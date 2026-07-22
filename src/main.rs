@@ -32,7 +32,10 @@ use text::TextCtx;
 const USAGE: &str = "\
 abner — A/B video comparison player
 
-usage: abner [--view <overlay|sbs|delta|split|checker|blend>] <video-a> <video-b> [more...]
+usage: abner [--view <overlay|sbs|delta|split|checker|blend>] [<video-a> <video-b> [more...]]
+
+Run with no arguments (or launched from the .app bundle) to open the
+launch window and drop clips in.
 
 keys:
   Enter        flip to the next video (overlay mode)
@@ -73,7 +76,10 @@ fn main() -> anyhow::Result<()> {
             paths.push(PathBuf::from(a));
         }
     }
-    if paths.len() < 2 {
+    // Zero paths (bundle double-click / bare `abner`) opens the launch
+    // window; one path can't form an A/B pair, so that's still an error.
+    if paths.len() == 1 {
+        eprintln!("abner compares two or more videos — pass none to open the launch window, or at least two.\n");
         eprint!("{USAGE}");
         std::process::exit(2);
     }
@@ -112,7 +118,9 @@ fn main() -> anyhow::Result<()> {
         v.player.set_notify(notify.clone());
     }
 
-    let title = {
+    let title = if paths.is_empty() {
+        "abner".to_string()
+    } else {
         let names: Vec<String> = paths
             .iter()
             .map(|p| p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default())

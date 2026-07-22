@@ -159,6 +159,11 @@ impl Gpu {
     ) -> anyhow::Result<Self> {
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
+        // Launch state has no videos, but the flat/glyph pipeline still
+        // needs a valid (0,0) texture pair to bind. Stand up one tiny
+        // never-sampled texture so `pair_bg(0, 0)` is well-formed.
+        let dummy_dims: [(u32, u32); 1] = [(2, 2)];
+        let video_dims: &[(u32, u32)] = if video_dims.is_empty() { &dummy_dims } else { video_dims };
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let surface = instance.create_surface(window)?;
         let adapter = instance

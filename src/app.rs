@@ -214,6 +214,29 @@ impl App {
     }
 
     pub fn key(&mut self, k: Key) {
+        // Launch state (no clips loaded): only global keys are live.
+        if self.videos.is_empty() {
+            match k {
+                Key::Escape => {
+                    if self.fullscreen {
+                        self.fullscreen = false;
+                        self.cmds.push(Cmd::ToggleFullscreen);
+                    } else {
+                        self.cmds.push(Cmd::Quit);
+                    }
+                }
+                Key::Char(c) => match c.to_ascii_lowercase() {
+                    'q' => self.cmds.push(Cmd::Quit),
+                    'f' => {
+                        self.fullscreen = !self.fullscreen;
+                        self.cmds.push(Cmd::ToggleFullscreen);
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+            return;
+        }
         match k {
             Key::Enter => {
                 self.active = (self.active + 1) % self.videos.len();
@@ -293,6 +316,9 @@ impl App {
     /// sits under it stays put, and every stream shares the resulting
     /// center. Positive delta = fingers spreading = zoom in.
     pub fn pinch(&mut self, delta: f32) {
+        if self.videos.is_empty() {
+            return;
+        }
         let (cx, cy) = self.cursor;
         let base = self.gesture_base(cx, cy);
         let old = self.zoom;
@@ -363,6 +389,10 @@ impl App {
 
     pub fn tick(&mut self, dt: f32, vp: (f32, f32), _scale: f32) -> FrameDesc {
         self.vp = vp;
+        // No clips loaded yet — paint the launch window (2b) and stop.
+        if self.videos.is_empty() {
+            return self.launch_frame(vp);
+        }
         let n = self.videos.len();
         let full_uv = [0.0, 0.0, 1.0, 1.0];
 
@@ -632,6 +662,167 @@ impl App {
             bg: Some(BG),
         });
     }
+
+    /// The 2b launch window: corner brackets, wordmark, two drop targets,
+    /// a terminal hint and the keycap legend. Drawn from flat rects and
+    /// text only (no video items), so it renders with zero streams loaded.
+    /// Widths are estimated at the monospace advance (~0.6 em) to center.
+    fn launch_frame(&self, vp: (f32, f32)) -> FrameDesc {
+        let (w, h) = vp;
+        let mut items: Vec<Item> = Vec::new();
+        let adv = |px: f32, n: usize| 0.60 * px * n as f32;
+
+        // ---- corner brackets ----
+        let inset = 22.0;
+        let arm = 26.0;
+        let t = 2.0;
+        // (horizontal-arm x/y, vertical-arm x/y) for each corner.
+        let corners = [
+            (inset, inset, inset, inset),
+            (w - inset - arm, inset, w - inset - t, inset),
+            (inset, h - inset - t, inset, h - inset - arm),
+            (w - inset - arm, h - inset - t, w - inset - t, h - inset - arm),
+        ];
+        for (hx, hy, vx, vy) in corners {
+            items.push(Item::Rect { r: RectPx { x: hx, y: hy, w: arm, h: t }, color: LIME_DIM });
+            items.push(Item::Rect { r: RectPx { x: vx, y: vy, w: t, h: arm }, color: LIME_DIM });
+        }
+
+        // ---- wordmark ----
+        let word = "A B N E R";
+        let wpx = 22.0;
+        items.push(Item::Text {
+            x: (w - adv(wpx, word.chars().count())) / 2.0,
+            y: h * 0.13,
+            px: wpx,
+            color: LIME,
+            text: word.into(),
+            bg: None,
+        });
+        let sub = "A / B VIDEO COMPARE";
+        let spx = 12.0;
+        items.push(Item::Text {
+            x: (w - adv(spx, sub.chars().count())) / 2.0,
+            y: h * 0.13 + 34.0,
+            px: spx,
+            color: DIM,
+            text: sub.into(),
+            bg: None,
+        });
+
+        // ---- two drop zones ----
+        let zw = 320.0;
+        let zh = 190.0;
+        let gap = 24.0;
+        let zx0 = (w - (zw * 2.0 + gap)) / 2.0;
+        let zy = (h - zh) / 2.0 - 6.0;
+        let zones: [(f32, [f32; 4], [f32; 4], [f32; 4], &str, &str, &str); 2] = [
+            (
+                zx0,
+                LIME,
+                [0.651, 0.886, 0.180, 0.05],
+                [0.651, 0.886, 0.180, 0.55],
+                "A",
+                "drop the reference clip",
+                "mp4 / mov / mkv / prores",
+            ),
+            (
+                zx0 + zw + gap,
+                TEXT,
+                [1.0, 1.0, 1.0, 0.02],
+                [1.0, 1.0, 1.0, 0.22],
+                "B",
+                "drop the encode to test",
+                "or a third, fourth clip",
+            ),
+        ];
+        for (zx, letter_col, fill, border, letter, label, sublabel) in zones {
+            items.push(Item::Rect { r: RectPx { x: zx, y: zy, w: zw, h: zh }, color: fill });
+            let bt = 1.5;
+            items.push(Item::Rect { r: RectPx { x: zx, y: zy, w: zw, h: bt }, color: border });
+            items.push(Item::Rect { r: RectPx { x: zx, y: zy + zh - bt, w: zw, h: bt }, color: border });
+            items.push(Item::Rect { r: RectPx { x: zx, y: zy, w: bt, h: zh }, color: border });
+            items.push(Item::Rect { r: RectPx { x: zx + zw - bt, y: zy, w: bt, h: zh }, color: border });
+            let cx = zx + zw / 2.0;
+            let big = 46.0;
+            items.push(Item::Text {
+                x: cx - adv(big, 1) / 2.0,
+                y: zy + 34.0,
+                px: big,
+                color: letter_col,
+                text: letter.into(),
+                bg: None,
+            });
+            let lb = 13.0;
+            items.push(Item::Text {
+                x: cx - adv(lb, label.chars().count()) / 2.0,
+                y: zy + 108.0,
+                px: lb,
+                color: TEXT,
+                text: label.into(),
+                bg: None,
+            });
+            let sb = 11.0;
+            items.push(Item::Text {
+                x: cx - adv(sb, sublabel.chars().count()) / 2.0,
+                y: zy + 134.0,
+                px: sb,
+                color: DIM,
+                text: sublabel.into(),
+                bg: None,
+            });
+        }
+
+        // ---- terminal hint (dim · lime command · dim), centered as a group ----
+        let hpx = 12.0;
+        let seg: [(&str, [f32; 4]); 3] = [
+            ("or run  ", DIM),
+            ("abner reference.mp4 encode.mp4", LIME),
+            ("  in the terminal", DIM),
+        ];
+        let hint_w: f32 = seg.iter().map(|(s, _)| adv(hpx, s.chars().count())).sum();
+        let mut hx = (w - hint_w) / 2.0;
+        let hy = h - 84.0;
+        for (s, c) in seg {
+            items.push(Item::Text { x: hx, y: hy, px: hpx, color: c, text: s.into(), bg: None });
+            hx += adv(hpx, s.chars().count());
+        }
+
+        // ---- keycap legend ----
+        let legend: [(&str, &str, bool); 4] = [
+            ("ENTER", "flip A/B", true),
+            ("SPACE", "play", false),
+            ("1-6", "view mode", false),
+            ("F", "fullscreen", false),
+        ];
+        let kpx = 11.0;
+        let chip_pad = 12.0; // renderer pads text bg by 6px each side
+        let cap_gap = 7.0;
+        let entry_gap = 20.0;
+        let entry_w = |cap: &str, label: &str| {
+            adv(kpx, cap.chars().count()) + chip_pad + cap_gap + adv(kpx, label.chars().count())
+        };
+        let legend_w: f32 = legend.iter().map(|e| entry_w(e.0, e.1)).sum::<f32>()
+            + entry_gap * (legend.len() - 1) as f32;
+        let mut lx = (w - legend_w) / 2.0;
+        let ly = h - 44.0;
+        for (cap, label, hot) in legend {
+            let (fg, bg) = if hot { (DARK, LIME) } else { (KEYCAP_FG, KEYCAP_BG) };
+            items.push(Item::Text { x: lx + 6.0, y: ly, px: kpx, color: fg, text: cap.into(), bg: Some(bg) });
+            let capw = adv(kpx, cap.chars().count()) + chip_pad;
+            let labx = lx + capw + cap_gap;
+            items.push(Item::Text { x: labx, y: ly, px: kpx, color: DIM, text: label.into(), bg: None });
+            lx = labx + adv(kpx, label.chars().count()) + entry_gap;
+        }
+
+        FrameDesc {
+            clear: LAUNCH_BG,
+            uploads: Vec::new(),
+            items,
+            animating: false,
+            redraw_at: None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -812,6 +1003,14 @@ const DIM: [f32; 4] = [0.62, 0.62, 0.66, 1.0];
 const ACTIVE: [f32; 4] = [1.0, 0.82, 0.25, 1.0];
 const ERR: [f32; 4] = [1.0, 0.35, 0.3, 1.0];
 const BG: [f32; 4] = [0.0, 0.0, 0.0, 0.55];
+
+// Launch window (2b) palette.
+const LIME: [f32; 4] = [0.651, 0.886, 0.180, 1.0];
+const LIME_DIM: [f32; 4] = [0.651, 0.886, 0.180, 0.5];
+const DARK: [f32; 4] = [0.02, 0.02, 0.024, 1.0];
+const KEYCAP_FG: [f32; 4] = [0.9, 0.9, 0.91, 1.0];
+const KEYCAP_BG: [f32; 4] = [0.149, 0.149, 0.172, 1.0];
+const LAUNCH_BG: [f32; 3] = [0.027, 0.027, 0.035];
 
 fn fmt_time(t: f64) -> String {
     let t = t.max(0.0);
