@@ -51,6 +51,15 @@ one; `Enter` rotates which pair you're looking at. Big letter badges mark what y
 seeing — A hugs the left edge, B the right. With the overlay hidden, `Enter` still
 flashes the letter briefly so you know where you are.
 
+## The HUD
+
+Corner brackets frame the active stream, a centre A|B toggle shows what's on screen,
+and the top-left block lists every clip's filename, resolution, fps, codec, bitrate,
+size, duration and path. Along the bottom sits a transport — prev / play-pause / next,
+a seek bar you can click and drag, the mode and timecode readout, and a keycap legend.
+The transport is hover-revealed: it fades out after a few seconds of stillness and any
+pointer movement brings it back. `Tab` hides the whole HUD.
+
 ## Ideas for more views
 
 - **Loupe** — a magnifier following the pointer showing A|B split at 4–8× inside the ring

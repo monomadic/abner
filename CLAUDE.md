@@ -31,15 +31,35 @@ CLAUDE.md documents the deeper media/render rationale).
   can't re-land on the same frame — then the delivered frame's true pts is ADOPTED as
   `t` (`pending` flags + `take_next`). The clock wraps at the shortest stream duration
   and exact-seeks everyone to 0.
-- `src/render.rs` — one wgpu pipeline for everything (flat rects, video quads, compare
+- `src/render.rs` — one wgpu pipeline for everything (rects, video quads, compare
   modes, glyphs), instanced quads in logical px. Per-video textures carry a blit-filled
   mip chain (4K fit-to-window without shimmer). Bind groups are cached per (A,B) texture
-  pair; keyless items (text) ride the current batch. sRGB end to end.
-- `src/shader.wgsl` — modes: 0 flat, 1 tex, 2 delta, 3 split, 4 checker, 5 blend,
+  pair; keyless items (rects/text) ride the current batch. `TextItem` carries
+  align/valign/tracking and an optional rounded chip: the renderer owns the font, so
+  it MEASURES each run — never estimate glyph positions app-side (`MONO_ADV` exists
+  only to step *between* runs).
+- `src/shader.wgsl` — modes: 0 rect, 1 tex, 2 delta, 3 split, 4 checker, 5 blend,
   6 glyph. Textures are sampled unconditionally then selected (uniform-control-flow
-  rule), `mode` is a flat varying.
+  rule), `mode` is a flat varying. Mode 0 is an SDF rounded box with `fwidth`-based
+  1px AA, an optional border (colour smuggled through the unused `uv` slot) and a
+  bottom-anchored scrim ramp. **UI colours are authored as sRGB hex and decoded by
+  `ui_color()`** — the surface is `*UnormSrgb` and re-encodes on write, so a raw sRGB
+  value lands pale. Same reason panel/scrim alphas run high (0.8–0.97): blending is
+  linear-space, so 0.6 alpha barely dims bright footage.
 - `src/text.rs` — ab_glyph over system fonts (SF Mono/Menlo/…), R8 shelf-packed atlas,
-  glyphs rasterized at physical px and drawn at logical size.
+  glyphs rasterized at physical px and drawn at logical size, optional tracking.
+  The system mono fonts have NO media-control glyphs (⏮ ⏸ ⏭ ⏎ render as nothing) —
+  use the geometric block (◀ ▶ ●) or draw the shape from rects.
+
+## Design source
+
+The HUD implements **2a** from the Claude Design project "A/B testing window mockups
+for Abner" (`Abner AB Window.dc.html`, project `e16025af-9465-4a81-bdc3-97780f3399eb`,
+read via the DesignSync tool). 2b (launch/empty state) is also implemented but its
+drop targets are still decorative — no `DroppedFile` handler, no runtime video load.
+Deliberate deviations from the mock are noted where they occur: higher panel alphas
+and a saturating scrim (bright real footage, not the mock's dark plate), `ENTER`
+instead of ⏎, and solid rather than dashed drop-zone borders.
 
 ## Rules
 

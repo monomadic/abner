@@ -14,6 +14,13 @@ use crate::text::{ATLAS, TextCtx};
 
 const MIP_LEVELS: u32 = 4;
 
+/// sRGB → linear for values headed to an `*UnormSrgb` render target that
+/// re-encodes on write (the shader's `ui_color`, CPU side).
+fn srgb_to_linear(c: f32) -> f64 {
+    let c = c as f64;
+    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+}
+
 /// Fullscreen-triangle blit used to fill each video mip from the previous.
 const BLIT_WGSL: &str = r#"
 @group(0) @binding(0) var src: texture_2d<f32>;
@@ -65,12 +72,113 @@ pub struct RectPx {
     pub h: f32,
 }
 
+/// A filled rect: optionally rounded, optionally outlined, optionally
+/// faded out toward its top edge (the transport scrim).
+#[derive(Debug, Clone, Copy)]
+pub struct RectItem {
+    pub r: RectPx,
+    pub color: [f32; 4],
+    pub radius: f32,
+    pub border_w: f32,
+    pub border_color: [f32; 4],
+    /// Alpha ramps to zero at the top edge — a bottom-anchored gradient.
+    pub fade_up: bool,
+}
+
+impl RectItem {
+    pub fn new(r: RectPx, color: [f32; 4]) -> Self {
+        Self { r, color, ..Default::default() }
+    }
+}
+
+impl Default for RectItem {
+    fn default() -> Self {
+        Self {
+            r: RectPx { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+            color: [0.0; 4],
+            radius: 0.0,
+            border_w: 0.0,
+            border_color: [0.0; 4],
+            fade_up: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Align {
+    Left,
+    Center,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VAlign {
+    /// `y` is the top of the line box.
+    Top,
+    /// `y` is the line box's vertical centre.
+    Middle,
+}
+
+/// Chip drawn behind a text run. Sized from the run's real measured
+/// width, so keycaps and pills fit their label exactly.
+#[derive(Debug, Clone, Copy)]
+pub struct TextBg {
+    pub color: [f32; 4],
+    pub radius: f32,
+    pub pad_x: f32,
+    pub pad_y: f32,
+    /// Solid offset shadow beneath the chip (keycap depth); alpha 0 = none.
+    pub shadow: [f32; 4],
+    pub shadow_dy: f32,
+}
+
+impl TextBg {
+    pub fn new(color: [f32; 4]) -> Self {
+        Self {
+            color,
+            radius: 0.0,
+            pad_x: 6.0,
+            pad_y: 3.0,
+            shadow: [0.0; 4],
+            shadow_dy: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TextItem {
+    /// Anchor point; `align` decides which edge of the run sits here.
+    pub x: f32,
+    pub y: f32,
+    /// Logical px size.
+    pub px: f32,
+    pub color: [f32; 4],
+    pub text: String,
+    pub align: Align,
+    pub valign: VAlign,
+    /// Extra advance per glyph, logical px (CSS letter-spacing).
+    pub tracking: f32,
+    pub bg: Option<TextBg>,
+}
+
+impl TextItem {
+    pub fn new(x: f32, y: f32, px: f32, color: [f32; 4], text: impl Into<String>) -> Self {
+        Self {
+            x,
+            y,
+            px,
+            color,
+            text: text.into(),
+            align: Align::Left,
+            valign: VAlign::Top,
+            tracking: 0.0,
+            bg: None,
+        }
+    }
+}
+
 pub enum Item {
-    #[allow(dead_code)] // handy primitive; the UI currently draws text-bg rects only
-    Rect {
-        r: RectPx,
-        color: [f32; 4],
-    },
+    Rect(RectItem),
     Video {
         a: usize,
         b: usize,
@@ -80,16 +188,7 @@ pub enum Item {
         p0: f32,
         p1: f32,
     },
-    Text {
-        x: f32,
-        y: f32,
-        /// Logical px size.
-        px: f32,
-        color: [f32; 4],
-        text: String,
-        /// Draw a padded background strip behind the run.
-        bg: Option<[f32; 4]>,
-    },
+    Text(TextItem),
 }
 
 /// Everything the renderer needs for one frame.
@@ -561,18 +660,20 @@ impl Gpu {
         };
 
         let scale = self.scale;
+        // Mode 0 carries the border colour in the uv slot (see shader.wgsl).
+        let rect_inst = |ri: &RectItem| Instance {
+            pos: [ri.r.x, ri.r.y],
+            size: [ri.r.w, ri.r.h],
+            uv: ri.border_color,
+            color: ri.color,
+            mode: 0.0,
+            p0: ri.radius,
+            p1: ri.border_w,
+            pad: if ri.fade_up { 1.0 } else { 0.0 },
+        };
         for item in &desc.items {
             match item {
-                Item::Rect { r, color } => push(&mut data, &mut batches, None, Instance {
-                    pos: [r.x, r.y],
-                    size: [r.w, r.h],
-                    uv: [0.0; 4],
-                    color: *color,
-                    mode: 0.0,
-                    p0: 0.0,
-                    p1: 0.0,
-                    pad: 0.0,
-                }),
+                Item::Rect(ri) => push(&mut data, &mut batches, None, rect_inst(ri)),
                 Item::Video { a, b, r, uv, mode, p0, p1 } => {
                     let key = self.pair_bg(*a, *b);
                     push(&mut data, &mut batches, Some(key), Instance {
@@ -586,27 +687,50 @@ impl Gpu {
                         pad: 0.0,
                     });
                 }
-                Item::Text { x, y, px, color, text, bg } => {
-                    let laid = self.text.layout(text, px * scale);
-                    if let Some(bg) = bg {
-                        let (pw, ph) = (laid.w / scale, laid.h / scale);
-                        push(&mut data, &mut batches, None, Instance {
-                            pos: [x - 6.0, y - 3.0],
-                            size: [pw + 12.0, ph + 6.0],
-                            uv: [0.0; 4],
-                            color: *bg,
-                            mode: 0.0,
-                            p0: 0.0,
-                            p1: 0.0,
-                            pad: 0.0,
-                        });
+                Item::Text(t) => {
+                    let laid = self.text.layout(&t.text, t.px * scale, t.tracking * scale);
+                    let (tw, th) = (laid.w / scale, laid.h / scale);
+                    // The anchor names an edge; the run is measured, so
+                    // centring is exact rather than estimated.
+                    let x0 = match t.align {
+                        Align::Left => t.x,
+                        Align::Center => t.x - tw / 2.0,
+                        Align::Right => t.x - tw,
+                    };
+                    let y0 = match t.valign {
+                        VAlign::Top => t.y,
+                        VAlign::Middle => t.y - th / 2.0,
+                    };
+                    if let Some(bg) = &t.bg {
+                        let chip = RectPx {
+                            x: x0 - bg.pad_x,
+                            y: y0 - bg.pad_y,
+                            w: tw + bg.pad_x * 2.0,
+                            h: th + bg.pad_y * 2.0,
+                        };
+                        if bg.shadow[3] > 0.0 {
+                            let mut sh = chip;
+                            sh.y += bg.shadow_dy;
+                            push(&mut data, &mut batches, None, rect_inst(&RectItem {
+                                r: sh,
+                                color: bg.shadow,
+                                radius: bg.radius,
+                                ..Default::default()
+                            }));
+                        }
+                        push(&mut data, &mut batches, None, rect_inst(&RectItem {
+                            r: chip,
+                            color: bg.color,
+                            radius: bg.radius,
+                            ..Default::default()
+                        }));
                     }
                     for q in &laid.quads {
                         push(&mut data, &mut batches, None, Instance {
-                            pos: [x + q.x / scale, y + q.y / scale],
+                            pos: [x0 + q.x / scale, y0 + q.y / scale],
                             size: [q.w / scale, q.h / scale],
                             uv: q.uv,
-                            color: *color,
+                            color: t.color,
                             mode: 6.0,
                             p0: 0.0,
                             p1: 0.0,
@@ -700,10 +824,13 @@ impl Gpu {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
+                        // sRGB surface: the clear value is linear, but
+                        // `clear` is authored as an sRGB colour like the
+                        // rest of the palette (see ui_color in the shader).
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: desc.clear[0] as f64,
-                            g: desc.clear[1] as f64,
-                            b: desc.clear[2] as f64,
+                            r: srgb_to_linear(desc.clear[0]),
+                            g: srgb_to_linear(desc.clear[1]),
+                            b: srgb_to_linear(desc.clear[2]),
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,

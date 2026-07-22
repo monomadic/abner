@@ -11,7 +11,9 @@ use std::time::Instant;
 
 use crate::player::Player;
 use crate::probe::VideoInfo;
-use crate::render::{FrameDesc, Item, RectPx, Upload, VideoMode};
+use crate::render::{
+    Align, FrameDesc, Item, RectItem, RectPx, TextBg, TextItem, Upload, VAlign, VideoMode,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -106,6 +108,10 @@ pub struct App {
     cursor: (f32, f32),
     /// Last pointer position while a drag-pan is held.
     drag: Option<(f32, f32)>,
+    /// Seconds of pointer stillness — drives the transport's reveal.
+    since_pointer: f32,
+    /// Dragging the seek bar (pins the transport open).
+    scrubbing: bool,
     vp: (f32, f32),
     fps: f64,
     /// Loop point: shortest stream duration (∞ when unknown).
@@ -153,6 +159,8 @@ impl App {
             fullscreen: false,
             cursor: (0.0, 0.0),
             drag: None,
+            since_pointer: 0.0,
+            scrubbing: false,
             vp: (1280.0, 800.0),
             fps,
             wrap,
@@ -283,6 +291,13 @@ impl App {
     }
 
     pub fn cursor_moved(&mut self, x: f32, y: f32) {
+        // Any motion re-reveals the transport.
+        self.since_pointer = 0.0;
+        if self.scrubbing {
+            self.scrub_to(x);
+            self.cursor = (x, y);
+            return;
+        }
         if let Some((lx, ly)) = self.drag
             && self.zoom > 1.001
         {
@@ -296,11 +311,48 @@ impl App {
     }
 
     pub fn mouse_down(&mut self, x: f32, y: f32) {
+        self.since_pointer = 0.0;
+        // While the transport is up, its controls take the press: the
+        // buttons act, the seek band scrubs. Anything else pans.
+        if self.show_ui && !self.videos.is_empty() && self.transport_alpha() > 0.5 {
+            let hit = |r: RectPx| x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+            if hit(self.btn_prev()) {
+                self.step(-1);
+                return;
+            }
+            if hit(self.btn_play()) {
+                self.playing = !self.playing;
+                return;
+            }
+            if hit(self.btn_next()) {
+                self.step(1);
+                return;
+            }
+            let s = self.seek_rect(self.vp);
+            if y >= s.y - SEEK_GRAB && y <= s.y + s.h + SEEK_GRAB && x >= s.x - 6.0
+                && x <= s.x + s.w + 6.0
+            {
+                self.scrubbing = true;
+                self.scrub_to(x);
+                return;
+            }
+        }
         self.drag = Some((x, y));
     }
 
     pub fn mouse_up(&mut self) {
         self.drag = None;
+        self.scrubbing = false;
+    }
+
+    /// Seek to the position the pointer names on the seek bar.
+    fn scrub_to(&mut self, x: f32) {
+        if !self.wrap.is_finite() || self.wrap <= 0.0 {
+            return;
+        }
+        let s = self.seek_rect(self.vp);
+        let f = ((x - s.x) / s.w.max(1.0)).clamp(0.0, 1.0) as f64;
+        self.seek_all(f * (self.wrap - 0.05).max(0.0), true);
     }
 
     pub fn scroll(&mut self, dx: f32, dy: f32) {
@@ -396,6 +448,7 @@ impl App {
         let n = self.videos.len();
         let full_uv = [0.0, 0.0, 1.0, 1.0];
 
+        self.since_pointer += dt;
         if self.playing && self.started {
             self.t += dt as f64 * self.speed;
             if self.wrap.is_finite() && self.t >= self.wrap - 0.05 {
@@ -486,150 +539,422 @@ impl App {
             }
         }
 
-        if self.show_ui {
-            self.build_ui(&mut items, vp);
-        }
-        // Big letter badges: always while the UI is on, flash-after-Enter
-        // while it's off. A hugs the left edge, B the right (middle
-        // videos of a >2 set interpolate across).
+        // Big letter badge: hugs the left edge for A, right for B (a >2
+        // set interpolates across). Always on with the UI up, a brief
+        // flash after Enter when it's hidden.
         let badge_alpha = if self.show_ui { 1.0 } else { (self.badge_flash / 0.4).min(1.0) };
         if badge_alpha > 0.0 {
-            let push_letter =
-                |items: &mut Vec<Item>, idx: usize, px: f32, active: bool, alpha: f32| {
-                    let letter = (b'A' + idx as u8) as char;
-                    // Monospace advance ≈ 0.62 em; enough for anchoring.
-                    let w_est = px * 0.62;
-                    let margin = 24.0;
-                    let f = if n > 1 { idx as f32 / (n - 1) as f32 } else { 0.0 };
-                    let x = margin + f * (vp.0 - w_est - 2.0 * margin);
-                    let mut c = if active { ACTIVE } else { DIM };
-                    c[3] *= alpha;
-                    let mut bgc = BG;
-                    bgc[3] *= alpha;
-                    items.push(Item::Text {
-                        x,
-                        y: (vp.1 - px * 1.2) / 2.0,
+            // The design sizes the badge against the frame (130px on a
+            // 506px-tall mock); keep that proportion so it stays the
+            // dominant graphic at any window size.
+            let big = (vp.1 * 0.257).clamp(72.0, 240.0);
+            let push_letter = |items: &mut Vec<Item>, idx: usize, px: f32, on: bool| {
+                let f = if n > 1 { idx as f32 / (n - 1) as f32 } else { 0.0 };
+                let margin = 26.0;
+                let mut c = if on { LIME } else { INACTIVE };
+                c[3] *= badge_alpha * 0.92;
+                let align = if f < 0.5 { Align::Left } else { Align::Right };
+                let x = margin + f * (vp.0 - 2.0 * margin);
+                let letter = ((b'A' + idx as u8) as char).to_string();
+                // Soft drop shadow so the badge holds against bright
+                // footage (the design's text-shadow).
+                items.push(Item::Text(TextItem {
+                    align,
+                    valign: VAlign::Middle,
+                    ..TextItem::new(
+                        x + px * 0.02,
+                        vp.1 / 2.0 + px * 0.03,
                         px,
-                        color: c,
-                        text: letter.to_string(),
-                        bg: Some(bgc),
-                    });
-                };
+                        [0.0, 0.0, 0.0, 0.45 * badge_alpha],
+                        letter.clone(),
+                    )
+                }));
+                items.push(Item::Text(TextItem {
+                    align,
+                    valign: VAlign::Middle,
+                    ..TextItem::new(x, vp.1 / 2.0, px, c, letter)
+                }));
+            };
             match self.mode {
-                // The flip view: one huge letter on that video's side.
-                Mode::Overlay => push_letter(&mut items, a, 110.0, true, badge_alpha),
-                // Comparing a pair: both letters, active highlighted.
+                Mode::Overlay => push_letter(&mut items, a, big, true),
+                // Comparing a pair: both letters, active in lime.
                 Mode::Delta | Mode::Split | Mode::Checker | Mode::Blend => {
-                    push_letter(&mut items, a, 96.0, true, badge_alpha);
-                    push_letter(&mut items, b, 96.0, false, badge_alpha);
+                    push_letter(&mut items, a, big * 0.74, true);
+                    push_letter(&mut items, b, big * 0.74, false);
                 }
                 // One label per cell, sitting over its own video.
                 Mode::SideBySide => {
                     let cw = vp.0 / n as f32;
                     for i in 0..n {
-                        let mut c = if i == a { ACTIVE } else { DIM };
+                        let mut c = if i == a { LIME } else { INACTIVE };
                         c[3] *= badge_alpha;
-                        let mut bgc = BG;
-                        bgc[3] *= badge_alpha;
-                        items.push(Item::Text {
-                            x: i as f32 * cw + 16.0,
-                            y: vp.1 - 76.0,
-                            px: 48.0,
-                            color: c,
-                            text: ((b'A' + i as u8) as char).to_string(),
-                            bg: Some(bgc),
-                        });
+                        items.push(Item::Text(TextItem {
+                            valign: VAlign::Middle,
+                            ..TextItem::new(
+                                i as f32 * cw + 20.0,
+                                vp.1 / 2.0,
+                                big * 0.42,
+                                c,
+                                ((b'A' + i as u8) as char).to_string(),
+                            )
+                        }));
                     }
                 }
             }
         }
 
-        let animating = self.playing || self.badge_flash > 0.0 || !self.started;
+        if self.show_ui {
+            self.build_hud(&mut items, vp);
+        }
+
+        let animating =
+            self.playing || self.badge_flash > 0.0 || !self.started || self.hud_fading();
         FrameDesc {
-            clear: [0.02, 0.02, 0.025],
+            clear: FRAME_BG,
             uploads,
             items,
             animating,
-            redraw_at: if animating { None } else { Some(Instant::now() + std::time::Duration::from_millis(100)) },
+            redraw_at: if animating {
+                None
+            } else {
+                Some(Instant::now() + std::time::Duration::from_millis(100))
+            },
         }
     }
 
-    fn build_ui(&mut self, items: &mut Vec<Item>, vp: (f32, f32)) {
-        let mut y = 14.0;
+    /// True while the transport is mid-fade (keeps the loop hot just
+    /// long enough for the reveal to finish).
+    fn hud_fading(&self) -> bool {
+        let a = self.transport_alpha();
+        a > 0.001 && a < 0.999
+    }
+
+    /// The transport is hover-revealed (per the design): pointer motion
+    /// brings it up, then it fades out after a spell of stillness.
+    /// Scrubbing pins it open.
+    fn transport_alpha(&self) -> f32 {
+        if self.scrubbing {
+            return 1.0;
+        }
+        let over = self.since_pointer - TRANSPORT_HOLD_S;
+        if over <= 0.0 {
+            1.0
+        } else {
+            (1.0 - over / TRANSPORT_FADE_S).clamp(0.0, 1.0)
+        }
+    }
+
+    /// Bottom transport strip geometry, shared by the draw and the
+    /// seek-bar hit test so they can't drift.
+    fn transport_rect(&self, vp: (f32, f32)) -> RectPx {
+        RectPx { x: 0.0, y: vp.1 - TRANSPORT_H, w: vp.0, h: TRANSPORT_H }
+    }
+
+    /// Transport button hit/draw rects — shared by the draw and the
+    /// click handler so a button can't move out from under its target.
+    fn btn_prev(&self) -> RectPx {
+        let bar = self.transport_rect(self.vp);
+        RectPx { x: 22.0, y: bar.y + 13.0, w: 26.0, h: 32.0 }
+    }
+    fn btn_play(&self) -> RectPx {
+        let bar = self.transport_rect(self.vp);
+        RectPx { x: 22.0 + 26.0 + 8.0, y: bar.y + 13.0, w: 32.0, h: 32.0 }
+    }
+    fn btn_next(&self) -> RectPx {
+        let bar = self.transport_rect(self.vp);
+        RectPx { x: 22.0 + 26.0 + 8.0 + 32.0 + 8.0, y: bar.y + 13.0, w: 26.0, h: 32.0 }
+    }
+
+    /// The seek bar's drawn track (the clickable band is taller).
+    fn seek_rect(&self, vp: (f32, f32)) -> RectPx {
+        let bar = self.transport_rect(vp);
+        let x0 = self.btn_next().x + self.btn_next().w + 13.0;
+        let x1 = (vp.0 - 22.0 - STATUS_RESERVE).max(x0 + 40.0);
+        RectPx { x: x0, y: bar.y + 13.0 + 16.0 - 2.5, w: x1 - x0, h: 5.0 }
+    }
+
+    /// The 2a HUD: corner brackets, centre A|B toggle, top-left info
+    /// block, and the hover-revealed transport (circular buttons,
+    /// rounded seek bar, keycap row).
+    fn build_hud(&mut self, items: &mut Vec<Item>, vp: (f32, f32)) {
+        let (w, h) = vp;
         let a = self.active;
-        for (i, v) in self.videos.iter().enumerate() {
-            let letter = (b'A' + i as u8) as char;
-            let marker = if i == a { "▶" } else { " " };
-            let name = v
-                .info
-                .path
-                .file_name()
-                .map(|f| f.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let color = if i == a { ACTIVE } else { TEXT };
-            items.push(Item::Text {
-                x: 14.0,
-                y,
-                px: 14.0,
-                color,
-                text: format!("{marker} {letter}  {name}"),
-                bg: Some(BG),
-            });
-            y += 21.0;
-            let failed = v.player.failed();
-            let br = v
-                .info
-                .bit_rate
-                .map(|b| format!("{:.2} Mb/s", b as f64 / 1e6))
-                .unwrap_or_else(|| "? Mb/s".into());
-            let detail = if failed {
-                "   DECODE FAILED".to_string()
-            } else {
-                format!(
-                    "   {}×{}  {:.3} fps  {} {}  {}  {}  {}",
-                    v.info.width,
-                    v.info.height,
-                    v.info.fps,
-                    v.info.codec,
-                    v.info.pix_fmt,
-                    br,
-                    fmt_size(v.info.file_size),
-                    fmt_time(v.info.duration),
-                )
-            };
-            items.push(Item::Text {
-                x: 14.0,
-                y,
-                px: 12.0,
-                color: if failed { ERR } else { DIM },
-                text: detail,
-                bg: Some(BG),
-            });
-            y += 18.0;
-            let dir = v
-                .info
-                .path
-                .parent()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            items.push(Item::Text {
-                x: 14.0,
-                y,
-                px: 12.0,
-                color: DIM,
-                text: format!("   {dir}"),
-                bg: Some(BG),
-            });
-            y += 26.0;
+        let n = self.videos.len();
+
+        // ---- corner brackets framing the active stream ----
+        let (inset, arm, t) = (16.0, 26.0, 2.0);
+        for (hx, hy, vx, vy) in [
+            (inset, inset, inset, inset),
+            (w - inset - arm, inset, w - inset - t, inset),
+            (inset, h - inset - t, inset, h - inset - arm),
+            (w - inset - arm, h - inset - t, w - inset - t, h - inset - arm),
+        ] {
+            items.push(Item::Rect(RectItem::new(
+                RectPx { x: hx, y: hy, w: arm, h: t },
+                LIME,
+            )));
+            items.push(Item::Rect(RectItem::new(
+                RectPx { x: vx, y: vy, w: t, h: arm },
+                LIME,
+            )));
         }
 
-        // Status line.
-        let frame = (self.t * self.fps).round() as i64;
-        let zoom = if self.zoom > 1.001 {
-            format!("{:.1}×", self.zoom)
-        } else {
-            "fit".to_string()
+        // ---- centre A|B toggle ----
+        let (seg_w, seg_h, seg_gap, pill_pad) = (42.0, 22.0, 3.0, 4.0);
+        let pill_w = n as f32 * seg_w + (n as f32 - 1.0) * seg_gap + pill_pad * 2.0;
+        let pill = RectPx {
+            x: (w - pill_w) / 2.0,
+            y: 20.0,
+            w: pill_w,
+            h: seg_h + pill_pad * 2.0,
         };
+        items.push(Item::Rect(RectItem {
+            radius: 9.0,
+            border_w: 1.0,
+            border_color: LIME_EDGE,
+            ..RectItem::new(pill, PILL_BG)
+        }));
+        for i in 0..n {
+            let sx = pill.x + pill_pad + i as f32 * (seg_w + seg_gap);
+            let on = i == a;
+            if on {
+                items.push(Item::Rect(RectItem {
+                    radius: 6.0,
+                    ..RectItem::new(
+                        RectPx { x: sx, y: pill.y + pill_pad, w: seg_w, h: seg_h },
+                        LIME,
+                    )
+                }));
+            }
+            items.push(Item::Text(TextItem {
+                align: Align::Center,
+                valign: VAlign::Middle,
+                ..TextItem::new(
+                    sx + seg_w / 2.0,
+                    pill.y + pill.h / 2.0,
+                    12.0,
+                    if on { FRAME_INK } else { SEG_OFF },
+                    ((b'A' + i as u8) as char).to_string(),
+                )
+            }));
+        }
+
+        // ---- top-left info block ----
+        let mut y = 22.0;
+        for (i, v) in self.videos.iter().enumerate() {
+            let on = i == a;
+            let name = ellipsize(
+                &v.info
+                    .path
+                    .file_name()
+                    .map(|f| f.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                34,
+            );
+            let name_len = name.chars().count();
+            // Title row: dark strip with a coloured left rule.
+            let row_h = 19.0;
+            let row_w = INFO_W;
+            items.push(Item::Rect(RectItem::new(
+                RectPx { x: 22.0, y, w: row_w, h: row_h },
+                if on { ROW_BG_ON } else { ROW_BG_OFF },
+            )));
+            items.push(Item::Rect(RectItem::new(
+                RectPx { x: 22.0, y, w: 2.0, h: row_h },
+                if on { LIME } else { RULE_OFF },
+            )));
+            let letter_c = if on { LIME } else { INACTIVE };
+            items.push(Item::Text(TextItem {
+                valign: VAlign::Middle,
+                ..TextItem::new(
+                    30.0,
+                    y + row_h / 2.0,
+                    11.0,
+                    letter_c,
+                    ((b'A' + i as u8) as char).to_string(),
+                )
+            }));
+            items.push(Item::Text(TextItem {
+                valign: VAlign::Middle,
+                ..TextItem::new(
+                    44.0,
+                    y + row_h / 2.0,
+                    12.0,
+                    if on { TEXT } else { TEXT_OFF },
+                    name,
+                )
+            }));
+            if on {
+                // Sits inline after the filename (monospace step), so it
+                // reads as part of the title rather than floating right.
+                let after = 44.0 + name_len as f32 * 12.0 * MONO_ADV + 10.0;
+                items.push(Item::Text(TextItem {
+                    valign: VAlign::Middle,
+                    tracking: 1.2,
+                    ..TextItem::new(
+                        after.min(22.0 + row_w - 60.0),
+                        y + row_h / 2.0,
+                        9.0,
+                        LIME,
+                        "● SHOWN",
+                    )
+                }));
+            }
+            y += row_h + 2.0;
+
+            // Detail lines ride their own faint strips: the design's dark
+            // mock stays legible bare, but real footage can be bright
+            // anywhere, and this is where you read the numbers.
+            let detail = |items: &mut Vec<Item>, y: f32, col: [f32; 4], s: String| {
+                items.push(Item::Rect(RectItem::new(
+                    RectPx { x: 22.0, y: y - 2.0, w: INFO_W, h: 15.0 },
+                    DETAIL_BG,
+                )));
+                items.push(Item::Text(TextItem::new(30.0, y, 10.5, col, ellipsize(&s, INFO_CH))));
+            };
+
+            let failed = v.player.failed();
+            if failed {
+                detail(items, y, ERR, "DECODE FAILED".into());
+                y += 21.0;
+            } else {
+                let br = v
+                    .info
+                    .bit_rate
+                    .map(|b| format!("{:.2} Mb/s", b as f64 / 1e6))
+                    .unwrap_or_else(|| "? Mb/s".into());
+                detail(
+                    items,
+                    y,
+                    DETAIL,
+                    format!(
+                        "{}×{}  {:.3} fps  {} {}",
+                        v.info.width, v.info.height, v.info.fps, v.info.codec, v.info.pix_fmt
+                    ),
+                );
+                y += 15.0;
+                detail(
+                    items,
+                    y,
+                    DIM,
+                    format!(
+                        "{}  {}  {}",
+                        br,
+                        fmt_size(v.info.file_size),
+                        fmt_time(v.info.duration)
+                    ),
+                );
+                y += 15.0;
+                // Path last, truncated from the LEFT — the leaf directory
+                // is what tells two encodes apart.
+                let dir = v
+                    .info
+                    .path
+                    .parent()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                detail(items, y, DIM_PATH, ellipsize_left(&dir, INFO_CH));
+                y += 17.0;
+            }
+            y += 4.0;
+        }
+
+        // ---- transport (hover-revealed) ----
+        let alpha = self.transport_alpha();
+        if alpha <= 0.001 {
+            return;
+        }
+        let fade = |mut c: [f32; 4]| {
+            c[3] *= alpha;
+            c
+        };
+        let bar = self.transport_rect(vp);
+        // The scrim reaches well above the controls so its weak upper
+        // end lands on empty frame, not on the seek bar.
+        items.push(Item::Rect(RectItem {
+            fade_up: true,
+            ..RectItem::new(
+                RectPx { y: bar.y - SCRIM_LEAD, h: bar.h + SCRIM_LEAD, ..bar },
+                fade(SCRIM),
+            )
+        }));
+        items.push(Item::Rect(RectItem::new(
+            RectPx { x: bar.x, y: bar.y, w: bar.w, h: 1.0 },
+            fade(LIME_EDGE),
+        )));
+
+        let cy = bar.y + 13.0 + 16.0;
+        // Prev / play-pause / next — the middle one on a lime disc.
+        // The design's ⏮/⏸/⏭ are absent from the system mono fonts (they
+        // render as nothing), so the triangles come from the geometric
+        // block, which every candidate font carries, and pause is drawn
+        // from two rects.
+        let prev = self.btn_prev();
+        let next = self.btn_next();
+        let disc = self.btn_play();
+        items.push(Item::Text(TextItem {
+            align: Align::Center,
+            valign: VAlign::Middle,
+            ..TextItem::new(prev.x + prev.w / 2.0, cy, 11.0, fade(GLYPH), "◀◀")
+        }));
+        items.push(Item::Rect(RectItem {
+            radius: disc.w / 2.0,
+            ..RectItem::new(disc, fade(LIME))
+        }));
+        if self.playing {
+            for dx in [-4.5, 1.5] {
+                items.push(Item::Rect(RectItem {
+                    radius: 1.0,
+                    ..RectItem::new(
+                        RectPx { x: disc.x + 16.0 + dx, y: cy - 6.0, w: 3.0, h: 12.0 },
+                        fade(FRAME_INK),
+                    )
+                }));
+            }
+        } else {
+            items.push(Item::Text(TextItem {
+                align: Align::Center,
+                valign: VAlign::Middle,
+                ..TextItem::new(disc.x + 17.0, cy, 13.0, fade(FRAME_INK), "▶")
+            }));
+        }
+        items.push(Item::Text(TextItem {
+            align: Align::Center,
+            valign: VAlign::Middle,
+            ..TextItem::new(next.x + next.w / 2.0, cy, 11.0, fade(GLYPH), "▶▶")
+        }));
+
+        // Seek bar: track, lime fill to the playhead, white knob.
+        let seek = self.seek_rect(vp);
+        let frac = if self.wrap.is_finite() && self.wrap > 0.0 {
+            (self.t / self.wrap).clamp(0.0, 1.0) as f32
+        } else {
+            0.0
+        };
+        items.push(Item::Rect(RectItem {
+            radius: 3.0,
+            ..RectItem::new(seek, fade(TRACK))
+        }));
+        if frac > 0.0 {
+            items.push(Item::Rect(RectItem {
+                radius: 3.0,
+                ..RectItem::new(RectPx { w: seek.w * frac, ..seek }, fade(LIME))
+            }));
+        }
+        items.push(Item::Rect(RectItem {
+            radius: 6.5,
+            ..RectItem::new(
+                RectPx {
+                    x: seek.x + seek.w * frac - 6.5,
+                    y: seek.y + seek.h / 2.0 - 6.5,
+                    w: 13.0,
+                    h: 13.0,
+                },
+                fade(KNOB),
+            )
+        }));
+
+        // Status readout, right-aligned inside the reserved strip.
         let extra = match self.mode {
             Mode::Delta => format!("  gain ×{:.1}", self.gain),
             Mode::Blend => format!("  blend {:.0}%", self.blend * 100.0),
@@ -637,40 +962,92 @@ impl App {
             _ => String::new(),
         };
         let speed = if (self.speed - 1.0).abs() > 1e-3 {
-            format!("   speed ×{:.2}", self.speed)
+            format!(" · {:.2}×", self.speed)
         } else {
             String::new()
         };
-        let status = format!(
-            "[{}] {}{}   {} / {}   frame {}   {}{}   {}",
-            self.mode.key(),
-            self.mode.name(),
-            extra,
-            fmt_time(self.t),
-            if self.wrap.is_finite() { fmt_time(self.wrap) } else { "?".into() },
-            frame,
-            if self.playing { "playing" } else { "paused" },
-            speed,
-            zoom,
-        );
-        items.push(Item::Text {
-            x: 14.0,
-            y: vp.1 - 32.0,
-            px: 13.0,
-            color: TEXT,
-            text: status,
-            bg: Some(BG),
-        });
+        let zoom = if self.zoom > 1.001 {
+            format!("{:.1}×", self.zoom)
+        } else {
+            "fit".to_string()
+        };
+        let mut sx = w - 22.0;
+        for (txt, col) in [
+            (zoom, fade(DIM)),
+            (
+                format!(
+                    "· frame {}{} ·",
+                    (self.t * self.fps).round() as i64,
+                    speed
+                ),
+                fade(DIM),
+            ),
+            (
+                format!(
+                    "/ {}",
+                    if self.wrap.is_finite() { fmt_time(self.wrap) } else { "?".into() }
+                ),
+                fade(TIME_OFF),
+            ),
+            (fmt_time(self.t), fade(TEXT)),
+            (format!("[{}] {}{}", self.mode.key(), self.mode.name(), extra), fade(LIME)),
+        ] {
+            items.push(Item::Text(TextItem {
+                align: Align::Right,
+                valign: VAlign::Middle,
+                ..TextItem::new(sx, cy, 11.0, col, txt.clone())
+            }));
+            // Right-to-left walk; monospace so a per-char step is exact.
+            sx -= txt.chars().count() as f32 * 11.0 * MONO_ADV + 8.0;
+        }
+
+        // ---- keycap row ----
+        let ky = bar.y + 13.0 + 32.0 + 12.0 + 8.0;
+        let mut kx = 22.0;
+        for (cap, label, hot) in [
+            ("ENTER", "flip A/B", true),
+            ("SPACE", "play", false),
+            ("< >", "frame-step", false),
+            ("[ ]", "speed", false),
+            ("1-6", "view mode", false),
+            ("TAB", "info", false),
+            ("F", "fullscreen", false),
+        ] {
+            let (fg, chip, shadow) = if hot {
+                (FRAME_INK, LIME, LIME_SHADOW)
+            } else {
+                (KEYCAP_FG, KEYCAP_BG, KEYCAP_SHADOW)
+            };
+            items.push(Item::Text(TextItem {
+                valign: VAlign::Middle,
+                bg: Some(TextBg {
+                    radius: 5.0,
+                    pad_x: 9.0,
+                    pad_y: 4.0,
+                    shadow: fade(shadow),
+                    shadow_dy: 2.0,
+                    ..TextBg::new(fade(chip))
+                }),
+                ..TextItem::new(kx, ky, 11.0, fade(fg), cap)
+            }));
+            kx += cap.chars().count() as f32 * 11.0 * MONO_ADV + 18.0 + 7.0;
+            items.push(Item::Text(TextItem {
+                valign: VAlign::Middle,
+                ..TextItem::new(kx, ky, 10.5, fade(LABEL), label)
+            }));
+            kx += label.chars().count() as f32 * 10.5 * MONO_ADV + 18.0;
+        }
     }
 
     /// The 2b launch window: corner brackets, wordmark, two drop targets,
     /// a terminal hint and the keycap legend. Drawn from flat rects and
     /// text only (no video items), so it renders with zero streams loaded.
-    /// Widths are estimated at the monospace advance (~0.6 em) to center.
     fn launch_frame(&self, vp: (f32, f32)) -> FrameDesc {
         let (w, h) = vp;
         let mut items: Vec<Item> = Vec::new();
-        let adv = |px: f32, n: usize| 0.60 * px * n as f32;
+        // Only used to step BETWEEN runs (the renderer measures and
+        // centres each run itself).
+        let adv = |px: f32, n: usize| MONO_ADV * px * n as f32;
 
         // ---- corner brackets ----
         let inset = 22.0;
@@ -684,31 +1061,27 @@ impl App {
             (w - inset - arm, h - inset - t, w - inset - t, h - inset - arm),
         ];
         for (hx, hy, vx, vy) in corners {
-            items.push(Item::Rect { r: RectPx { x: hx, y: hy, w: arm, h: t }, color: LIME_DIM });
-            items.push(Item::Rect { r: RectPx { x: vx, y: vy, w: t, h: arm }, color: LIME_DIM });
+            items.push(Item::Rect(RectItem::new(
+                RectPx { x: hx, y: hy, w: arm, h: t },
+                LIME_DIM,
+            )));
+            items.push(Item::Rect(RectItem::new(
+                RectPx { x: vx, y: vy, w: t, h: arm },
+                LIME_DIM,
+            )));
         }
 
         // ---- wordmark ----
-        let word = "A B N E R";
-        let wpx = 22.0;
-        items.push(Item::Text {
-            x: (w - adv(wpx, word.chars().count())) / 2.0,
-            y: h * 0.13,
-            px: wpx,
-            color: LIME,
-            text: word.into(),
-            bg: None,
-        });
-        let sub = "A / B VIDEO COMPARE";
-        let spx = 12.0;
-        items.push(Item::Text {
-            x: (w - adv(spx, sub.chars().count())) / 2.0,
-            y: h * 0.13 + 34.0,
-            px: spx,
-            color: DIM,
-            text: sub.into(),
-            bg: None,
-        });
+        items.push(Item::Text(TextItem {
+            align: Align::Center,
+            tracking: 11.0,
+            ..TextItem::new(w / 2.0, h * 0.13, 22.0, LIME, "ABNER")
+        }));
+        items.push(Item::Text(TextItem {
+            align: Align::Center,
+            tracking: 3.4,
+            ..TextItem::new(w / 2.0, h * 0.13 + 34.0, 12.0, DIM, "A / B VIDEO COMPARE")
+        }));
 
         // ---- two drop zones ----
         let zw = 320.0;
@@ -724,7 +1097,7 @@ impl App {
                 [0.651, 0.886, 0.180, 0.55],
                 "A",
                 "drop the reference clip",
-                "mp4 / mov / mkv / prores",
+                "mp4 · mov · mkv · prores",
             ),
             (
                 zx0 + zw + gap,
@@ -737,40 +1110,25 @@ impl App {
             ),
         ];
         for (zx, letter_col, fill, border, letter, label, sublabel) in zones {
-            items.push(Item::Rect { r: RectPx { x: zx, y: zy, w: zw, h: zh }, color: fill });
-            let bt = 1.5;
-            items.push(Item::Rect { r: RectPx { x: zx, y: zy, w: zw, h: bt }, color: border });
-            items.push(Item::Rect { r: RectPx { x: zx, y: zy + zh - bt, w: zw, h: bt }, color: border });
-            items.push(Item::Rect { r: RectPx { x: zx, y: zy, w: bt, h: zh }, color: border });
-            items.push(Item::Rect { r: RectPx { x: zx + zw - bt, y: zy, w: bt, h: zh }, color: border });
+            items.push(Item::Rect(RectItem {
+                radius: 12.0,
+                border_w: 1.5,
+                border_color: border,
+                ..RectItem::new(RectPx { x: zx, y: zy, w: zw, h: zh }, fill)
+            }));
             let cx = zx + zw / 2.0;
-            let big = 46.0;
-            items.push(Item::Text {
-                x: cx - adv(big, 1) / 2.0,
-                y: zy + 34.0,
-                px: big,
-                color: letter_col,
-                text: letter.into(),
-                bg: None,
-            });
-            let lb = 13.0;
-            items.push(Item::Text {
-                x: cx - adv(lb, label.chars().count()) / 2.0,
-                y: zy + 108.0,
-                px: lb,
-                color: TEXT,
-                text: label.into(),
-                bg: None,
-            });
-            let sb = 11.0;
-            items.push(Item::Text {
-                x: cx - adv(sb, sublabel.chars().count()) / 2.0,
-                y: zy + 134.0,
-                px: sb,
-                color: DIM,
-                text: sublabel.into(),
-                bg: None,
-            });
+            items.push(Item::Text(TextItem {
+                align: Align::Center,
+                ..TextItem::new(cx, zy + 34.0, 46.0, letter_col, letter)
+            }));
+            items.push(Item::Text(TextItem {
+                align: Align::Center,
+                ..TextItem::new(cx, zy + 108.0, 13.0, TEXT, label)
+            }));
+            items.push(Item::Text(TextItem {
+                align: Align::Center,
+                ..TextItem::new(cx, zy + 134.0, 11.0, DIM, sublabel)
+            }));
         }
 
         // ---- terminal hint (dim · lime command · dim), centered as a group ----
@@ -784,7 +1142,7 @@ impl App {
         let mut hx = (w - hint_w) / 2.0;
         let hy = h - 84.0;
         for (s, c) in seg {
-            items.push(Item::Text { x: hx, y: hy, px: hpx, color: c, text: s.into(), bg: None });
+            items.push(Item::Text(TextItem::new(hx, hy, hpx, c, s)));
             hx += adv(hpx, s.chars().count());
         }
 
@@ -796,7 +1154,7 @@ impl App {
             ("F", "fullscreen", false),
         ];
         let kpx = 11.0;
-        let chip_pad = 12.0; // renderer pads text bg by 6px each side
+        let chip_pad = 18.0;
         let cap_gap = 7.0;
         let entry_gap = 20.0;
         let entry_w = |cap: &str, label: &str| {
@@ -807,11 +1165,25 @@ impl App {
         let mut lx = (w - legend_w) / 2.0;
         let ly = h - 44.0;
         for (cap, label, hot) in legend {
-            let (fg, bg) = if hot { (DARK, LIME) } else { (KEYCAP_FG, KEYCAP_BG) };
-            items.push(Item::Text { x: lx + 6.0, y: ly, px: kpx, color: fg, text: cap.into(), bg: Some(bg) });
+            let (fg, chip, shadow) = if hot {
+                (DARK, LIME, LIME_SHADOW)
+            } else {
+                (KEYCAP_FG, KEYCAP_BG, KEYCAP_SHADOW)
+            };
+            items.push(Item::Text(TextItem {
+                bg: Some(TextBg {
+                    radius: 5.0,
+                    pad_x: 9.0,
+                    pad_y: 4.0,
+                    shadow,
+                    shadow_dy: 2.0,
+                    ..TextBg::new(chip)
+                }),
+                ..TextItem::new(lx + 9.0, ly, kpx, fg, cap)
+            }));
             let capw = adv(kpx, cap.chars().count()) + chip_pad;
             let labx = lx + capw + cap_gap;
-            items.push(Item::Text { x: labx, y: ly, px: kpx, color: DIM, text: label.into(), bg: None });
+            items.push(Item::Text(TextItem::new(labx, ly, kpx, DIM, label)));
             lx = labx + adv(kpx, label.chars().count()) + entry_gap;
         }
 
@@ -887,6 +1259,57 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         false
+    }
+
+    /// The 2a transport is a real control surface, not a picture of one:
+    /// its buttons act and its seek bar scrubs, from the same rects the
+    /// draw uses.
+    #[test]
+    fn transport_buttons_and_seek_bar_are_live() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 2);
+        assert!(
+            tick_until(&mut app, Duration::from_secs(10), |a| a.started && a.t > 0.2),
+            "playback never started"
+        );
+        let vp = app.vp;
+
+        // Play/pause disc toggles.
+        let play = app.btn_play();
+        assert!(app.playing);
+        app.mouse_down(play.x + play.w / 2.0, play.y + play.h / 2.0);
+        app.mouse_up();
+        assert!(!app.playing, "clicking the disc should pause");
+
+        // Next steps one frame forward and stays paused.
+        let before = app.t;
+        let next = app.btn_next();
+        app.mouse_down(next.x + next.w / 2.0, next.y + next.h / 2.0);
+        app.mouse_up();
+        assert!(
+            tick_until(&mut app, Duration::from_secs(5), |a| !a.videos.iter().any(|v| v.pending)),
+            "step frame never arrived"
+        );
+        assert!(app.t > before, "next should advance: {before:.4} -> {:.4}", app.t);
+
+        // A press on the seek track scrubs to that fraction, and never
+        // starts a pan drag.
+        let s = app.seek_rect(vp);
+        app.mouse_down(s.x + s.w * 0.75, s.y + s.h / 2.0);
+        assert!(app.scrubbing);
+        assert!(app.drag.is_none(), "a seek press must not also pan");
+        let want = 0.75 * (app.wrap - 0.05);
+        assert!(
+            (app.t - want).abs() < 0.2,
+            "seek should land at ~75%: wanted {want:.3}, got {:.3}",
+            app.t
+        );
+        app.mouse_up();
+        assert!(!app.scrubbing);
+
+        // A press on open frame still pans.
+        app.mouse_down(vp.0 / 2.0, vp.1 / 2.0);
+        assert!(app.drag.is_some());
     }
 
     /// Photo-style pinch: the content point under the pointer must stay
@@ -998,19 +1421,83 @@ mod tests {
     }
 }
 
-const TEXT: [f32; 4] = [0.92, 0.92, 0.92, 1.0];
-const DIM: [f32; 4] = [0.62, 0.62, 0.66, 1.0];
-const ACTIVE: [f32; 4] = [1.0, 0.82, 0.25, 1.0];
-const ERR: [f32; 4] = [1.0, 0.35, 0.3, 1.0];
-const BG: [f32; 4] = [0.0, 0.0, 0.0, 0.55];
-
-// Launch window (2b) palette.
+// ---- 2a "Instrument HUD, remixed" palette ----
+/// Lime signal accent (#a6e22e) — the one hot colour in the design.
 const LIME: [f32; 4] = [0.651, 0.886, 0.180, 1.0];
 const LIME_DIM: [f32; 4] = [0.651, 0.886, 0.180, 0.5];
+/// Hairlines and pill outlines drawn in the accent, well under full.
+const LIME_EDGE: [f32; 4] = [0.651, 0.886, 0.180, 0.28];
+const LIME_SHADOW: [f32; 4] = [0.451, 0.620, 0.098, 0.95];
+/// Frame background / ink on lime (#050506).
+const FRAME_BG: [f32; 3] = [0.0196, 0.0196, 0.0235];
+const FRAME_INK: [f32; 4] = [0.0196, 0.0196, 0.0235, 1.0];
+const TEXT: [f32; 4] = [0.941, 0.941, 0.949, 1.0];
+const TEXT_OFF: [f32; 4] = [0.784, 0.784, 0.824, 0.85];
+const DETAIL: [f32; 4] = [0.824, 0.824, 0.863, 0.95];
+const DIM_PATH: [f32; 4] = [0.588, 0.588, 0.627, 0.75];
+const DETAIL_BG: [f32; 4] = [0.0, 0.0, 0.0, 0.82];
+const DIM: [f32; 4] = [0.588, 0.588, 0.627, 0.9];
+const LABEL: [f32; 4] = [0.784, 0.784, 0.804, 0.85];
+const INACTIVE: [f32; 4] = [0.706, 0.706, 0.745, 0.9];
+const SEG_OFF: [f32; 4] = [0.902, 0.902, 0.922, 0.8];
+const TIME_OFF: [f32; 4] = [0.471, 0.471, 0.510, 0.85];
+const GLYPH: [f32; 4] = [0.824, 0.824, 0.843, 0.85];
+const ERR: [f32; 4] = [1.0, 0.35, 0.3, 1.0];
+const PILL_BG: [f32; 4] = [0.016, 0.016, 0.024, 0.62];
+// Panel alphas run high on purpose: see the scrim note in shader.wgsl —
+// linear-space blending means 0.6 alpha barely dims bright footage.
+const ROW_BG_ON: [f32; 4] = [0.0, 0.0, 0.0, 0.90];
+const ROW_BG_OFF: [f32; 4] = [0.0, 0.0, 0.0, 0.82];
+const RULE_OFF: [f32; 4] = [1.0, 1.0, 1.0, 0.14];
+const SCRIM: [f32; 4] = [0.016, 0.016, 0.024, 0.97];
+const TRACK: [f32; 4] = [1.0, 1.0, 1.0, 0.14];
+const KNOB: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+const KEYCAP_FG: [f32; 4] = [0.910, 0.910, 0.918, 1.0];
+const KEYCAP_BG: [f32; 4] = [0.149, 0.149, 0.173, 1.0];
+const KEYCAP_SHADOW: [f32; 4] = [0.0, 0.0, 0.0, 0.6];
+
+// Launch window (2b) palette.
 const DARK: [f32; 4] = [0.02, 0.02, 0.024, 1.0];
-const KEYCAP_FG: [f32; 4] = [0.9, 0.9, 0.91, 1.0];
-const KEYCAP_BG: [f32; 4] = [0.149, 0.149, 0.172, 1.0];
 const LAUNCH_BG: [f32; 3] = [0.027, 0.027, 0.035];
+
+/// Info block width, and how many monospace chars fit inside it.
+const INFO_W: f32 = 430.0;
+const INFO_CH: usize = ((INFO_W - 16.0) / (10.5 * MONO_ADV)) as usize;
+
+/// Transport strip: 13px pad + 32px controls + 12px gap + keycaps + 14px.
+const TRANSPORT_H: f32 = 92.0;
+/// Extra scrim drawn above the strip so the gradient's transparent end
+/// falls on bare frame rather than on the controls.
+const SCRIM_LEAD: f32 = 54.0;
+/// Width reserved right of the seek bar for the status readout.
+const STATUS_RESERVE: f32 = 330.0;
+/// Extra grab margin above/below the 5px seek track.
+const SEEK_GRAB: f32 = 9.0;
+/// Pointer stillness before the transport starts fading, and the fade.
+const TRANSPORT_HOLD_S: f32 = 2.6;
+const TRANSPORT_FADE_S: f32 = 0.45;
+/// Advance width of the monospace UI font, in em — used only to step
+/// between right-aligned status segments and keycap chips, never to
+/// place a glyph (the renderer measures those exactly).
+const MONO_ADV: f32 = 0.60;
+
+/// Clip a run to `max` characters, marking the cut with an ellipsis.
+fn ellipsize(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    s.chars().take(max.saturating_sub(1)).collect::<String>() + "…"
+}
+
+/// Same, but keeps the TAIL (for paths, where the leaf matters).
+fn ellipsize_left(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    let skip = n - max.saturating_sub(1);
+    "…".to_string() + &s.chars().skip(skip).collect::<String>()
+}
 
 fn fmt_time(t: f64) -> String {
     let t = t.max(0.0);

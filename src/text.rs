@@ -138,9 +138,10 @@ impl TextCtx {
         self.cache.get(&key).and_then(|e| e.as_ref())
     }
 
-    /// Lay out one line at `px` physical pixels. Quads are relative to the
-    /// line box's top-left.
-    pub fn layout(&mut self, text: &str, px: f32) -> LaidText {
+    /// Lay out one line at `px` physical pixels, adding `tracking` px of
+    /// extra advance per glyph (CSS letter-spacing). Quads are relative
+    /// to the line box's top-left.
+    pub fn layout(&mut self, text: &str, px: f32, tracking: f32) -> LaidText {
         let Some(font) = self.font.as_ref() else {
             return LaidText { quads: Vec::new(), w: 0.0, h: 0.0 };
         };
@@ -171,7 +172,11 @@ impl TextCtx {
                     ],
                 });
             }
-            pen += adv;
+            pen += adv + tracking;
+        }
+        // Trailing tracking isn't part of the visible run.
+        if tracking != 0.0 && !text.is_empty() {
+            pen -= tracking;
         }
         LaidText { quads, w: pen, h: line_h }
     }
