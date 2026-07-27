@@ -18,10 +18,20 @@ serde_json = "1"
 # dev libraries via pkg-config (`brew install ffmpeg` provides them).
 rsmpeg = { version = "0.18", default-features = false, features = ["link_system_ffmpeg", "ffmpeg8"] }
 
-# Fake-fullscreen contour fix on macOS Tahoe: the ~1px window border is
-# drawn with the shadow, so we need setHasShadow(false) (see main.rs).
+# AppKit, for two things (both in main.rs): the fake-fullscreen contour fix
+# on macOS Tahoe (the ~1px window border is drawn with the shadow, so we
+# need setHasShadow(false)), and the embedded Dock icon.
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2-app-kit = { version = "0.2", features = ["NSResponder", "NSView", "NSWindow"] }
+objc2-app-kit = { version = "0.2", features = [
+    "NSResponder",
+    "NSView",
+    "NSWindow",
+    "NSApplication",
+    "NSImage",
+] }
+objc2-foundation = { version = "0.2", features = ["NSData"] }
+# 0.5 to match objc2-app-kit 0.2's objc2 (only needed for the ClassType trait).
+objc2 = "0.5"
 
 [profile.dev]
 # wgpu + shader-heavy code is unusably slow at opt-level 0

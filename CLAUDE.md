@@ -12,6 +12,11 @@ CLAUDE.md documents the deeper media/render rationale).
   continuous path (no vsync present to pace them = pegged core), `MIN_FRAME` floors the
   Poll cadence, idle ticks at 100ms. Fake fullscreen = `set_simple_fullscreen` +
   `setHasShadow(false)` (macOS Tahoe draws its window contour with the shadow).
+  The Dock icon is `include_bytes!`'d (`assets/icons/abner-flat-white.png`) and pushed
+  to `NSApp.setApplicationIconImage` at startup — a bare Mach-O has no
+  `CFBundleIconFile`, and running from a shell is the common case here. AppKit decodes
+  the PNG, so no image crate is pulled in; other platforms want an already-decoded RGBA
+  buffer for `Window::with_window_icon`, so `set_app_icon()` is a no-op there.
 - `src/player.rs` — adapted from switchblade's `SeekablePlayer` (in-process libav via
   rsmpeg, VT decode for h264/hevc/prores only, content-relative time, bounded queue,
   drop-wakes-the-parked-reader). **Key difference: no per-player pacing.** Players queue

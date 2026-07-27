@@ -107,6 +107,9 @@ fn main() -> anyhow::Result<()> {
     }
 
     let event_loop = EventLoop::new()?;
+    // NSApp exists once the event loop is built; give it our icon before
+    // the window (and therefore the Dock tile) appears.
+    set_app_icon();
     event_loop.set_control_flow(ControlFlow::Poll);
     // Frame-arrival wakes (paused framesteps, seek completions) coalesce
     // into single redraws via the event-loop proxy.
@@ -201,6 +204,37 @@ fn toggle_fast_fullscreen(w: &Window) {
         w.set_fullscreen(next);
     }
 }
+
+/// The app icon, baked into the executable.
+///
+/// A bare Mach-O has nowhere to hang an icon — `CFBundleIconFile` only
+/// resolves inside an .app — so the PNG rides along in `.rodata` and we hand
+/// it to AppKit at startup. That covers the common case here (`abner a.mp4
+/// b.mp4` from a shell), where there is no bundle at all; `cargo bundle`
+/// still converts the same file into the .app's .icns.
+#[cfg(target_os = "macos")]
+const ICON_PNG: &[u8] = include_bytes!("../assets/icons/abner-flat-white.png");
+
+/// Sets the Dock / app-switcher icon. AppKit decodes the PNG itself, so no
+/// image crate is pulled in for this. (No-op elsewhere: X11/Windows want an
+/// already-decoded RGBA buffer via `Window::with_window_icon`, which would
+/// mean a PNG decoder — not worth it until abner runs there.)
+#[cfg(target_os = "macos")]
+fn set_app_icon() {
+    use objc2::ClassType;
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::{MainThreadMarker, NSData};
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let data = NSData::with_bytes(ICON_PNG);
+    let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else {
+        log::warn!("embedded app icon failed to decode");
+        return;
+    };
+    unsafe { NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&image)) };
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_app_icon() {}
 
 #[cfg(target_os = "macos")]
 fn set_window_shadow(w: &Window, on: bool) {
