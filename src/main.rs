@@ -11,11 +11,12 @@ mod app;
 mod player;
 mod probe;
 mod render;
+mod schedule;
 mod text;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -145,12 +146,6 @@ fn main() -> anyhow::Result<()> {
     event_loop.run_app(&mut runner)?;
     Ok(())
 }
-
-/// Floor on the continuous-redraw interval — the runaway guard for any
-/// path that skips the vsync present (switchblade's occluded-window bug).
-const MIN_FRAME: Duration = Duration::from_millis(4);
-/// Housekeeping cadence while nothing animates.
-const IDLE_TICK: Duration = Duration::from_millis(100);
 
 struct Runner {
     app: App,
@@ -381,24 +376,22 @@ impl ApplicationHandler for Runner {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // The cadence rules live in `schedule` (tested there), not here.
         let Some(w) = &self.window else { return };
-        let now = Instant::now();
-        if self.animating && !self.occluded {
-            let next = self.last_frame + MIN_FRAME;
-            if now >= next {
-                event_loop.set_control_flow(ControlFlow::Poll);
+        match schedule::next_frame(
+            self.animating,
+            self.occluded,
+            self.redraw_at,
+            self.last_frame,
+            Instant::now(),
+        ) {
+            schedule::NextFrame::Now { poll } => {
+                if poll {
+                    event_loop.set_control_flow(ControlFlow::Poll);
+                }
                 w.request_redraw();
-            } else {
-                event_loop.set_control_flow(ControlFlow::WaitUntil(next));
             }
-        } else {
-            let mut next = self.last_frame + IDLE_TICK;
-            if !self.occluded && let Some(t) = self.redraw_at {
-                next = next.min(t);
-            }
-            if now >= next {
-                w.request_redraw();
-            } else {
+            schedule::NextFrame::At(next) => {
                 event_loop.set_control_flow(ControlFlow::WaitUntil(next));
             }
         }
