@@ -7,10 +7,12 @@ CLAUDE.md documents the deeper media/render rationale).
 
 ## Architecture
 
-- `src/main.rs` — CLI + winit loop. Carries switchblade's loop rules: input wakes are
-  optimistic, `animating` decides if the loop stays hot, occluded windows never run the
-  continuous path (no vsync present to pace them = pegged core), `MIN_FRAME` floors the
-  Poll cadence, idle ticks at 100ms. Fake fullscreen = `set_simple_fullscreen` +
+- `src/main.rs` — CLI + winit loop. The redraw cadence lives in `src/schedule.rs`
+  (switchblade's module, verbatim, with its tests): input wakes are optimistic,
+  `animating` decides if the loop stays hot, occluded windows never run the continuous
+  path (no vsync present to pace them = pegged core), `MIN_FRAME` floors the Poll
+  cadence, idle ticks at 100ms. `about_to_wait` is the only caller — don't grow a
+  second copy of the rules there. Fake fullscreen = `set_simple_fullscreen` +
   `setHasShadow(false)` (macOS Tahoe draws its window contour with the shadow).
   The Dock icon is `include_bytes!`'d (`assets/icons/abner-flat-white.png`) and pushed
   to `NSApp.setApplicationIconImage` at startup — a bare Mach-O has no
@@ -24,6 +26,16 @@ CLAUDE.md documents the deeper media/render rationale).
   `take_upto(t)` (pop all due, newest wins). Sync is by construction, pause is "stop
   advancing t" (backpressure stalls decoders), EOF parks the reader until a seek.
   Decode is at native resolution — pixels are the product here, nothing scales.
+  Three robustness rules ported from switchblade (2026-09-04), each a shipped bug there:
+  `Drop` takes the `frames` lock for an instant before notifying (a store+notify between
+  the reader's `closed` check and its wait is a lost wakeup = leaked thread); an AVIO
+  interrupt callback is installed BEFORE `avformat_open_input` so a drop reaches a
+  reader wedged in libav I/O on a dead mount (`dropped_player_interrupts_a_reader_blocked_in_libav_io`);
+  a failed seek FAILS the player rather than continuing from wherever it was, because a
+  silently unsynced stream is the one thing this product must never show.
+- `src/probe.rs` — one ffprobe per input at startup, synchronous on the main thread
+  before any window exists, so it runs under a hard deadline (`run_deadlined`): a child
+  stuck on a dead volume otherwise looks exactly like a crash.
 - `src/app.rs` — master clock, modes, input, UI overlay. **Zoom** is photo-style: one
   shared `(zoom, center)` where `center` is the content point (0..1) held mid-view —
   every video applies it to its own fit rect, so pan/zoom position stays synced across
@@ -51,8 +63,12 @@ CLAUDE.md documents the deeper media/render rationale).
   `ui_color()`** — the surface is `*UnormSrgb` and re-encodes on write, so a raw sRGB
   value lands pale. Same reason panel/scrim alphas run high (0.8–0.97): blending is
   linear-space, so 0.6 alpha barely dims bright footage.
-- `src/text.rs` — ab_glyph over system fonts (SF Mono/Menlo/…), R8 shelf-packed atlas,
-  glyphs rasterized at physical px and drawn at logical size, optional tracking.
+- `src/text.rs` — ab_glyph over system fonts (SF Mono/Menlo/…), 2048² R8 shelf-packed
+  atlas, glyphs rasterized at physical px and drawn at logical size, optional tracking.
+  New glyphs upload as their own rects (`pending`), never the whole atlas. The atlas is
+  NEVER reset mid-frame — earlier text in the frame has already baked its UVs — so a
+  full atlas refuses the glyph, memoizes the miss, and `begin_frame()` wipes at the next
+  frame start (then the renderer re-uploads the whole texture).
   The system mono fonts have NO media-control glyphs (⏮ ⏸ ⏭ ⏎ render as nothing) —
   use the geometric block (◀ ▶ ●) or draw the shape from rects.
 
