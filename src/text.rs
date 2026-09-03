@@ -1,13 +1,31 @@
 //! Minimal glyph stack: a system monospace font rasterized on demand into
-//! one R8 atlas (CPU-side shelf packer, whole-texture upload when dirty).
-//! Glyphs rasterize at physical pixel size and draw at logical size, so
-//! text stays crisp on HiDPI.
+//! one R8 atlas (CPU-side shelf packer, per-glyph rect uploads). Glyphs
+//! rasterize at physical pixel size and draw at logical size, so text
+//! stays crisp on HiDPI.
+//!
+//! Two rules carried over from switchblade's atlas, both shipped bugs
+//! there: the atlas is NEVER reset in the middle of a frame (earlier text
+//! in the same frame has already baked its UVs, and a wipe under them
+//! draws garbage), and a glyph that can't be placed is refused and
+//! remembered, so it costs one raster attempt rather than one per frame.
 
 use std::collections::HashMap;
 
 use ab_glyph::{Font, FontVec, ScaleFont};
 
-pub const ATLAS: u32 = 1024;
+/// 2048² × R8 = 4 MiB, which is nothing; 1024 was ~40% full with two
+/// sizes at 2× retina and one reset would have wiped the lot.
+pub const ATLAS: u32 = 2048;
+
+/// A freshly rasterized glyph's rect, for a partial texture upload. The
+/// pixels live in `TextCtx::atlas` at this position.
+#[derive(Debug, Clone, Copy)]
+pub struct Upload {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
 
 /// One positioned glyph, in PHYSICAL pixels relative to the text origin
 /// (top-left of the line box).
@@ -41,7 +59,11 @@ struct Entry {
 pub struct TextCtx {
     font: Option<FontVec>,
     pub atlas: Vec<u8>,
-    pub dirty: bool,
+    /// Rects rasterized since the renderer last drained them.
+    pub pending: Vec<Upload>,
+    /// Set when a glyph didn't fit; the reset is deferred to the next
+    /// frame boundary (`begin_frame`), never done mid-layout.
+    full: bool,
     cache: HashMap<(u16, u32), Option<Entry>>,
     cur_x: u32,
     cur_y: u32,
@@ -77,12 +99,33 @@ impl TextCtx {
         Self {
             font,
             atlas: vec![0; (ATLAS * ATLAS) as usize],
-            dirty: false,
+            pending: Vec::new(),
+            full: false,
             cache: HashMap::new(),
             cur_x: 0,
             cur_y: 0,
             row_h: 0,
         }
+    }
+
+    /// Frame boundary. If the last frame ran the atlas out of room, wipe
+    /// it NOW — before anything in this frame has baked a UV — and tell
+    /// the renderer the whole texture needs re-uploading. Returns true on
+    /// a reset. Only a pathological glyph-size churn ever gets here; a
+    /// stream of these in the log is the signature to look for.
+    pub fn begin_frame(&mut self) -> bool {
+        if !self.full {
+            return false;
+        }
+        log::debug!("text: atlas full, resetting ({} entries)", self.cache.len());
+        self.cache.clear();
+        self.atlas.fill(0);
+        self.pending.clear();
+        self.cur_x = 0;
+        self.cur_y = 0;
+        self.row_h = 0;
+        self.full = false;
+        true
     }
 
     fn pack(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
@@ -95,13 +138,11 @@ impl TextCtx {
             self.row_h = 0;
         }
         if self.cur_y + h + 1 > ATLAS {
-            // Atlas full (a pathological glyph-size churn): reset. The next
-            // frame re-rasterizes what it needs — visually a non-event.
-            self.cache.clear();
-            self.atlas.fill(0);
-            self.cur_x = 0;
-            self.cur_y = 0;
-            self.row_h = 0;
+            // No room. Refuse rather than reset: quads earlier in this
+            // frame already point into the atlas. The miss is memoized by
+            // the caller and the reset happens at the next frame start.
+            self.full = true;
+            return None;
         }
         let at = (self.cur_x, self.cur_y);
         self.cur_x += w + 1;
@@ -130,7 +171,7 @@ impl TextCtx {
                         atlas[i] = atlas[i].max((c * 255.0) as u8);
                     }
                 });
-                self.dirty = true;
+                self.pending.push(Upload { x: ax, y: ay, w, h });
                 Some(Entry { ax, ay, w, h, left: b.min.x, top: b.min.y })
             });
             self.cache.insert(key, made);

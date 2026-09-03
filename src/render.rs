@@ -619,27 +619,36 @@ impl Gpu {
         v.dirty = true;
     }
 
+    /// Upload one rect of the CPU glyph atlas. The source slice starts at
+    /// the rect's first byte with the atlas width as its row pitch, so no
+    /// copy-out is needed.
+    fn upload_glyph_rect(&self, x: u32, y: u32, w: u32, h: u32) {
+        let offset = (y * ATLAS + x) as usize;
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.glyph_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x, y, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &self.text.atlas[offset..],
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(ATLAS),
+                rows_per_image: Some(h),
+            },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+    }
+
     pub fn render(&mut self, desc: &FrameDesc, viewport: (f32, f32)) {
         for up in &desc.uploads {
             self.upload_video(up);
         }
-        if self.text.dirty {
-            self.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &self.glyph_tex,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &self.text.atlas,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(ATLAS),
-                    rows_per_image: Some(ATLAS),
-                },
-                wgpu::Extent3d { width: ATLAS, height: ATLAS, depth_or_array_layers: 1 },
-            );
-            self.text.dirty = false;
+        // A deferred atlas reset lands here, before any layout in this
+        // frame hands out a UV; the wiped texture goes up whole.
+        if self.text.begin_frame() {
+            self.upload_glyph_rect(0, 0, ATLAS, ATLAS);
         }
 
         // Build instances + draw batches (bind-group key per range).
@@ -740,24 +749,11 @@ impl Gpu {
                 }
             }
         }
-        // The glyph atlas may have grown during layout — re-upload.
-        if self.text.dirty {
-            self.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &self.glyph_tex,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &self.text.atlas,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(ATLAS),
-                    rows_per_image: Some(ATLAS),
-                },
-                wgpu::Extent3d { width: ATLAS, height: ATLAS, depth_or_array_layers: 1 },
-            );
-            self.text.dirty = false;
+        // Glyphs rasterized during layout go up as their own rects, not
+        // as a whole-atlas re-upload (4 MiB per new glyph otherwise).
+        let pending = std::mem::take(&mut self.text.pending);
+        for u in &pending {
+            self.upload_glyph_rect(u.x, u.y, u.w, u.h);
         }
 
         if data.len() > self.instance_capacity {
