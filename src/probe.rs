@@ -1,10 +1,65 @@
 //! One ffprobe per input at startup — abner has no cache and no library,
 //! so a plain synchronous probe is the right weight.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow};
+
+/// Hard deadline on the ffprobe child. The probe runs synchronously on
+/// the main thread before any window exists, so a child wedged on a dead
+/// network mount would otherwise look exactly like a crash: no window,
+/// no message, forever. Local files probe in milliseconds; this only ever
+/// fires on storage that has gone away.
+const PROBE_DEADLINE: Duration = Duration::from_secs(30);
+
+struct Output {
+    success: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// `Command::output()` with a deadline: on expiry the child is killed and
+/// `None` comes back. Both pipes drain on their own threads while we
+/// poll, because a child that fills a pipe buffer blocks forever and the
+/// deadline would then fire on work that was making progress. A process
+/// stuck in an uninterruptible read does not die on SIGKILL either — so
+/// the kill is fire-and-forget and the drain threads are left unjoined,
+/// or the hang would just move here.
+fn run_deadlined(cmd: &mut Command, deadline: Duration) -> std::io::Result<Option<Output>> {
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut p) = pipe {
+                let _ = p.read_to_end(&mut buf);
+            }
+            buf
+        })
+    }
+    let out = drain(child.stdout.take());
+    let err = drain(child.stderr.take());
+    let started = Instant::now();
+    let mut nap = Duration::from_micros(200);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            let stdout = out.join().unwrap_or_default();
+            let stderr = err.join().unwrap_or_default();
+            return Ok(Some(Output { success: status.success(), stdout, stderr }));
+        }
+        if started.elapsed() >= deadline {
+            let _ = child.kill();
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            return Ok(None);
+        }
+        std::thread::sleep(nap);
+        nap = (nap * 2).min(Duration::from_millis(2));
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct VideoInfo {
@@ -36,12 +91,18 @@ fn parse_rate(s: &str) -> Option<f64> {
 }
 
 pub fn probe(path: &Path) -> anyhow::Result<VideoInfo> {
-    let out = Command::new("ffprobe")
-        .args(["-v", "error", "-print_format", "json", "-show_format", "-show_streams"])
-        .arg(path)
-        .output()
-        .context("running ffprobe (is ffmpeg installed?)")?;
-    if !out.status.success() {
+    let mut cmd = Command::new("ffprobe");
+    cmd.args(["-v", "error", "-print_format", "json", "-show_format", "-show_streams"]).arg(path);
+    let out = run_deadlined(&mut cmd, PROBE_DEADLINE)
+        .context("running ffprobe (is ffmpeg installed?)")?
+        .ok_or_else(|| {
+            anyhow!(
+                "ffprobe did not finish within {}s for {} — is the file on a storage volume that has gone away?",
+                PROBE_DEADLINE.as_secs(),
+                path.display()
+            )
+        })?;
+    if !out.success {
         return Err(anyhow!(
             "ffprobe failed for {}: {}",
             path.display(),

@@ -124,7 +124,12 @@ impl Player {
         let reader_shared = shared.clone();
         thread::spawn(move || {
             // All libav state is created, used and freed on this thread.
-            if let Err(e) = unsafe { reader(&reader_shared, &cfg) } {
+            // A drop aborts blocked libav I/O via the interrupt callback,
+            // and that abort surfaces here as an ordinary error — a
+            // closed player shutting down is not a stream failure.
+            if let Err(e) = unsafe { reader(&reader_shared, &cfg) }
+                && !reader_shared.closed.load(Ordering::Relaxed)
+            {
                 log::warn!("player: {} — {e}", cfg.path.display());
                 reader_shared.failed.store(true, Ordering::Relaxed);
             }
@@ -208,6 +213,16 @@ impl Player {
 impl Drop for Player {
     fn drop(&mut self) {
         self.shared.closed.store(true, Ordering::Relaxed);
+        // Serialize with the reader's park loop before notifying: the
+        // reader checks `closed` under the `frames` lock and then waits on
+        // `space`. A store+notify that lands between its check and its
+        // wait is a LOST wakeup — nothing ever notifies again and the
+        // reader parks forever, pinning its buffers (switchblade's
+        // documented leak). Holding the lock for an instant forces the
+        // reader to be either before its check (sees `closed`) or already
+        // parked (gets the notify). `seek()` gets this ordering for free
+        // via its drain.
+        drop(self.shared.frames.lock());
         self.shared.space.notify_all();
     }
 }
@@ -335,13 +350,37 @@ fn quiet_libav_once() {
     });
 }
 
+/// libav's `AVIOInterruptCB`: a non-zero return aborts whatever blocking
+/// I/O the reader is inside. Without it a reader wedged in
+/// `avformat_open_input`'s probe loop or `av_read_frame` (stale network
+/// mount, unplugged drive, a dribbling source) ignores `closed` until the
+/// OS-level I/O timeout — minutes — and every dropped player stuck there
+/// keeps its buffers and its VideoToolbox session for the duration. This
+/// is how a drop reaches a reader that is stuck in libav rather than
+/// parked on the condvar. `opaque` points at `Shared::closed`, kept alive
+/// for the whole reader lifetime by the thread's own Arc.
+unsafe extern "C" fn check_closed(opaque: *mut std::ffi::c_void) -> std::os::raw::c_int {
+    unsafe { (*(opaque as *const AtomicBool)).load(Ordering::Relaxed) as i32 }
+}
+
 unsafe fn reader(shared: &Shared, cfg: &ReaderCfg) -> Result<(), String> {
     quiet_libav_once();
     unsafe {
-        let mut fmt_raw: *mut ffi::AVFormatContext = ptr::null_mut();
+        // Pre-allocate the context so the interrupt callback is installed
+        // BEFORE `avformat_open_input` — the open itself (and the probe
+        // reads inside it) is one of the places a stale mount wedges.
+        let mut fmt_raw: *mut ffi::AVFormatContext = ffi::avformat_alloc_context();
+        if fmt_raw.is_null() {
+            return Err("format alloc failed".into());
+        }
+        (*fmt_raw).interrupt_callback = ffi::AVIOInterruptCB {
+            callback: Some(check_closed),
+            opaque: &shared.closed as *const AtomicBool as *mut std::ffi::c_void,
+        };
         if ffi::avformat_open_input(&mut fmt_raw, cfg.cpath.as_ptr(), ptr::null(), ptr::null_mut())
             < 0
         {
+            // avformat_open_input frees a caller-supplied context on failure.
             return Err("open failed".into());
         }
         let fmt = FmtCtx(fmt_raw);
@@ -418,7 +457,14 @@ unsafe fn reader(shared: &Shared, cfg: &ReaderCfg) -> Result<(), String> {
                 return Ok(());
             }
             if let Some((target, exact)) = shared.cmd.lock().unwrap().take() {
-                seek_to(target);
+                // A seek that fails (transient SMB fault, stale handle)
+                // must not be silent: the reader would carry on from
+                // wherever it was while the other streams land on the
+                // target, and A/B on the same frame — the product — would
+                // be quietly false. Failing the player puts it in the HUD.
+                if !seek_to(target) {
+                    return Err(format!("seek to {target:.3}s failed"));
+                }
                 pump.skip_until = exact.then_some(target);
                 continue;
             }
@@ -810,5 +856,52 @@ mod tests {
             thread::sleep(Duration::from_millis(20));
         }
         assert!(shared.upgrade().is_none(), "reader thread leaked after drop");
+    }
+
+    /// A reader wedged inside libav I/O (not parked on the condvar) must
+    /// still die on drop. A FIFO that dribbles zeros keeps
+    /// `avformat_open_input` probing forever — libav's probe never gives
+    /// up while bytes keep arriving — so without the interrupt callback
+    /// the thread outlives this test's deadline by minutes.
+    #[test]
+    fn dropped_player_interrupts_a_reader_blocked_in_libav_io() {
+        let dir = std::env::temp_dir().join("abner_player_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let fifo = dir.join("stall.fifo");
+        let _ = std::fs::remove_file(&fifo);
+        let made = Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !made {
+            eprintln!("skipping: mkfifo unavailable");
+            return;
+        }
+        // Dribble zeros forever; exits on EPIPE once the aborted reader
+        // frees its format context and the read end closes.
+        let wpath = fifo.clone();
+        let writer = thread::spawn(move || {
+            use std::io::Write;
+            let Ok(mut f) = std::fs::OpenOptions::new().write(true).open(&wpath) else {
+                return;
+            };
+            let chunk = [0u8; 256];
+            while f.write_all(&chunk).is_ok() {
+                thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let p = Player::spawn(&fifo, 320, 180, false, None).expect("spawn");
+        // Let the reader get properly stuck inside the open's probe loop.
+        thread::sleep(Duration::from_millis(300));
+        let shared = Arc::downgrade(&p.shared);
+        drop(p);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while shared.upgrade().is_some() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(shared.upgrade().is_none(), "reader thread stayed wedged in libav I/O after drop");
+        let _ = writer.join();
+        let _ = std::fs::remove_file(&fifo);
     }
 }
