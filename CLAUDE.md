@@ -1,7 +1,7 @@
 # abner — agent notes
 
 A/B video comparison player: N videos decoded in frame-locked sync, flipped/diffed
-on screen. Deliberately slim — one crate, five modules, no config file, no cache.
+on screen. Deliberately slim — one crate, six modules, no config file, no cache.
 Sibling project: `~/src/switchblade` (the graphics learnings came from there; its
 CLAUDE.md documents the deeper media/render rationale).
 
@@ -19,6 +19,10 @@ CLAUDE.md documents the deeper media/render rationale).
   `CFBundleIconFile`, and running from a shell is the common case here. AppKit decodes
   the PNG, so no image crate is pulled in; other platforms want an already-decoded RGBA
   buffer for `Window::with_window_icon`, so `set_app_icon()` is a no-op there.
+  **Known trap if abner ever ships as a .app:** that call overrides the bundle's
+  `CFBundleIconFile` at launch (switchblade hit this — a stale baked-in PNG looked
+  exactly like an icon cache that wouldn't clear). Its fix was to return early when the
+  executable sits under `Contents/MacOS`; do the same before bundling.
 - `src/player.rs` — adapted from switchblade's `SeekablePlayer` (in-process libav via
   rsmpeg, VT decode for h264/hevc/prores only, content-relative time, bounded queue,
   drop-wakes-the-parked-reader). **Key difference: no per-player pacing.** Players queue
@@ -85,9 +89,13 @@ instead of ⏎, and solid rather than dashed drop-zone borders.
 ## Rules
 
 - `cargo test` generates tiny ffmpeg test clips; the suite covers master-clock
-  draining, exact seek, two-player sync, framestep adoption, reader-thread cleanup.
-  Keep it green — sync IS the product.
+  draining, exact seek, two-player sync, framestep adoption, reader-thread cleanup
+  (condvar-parked AND wedged-in-libav-I/O, the latter via a mkfifo dribble), and the
+  redraw cadence (`schedule::tests`). Keep it green — sync IS the product.
 - Building needs the ffmpeg 8.x dev libraries (brew ffmpeg) — same as switchblade.
-- Verify visual changes with a targeted window capture
-  (`screencapture -l $(window id)`), never by injecting global keystrokes — a
-  `--view` flag exists so every mode is reachable from the CLI.
+- Verify visual changes with a targeted window capture, never by injecting global
+  keystrokes — a `--view` flag exists so every mode is reachable from the CLI.
+  `scripts/window-id.swift` prints the window id:
+  `screencapture -x -l "$(swift scripts/window-id.swift | head -1)" shot.png`.
+  `ffmpeg -f lavfi -i testsrc2=size=1280x720:rate=30 -t 6 -g 30 a.mp4` makes a clip
+  (vary `eq=brightness` for a B that actually differs).

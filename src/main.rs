@@ -36,7 +36,8 @@ abner — A/B video comparison player
 usage: abner [--view <overlay|sbs|delta|split|checker|blend>] [<video-a> <video-b> [more...]]
 
 Run with no arguments (or launched from the .app bundle) to open the
-launch window and drop clips in.
+launch window. (Its drop targets are not wired up yet — pass paths on
+the command line to load clips.)
 
 keys:
   Enter        flip to the next video (overlay mode)
@@ -50,7 +51,8 @@ keys:
   Z            reset zoom
   F            fullscreen (borderless, same Space)
   Tab          toggle info overlay
-  Q / Esc      quit
+  Q            quit
+  Esc          leave fullscreen, else quit
 ";
 
 fn main() -> anyhow::Result<()> {

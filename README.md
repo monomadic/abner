@@ -8,7 +8,11 @@ they play in frame-locked sync.
 abner original.mp4 encoded.mp4
 abner --view delta original.mp4 encoded.mp4
 abner a.mp4 b.mp4 c.mp4          # three-way works too
+abner                            # launch window (drop targets not wired up yet)
 ```
+
+`--view` takes `overlay`, `sbs`, `delta`, `split`, `checker` or `blend`, so every
+mode is reachable from the command line. One path is an error — an A/B needs two.
 
 Born out of the [switchblade](../switchblade) project's graphics stack: in-process libav
 decode (VideoToolbox for h264/hevc/prores), a wgpu renderer with mip-chained video
@@ -44,7 +48,8 @@ frame's true pts is adopted back into the clock, so stepping can't accumulate dr
 | `[` `]` | slow down / speed up playback (0.25×–4×; `Backspace` resets) |
 | `F` | fullscreen (borderless, same Space, instant) |
 | `Tab` | toggle the info overlay (filename, path, res, fps, codec, bitrate, size, duration) |
-| `Q` / `Esc` | quit |
+| `Q` | quit |
+| `Esc` | leave fullscreen, else quit |
 
 In compare modes (delta/split/checker/blend) the pair is the active video vs the next
 one; `Enter` rotates which pair you're looking at. Big letter badges mark what you're
@@ -81,8 +86,13 @@ cargo build --release
 ./target/release/abner --help
 ```
 
-`cargo test` runs the sync/seek/framestep regression suite (generates tiny test clips
-with ffmpeg under `$TMPDIR`).
+`cargo test` runs the regression suite: master-clock draining, exact seek, two-player
+sync, framestep adoption, reader-thread cleanup (including a reader wedged in libav I/O
+on a FIFO), redraw cadence. It generates tiny test clips with ffmpeg under `$TMPDIR`.
+
+A startup `ffprobe` that doesn't return within 30s (a file on a volume that has gone
+away) is an error rather than a hang; a decoder whose seek fails is marked failed in
+the HUD rather than silently drifting out of sync.
 
 ## License
 
