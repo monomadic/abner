@@ -3,6 +3,20 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-09-04 — .app bundling (TASKS.md 2)
+
+- `packaging/build-app.sh` + `packaging/Info.plist.in`, switchblade's recipe minus
+  document icons and asset folders: bundled ffmpeg dylibs rewritten to `@rpath`,
+  ad-hoc codesign, PATH-fixing launcher, LaunchServices refresh, `--install`/`--open`/
+  `--with-cli-tools`/`--sign`/`--debug`. Verified: the bundle runs with an empty PATH
+  (dylibs + ffprobe lookup), and `open Abner.app` shows the launch window. The
+  `cargo-bundle` metadata went — it can't rewrite dylib paths, so its bundle only ran
+  on the machine that built it.
+- `assets/app-icon.png` is now the icon slot for both the `.icns` and the bare
+  binary's Dock icon. `set_app_icon()` returns early inside a bundle (the
+  `setApplicationIconImage`-overrides-the-plist trap).
+- `scripts/window-id.swift` matches the bundled app's owner name too.
+
 ## 2026-09-04 — switchblade catch-up
 
 Assessment of abner against switchblade (forked 2026-07-23; switchblade gained ~166

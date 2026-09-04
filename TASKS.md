@@ -13,17 +13,15 @@ Effort estimates come from the 2026-09-04 comparison against switchblade.
    the `FilesDropped` path). Also needs probe + `Player::spawn` to move off the startup
    path so a drop can build the `Video` list at runtime. ~25 lines for the event
    plumbing, more for the runtime load. Until this lands, `--help` says so.
-2. **Bundle-icon guard before shipping a .app.** `set_app_icon()` calls
-   `setApplicationIconImage`, which overrides the bundle's `CFBundleIconFile` at launch
-   (switchblade 2026-08-30: looked exactly like an icon cache that wouldn't clear).
-   Return early when the executable sits under `Contents/MacOS`. ~5 lines. Do this in
-   the same change as any `cargo bundle` work.
+2. *(done 2026-09-04 — see HISTORY.md)*
 3. **Open With / double-click a file on the .app.** LaunchServices delivers opened
    files as an Apple Event, never argv, so a bundled abner opened by double-click shows
    an empty window. Port switchblade's `open.rs` + `open_shim.m` (~130 lines, needs a
    `build.rs` + `cc`): it grafts `application:openURLs:` onto winit's delegate class,
    because winit 0.30 owns the NSApplicationDelegate and panics if it is replaced.
-   Depends on 1 (the runtime-load path).
+   Depends on 1 (the runtime-load path). Land the `CFBundleDocumentTypes` +
+   `UTImportedTypeDeclarations` block from switchblade's `Info.plist.in` in the same
+   change — `packaging/Info.plist.in` deliberately omits it until then.
 
 ## Next
 

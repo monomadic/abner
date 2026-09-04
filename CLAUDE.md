@@ -18,15 +18,16 @@ from one to the other, keeping its number.
   cadence, idle ticks at 100ms. `about_to_wait` is the only caller — don't grow a
   second copy of the rules there. Fake fullscreen = `set_simple_fullscreen` +
   `setHasShadow(false)` (macOS Tahoe draws its window contour with the shadow).
-  The Dock icon is `include_bytes!`'d (`assets/icons/abner-flat-white.png`) and pushed
-  to `NSApp.setApplicationIconImage` at startup — a bare Mach-O has no
-  `CFBundleIconFile`, and running from a shell is the common case here. AppKit decodes
-  the PNG, so no image crate is pulled in; other platforms want an already-decoded RGBA
-  buffer for `Window::with_window_icon`, so `set_app_icon()` is a no-op there.
-  **Known trap if abner ever ships as a .app:** that call overrides the bundle's
-  `CFBundleIconFile` at launch (switchblade hit this — a stale baked-in PNG looked
-  exactly like an icon cache that wouldn't clear). Its fix was to return early when the
-  executable sits under `Contents/MacOS`; do the same before bundling.
+  The Dock icon for the BARE binary is `include_bytes!`'d from `assets/app-icon.png`
+  (the icon SLOT — `packaging/build-app.sh` renders the bundle's `.icns` from the same
+  file, so the two can't drift; the alternates in `assets/icons/` become the icon by
+  being copied over it) and pushed to `NSApp.setApplicationIconImage` at startup — a
+  bare Mach-O has no `CFBundleIconFile`, and running from a shell is the common case
+  here. **`set_app_icon()` returns early when the executable sits under
+  `Contents/MacOS`**: inside a bundle that call OVERRIDES `AppIcon.icns` at launch, and
+  switchblade lost a day to it (a stale baked-in PNG read exactly like an icon cache
+  that wouldn't clear). AppKit decodes the PNG, so no image crate is pulled in; other
+  platforms want an already-decoded RGBA buffer, so it's a no-op there.
 - `src/player.rs` — adapted from switchblade's `SeekablePlayer` (in-process libav via
   rsmpeg, VT decode for h264/hevc/prores only, content-relative time, bounded queue,
   drop-wakes-the-parked-reader). **Key difference: no per-player pacing.** Players queue
@@ -97,6 +98,15 @@ instead of ⏎, and solid rather than dashed drop-zone borders.
   (condvar-parked AND wedged-in-libav-I/O, the latter via a mkfifo dribble), and the
   redraw cadence (`schedule::tests`). Keep it green — sync IS the product.
 - Building needs the ffmpeg 8.x dev libraries (brew ffmpeg) — same as switchblade.
+- **`./packaging/build-app.sh [--open|--install]` builds `Abner.app`** — switchblade's
+  recipe: release build, `assets/app-icon.png` → `AppIcon.icns`, `Info.plist.in` with
+  version + git hash, every non-system dylib copied into `Contents/Frameworks` with
+  load paths rewritten to `@rpath`, ad-hoc codesign (mandatory on Apple Silicon after
+  `install_name_tool`), then `lsregister -f` so an in-place reinstall doesn't keep the
+  old icon. `CFBundleExecutable` is a thin launcher that prepends the Homebrew bin dirs
+  to PATH, because a Finder-launched app gets no PATH and the startup `ffprobe` would
+  fail. The plist declares NO document types yet — that lands with the open-files
+  delegate (TASKS.md 3), or Open With would show an empty launch window.
 - Verify visual changes with a targeted window capture, never by injecting global
   keystrokes — a `--view` flag exists so every mode is reachable from the CLI.
   `scripts/window-id.swift` prints the window id:

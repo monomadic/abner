@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>Abner</string>
+	<key>CFBundleDisplayName</key>
+	<string>Abner</string>
+	<key>CFBundleIdentifier</key>
+	<string>{{BUNDLE_ID}}</string>
+	<key>CFBundleVersion</key>
+	<string>{{BUILD}}</string>
+	<key>CFBundleShortVersionString</key>
+	<string>{{VERSION}}</string>
+	<key>CFBundleExecutable</key>
+	<string>abner</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleSignature</key>
+	<string>?????</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.video</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>© Abner contributors</string>
+	<!-- No CFBundleDocumentTypes yet: LaunchServices delivers opened files
+	     as an Apple Event, never argv, and abner has no open-files delegate
+	     (TASKS.md 3). Declaring the types before then would list Abner in
+	     Open With and have it open an EMPTY launch window. Add the
+	     declarations and the runtime half together. -->
+</dict>
+</plist>

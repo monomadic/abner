@@ -84,7 +84,15 @@ pointer movement brings it back. `Tab` hides the whole HUD.
 ```sh
 cargo build --release
 ./target/release/abner --help
+./packaging/build-app.sh --open      # self-contained Abner.app (bundles the ffmpeg dylibs, ad-hoc codesigns)
+./packaging/build-app.sh --install   # …and copy it to /Applications
 ```
+
+The bundle carries its own copies of the ffmpeg libraries, so it runs on a machine
+without Homebrew; the `ffprobe` CLI it shells out to at startup is still looked up on
+PATH (`--with-cli-tools` copies that in too). The app icon is `assets/app-icon.png` —
+drop a new square PNG there and both the bundle's `.icns` and the bare binary's Dock
+icon follow. Double-clicking a video on the bundle doesn't load it yet (see TASKS.md).
 
 `cargo test` runs the regression suite: master-clock draining, exact seek, two-player
 sync, framestep adoption, reader-thread cleanup (including a reader wedged in libav I/O
