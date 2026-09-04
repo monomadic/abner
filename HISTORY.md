@@ -3,6 +3,17 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-09-04 — no visible titlebar
+
+Switchblade's glass titlebar: `setTitlebarAppearsTransparent` +
+`NSWindowTitleHidden` + `FullSizeContentView`, so the wgpu surface fills the strip and
+the frame runs edge to edge. The transparent bar on its own would show the default
+system grey rather than the app's clear — the content view has to extend under it for
+the strip to match. Traffic lights kept (they float over the content), so top-anchored
+HUD rows — corner brackets, the A|B pill, the info block, the launch window's
+brackets — are offset by `App::top_inset()`: `TITLEBAR_H` (28) windowed, 0 in fake
+fullscreen, where the window is borderless. The window title is still set, only hidden.
+
 ## 2026-09-04 — drop-to-load (TASKS.md 1)
 
 Drag clips onto the window and they load. Slots fill in drop order: one file fills

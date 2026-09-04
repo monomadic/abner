@@ -169,6 +169,12 @@ impl App {
         }
     }
 
+    /// Top margin for HUD rows that would otherwise sit under the
+    /// floating traffic lights — see `TITLEBAR_H`.
+    fn top_inset(&self) -> f32 {
+        if self.fullscreen { 0.0 } else { TITLEBAR_H }
+    }
+
     /// Enough streams to compare. One clip (a single drop, or `abner
     /// one.mp4`) is a HALF-filled launch window, not a player: slot A
     /// holds it and B keeps waiting.
@@ -746,9 +752,10 @@ impl App {
 
         // ---- corner brackets framing the active stream ----
         let (inset, arm, t) = (16.0, 26.0, 2.0);
+        let top = inset + self.top_inset();
         for (hx, hy, vx, vy) in [
-            (inset, inset, inset, inset),
-            (w - inset - arm, inset, w - inset - t, inset),
+            (inset, top, inset, top),
+            (w - inset - arm, top, w - inset - t, top),
             (inset, h - inset - t, inset, h - inset - arm),
             (w - inset - arm, h - inset - t, w - inset - t, h - inset - arm),
         ] {
@@ -767,7 +774,7 @@ impl App {
         let pill_w = n as f32 * seg_w + (n as f32 - 1.0) * seg_gap + pill_pad * 2.0;
         let pill = RectPx {
             x: (w - pill_w) / 2.0,
-            y: 20.0,
+            y: 20.0 + self.top_inset(),
             w: pill_w,
             h: seg_h + pill_pad * 2.0,
         };
@@ -803,7 +810,7 @@ impl App {
         }
 
         // ---- top-left info block ----
-        let mut y = 22.0;
+        let mut y = 22.0 + self.top_inset();
         for (i, v) in self.videos.iter().enumerate() {
             let on = i == a;
             let name = ellipsize(
@@ -1117,9 +1124,10 @@ impl App {
         let arm = 26.0;
         let t = 2.0;
         // (horizontal-arm x/y, vertical-arm x/y) for each corner.
+        let top = inset + self.top_inset();
         let corners = [
-            (inset, inset, inset, inset),
-            (w - inset - arm, inset, w - inset - t, inset),
+            (inset, top, inset, top),
+            (w - inset - arm, top, w - inset - t, top),
             (inset, h - inset - t, inset, h - inset - arm),
             (w - inset - arm, h - inset - t, w - inset - t, h - inset - arm),
         ];
@@ -1611,6 +1619,14 @@ const TRANSPORT_FADE_S: f32 = 0.45;
 /// between right-aligned status segments and keycap chips, never to
 /// place a glyph (the renderer measures those exactly).
 const MONO_ADV: f32 = 0.60;
+
+/// Logical height of a standard macOS titlebar. The window has no visible
+/// bar (`set_titlebar_glass` makes it transparent and runs the content
+/// under it), but the traffic-light buttons still float in that strip, so
+/// the top HUD row is pushed below them — everything else goes edge to
+/// edge. Zero in fake fullscreen: that window is borderless, buttons and
+/// all.
+const TITLEBAR_H: f32 = 28.0;
 
 /// Clip a run to `max` characters, marking the cut with an ellipsis.
 fn ellipsize(s: &str, max: usize) -> String {

@@ -319,6 +319,33 @@ fn set_app_icon() {
 #[cfg(not(target_os = "macos"))]
 fn set_app_icon() {}
 
+/// Glass titlebar: hide the title text, drop the titlebar's own drawing,
+/// and — crucially — extend the content view UNDER it
+/// (`FullSizeContentView`) so the wgpu surface fills that strip too. A
+/// transparent titlebar on its own shows the DEFAULT system window tint
+/// (a grey), not the app's clear, so letting the same GPU clear paint it
+/// is the only way the strip matches the frame exactly. The traffic-light
+/// buttons float above the content and are untouched; the window title is
+/// still set (and still correct for anything that reads it), just hidden.
+/// The app's top HUD row keeps clear of the buttons via
+/// `App::top_inset`. (switchblade, `set_titlebar_glass`.)
+#[cfg(target_os = "macos")]
+fn set_titlebar_glass(w: &Window) {
+    use objc2_app_kit::{NSView, NSWindowStyleMask, NSWindowTitleVisibility};
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(handle) = w.window_handle() else { return };
+    let RawWindowHandle::AppKit(h) = handle.as_raw() else { return };
+    let view: &NSView = unsafe { h.ns_view.cast::<NSView>().as_ref() };
+    if let Some(window) = view.window() {
+        window.setTitlebarAppearsTransparent(true);
+        window.setTitleVisibility(NSWindowTitleVisibility::NSWindowTitleHidden);
+        // Additive, so winit's existing mask bits survive — and winit
+        // saves/restores the whole mask around simple fullscreen, so this
+        // bit comes back with it.
+        window.setStyleMask(window.styleMask() | NSWindowStyleMask::FullSizeContentView);
+    }
+}
+
 /// Whether the platform's primary modifier (⌘ on macOS) is held RIGHT
 /// NOW, read from the hardware state. Only needed where the event stream
 /// can't answer: a drag from another app delivers `DroppedFile` without
@@ -357,6 +384,10 @@ impl ApplicationHandler for Runner {
             .with_title(&self.title)
             .with_inner_size(LogicalSize::new(1280.0, 800.0));
         let window = Arc::new(_event_loop.create_window(attrs).expect("create window"));
+        // Text-free glass titlebar with the video running underneath it
+        // (traffic lights kept) — switchblade's treatment.
+        #[cfg(target_os = "macos")]
+        set_titlebar_glass(&window);
         let dims: Vec<(u32, u32)> =
             self.app.videos.iter().map(|v| (v.player.w, v.player.h)).collect();
         let gpu = pollster::block_on(Gpu::new(window.clone(), &dims, TextCtx::load()))

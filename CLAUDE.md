@@ -18,6 +18,13 @@ from one to the other, keeping its number.
   cadence, idle ticks at 100ms. `about_to_wait` is the only caller — don't grow a
   second copy of the rules there. Fake fullscreen = `set_simple_fullscreen` +
   `setHasShadow(false)` (macOS Tahoe draws its window contour with the shadow).
+  **No visible titlebar** (`set_titlebar_glass`, switchblade's): transparent bar,
+  hidden title, and `FullSizeContentView` so the wgpu surface runs UNDER the strip —
+  a transparent bar alone shows the default system grey, not the app's clear, so the
+  only way to match exactly is to let the same GPU clear paint it. The traffic lights
+  stay, floating over the content, which is why the top HUD row is offset by
+  `App::top_inset` (`TITLEBAR_H`, zero in fake fullscreen — that window is borderless).
+  The title is still SET, just hidden, so anything reading it sees the clip names.
   The Dock icon for the BARE binary is `include_bytes!`'d from `assets/app-icon.png`
   (the icon SLOT — `packaging/build-app.sh` renders the bundle's `.icns` from the same
   file, so the two can't drift; the alternates in `assets/icons/` become the icon by
