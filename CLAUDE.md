@@ -5,6 +5,10 @@ on screen. Deliberately slim — one crate, six modules, no config file, no cach
 Sibling project: `~/src/switchblade` (the graphics learnings came from there; its
 CLAUDE.md documents the deeper media/render rationale).
 
+**[TASKS.md](TASKS.md) is the numbered, priority-ordered list of open work;
+[HISTORY.md](HISTORY.md) records what landed and why.** When a task lands, move it
+from one to the other, keeping its number.
+
 ## Architecture
 
 - `src/main.rs` — CLI + winit loop. The redraw cadence lives in `src/schedule.rs`
