@@ -116,6 +116,10 @@ pub struct App {
     fps: f64,
     /// Loop point: shortest stream duration (∞ when unknown).
     wrap: f64,
+    /// A file drag is hovering the window — brightens the launch
+    /// window's drop targets. winit reports no drop POSITION, so the
+    /// whole window is one target and both zones light together.
+    drag_hover: bool,
     cmds: Vec<Cmd>,
 }
 
@@ -135,12 +139,8 @@ impl Mode {
 
 impl App {
     pub fn new(videos: Vec<Video>, mode: Mode) -> Self {
-        let fps = videos.first().map(|v| v.info.fps).filter(|f| *f > 1.0).unwrap_or(30.0);
-        let wrap = videos
-            .iter()
-            .map(|v| v.info.duration)
-            .filter(|d| *d > 0.1)
-            .fold(f64::INFINITY, f64::min);
+        let fps = Self::fps_of(&videos);
+        let wrap = Self::wrap_of(&videos);
         Self {
             videos,
             active: 0,
@@ -164,8 +164,70 @@ impl App {
             vp: (1280.0, 800.0),
             fps,
             wrap,
+            drag_hover: false,
             cmds: Vec::new(),
         }
+    }
+
+    /// Enough streams to compare. One clip (a single drop, or `abner
+    /// one.mp4`) is a HALF-filled launch window, not a player: slot A
+    /// holds it and B keeps waiting.
+    pub fn ready(&self) -> bool {
+        self.videos.len() >= 2
+    }
+
+    fn fps_of(videos: &[Video]) -> f64 {
+        videos.first().map(|v| v.info.fps).filter(|f| *f > 1.0).unwrap_or(30.0)
+    }
+
+    fn wrap_of(videos: &[Video]) -> f64 {
+        videos
+            .iter()
+            .map(|v| v.info.duration)
+            .filter(|d| *d > 0.1)
+            .fold(f64::INFINITY, f64::min)
+    }
+
+    /// Take on newly loaded clips — from a drop, or (later) an Open With.
+    /// They fill the next free slots in drop order (A, B, C…); `replace`
+    /// starts a fresh comparison from the first of them instead.
+    ///
+    /// Every stream rewinds to 0: the arrivals decode from the top, and a
+    /// clip already running at t=42 that kept its position would be
+    /// unsynced against them — the one thing this product must never
+    /// show. Frame-lock is re-established by construction, as at startup.
+    pub fn add_videos(&mut self, mut videos: Vec<Video>, replace: bool) {
+        if videos.is_empty() {
+            return;
+        }
+        if replace {
+            self.videos.clear();
+        }
+        for v in &mut self.videos {
+            v.player.seek(0.0, true);
+            v.pending = false;
+            v.delivered = false;
+        }
+        self.videos.append(&mut videos);
+        self.fps = Self::fps_of(&self.videos);
+        self.wrap = Self::wrap_of(&self.videos);
+        self.t = 0.0;
+        self.started = false;
+        self.playing = true;
+        self.active = 0;
+        self.speed = 1.0;
+        self.zoom = 1.0;
+        self.center = (0.5, 0.5);
+        self.since_pointer = 0.0;
+        self.drag = None;
+        self.scrubbing = false;
+        self.drag_hover = false;
+    }
+
+    /// A file drag entered or left the window (winit's `HoveredFile` /
+    /// `HoveredFileCancelled`).
+    pub fn set_drag_hover(&mut self, on: bool) {
+        self.drag_hover = on;
     }
 
     pub fn take_cmds(&mut self) -> Vec<Cmd> {
@@ -222,8 +284,8 @@ impl App {
     }
 
     pub fn key(&mut self, k: Key) {
-        // Launch state (no clips loaded): only global keys are live.
-        if self.videos.is_empty() {
+        // Launch state (fewer than two clips): only global keys are live.
+        if !self.ready() {
             match k {
                 Key::Escape => {
                     if self.fullscreen {
@@ -314,7 +376,7 @@ impl App {
         self.since_pointer = 0.0;
         // While the transport is up, its controls take the press: the
         // buttons act, the seek band scrubs. Anything else pans.
-        if self.show_ui && !self.videos.is_empty() && self.transport_alpha() > 0.5 {
+        if self.show_ui && self.ready() && self.transport_alpha() > 0.5 {
             let hit = |r: RectPx| x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
             if hit(self.btn_prev()) {
                 self.step(-1);
@@ -368,7 +430,7 @@ impl App {
     /// sits under it stays put, and every stream shares the resulting
     /// center. Positive delta = fingers spreading = zoom in.
     pub fn pinch(&mut self, delta: f32) {
-        if self.videos.is_empty() {
+        if !self.ready() {
             return;
         }
         let (cx, cy) = self.cursor;
@@ -441,8 +503,9 @@ impl App {
 
     pub fn tick(&mut self, dt: f32, vp: (f32, f32), _scale: f32) -> FrameDesc {
         self.vp = vp;
-        // No clips loaded yet — paint the launch window (2b) and stop.
-        if self.videos.is_empty() {
+        // Not a pair yet — paint the launch window (2b) and stop. With
+        // one clip loaded its slot shows filled and B keeps waiting.
+        if !self.ready() {
             return self.launch_frame(vp);
         }
         let n = self.videos.len();
@@ -1084,32 +1147,49 @@ impl App {
         }));
 
         // ---- two drop zones ----
+        //
+        // A slot holding a clip shows what it holds (name + format) and
+        // goes lime; the rest keep their prompt. A drag over the window
+        // brightens the empty ones — winit reports no drop position, so
+        // both light together and the file fills the next free slot.
         let zw = 320.0;
         let zh = 190.0;
         let gap = 24.0;
         let zx0 = (w - (zw * 2.0 + gap)) / 2.0;
         let zy = (h - zh) / 2.0 - 6.0;
-        let zones: [(f32, [f32; 4], [f32; 4], [f32; 4], &str, &str, &str); 2] = [
-            (
-                zx0,
-                LIME,
-                [0.651, 0.886, 0.180, 0.05],
-                [0.651, 0.886, 0.180, 0.55],
-                "A",
-                "drop the reference clip",
-                "mp4 · mov · mkv · prores",
-            ),
-            (
-                zx0 + zw + gap,
-                TEXT,
-                [1.0, 1.0, 1.0, 0.02],
-                [1.0, 1.0, 1.0, 0.22],
-                "B",
-                "drop the encode to test",
-                "or a third, fourth clip",
-            ),
-        ];
-        for (zx, letter_col, fill, border, letter, label, sublabel) in zones {
+        // Characters that fit across a zone at the label size.
+        let zone_ch = ((zw - 28.0) / (13.0 * MONO_ADV)) as usize;
+        for i in 0..2usize {
+            let zx = zx0 + i as f32 * (zw + gap);
+            let loaded = self.videos.get(i);
+            let (letter_col, fill, border) = match (loaded.is_some(), i, self.drag_hover) {
+                // Loaded. The empty A target is ALREADY a lime tint, so
+                // fill alone can't say "filled" — the step up in fill
+                // reads only next to the solid border, the lime name and
+                // the ● (the HUD's own "● SHOWN" idiom).
+                (true, _, _) => (LIME, [0.651, 0.886, 0.180, 0.085], LIME),
+                (false, 0, false) => (LIME, [0.651, 0.886, 0.180, 0.05], LIME_HALF),
+                (false, 0, true) => (LIME, [0.651, 0.886, 0.180, 0.12], LIME),
+                (false, _, false) => (TEXT, [1.0, 1.0, 1.0, 0.02], [1.0, 1.0, 1.0, 0.22]),
+                (false, _, true) => (TEXT, [1.0, 1.0, 1.0, 0.07], [1.0, 1.0, 1.0, 0.55]),
+            };
+            let (label, sublabel) = match loaded {
+                Some(v) => (
+                    ellipsize(
+                        &v.info
+                            .path
+                            .file_name()
+                            .map(|f| f.to_string_lossy().into_owned())
+                            .unwrap_or_default(),
+                        zone_ch,
+                    ),
+                    format!("● {}×{} · {}", v.info.width, v.info.height, v.info.codec),
+                ),
+                None if i == 0 => {
+                    ("drop the reference clip".into(), "mp4 · mov · mkv · prores".into())
+                }
+                None => ("drop the encode to test".into(), "or a third, fourth clip".into()),
+            };
             items.push(Item::Rect(RectItem {
                 radius: 12.0,
                 border_w: 1.5,
@@ -1119,25 +1199,27 @@ impl App {
             let cx = zx + zw / 2.0;
             items.push(Item::Text(TextItem {
                 align: Align::Center,
-                ..TextItem::new(cx, zy + 34.0, 46.0, letter_col, letter)
+                ..TextItem::new(cx, zy + 34.0, 46.0, letter_col, ["A", "B"][i])
             }));
             items.push(Item::Text(TextItem {
                 align: Align::Center,
-                ..TextItem::new(cx, zy + 108.0, 13.0, TEXT, label)
+                ..TextItem::new(cx, zy + 108.0, 13.0, if loaded.is_some() { LIME } else { TEXT }, label)
             }));
             items.push(Item::Text(TextItem {
                 align: Align::Center,
-                ..TextItem::new(cx, zy + 134.0, 11.0, DIM, sublabel)
+                ..TextItem::new(cx, zy + 134.0, 11.0, if loaded.is_some() { LIME_DIM } else { DIM }, sublabel)
             }));
         }
 
         // ---- terminal hint (dim · lime command · dim), centered as a group ----
         let hpx = 12.0;
-        let seg: [(&str, [f32; 4]); 3] = [
-            ("or run  ", DIM),
-            ("abner reference.mp4 encode.mp4", LIME),
-            ("  in the terminal", DIM),
-        ];
+        let seg: [(&str, [f32; 4]); 3] = if self.videos.is_empty() {
+            [("or run  ", DIM), ("abner reference.mp4 encode.mp4", LIME), ("  in the terminal", DIM)]
+        } else {
+            // Half a pair: say what is still missing rather than repeat
+            // the terminal invocation the user has clearly moved past.
+            [("drop a ", DIM), ("second clip", LIME), (" to start comparing", DIM)]
+        };
         let hint_w: f32 = seg.iter().map(|(s, _)| adv(hpx, s.chars().count())).sum();
         let mut hx = (w - hint_w) / 2.0;
         let hy = h - 84.0;
@@ -1227,22 +1309,21 @@ mod tests {
         Some(clip)
     }
 
+    fn mk_video(clip: &PathBuf) -> Video {
+        let info = probe::probe(clip).expect("probe");
+        let player = crate::player::Player::spawn(
+            clip,
+            info.width,
+            info.height,
+            probe::vt_accel(&info.codec),
+            info.rotation,
+        )
+        .expect("spawn");
+        Video { info, player, shown_pts: 0.0, delivered: false, pending: false }
+    }
+
     fn mk_app(clip: &PathBuf, n: usize) -> App {
-        let videos = (0..n)
-            .map(|_| {
-                let info = probe::probe(clip).expect("probe");
-                let player = crate::player::Player::spawn(
-                    clip,
-                    info.width,
-                    info.height,
-                    probe::vt_accel(&info.codec),
-                    info.rotation,
-                )
-                .expect("spawn");
-                Video { info, player, shown_pts: 0.0, delivered: false, pending: false }
-            })
-            .collect();
-        App::new(videos, Mode::Overlay)
+        App::new((0..n).map(|_| mk_video(clip)).collect(), Mode::Overlay)
     }
 
     /// Tick until a condition holds (real decode runs behind this).
@@ -1259,6 +1340,55 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         false
+    }
+
+
+    /// Dropped clips fill slots in order: one file leaves B empty (the
+    /// launch window stays up, half filled), a second completes the pair
+    /// and starts playing, and a further drop appends C. Whatever the
+    /// route in, every stream must come back to the same instant — a
+    /// stream that kept its old position would be silently unsynced.
+    #[test]
+    fn dropped_clips_fill_slots_in_order_and_stay_synced() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 0);
+        assert!(!app.ready(), "no clips is the launch window");
+
+        // One clip: slot A holds it, B is still an empty target.
+        app.add_videos(vec![mk_video(&clip)], false);
+        assert_eq!(app.videos.len(), 1);
+        assert!(!app.ready(), "one clip can't be a comparison");
+        // The launch window still draws (no video items, so no uploads).
+        assert!(app.tick(0.016, (1280.0, 800.0), 2.0).uploads.is_empty());
+
+        // A second clip completes the pair and playback begins.
+        app.add_videos(vec![mk_video(&clip)], false);
+        assert_eq!(app.videos.len(), 2);
+        assert!(app.ready());
+        assert!(
+            tick_until(&mut app, Duration::from_secs(10), |a| a.started && a.t > 0.3),
+            "playback never started after the pair completed"
+        );
+
+        // A third dropped onto the running pair appends, and the clock
+        // goes back to 0 so the newcomer is locked to the other two.
+        app.add_videos(vec![mk_video(&clip)], false);
+        assert_eq!(app.videos.len(), 3);
+        assert_eq!(app.t, 0.0, "an added stream must rewind everyone");
+        assert!(!app.started);
+        assert!(
+            tick_until(&mut app, Duration::from_secs(10), |a| a.started && a.t > 0.3),
+            "playback never resumed after the append"
+        );
+        let pts: Vec<f64> = app.videos.iter().map(|v| v.shown_pts).collect();
+        let spread = pts.iter().cloned().fold(f64::MIN, f64::max)
+            - pts.iter().cloned().fold(f64::MAX, f64::min);
+        assert!(spread < 1.5 / app.fps, "streams drifted after an append: {pts:?}");
+
+        // ⌘-drop replaces the whole set instead of adding to it.
+        app.add_videos(vec![mk_video(&clip), mk_video(&clip)], true);
+        assert_eq!(app.videos.len(), 2, "replace starts a fresh comparison");
+        assert_eq!(app.t, 0.0);
     }
 
     /// The 2a transport is a real control surface, not a picture of one:
@@ -1425,6 +1555,7 @@ mod tests {
 /// Lime signal accent (#a6e22e) — the one hot colour in the design.
 const LIME: [f32; 4] = [0.651, 0.886, 0.180, 1.0];
 const LIME_DIM: [f32; 4] = [0.651, 0.886, 0.180, 0.5];
+const LIME_HALF: [f32; 4] = [0.651, 0.886, 0.180, 0.55];
 /// Hairlines and pill outlines drawn in the accent, well under full.
 const LIME_EDGE: [f32; 4] = [0.651, 0.886, 0.180, 0.28];
 const LIME_SHADOW: [f32; 4] = [0.451, 0.620, 0.098, 0.95];

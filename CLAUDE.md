@@ -23,7 +23,14 @@ from one to the other, keeping its number.
   file, so the two can't drift; the alternates in `assets/icons/` become the icon by
   being copied over it) and pushed to `NSApp.setApplicationIconImage` at startup — a
   bare Mach-O has no `CFBundleIconFile`, and running from a shell is the common case
-  here. **`set_app_icon()` returns early when the executable sits under
+  here. **Drops** are switchblade's `FilesDropped` path: winit sends one `DroppedFile`
+  per file with no end-of-batch marker, so `window_event` accumulates into `dropped`
+  and `about_to_wait` flushes the whole gesture at once (without the batch, a pair
+  dropped together would land as two one-file loads). ⌘ (replace, not add) is read
+  from the HARDWARE modifier state — a drag from Finder never focuses this window, so
+  no `ModifiersChanged` ever reported the key. `Runner::files_dropped` probes and
+  spawns right there on the loop, which `probe`'s deadline makes safe, and logs-and-
+  skips anything that fails: a drop is a guess by definition. **`set_app_icon()` returns early when the executable sits under
   `Contents/MacOS`**: inside a bundle that call OVERRIDES `AppIcon.icns` at launch, and
   switchblade lost a day to it (a stale baked-in PNG read exactly like an icon cache
   that wouldn't clear). AppKit decodes the PNG, so no image crate is pulled in; other
@@ -85,8 +92,10 @@ from one to the other, keeping its number.
 
 The HUD implements **2a** from the Claude Design project "A/B testing window mockups
 for Abner" (`Abner AB Window.dc.html`, project `e16025af-9465-4a81-bdc3-97780f3399eb`,
-read via the DesignSync tool). 2b (launch/empty state) is also implemented but its
-drop targets are still decorative — no `DroppedFile` handler, no runtime video load.
+read via the DesignSync tool). 2b (launch/empty state) is implemented too, and its drop
+targets are live: a filled slot shows the clip's name and `● WxH · codec` behind a
+solid lime border, and a drag over the window brightens the empty ones (winit gives no
+drop POSITION, so both light together and the file fills the next free slot).
 Deliberate deviations from the mock are noted where they occur: higher panel alphas
 and a saturating scrim (bright real footage, not the mock's dark plate), `ENTER`
 instead of ⏎, and solid rather than dashed drop-zone borders.
@@ -96,7 +105,9 @@ instead of ⏎, and solid rather than dashed drop-zone borders.
 - `cargo test` generates tiny ffmpeg test clips; the suite covers master-clock
   draining, exact seek, two-player sync, framestep adoption, reader-thread cleanup
   (condvar-parked AND wedged-in-libav-I/O, the latter via a mkfifo dribble), and the
-  redraw cadence (`schedule::tests`). Keep it green — sync IS the product.
+  redraw cadence (`schedule::tests`), and slot-filling drops (0 → 1 → 2 → 3, asserting
+  the clock rewinds and the streams stay inside a frame period of each other).
+  Keep it green — sync IS the product.
 - Building needs the ffmpeg 8.x dev libraries (brew ffmpeg) — same as switchblade.
 - **`./packaging/build-app.sh [--open|--install]` builds `Abner.app`** — switchblade's
   recipe: release build, `assets/app-icon.png` → `AppIcon.icns`, `Info.plist.in` with

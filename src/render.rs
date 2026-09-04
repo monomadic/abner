@@ -241,6 +241,9 @@ pub struct Gpu {
     instance_capacity: usize,
     sampler: wgpu::Sampler,
     bgl: wgpu::BindGroupLayout,
+    /// Kept so `set_video_dims` can build mip bind groups for textures
+    /// created after startup (a drop loads clips at runtime).
+    blit_bgl: wgpu::BindGroupLayout,
     videos: Vec<VideoTex>,
     /// Bind groups per (a, b) texture pair, created lazily.
     pair_bgs: HashMap<(usize, usize), wgpu::BindGroup>,
@@ -454,51 +457,7 @@ impl Gpu {
 
         let videos = video_dims
             .iter()
-            .map(|&(w, h)| {
-                let (w, h) = (w.max(2), h.max(2));
-                let mips = (32 - w.max(h).leading_zeros()).min(MIP_LEVELS);
-                let tex = device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("video"),
-                    size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-                    mip_level_count: mips,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING
-                        | wgpu::TextureUsages::COPY_DST
-                        | wgpu::TextureUsages::RENDER_ATTACHMENT,
-                    view_formats: &[],
-                });
-                let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-                let mip_views: Vec<_> = (0..mips)
-                    .map(|i| {
-                        tex.create_view(&wgpu::TextureViewDescriptor {
-                            base_mip_level: i,
-                            mip_level_count: Some(1),
-                            ..Default::default()
-                        })
-                    })
-                    .collect();
-                let mip_bgs: Vec<_> = (1..mips as usize)
-                    .map(|i| {
-                        device.create_bind_group(&wgpu::BindGroupDescriptor {
-                            label: Some("video mip"),
-                            layout: &blit_bgl,
-                            entries: &[
-                                wgpu::BindGroupEntry {
-                                    binding: 0,
-                                    resource: wgpu::BindingResource::TextureView(&mip_views[i - 1]),
-                                },
-                                wgpu::BindGroupEntry {
-                                    binding: 1,
-                                    resource: wgpu::BindingResource::Sampler(&sampler),
-                                },
-                            ],
-                        })
-                    })
-                    .collect();
-                VideoTex { tex, view, mips, mip_views, mip_bgs, dirty: false }
-            })
+            .map(|&(w, h)| Self::make_video_tex(&device, &blit_bgl, &sampler, w, h))
             .collect();
 
         let glyph_tex = device.create_texture(&wgpu::TextureDescriptor {
@@ -528,6 +487,7 @@ impl Gpu {
             instance_capacity,
             sampler,
             bgl,
+            blit_bgl,
             videos,
             pair_bgs: HashMap::new(),
             glyph_tex,
@@ -539,6 +499,100 @@ impl Gpu {
         // the (0, 0) pair — make sure it exists.
         gpu.pair_bg(0, 0);
         Ok(gpu)
+    }
+
+    /// One video's texture + its blit-filled mip chain. Called at startup
+    /// and again whenever the video set changes (a drop loads clips at
+    /// runtime), so it takes only borrowed device state.
+    fn make_video_tex(
+        device: &wgpu::Device,
+        blit_bgl: &wgpu::BindGroupLayout,
+        sampler: &wgpu::Sampler,
+        w: u32,
+        h: u32,
+    ) -> VideoTex {
+        let (w, h) = (w.max(2), h.max(2));
+        let mips = (32 - w.max(h).leading_zeros()).min(MIP_LEVELS);
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("video"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: mips,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let mip_views: Vec<_> = (0..mips)
+            .map(|i| {
+                tex.create_view(&wgpu::TextureViewDescriptor {
+                    base_mip_level: i,
+                    mip_level_count: Some(1),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        let mip_bgs: Vec<_> = (1..mips as usize)
+            .map(|i| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("video mip"),
+                    layout: blit_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&mip_views[i - 1]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(sampler),
+                        },
+                    ],
+                })
+            })
+            .collect();
+        VideoTex { tex, view, mips, mip_views, mip_bgs, dirty: false }
+    }
+
+    /// Re-point the video textures at a new set of streams (a drop loaded
+    /// clips at runtime). Slots whose dimensions are unchanged KEEP their
+    /// texture — an append (A, B gain a C) must not blank the two streams
+    /// already on screen, which would otherwise show black until their
+    /// next frame lands. Every cached pair bind group holds views into
+    /// these textures, so any real change drops the whole cache.
+    pub fn set_video_dims(&mut self, dims: &[(u32, u32)]) {
+        // Same reason as `new`: with no streams loaded the flat/glyph
+        // pipeline still needs a well-formed (0, 0) pair to bind.
+        let dummy: [(u32, u32); 1] = [(2, 2)];
+        let dims: &[(u32, u32)] = if dims.is_empty() { &dummy } else { dims };
+        let mut old = std::mem::take(&mut self.videos).into_iter();
+        let mut changed = false;
+        let mut videos = Vec::with_capacity(dims.len());
+        for &(w, h) in dims {
+            let (w, h) = (w.max(2), h.max(2));
+            match old.next() {
+                Some(v) if v.tex.size().width == w && v.tex.size().height == h => videos.push(v),
+                _ => {
+                    changed = true;
+                    videos.push(Self::make_video_tex(
+                        &self.device,
+                        &self.blit_bgl,
+                        &self.sampler,
+                        w,
+                        h,
+                    ));
+                }
+            }
+        }
+        // Anything left over is a stream that went away.
+        changed |= old.next().is_some();
+        self.videos = videos;
+        if changed {
+            self.pair_bgs.clear();
+            self.pair_bg(0, 0);
+        }
     }
 
     fn make_instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {

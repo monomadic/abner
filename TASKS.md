@@ -6,20 +6,17 @@ Effort estimates come from the 2026-09-04 comparison against switchblade.
 
 ## Now
 
-1. **Drop-to-load on the launch window.** The 2b launch window's drop targets are
-   decorative: no `DroppedFile` arm in `main.rs`, no runtime video load. winit delivers
-   one event per file with no end-of-batch marker, so accumulate in `window_event` and
-   flush the whole gesture from `about_to_wait` (switchblade `sb-window/src/lib.rs`,
-   the `FilesDropped` path). Also needs probe + `Player::spawn` to move off the startup
-   path so a drop can build the `Video` list at runtime. ~25 lines for the event
-   plumbing, more for the runtime load. Until this lands, `--help` says so.
+1. *(done 2026-09-04 — see HISTORY.md)*
 2. *(done 2026-09-04 — see HISTORY.md)*
 3. **Open With / double-click a file on the .app.** LaunchServices delivers opened
    files as an Apple Event, never argv, so a bundled abner opened by double-click shows
    an empty window. Port switchblade's `open.rs` + `open_shim.m` (~130 lines, needs a
    `build.rs` + `cc`): it grafts `application:openURLs:` onto winit's delegate class,
    because winit 0.30 owns the NSApplicationDelegate and panics if it is replaced.
-   Depends on 1 (the runtime-load path). Land the `CFBundleDocumentTypes` +
+   The runtime-load path it needs now exists (task 1): drain the opened paths in
+   `about_to_wait` and hand them to `Runner::files_dropped(paths, false)` — always an
+   ADD, never the ⌘-replace, since a ⌘ held while picking a menu item must not wipe
+   the set. Land the `CFBundleDocumentTypes` +
    `UTImportedTypeDeclarations` block from switchblade's `Info.plist.in` in the same
    change — `packaging/Info.plist.in` deliberately omits it until then.
 

@@ -8,11 +8,24 @@ they play in frame-locked sync.
 abner original.mp4 encoded.mp4
 abner --view delta original.mp4 encoded.mp4
 abner a.mp4 b.mp4 c.mp4          # three-way works too
-abner                            # launch window (drop targets not wired up yet)
+abner                            # launch window — drag clips onto it
 ```
 
 `--view` takes `overlay`, `sbs`, `delta`, `split`, `checker` or `blend`, so every
-mode is reachable from the command line. One path is an error — an A/B needs two.
+mode is reachable from the command line.
+
+## Drag and drop
+
+Run `abner` with no arguments and drag clips onto the launch window. One file fills
+slot **A** and the window keeps waiting; two land as **A** and **B** and start playing;
+more add C, D… — in the order the platform hands them over, which for a Finder
+multi-select is the order they appear in that window, so drop them one at a time if it
+matters which is A. Dropping onto a running comparison **adds** streams — hold **⌘** while
+dropping to replace the whole set instead. A single path on the command line
+(`abner reference.mp4`) opens the same half-filled window.
+
+Every load rewinds all streams to 0, so an arrival is frame-locked with what was
+already playing rather than joining mid-flight.
 
 Born out of the [switchblade](../switchblade) project's graphics stack: in-process libav
 decode (VideoToolbox for h264/hevc/prores), a wgpu renderer with mip-chained video

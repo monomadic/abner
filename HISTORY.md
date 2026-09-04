@@ -3,6 +3,40 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-09-04 — drop-to-load (TASKS.md 1)
+
+Drag clips onto the window and they load. Slots fill in drop order: one file fills
+**A** and the launch window stays up half filled, two land as **A**/**B** and start
+playing, more add C, D…. A drop onto a running comparison ADDS streams; ⌘ held at drop
+time replaces the whole set. `abner one.mp4` now opens the same half-filled window
+instead of erroring out.
+
+- Event plumbing is switchblade's `FilesDropped` path (`sb-window/src/lib.rs`): winit
+  reports one `DroppedFile` per file with no end-of-batch marker, so they accumulate in
+  `window_event` and flush as ONE gesture from `about_to_wait` — without the batch,
+  dropping a pair would land as two separate one-file loads. ⌘ is read from the
+  hardware modifier state (`os_primary_modifier_down`), because a drag from Finder
+  never focuses this window and so never sends a `ModifiersChanged`.
+- `App::add_videos` rewinds EVERY stream to 0 on a load. A clip that kept its position
+  while the arrivals decoded from the top would be silently unsynced — the one thing
+  this product must never show. `App::ready()` (two or more streams) now gates the
+  launch window, the transport hit-testing and the keymap.
+- `Gpu::set_video_dims` rebuilds the per-video textures at runtime. Slots whose
+  dimensions are unchanged KEEP their texture, so appending a C doesn't blank A and B
+  until their next frame lands; any real change drops the pair-bind-group cache, whose
+  entries hold views into those textures.
+- Probing on the event loop is safe because `probe::run_deadlined` already bounds it —
+  a dropped file on a dead mount fails in bounded time instead of hanging the window.
+  A file that fails to probe or spawn is logged and skipped, not fatal: a drop is a
+  guess by definition.
+- The 2b launch window's targets are live state now: a filled slot shows the clip's
+  name, `● WxH · codec` and a solid lime border, and a drag over the window brightens
+  the empty ones (winit reports no drop POSITION, so both light together and the file
+  fills the next free slot).
+- New test `dropped_clips_fill_slots_in_order_and_stay_synced`: 0 → 1 (not ready) → 2
+  (plays) → 3 (appends), asserting the clock rewinds and the three streams' shown pts
+  stay inside a frame period.
+
 ## 2026-09-04 — .app bundling (TASKS.md 2)
 
 - `packaging/build-app.sh` + `packaging/Info.plist.in`, switchblade's recipe minus

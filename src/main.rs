@@ -14,7 +14,7 @@ mod render;
 mod schedule;
 mod text;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -36,8 +36,10 @@ abner — A/B video comparison player
 usage: abner [--view <overlay|sbs|delta|split|checker|blend>] [<video-a> <video-b> [more...]]
 
 Run with no arguments (or launched from the .app bundle) to open the
-launch window. (Its drop targets are not wired up yet — pass paths on
-the command line to load clips.)
+launch window, then drag clips onto it: one drop fills slot A and waits,
+two fill A and B and start playing, more add C, D… Dropping onto a
+running comparison ADDS streams; hold Cmd while dropping to replace the
+whole set. A single path on the command line loads slot A the same way.
 
 keys:
   Enter        flip to the next video (overlay mode)
@@ -80,33 +82,11 @@ fn main() -> anyhow::Result<()> {
         }
     }
     // Zero paths (bundle double-click / bare `abner`) opens the launch
-    // window; one path can't form an A/B pair, so that's still an error.
-    if paths.len() == 1 {
-        eprintln!("abner compares two or more videos — pass none to open the launch window, or at least two.\n");
-        eprint!("{USAGE}");
-        std::process::exit(2);
-    }
-
+    // window; one path fills slot A there and waits for a drop — the same
+    // half-filled state a single dropped file produces.
     let mut videos = Vec::new();
     for p in &paths {
-        let info = probe::probe(p)?;
-        log::info!(
-            "{}: {}x{} {} {:.3}fps",
-            p.display(),
-            info.width,
-            info.height,
-            info.codec,
-            info.fps
-        );
-        let player = Player::spawn(
-            p,
-            info.width,
-            info.height,
-            probe::vt_accel(&info.codec),
-            info.rotation,
-        )
-        .ok_or_else(|| anyhow::anyhow!("failed to start decoder for {}", p.display()))?;
-        videos.push(Video { info, player, shown_pts: 0.0, delivered: false, pending: false });
+        videos.push(load_video(p)?);
     }
 
     let event_loop = EventLoop::new()?;
@@ -124,19 +104,13 @@ fn main() -> anyhow::Result<()> {
         v.player.set_notify(notify.clone());
     }
 
-    let title = if paths.is_empty() {
-        "abner".to_string()
-    } else {
-        let names: Vec<String> = paths
-            .iter()
-            .map(|p| p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default())
-            .collect();
-        format!("abner — {}", names.join(" vs "))
-    };
+    let title = title_for(&videos);
 
     let mut runner = Runner {
         app: App::new(videos, mode),
         title,
+        notify,
+        dropped: Vec::new(),
         window: None,
         gpu: None,
         last_frame: Instant::now(),
@@ -149,9 +123,56 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Probe one path and start its decoder. The probe is a synchronous
+/// ffprobe under a hard deadline (`probe::run_deadlined`), which is what
+/// makes it safe to call straight from the event loop on a drop: a file
+/// on a dead mount fails in bounded time instead of hanging the window.
+fn load_video(path: &Path) -> anyhow::Result<Video> {
+    let info = probe::probe(path)?;
+    log::info!(
+        "{}: {}x{} {} {:.3}fps",
+        path.display(),
+        info.width,
+        info.height,
+        info.codec,
+        info.fps
+    );
+    let player = Player::spawn(
+        path,
+        info.width,
+        info.height,
+        probe::vt_accel(&info.codec),
+        info.rotation,
+    )
+    .ok_or_else(|| anyhow::anyhow!("failed to start decoder for {}", path.display()))?;
+    Ok(Video { info, player, shown_pts: 0.0, delivered: false, pending: false })
+}
+
+fn title_for(videos: &[Video]) -> String {
+    if videos.is_empty() {
+        return "abner".to_string();
+    }
+    let names: Vec<String> = videos
+        .iter()
+        .map(|v| {
+            v.info.path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()
+        })
+        .collect();
+    format!("abner — {}", names.join(" vs "))
+}
+
 struct Runner {
     app: App,
     title: String,
+    /// Handed to every player, including ones spawned by a drop, so a
+    /// frame arriving while the loop idles still wakes it.
+    notify: player::Notify,
+    /// Files dropped this loop turn. winit reports one `DroppedFile` per
+    /// file with NO end-of-batch event, so they collect here and flush as
+    /// one gesture in `about_to_wait` — switchblade's `FilesDropped`
+    /// path. Without the batch, dropping two clips at once would land as
+    /// two separate one-file loads.
+    dropped: Vec<PathBuf>,
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
     last_frame: Instant,
@@ -164,6 +185,48 @@ struct Runner {
 impl Runner {
     fn scale(&self) -> f64 {
         self.window.as_ref().map_or(1.0, |w| w.scale_factor())
+    }
+
+    /// One drop gesture, flushed whole from `about_to_wait`.
+    ///
+    /// Each path is probed and spawned right here — a bad file (a folder,
+    /// a PDF, a clip on a vanished mount) is logged and skipped rather
+    /// than taken as a reason to fail the app, because a drop is a guess
+    /// by definition. Survivors fill the next free slots; `replace` (⌘
+    /// held) starts over from the first of them.
+    fn files_dropped(&mut self, paths: Vec<PathBuf>, replace: bool) {
+        self.app.set_drag_hover(false);
+        let mut videos = Vec::new();
+        for p in &paths {
+            match load_video(p) {
+                Ok(v) => {
+                    v.player.set_notify(self.notify.clone());
+                    videos.push(v);
+                }
+                Err(e) => log::warn!("ignoring dropped {}: {e}", p.display()),
+            }
+        }
+        if videos.is_empty() {
+            return;
+        }
+        log::info!(
+            "{} clip(s) dropped on the window ({})",
+            videos.len(),
+            if replace { "replace" } else { "add" }
+        );
+        self.app.add_videos(videos, replace);
+        // The GPU's per-video textures are indexed by video slot, so they
+        // follow the app's list; unchanged slots keep their texture (see
+        // `set_video_dims`), so an append never blanks what is on screen.
+        let dims: Vec<(u32, u32)> =
+            self.app.videos.iter().map(|v| (v.player.w, v.player.h)).collect();
+        if let Some(gpu) = &mut self.gpu {
+            gpu.set_video_dims(&dims);
+        }
+        self.title = title_for(&self.app.videos);
+        if let Some(w) = &self.window {
+            w.set_title(&self.title);
+        }
     }
 
     fn apply_cmds(&mut self, event_loop: &ActiveEventLoop) {
@@ -256,6 +319,23 @@ fn set_app_icon() {
 #[cfg(not(target_os = "macos"))]
 fn set_app_icon() {}
 
+/// Whether the platform's primary modifier (⌘ on macOS) is held RIGHT
+/// NOW, read from the hardware state. Only needed where the event stream
+/// can't answer: a drag from another app delivers `DroppedFile` without
+/// this window ever seeing a `ModifiersChanged`. (switchblade.)
+fn os_primary_modifier_down() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::{NSEvent, NSEventModifierFlags};
+        unsafe { NSEvent::modifierFlags_class() }
+            .contains(NSEventModifierFlags::NSEventModifierFlagCommand)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn set_window_shadow(w: &Window, on: bool) {
     use objc2_app_kit::NSView;
@@ -312,6 +392,20 @@ impl ApplicationHandler for Runner {
                 if let Some(gpu) = &mut self.gpu {
                     gpu.set_scale(scale_factor as f32);
                 }
+            }
+            WindowEvent::DroppedFile(path) => {
+                // One event per file, no end-of-batch marker: collect and
+                // flush the whole gesture in `about_to_wait`.
+                self.dropped.push(path);
+                self.animating = true;
+            }
+            WindowEvent::HoveredFile(_) => {
+                self.app.set_drag_hover(true);
+                self.animating = true;
+            }
+            WindowEvent::HoveredFileCancelled => {
+                self.app.set_drag_hover(false);
+                self.animating = true;
             }
             WindowEvent::Occluded(occluded) => {
                 self.occluded = occluded;
@@ -401,6 +495,23 @@ impl ApplicationHandler for Runner {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // A drop gesture's per-file events have all been dispatched by the
+        // time the loop is about to wait: flush them as one batch, so two
+        // files dropped together land as an A/B pair. Slot order is the
+        // order the platform delivers (for a Finder multi-select, the
+        // order they appear in that window) — drop them one at a time to
+        // choose. ⌘ (replace instead
+        // of add) is read from the HARDWARE modifier state — a drag from
+        // Finder never focuses this window, so no `ModifiersChanged` ever
+        // reported the key going down. (switchblade, `FilesDropped`.)
+        if !self.dropped.is_empty() {
+            let paths = std::mem::take(&mut self.dropped);
+            self.files_dropped(paths, os_primary_modifier_down());
+            self.animating = true;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
         // The cadence rules live in `schedule` (tested there), not here.
         let Some(w) = &self.window else { return };
         match schedule::next_frame(
