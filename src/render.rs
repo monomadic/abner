@@ -14,6 +14,76 @@ use crate::text::{ATLAS, TextCtx};
 
 const MIP_LEVELS: u32 = 4;
 
+/// The wordmark, baked in like the Dock icon (`main.rs`) so the launch
+/// window works from a bare binary with no resource directory.
+const LOGO_PNG: &[u8] = include_bytes!("../assets/logo.png");
+
+/// The decoded wordmark: pixels, size, and the sub-rect the ink actually
+/// occupies.
+struct Logo {
+    rgba: Vec<u8>,
+    w: u32,
+    h: u32,
+    /// UV box of the ink, transparent margin excluded.
+    uv: [f32; 4],
+    /// Aspect of that box — what the layout wants, never the file's.
+    aspect: f32,
+}
+
+/// Decode the wordmark to straight-alpha RGBA8 and measure it. The Dock
+/// icon goes through AppKit, but a texture needs the pixels in-process —
+/// hence the one image-format dependency in the tree.
+///
+/// The measuring matters: an exported logo carries whatever margin the
+/// exporter left (assets/logo.png is padded ~12% at the top and ~18% at
+/// the bottom, so drawing it whole would sit the mark visibly high in its
+/// own box). Trimming to the ink here keeps the launch layout independent
+/// of the file's framing — the same reason the renderer measures text
+/// rather than letting callers estimate it.
+fn decode_logo() -> Logo {
+    let mut dec = png::Decoder::new(std::io::Cursor::new(LOGO_PNG));
+    // Widen whatever the file happens to be (palette, 16-bit, no alpha)
+    // to the RGBA8 the texture wants.
+    dec.set_transformations(png::Transformations::EXPAND | png::Transformations::ALPHA);
+    let mut reader = dec.read_info().expect("logo png header");
+    let mut buf = vec![0u8; reader.output_buffer_size().expect("logo png size")];
+    let info = reader.next_frame(&mut buf).expect("logo png pixels");
+    buf.truncate(info.buffer_size());
+    let (w, h) = (info.width, info.height);
+
+    // Alpha bounding box. The cutoff ignores the near-zero fringe a soft
+    // export leaves outside the artwork.
+    const INK: u8 = 8;
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0u32, 0u32);
+    for y in 0..h {
+        let row = &buf[(y * w * 4) as usize..((y + 1) * w * 4) as usize];
+        for x in 0..w {
+            if row[(x * 4 + 3) as usize] > INK {
+                x0 = x0.min(x);
+                x1 = x1.max(x);
+                y0 = y0.min(y);
+                y1 = y1.max(y);
+            }
+        }
+    }
+    // A fully transparent image would leave the box inverted; fall back
+    // to the whole texture rather than divide by a negative.
+    let (x0, y0, x1, y1) = if x1 >= x0 && y1 >= y0 { (x0, y0, x1, y1) } else { (0, 0, w - 1, h - 1) };
+    let (bw, bh) = ((x1 - x0 + 1) as f32, (y1 - y0 + 1) as f32);
+    Logo {
+        rgba: buf,
+        w,
+        h,
+        uv: [
+            x0 as f32 / w as f32,
+            y0 as f32 / h as f32,
+            (x1 + 1) as f32 / w as f32,
+            (y1 + 1) as f32 / h as f32,
+        ],
+        aspect: bw / bh,
+    }
+}
+
 /// sRGB → linear for values headed to an `*UnormSrgb` render target that
 /// re-encodes on write (the shader's `ui_color`, CPU side).
 fn srgb_to_linear(c: f32) -> f64 {
@@ -189,11 +259,14 @@ pub enum Item {
         p1: f32,
     },
     Text(TextItem),
+    /// The wordmark, drawn from the renderer's own texture. `alpha` fades
+    /// it; the rect must already carry the logo's aspect (`Gpu::logo_aspect`).
+    Logo { r: RectPx, alpha: f32 },
 }
 
 /// Everything the renderer needs for one frame.
 pub struct FrameDesc {
-    pub clear: [f32; 3],
+    pub clear: [f32; 4],
     pub uploads: Vec<Upload>,
     pub items: Vec<Item>,
     pub animating: bool,
@@ -245,6 +318,12 @@ pub struct Gpu {
     /// created after startup (a drop loads clips at runtime).
     blit_bgl: wgpu::BindGroupLayout,
     videos: Vec<VideoTex>,
+    /// The launch wordmark: same texture shape as a video (mip chain and
+    /// all — it is drawn at a fraction of its native size), uploaded once
+    /// and bound in every group so mode 7 needs no batch key.
+    logo: VideoTex,
+    logo_uv: [f32; 4],
+    logo_aspect: f32,
     /// Bind groups per (a, b) texture pair, created lazily.
     pair_bgs: HashMap<(usize, usize), wgpu::BindGroup>,
     glyph_tex: wgpu::Texture,
@@ -300,7 +379,18 @@ impl Gpu {
             width: size.width.max(1),
             height: size.height.max(1),
             present_mode: wgpu::PresentMode::AutoVsync,
-            alpha_mode: caps.alpha_modes[0],
+            // The window is transparent (see main.rs): the clear colour
+            // carries an alpha, so the desktop shows through the app's
+            // background while opaque video quads stay solid. Premultiplied
+            // is what `BlendState::ALPHA_BLENDING` accumulates; fall back to
+            // whatever the surface does offer, opaque included.
+            alpha_mode: [
+                wgpu::CompositeAlphaMode::PreMultiplied,
+                wgpu::CompositeAlphaMode::PostMultiplied,
+            ]
+            .into_iter()
+            .find(|m| caps.alpha_modes.contains(m))
+            .unwrap_or(caps.alpha_modes[0]),
             color_space: wgpu::SurfaceColorSpace::Auto,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
@@ -359,6 +449,7 @@ impl Gpu {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                tex_entry(5),
             ],
         });
 
@@ -460,6 +551,25 @@ impl Gpu {
             .map(|&(w, h)| Self::make_video_tex(&device, &blit_bgl, &sampler, w, h))
             .collect();
 
+        let logo_img = decode_logo();
+        let (logo_w, logo_h) = (logo_img.w, logo_img.h);
+        let logo = Self::make_video_tex(&device, &blit_bgl, &sampler, logo_w, logo_h);
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &logo.tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &logo_img.rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(logo_w * 4),
+                rows_per_image: Some(logo_h),
+            },
+            wgpu::Extent3d { width: logo_w, height: logo_h, depth_or_array_layers: 1 },
+        );
+
         let glyph_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("glyphs"),
             size: wgpu::Extent3d { width: ATLAS, height: ATLAS, depth_or_array_layers: 1 },
@@ -489,6 +599,10 @@ impl Gpu {
             bgl,
             blit_bgl,
             videos,
+            // Mips are blitted on the first frame, like a video upload.
+            logo: VideoTex { dirty: true, ..logo },
+            logo_uv: logo_img.uv,
+            logo_aspect: logo_img.aspect,
             pair_bgs: HashMap::new(),
             glyph_tex,
             glyph_view,
@@ -628,6 +742,10 @@ impl Gpu {
                         binding: 4,
                         resource: wgpu::BindingResource::Sampler(&self.sampler),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(&self.logo.view),
+                    },
                 ],
             });
             self.pair_bgs.insert(key, bg);
@@ -646,6 +764,13 @@ impl Gpu {
 
     pub fn set_scale(&mut self, scale: f32) {
         self.scale = scale;
+    }
+
+    /// Width / height of the wordmark's INK, margin excluded. The
+    /// renderer owns the image, so it owns its proportions too — same
+    /// rule as text.
+    pub fn logo_aspect(&self) -> f32 {
+        self.logo_aspect
     }
 
     fn upload_video(&mut self, up: &Upload) {
@@ -750,6 +875,16 @@ impl Gpu {
                         pad: 0.0,
                     });
                 }
+                Item::Logo { r, alpha } => push(&mut data, &mut batches, None, Instance {
+                    pos: [r.x, r.y],
+                    size: [r.w, r.h],
+                    uv: self.logo_uv,
+                    color: [0.0, 0.0, 0.0, *alpha],
+                    mode: 7.0,
+                    p0: 0.0,
+                    p1: 0.0,
+                    pad: 0.0,
+                }),
                 Item::Text(t) => {
                     let laid = self.text.layout(&t.text, t.px * scale, t.tracking * scale);
                     let (tw, th) = (laid.w / scale, laid.h / scale);
@@ -841,7 +976,7 @@ impl Gpu {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
 
         // Refresh dirty video mip chains (queued writes land first).
-        for v in &mut self.videos {
+        for v in self.videos.iter_mut().chain(std::iter::once(&mut self.logo)) {
             if !v.dirty {
                 continue;
             }
@@ -878,10 +1013,14 @@ impl Gpu {
                         // `clear` is authored as an sRGB colour like the
                         // rest of the palette (see ui_color in the shader).
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: srgb_to_linear(desc.clear[0]),
-                            g: srgb_to_linear(desc.clear[1]),
-                            b: srgb_to_linear(desc.clear[2]),
-                            a: 1.0,
+                            // The window is transparent, and both the
+                            // blend state and the surface's alpha mode
+                            // are PREmultiplied, so the clear colour is
+                            // scaled by its own alpha here.
+                            r: srgb_to_linear(desc.clear[0]) * desc.clear[3] as f64,
+                            g: srgb_to_linear(desc.clear[1]) * desc.clear[3] as f64,
+                            b: srgb_to_linear(desc.clear[2]) * desc.clear[3] as f64,
+                            a: desc.clear[3] as f64,
                         }),
                         store: wgpu::StoreOp::Store,
                     },

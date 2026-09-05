@@ -14,6 +14,10 @@ pollster = "1"
 bytemuck = { version = "1", features = ["derive"] }
 ab_glyph = "0.2"
 serde_json = "1"
+# The launch window draws the wordmark from assets/logo/logo-01.png, which the
+# renderer uploads as a texture — unlike the Dock icon (decoded by AppKit, see
+# main.rs) it needs an RGBA buffer in-process, and nothing else can produce one.
+png = "0.18"
 # In-process libav (same setup as switchblade): links the system ffmpeg 8.x
 # dev libraries via pkg-config (`brew install ffmpeg` provides them).
 rsmpeg = { version = "0.18", default-features = false, features = ["link_system_ffmpeg", "ffmpeg8"] }

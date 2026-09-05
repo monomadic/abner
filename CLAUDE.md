@@ -72,14 +72,26 @@ from one to the other, keeping its number.
   `t` (`pending` flags + `take_next`). The clock wraps at the shortest stream duration
   and exact-seeks everyone to 0.
 - `src/render.rs` — one wgpu pipeline for everything (rects, video quads, compare
-  modes, glyphs), instanced quads in logical px. Per-video textures carry a blit-filled
+  modes, glyphs, the logo), instanced quads in logical px. Per-video textures carry a blit-filled
   mip chain (4K fit-to-window without shimmer). Bind groups are cached per (A,B) texture
   pair; keyless items (rects/text) ride the current batch. `TextItem` carries
   align/valign/tracking and an optional rounded chip: the renderer owns the font, so
   it MEASURES each run — never estimate glyph positions app-side (`MONO_ADV` exists
-  only to step *between* runs).
+  only to step *between* runs). The **wordmark** (`assets/logo.png`) is
+  `include_bytes!`'d and decoded with the `png` crate — the Dock icon goes through
+  AppKit, but a texture needs the pixels in-process — into a mipped texture bound at
+  slot 5 of EVERY bind group, so `Item::Logo` needs no batch key of its own. The
+  renderer owns the image, so it MEASURES it: `decode_logo` takes the alpha bounding
+  box and hands `App` the trimmed aspect plus the uv rect to draw, so the launch
+  layout doesn't inherit whatever margin the export left (logo.png is padded ~12% top,
+  ~18% bottom — drawn whole, the mark sits visibly high in its own box). Same rule as
+  text: never estimate what the renderer can measure.
+  The surface is **transparent** (`with_transparent` in main.rs + a premultiplied
+  alpha mode): `FrameDesc::clear` carries an alpha and the clear colour is scaled by
+  it, so the desktop shows faintly through the app background and the letterbox while
+  opaque video quads (they write alpha 1) stay solid.
 - `src/shader.wgsl` — modes: 0 rect, 1 tex, 2 delta, 3 split, 4 checker, 5 blend,
-  6 glyph. Textures are sampled unconditionally then selected (uniform-control-flow
+  6 glyph, 7 logo. Textures are sampled unconditionally then selected (uniform-control-flow
   rule), `mode` is a flat varying. Mode 0 is an SDF rounded box with `fwidth`-based
   1px AA, an optional border (colour smuggled through the unused `uv` slot) and a
   bottom-anchored scrim ramp. **UI colours are authored as sRGB hex and decoded by
@@ -101,11 +113,23 @@ The HUD implements **2a** from the Claude Design project "A/B testing window moc
 for Abner" (`Abner AB Window.dc.html`, project `e16025af-9465-4a81-bdc3-97780f3399eb`,
 read via the DesignSync tool). 2b (launch/empty state) is implemented too, and its drop
 targets are live: a filled slot shows the clip's name and `● WxH · codec` behind a
-solid lime border, and a drag over the window brightens the empty ones (winit gives no
+solid border, and a drag over the window brightens the empty ones (winit gives no
 drop POSITION, so both light together and the file fills the next free slot).
 Deliberate deviations from the mock are noted where they occur: higher panel alphas
 and a saturating scrim (bright real footage, not the mock's dark plate), `ENTER`
 instead of ⏎, and solid rather than dashed drop-zone borders.
+
+**The palette comes from the logo, not the mock.** 2a's lime (#a6e22e) read as a
+different product next to `assets/logo.png`, so `ACCENT` is the mark's upper bar
+(#006dcf, lifted to #1580de — the bar itself clears only ~4:1 against the HUD's black,
+under the bar for 10–11px mono) and `ACCENT_B` its lower one (#e71b24, used as-is) —
+the launch window gives slot A the blue and slot B the red, so the pair on screen is
+the pair on the mark above it.
+Both are far more saturated than lime, so the drop-zone washes run thinner than the
+mock's: blending is linear-space, and 5% of a primary already reads as a coloured
+panel. The zone that the NEXT drop lands in is the bright one; later empty slots stay
+quiet. The launch window's wordmark is the logo IMAGE, not type — it already carries
+the "VIDEO QUALITY TESTING TOOLKIT" line that used to be a second text run.
 
 ## Rules
 
@@ -116,6 +140,7 @@ instead of ⏎, and solid rather than dashed drop-zone borders.
   the clock rewinds and the streams stay inside a frame period of each other).
   Keep it green — sync IS the product.
 - Building needs the ffmpeg 8.x dev libraries (brew ffmpeg) — same as switchblade.
+  The only other non-obvious dependency is `png`, for the wordmark texture.
 - **`./packaging/build-app.sh [--open|--install]` builds `Abner.app`** — switchblade's
   recipe: release build, `assets/app-icon.png` → `AppIcon.icns`, `Info.plist.in` with
   version + git hash, every non-system dylib copied into `Contents/Frameworks` with

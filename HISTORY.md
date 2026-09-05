@@ -3,6 +3,46 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-09-05 — logo on the launch window, palette from the logo, transparent window
+
+The launch window's wordmark is now `assets/logo.png` instead of tracked-out "ABNER"
+type. The image already carries the "VIDEO QUALITY TESTING TOOLKIT" line, so the
+second text run went with it.
+
+- The renderer owns the mark, the way it owns the font: `include_bytes!` +
+  the `png` crate (the Dock icon is decoded by AppKit, but a TEXTURE needs the pixels
+  in-process, and nothing else in the tree can produce them), into a mipped
+  `Rgba8UnormSrgb` texture — it is drawn at ~460 logical px from a 2056px source, so
+  the mip chain is doing real work. Bound at slot 5 of EVERY bind group, so shader
+  mode 7 rides whatever batch is current and needs no key. And it MEASURES the file:
+  `decode_logo` takes the alpha bounding box and hands `App` the trimmed aspect plus
+  the uv rect to draw, because logo.png carries ~12% margin at the top and ~18% at the
+  bottom and drawn whole the mark sits visibly high in its own box. App-side code
+  never guesses the proportions — the rule the text stack already follows.
+- **Palette re-cut from the mark.** 2a's lime (#a6e22e) read as a different product
+  sitting under the logo, so `LIME*` became `ACCENT*` = the mark's upper bar (#006dcf)
+  and `ACCENT_B` = its lower bar (#e71b24, used as-is). The blue is the one deliberate
+  departure from the file: at #006dcf it clears only ~4:1 against the HUD's black,
+  which is under the bar for 10–11px mono, so the accent ships lifted to #1580de —
+  next to the mark it still reads as the same blue, and illegible status text would
+  not have. The launch window gives slot A the blue and slot B the red — the pair on
+  screen is the pair on the mark
+  directly above it. Both hues are far more saturated than lime, so the zone washes
+  were re-weighted DOWN (0.05 → 0.035): blending is linear-space, and 5% of a primary
+  already reads as a solid coloured panel. The "which slot fills next" affordance the
+  original got from lime-vs-white is kept explicitly — the next free zone is the
+  bright one, later empty zones sit at a twelfth of the fill and a fifth of the
+  border.
+- **The window is slightly transparent.** `with_transparent(true)`, a premultiplied
+  surface alpha mode (falling back through post-multiplied to opaque), and
+  `FrameDesc::clear` widened to RGBA — the clear colour is scaled by its own alpha at
+  the `LoadOp`, since the blend state accumulates premultiplied. Backgrounds run at
+  0.92 (frame) and 0.90 (launch). Video quads write alpha 1, so the picture itself is
+  never see-through; only the app background, the letterbox and the launch plate let
+  the desktop through. Verified from the window capture's own alpha channel
+  (background pixel `07 07 09 e7`), not by eye — a capture composited on white looks
+  identical to an opaque window.
+
 ## 2026-09-04 — no visible titlebar
 
 Switchblade's glass titlebar: `setTitlebarAppearsTransparent` +

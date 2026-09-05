@@ -120,6 +120,10 @@ pub struct App {
     /// window's drop targets. winit reports no drop POSITION, so the
     /// whole window is one target and both zones light together.
     drag_hover: bool,
+    /// Width / height of the wordmark texture, handed over by the
+    /// renderer once it has decoded the image (`Gpu::logo_aspect`). The
+    /// placeholder only ever shows in tests, which draw no pixels.
+    logo_aspect: f32,
     cmds: Vec<Cmd>,
 }
 
@@ -165,8 +169,13 @@ impl App {
             fps,
             wrap,
             drag_hover: false,
+            logo_aspect: 3.0,
             cmds: Vec::new(),
         }
+    }
+
+    pub fn set_logo_aspect(&mut self, aspect: f32) {
+        self.logo_aspect = aspect;
     }
 
     /// Top margin for HUD rows that would otherwise sit under the
@@ -620,7 +629,7 @@ impl App {
             let push_letter = |items: &mut Vec<Item>, idx: usize, px: f32, on: bool| {
                 let f = if n > 1 { idx as f32 / (n - 1) as f32 } else { 0.0 };
                 let margin = 26.0;
-                let mut c = if on { LIME } else { INACTIVE };
+                let mut c = if on { ACCENT } else { INACTIVE };
                 c[3] *= badge_alpha * 0.92;
                 let align = if f < 0.5 { Align::Left } else { Align::Right };
                 let x = margin + f * (vp.0 - 2.0 * margin);
@@ -646,7 +655,7 @@ impl App {
             };
             match self.mode {
                 Mode::Overlay => push_letter(&mut items, a, big, true),
-                // Comparing a pair: both letters, active in lime.
+                // Comparing a pair: both letters, active in the accent.
                 Mode::Delta | Mode::Split | Mode::Checker | Mode::Blend => {
                     push_letter(&mut items, a, big * 0.74, true);
                     push_letter(&mut items, b, big * 0.74, false);
@@ -655,7 +664,7 @@ impl App {
                 Mode::SideBySide => {
                     let cw = vp.0 / n as f32;
                     for i in 0..n {
-                        let mut c = if i == a { LIME } else { INACTIVE };
+                        let mut c = if i == a { ACCENT } else { INACTIVE };
                         c[3] *= badge_alpha;
                         items.push(Item::Text(TextItem {
                             valign: VAlign::Middle,
@@ -761,11 +770,11 @@ impl App {
         ] {
             items.push(Item::Rect(RectItem::new(
                 RectPx { x: hx, y: hy, w: arm, h: t },
-                LIME,
+                ACCENT,
             )));
             items.push(Item::Rect(RectItem::new(
                 RectPx { x: vx, y: vy, w: t, h: arm },
-                LIME,
+                ACCENT,
             )));
         }
 
@@ -781,7 +790,7 @@ impl App {
         items.push(Item::Rect(RectItem {
             radius: 9.0,
             border_w: 1.0,
-            border_color: LIME_EDGE,
+            border_color: ACCENT_EDGE,
             ..RectItem::new(pill, PILL_BG)
         }));
         for i in 0..n {
@@ -792,7 +801,7 @@ impl App {
                     radius: 6.0,
                     ..RectItem::new(
                         RectPx { x: sx, y: pill.y + pill_pad, w: seg_w, h: seg_h },
-                        LIME,
+                        ACCENT,
                     )
                 }));
             }
@@ -831,9 +840,9 @@ impl App {
             )));
             items.push(Item::Rect(RectItem::new(
                 RectPx { x: 22.0, y, w: 2.0, h: row_h },
-                if on { LIME } else { RULE_OFF },
+                if on { ACCENT } else { RULE_OFF },
             )));
-            let letter_c = if on { LIME } else { INACTIVE };
+            let letter_c = if on { ACCENT } else { INACTIVE };
             items.push(Item::Text(TextItem {
                 valign: VAlign::Middle,
                 ..TextItem::new(
@@ -865,7 +874,7 @@ impl App {
                         after.min(22.0 + row_w - 60.0),
                         y + row_h / 2.0,
                         9.0,
-                        LIME,
+                        ACCENT,
                         "● SHOWN",
                     )
                 }));
@@ -950,11 +959,11 @@ impl App {
         }));
         items.push(Item::Rect(RectItem::new(
             RectPx { x: bar.x, y: bar.y, w: bar.w, h: 1.0 },
-            fade(LIME_EDGE),
+            fade(ACCENT_EDGE),
         )));
 
         let cy = bar.y + 13.0 + 16.0;
-        // Prev / play-pause / next — the middle one on a lime disc.
+        // Prev / play-pause / next — the middle one on an accent disc.
         // The design's ⏮/⏸/⏭ are absent from the system mono fonts (they
         // render as nothing), so the triangles come from the geometric
         // block, which every candidate font carries, and pause is drawn
@@ -969,7 +978,7 @@ impl App {
         }));
         items.push(Item::Rect(RectItem {
             radius: disc.w / 2.0,
-            ..RectItem::new(disc, fade(LIME))
+            ..RectItem::new(disc, fade(ACCENT))
         }));
         if self.playing {
             for dx in [-4.5, 1.5] {
@@ -994,7 +1003,7 @@ impl App {
             ..TextItem::new(next.x + next.w / 2.0, cy, 11.0, fade(GLYPH), "▶▶")
         }));
 
-        // Seek bar: track, lime fill to the playhead, white knob.
+        // Seek bar: track, accent fill to the playhead, white knob.
         let seek = self.seek_rect(vp);
         let frac = if self.wrap.is_finite() && self.wrap > 0.0 {
             (self.t / self.wrap).clamp(0.0, 1.0) as f32
@@ -1008,7 +1017,7 @@ impl App {
         if frac > 0.0 {
             items.push(Item::Rect(RectItem {
                 radius: 3.0,
-                ..RectItem::new(RectPx { w: seek.w * frac, ..seek }, fade(LIME))
+                ..RectItem::new(RectPx { w: seek.w * frac, ..seek }, fade(ACCENT))
             }));
         }
         items.push(Item::Rect(RectItem {
@@ -1060,7 +1069,7 @@ impl App {
                 fade(TIME_OFF),
             ),
             (fmt_time(self.t), fade(TEXT)),
-            (format!("[{}] {}{}", self.mode.key(), self.mode.name(), extra), fade(LIME)),
+            (format!("[{}] {}{}", self.mode.key(), self.mode.name(), extra), fade(ACCENT)),
         ] {
             items.push(Item::Text(TextItem {
                 align: Align::Right,
@@ -1084,7 +1093,7 @@ impl App {
             ("F", "fullscreen", false),
         ] {
             let (fg, chip, shadow) = if hot {
-                (FRAME_INK, LIME, LIME_SHADOW)
+                (FRAME_INK, ACCENT, ACCENT_SHADOW)
             } else {
                 (KEYCAP_FG, KEYCAP_BG, KEYCAP_SHADOW)
             };
@@ -1134,30 +1143,32 @@ impl App {
         for (hx, hy, vx, vy) in corners {
             items.push(Item::Rect(RectItem::new(
                 RectPx { x: hx, y: hy, w: arm, h: t },
-                LIME_DIM,
+                ACCENT_DIM,
             )));
             items.push(Item::Rect(RectItem::new(
                 RectPx { x: vx, y: vy, w: t, h: arm },
-                LIME_DIM,
+                ACCENT_DIM,
             )));
         }
 
         // ---- wordmark ----
-        items.push(Item::Text(TextItem {
-            align: Align::Center,
-            tracking: 11.0,
-            ..TextItem::new(w / 2.0, h * 0.13, 22.0, LIME, "ABNER")
-        }));
-        items.push(Item::Text(TextItem {
-            align: Align::Center,
-            tracking: 3.4,
-            ..TextItem::new(w / 2.0, h * 0.13 + 34.0, 12.0, DIM, "A / B VIDEO COMPARE")
-        }));
+        //
+        // The logo image, not type: it already carries the "VIDEO QUALITY
+        // TESTING TOOLKIT" line that used to be a separate text run, and
+        // the palette below is sampled from its two bars. Width is capped
+        // against the window so a narrow one doesn't run it edge to edge;
+        // the renderer owns the aspect, the way it owns glyph metrics.
+        let lw = (w * 0.34).clamp(240.0, 460.0).min(w - 96.0);
+        let lh = lw / self.logo_aspect;
+        items.push(Item::Logo {
+            r: RectPx { x: (w - lw) / 2.0, y: h * 0.13 - lh * 0.28, w: lw, h: lh },
+            alpha: 1.0,
+        });
 
         // ---- two drop zones ----
         //
         // A slot holding a clip shows what it holds (name + format) and
-        // goes lime; the rest keep their prompt. A drag over the window
+        // goes solid; the rest keep their prompt. A drag over the window
         // brightens the empty ones — winit reports no drop position, so
         // both light together and the file fills the next free slot.
         let zw = 320.0;
@@ -1170,16 +1181,31 @@ impl App {
         for i in 0..2usize {
             let zx = zx0 + i as f32 * (zw + gap);
             let loaded = self.videos.get(i);
-            let (letter_col, fill, border) = match (loaded.is_some(), i, self.drag_hover) {
-                // Loaded. The empty A target is ALREADY a lime tint, so
+            // Each slot wears one of the logo's two bars — A the blue,
+            // B the red — so the pair on screen reads as the same pair on
+            // the mark directly above it. Both hues are far more saturated
+            // than 2a's lime, so the washes below run thinner than the
+            // mock's: blending is linear-space (see shader.wgsl), and 5%
+            // of a primary already reads as a coloured panel.
+            let (hue, hue_dim) = match i {
+                0 => (ACCENT, ACCENT_DIM),
+                _ => (ACCENT_B, ACCENT_B_DIM),
+            };
+            let tint = |a: f32| [hue[0], hue[1], hue[2], a];
+            // Which slot the next drop lands in — the one target worth
+            // pointing at. A later empty slot stays quiet so the eye has
+            // somewhere to go first.
+            let next = i == self.videos.len();
+            let (letter_col, fill, border) = match (loaded.is_some(), next, self.drag_hover) {
+                // Loaded. An empty target is ALREADY a tint of its hue, so
                 // fill alone can't say "filled" — the step up in fill
-                // reads only next to the solid border, the lime name and
-                // the ● (the HUD's own "● SHOWN" idiom).
-                (true, _, _) => (LIME, [0.651, 0.886, 0.180, 0.085], LIME),
-                (false, 0, false) => (LIME, [0.651, 0.886, 0.180, 0.05], LIME_HALF),
-                (false, 0, true) => (LIME, [0.651, 0.886, 0.180, 0.12], LIME),
-                (false, _, false) => (TEXT, [1.0, 1.0, 1.0, 0.02], [1.0, 1.0, 1.0, 0.22]),
-                (false, _, true) => (TEXT, [1.0, 1.0, 1.0, 0.07], [1.0, 1.0, 1.0, 0.55]),
+                // reads only next to the solid border, the coloured name
+                // and the ● (the HUD's own "● SHOWN" idiom).
+                (true, _, _) => (hue, tint(0.055), hue),
+                (false, true, false) => (hue, tint(0.035), tint(0.55)),
+                (false, true, true) => (hue, tint(0.085), hue),
+                (false, false, false) => (hue_dim, tint(0.012), tint(0.20)),
+                (false, false, true) => (hue, tint(0.045), tint(0.55)),
             };
             let (label, sublabel) = match loaded {
                 Some(v) => (
@@ -1211,22 +1237,22 @@ impl App {
             }));
             items.push(Item::Text(TextItem {
                 align: Align::Center,
-                ..TextItem::new(cx, zy + 108.0, 13.0, if loaded.is_some() { LIME } else { TEXT }, label)
+                ..TextItem::new(cx, zy + 108.0, 13.0, if loaded.is_some() { hue } else { TEXT }, label)
             }));
             items.push(Item::Text(TextItem {
                 align: Align::Center,
-                ..TextItem::new(cx, zy + 134.0, 11.0, if loaded.is_some() { LIME_DIM } else { DIM }, sublabel)
+                ..TextItem::new(cx, zy + 134.0, 11.0, if loaded.is_some() { hue_dim } else { DIM }, sublabel)
             }));
         }
 
-        // ---- terminal hint (dim · lime command · dim), centered as a group ----
+        // ---- terminal hint (dim · accent command · dim), centered as a group ----
         let hpx = 12.0;
         let seg: [(&str, [f32; 4]); 3] = if self.videos.is_empty() {
-            [("or run  ", DIM), ("abner reference.mp4 encode.mp4", LIME), ("  in the terminal", DIM)]
+            [("or run  ", DIM), ("abner reference.mp4 encode.mp4", ACCENT), ("  in the terminal", DIM)]
         } else {
             // Half a pair: say what is still missing rather than repeat
             // the terminal invocation the user has clearly moved past.
-            [("drop a ", DIM), ("second clip", LIME), (" to start comparing", DIM)]
+            [("drop a ", DIM), ("second clip", ACCENT), (" to start comparing", DIM)]
         };
         let hint_w: f32 = seg.iter().map(|(s, _)| adv(hpx, s.chars().count())).sum();
         let mut hx = (w - hint_w) / 2.0;
@@ -1256,7 +1282,7 @@ impl App {
         let ly = h - 44.0;
         for (cap, label, hot) in legend {
             let (fg, chip, shadow) = if hot {
-                (DARK, LIME, LIME_SHADOW)
+                (DARK, ACCENT, ACCENT_SHADOW)
             } else {
                 (KEYCAP_FG, KEYCAP_BG, KEYCAP_SHADOW)
             };
@@ -1560,15 +1586,28 @@ mod tests {
 }
 
 // ---- 2a "Instrument HUD, remixed" palette ----
-/// Lime signal accent (#a6e22e) — the one hot colour in the design.
-const LIME: [f32; 4] = [0.651, 0.886, 0.180, 1.0];
-const LIME_DIM: [f32; 4] = [0.651, 0.886, 0.180, 0.5];
-const LIME_HALF: [f32; 4] = [0.651, 0.886, 0.180, 0.55];
+/// Signal accent — the one hot colour in the design, and where the whole
+/// palette comes from: 2a's lime read as a different product next to the
+/// logo. This is the mark's upper bar (`assets/logo.png`, #006dcf) lifted
+/// to #1580de, the one deliberate departure from the file: the bar itself
+/// clears only ~4:1 against the HUD's black, which is under the bar for
+/// 10–11px mono. Side by side with the mark it still reads as the same
+/// blue; illegible status text would not.
+const ACCENT: [f32; 4] = [0.082, 0.502, 0.871, 1.0];
+const ACCENT_DIM: [f32; 4] = [0.082, 0.502, 0.871, 0.5];
 /// Hairlines and pill outlines drawn in the accent, well under full.
-const LIME_EDGE: [f32; 4] = [0.651, 0.886, 0.180, 0.28];
-const LIME_SHADOW: [f32; 4] = [0.451, 0.620, 0.098, 0.95];
-/// Frame background / ink on lime (#050506).
-const FRAME_BG: [f32; 3] = [0.0196, 0.0196, 0.0235];
+const ACCENT_EDGE: [f32; 4] = [0.082, 0.502, 0.871, 0.28];
+const ACCENT_SHADOW: [f32; 4] = [0.020, 0.278, 0.510, 0.95];
+/// The logo's lower bar (#e71b24), used as-is — red carries enough
+/// luminance to stay readable. Only where the mark itself pairs the two:
+/// slot B against slot A on the launch window.
+const ACCENT_B: [f32; 4] = [0.906, 0.106, 0.141, 1.0];
+const ACCENT_B_DIM: [f32; 4] = [0.906, 0.106, 0.141, 0.5];
+/// Frame background / ink on the accent (#050506). The alpha is the
+/// window's: the surface is transparent (`with_transparent` in main.rs),
+/// so the desktop shows faintly through the letterbox — opaque video
+/// quads are unaffected.
+const FRAME_BG: [f32; 4] = [0.0196, 0.0196, 0.0235, 0.92];
 const FRAME_INK: [f32; 4] = [0.0196, 0.0196, 0.0235, 1.0];
 const TEXT: [f32; 4] = [0.941, 0.941, 0.949, 1.0];
 const TEXT_OFF: [f32; 4] = [0.784, 0.784, 0.824, 0.85];
@@ -1597,7 +1636,7 @@ const KEYCAP_SHADOW: [f32; 4] = [0.0, 0.0, 0.0, 0.6];
 
 // Launch window (2b) palette.
 const DARK: [f32; 4] = [0.02, 0.02, 0.024, 1.0];
-const LAUNCH_BG: [f32; 3] = [0.027, 0.027, 0.035];
+const LAUNCH_BG: [f32; 4] = [0.027, 0.027, 0.035, 0.90];
 
 /// Info block width, and how many monospace chars fit inside it.
 const INFO_W: f32 = 430.0;

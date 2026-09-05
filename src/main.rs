@@ -382,6 +382,11 @@ impl ApplicationHandler for Runner {
         }
         let attrs = Window::default_attributes()
             .with_title(&self.title)
+            // The app background is drawn with an alpha (see FRAME_BG /
+            // LAUNCH_BG in app.rs), so the desktop shows faintly through
+            // the letterbox and the launch window. Video quads write
+            // alpha 1, so the picture itself is never see-through.
+            .with_transparent(true)
             .with_inner_size(LogicalSize::new(1280.0, 800.0));
         let window = Arc::new(_event_loop.create_window(attrs).expect("create window"));
         // Text-free glass titlebar with the video running underneath it
@@ -392,6 +397,9 @@ impl ApplicationHandler for Runner {
             self.app.videos.iter().map(|v| (v.player.w, v.player.h)).collect();
         let gpu = pollster::block_on(Gpu::new(window.clone(), &dims, TextCtx::load()))
             .expect("init gpu");
+        // The renderer decoded the wordmark, so it owns its proportions;
+        // the launch window sizes its quad from them.
+        self.app.set_logo_aspect(gpu.logo_aspect());
         self.window = Some(window);
         self.gpu = Some(gpu);
         self.last_frame = Instant::now();

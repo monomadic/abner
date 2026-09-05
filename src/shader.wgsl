@@ -12,6 +12,9 @@ struct U {
 @group(0) @binding(2) var tex_b: texture_2d<f32>;
 @group(0) @binding(3) var tex_g: texture_2d<f32>;
 @group(0) @binding(4) var samp: sampler;
+// The launch wordmark. One texture for the life of the process, bound in
+// every group so mode 7 needs no batch key of its own.
+@group(0) @binding(5) var tex_l: texture_2d<f32>;
 
 struct In {
     @location(0) pos: vec2<f32>,
@@ -91,7 +94,7 @@ fn ui_color(c: vec4<f32>) -> vec4<f32> {
 // Modes (keep in sync with render.rs):
 // 0 rect (p0 radius, p1 border width, uv = border colour, pad = fade-up)
 // 1 video A  2 delta |A-B|*gain  3 split at p0  4 checker(p0 px)
-// 5 blend mix(A,B,p0)  6 glyph (tex_g.r * color)
+// 5 blend mix(A,B,p0)  6 glyph (tex_g.r * color)  7 logo (tex_l * color.a)
 
 @fragment
 fn fs_main(in: Out) -> @location(0) vec4<f32> {
@@ -99,6 +102,7 @@ fn fs_main(in: Out) -> @location(0) vec4<f32> {
     let a = textureSample(tex_a, samp, in.uv);
     let b = textureSample(tex_b, samp, in.uv);
     let g = textureSample(tex_g, samp, in.uv).r;
+    let l = textureSample(tex_l, samp, in.uv);
     switch in.mode {
         case 0u: {
             let half = in.size * 0.5;
@@ -156,6 +160,13 @@ fn fs_main(in: Out) -> @location(0) vec4<f32> {
         case 6u: {
             let c = ui_color(in.color);
             return vec4<f32>(c.rgb, c.a * g);
+        }
+        case 7u: {
+            // The logo texture is sRGB, so sampling already decoded it —
+            // no ui_color here. Its alpha is straight (not premultiplied),
+            // which is what ALPHA_BLENDING expects; color.a fades the
+            // whole mark.
+            return vec4<f32>(l.rgb, l.a * in.color.a);
         }
         default: {
             return in.color;
