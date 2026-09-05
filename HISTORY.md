@@ -3,6 +3,48 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-09-05 — 18. app icon fills its tile on macOS 26 (Tahoe)
+
+The Dock drew the app icon inset in a white rounded plate, visibly smaller than every
+neighbouring icon. The icon PNG was not the cause and could not be: `assets/app-icon.png`
+and every size inside the built `AppIcon.icns` were already flush to their canvas (100%
+fill, measured back out of the installed bundle). macOS 26 adds the plate itself.
+
+**Cause.** Tahoe masks an app icon into its own squircle, but only when the icon FILLS
+its canvas. Given artwork that floats in a margin — which is how every render in
+`assets/icons/` arrives, a shape at ~89% of its canvas with a transparent surround — it
+instead composites the icon onto a white plate and shrinks it inside. The margin is the
+trigger. Centring the art, trimming it tighter, or fitting it to Apple's 824-in-1024
+grid all leave the margin intact and change nothing on screen, which is what made this
+look like a caching problem.
+
+**Fix.** `scripts/trim-icon.py` trims to the alpha bounding box, scales just past the
+canvas, centre-crops to 1024² and masks to a superellipse cut slightly wider than Apple's
+corner. Surplus alpha the system mask cuts; a deficit leaves slivers of margin and brings
+the plate back. `--zoom` defaults to 1.05 — measured as the point where the artwork covers
+the tile (at 1.00, 0.9% of the mask is bare), so 95% of the render survives and only its
+rounded corners are lost. A first pass flattened to fully opaque at zoom 1.5, matching
+switchblade's brute-force shape; that works but throws away a third of the artwork, and
+the coverage measurement showed the crop only ever needed to be 5%. The script now warns
+when a chosen zoom leaves the tile uncovered. `assets/app-icon.png` is regenerated
+through it.
+
+Switchblade answered this: its Dock icon was always fine on the same
+`CFBundleIconFile`-only bundle layout, and its `AppIcon.icns` turns out to be 1024²
+with zero alpha — 100% opaque, full-bleed. abner's transparent surround was the entire
+difference.
+
+- A first diagnosis blamed the legacy icon path — Terminal.app carries `CFBundleIconName`
+  (→ `Assets.car`) where abner carries only `CFBundleIconFile`, and the reading was that
+  Tahoe reserves the full tile for modern assets. Wrong, and worth recording as a wrong
+  turn: switchblade has no `CFBundleIconName` either. It would have cost a full Xcode
+  install and an Icon Composer redraw for nothing.
+- Verify icon changes by asking macOS what it composites — `NSWorkspace.icon(forFile:)`
+  on the built .app, rendered to a PNG — not by eye and not from the source asset. The
+  plate is invisible in the PNG and only appears in the system's composite. A throwaway
+  .app in a temp dir with a generated `.icns` is enough to A/B a candidate before
+  touching the repo, which is how the crop factor was chosen.
+
 ## 2026-09-05 — logo on the launch window, palette from the logo, transparent window
 
 The launch window's wordmark is now `assets/logo.png` instead of tracked-out "ABNER"
