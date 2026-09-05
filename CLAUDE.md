@@ -29,24 +29,21 @@ from one to the other, keeping its number.
   (the icon SLOT — `packaging/build-app.sh` renders the bundle's `.icns` from the same
   file, so the two can't drift; the alternates in `assets/icons/` become the icon by
   being run through `scripts/trim-icon.py <alternate> assets/app-icon.png`, not
-  `cp`. **macOS 26 masks the icon to its own squircle only if the icon FILLS its
-  canvas**; hand it artwork floating in a margin — which is how every render in
-  `assets/icons/` arrives, a shape at ~89% of its canvas with transparent
-  surround — and the system instead drops it on a white plate and shrinks it
-  inside, a padded undersized Dock tile that no amount of trimming or centring
-  fixes, because the margin IS the trigger. The MARGIN is the trigger, not the
-  alpha — artwork whose alpha follows the tile edge composites fine — so the
-  script trims to the alpha bbox, scales just past the canvas (`--zoom`, default
-  1.05, the measured point where the art covers the mask; 1.00 leaves 0.9% bare
-  and the plate returns), centre-crops to 1024² and masks to a superellipse cut
-  slightly WIDER than Apple's corner. Surplus alpha the system mask cuts; a
-  deficit brings the plate back. Only the render's rounded corners are lost, and
-  pre-Tahoe still gets a rounded icon. Switchblade solved the same problem by
-  brute force — its `AppIcon.icns` is 1024² with zero alpha, fully opaque — which
-  is why its Dock icon always looked right on an identical
-  `CFBundleIconFile`-only bundle. Verify a change by asking macOS what it
-  composites (`NSWorkspace.icon(forFile:)` on the built .app, rendered to a PNG)
-  rather than by eye: the plate is invisible in the source asset) and pushed to `NSApp.setApplicationIconImage` at startup — a
+  `cp`. The rule is **square, full-bleed, opaque, UNMASKED, 1024²** — macOS 26
+  applies the rounded-rectangle mask itself. Apple documents this outright (HIG > App icons > Icon shape, rev. 2026-06-08): *"Produce appropriately shaped, unmasked layers. The system masks all layer edges to produce an icon's final shape. For iOS, iPadOS, and macOS icons, provide square layers so the system can apply rounded corners. Providing layers with pre-defined masking negatively impacts specular highlight effects and makes edges look jagged."* and *"If you do import a background layer, make sure it's full-bleed and opaque."*
+  An icon that doesn't meet it gets adapted by the system instead: abner's Dock
+  icon came back shrunk inside a lighter plate, which reads as padding that no
+  amount of re-centring the PNG fixes. The renders in `assets/icons/` never meet
+  it — a rounded body floating in a transparent margin at ~89% of its canvas,
+  with its own bevel and glow (the HIG says to avoid soft feathered edges and to
+  leave highlights, bevels and glows to the system, so bear that in mind when
+  picking the next render). The script trims to the alpha bbox and scales up
+  until the 1024² centre crop is opaque corner to corner — `--zoom` defaults to
+  the smallest such value, found by search, so the crop is never tighter than the
+  guideline needs. Switchblade's slot icon already satisfies this (1254², fully
+  opaque, edge to edge), which is why its Dock icon was always right on an
+  identical `CFBundleIconFile`-only bundle. `packaging/check-icon.swift` there
+  renders what the OS composites, for verifying a change against the source art) and pushed to `NSApp.setApplicationIconImage` at startup — a
   bare Mach-O has no `CFBundleIconFile`, and running from a shell is the common case
   here. **Drops** are switchblade's `FilesDropped` path: winit sends one `DroppedFile`
   per file with no end-of-batch marker, so `window_event` accumulates into `dropped`

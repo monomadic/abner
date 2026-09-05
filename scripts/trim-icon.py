@@ -1,29 +1,37 @@
 #!/usr/bin/env python3
-"""Fit an icon render to the macOS 26 icon tile.
+"""Crop an icon render to a square, full-bleed, opaque macOS app icon.
 
-Tahoe masks the app icon to its own squircle — but ONLY if the icon covers that
-squircle. Hand it artwork floating in a margin (which is how every render in
-assets/icons/ arrives: a shape at ~89% of its canvas with a transparent
-surround) and the system instead drops it on a white plate and shrinks it
-inside, a padded undersized tile that no amount of centring or trimming fixes.
-The margin itself is the trigger, not the alpha: artwork whose alpha follows the
-tile edge composites correctly, which is what this writes.
+Apple's Human Interface Guidelines ("App icons" > Icon shape) state the rule
+plainly, and it is the whole rule:
 
-So: trim to the artwork's alpha bounding box, scale it just past the canvas,
-centre-crop to 1024x1024, and mask to a superellipse cut a touch wider than
-Apple's own corner (surplus alpha is cut by the system mask; a DEFICIT would
-leave slivers of margin and bring the plate back). The corners of the render's
-rounded body are the only part lost, and pre-Tahoe still gets a rounded icon.
+    Produce appropriately shaped, unmasked layers. The system masks all layer
+    edges to produce an icon's final shape. For iOS, iPadOS, and macOS icons,
+    provide square layers so the system can apply rounded corners. Providing
+    layers with pre-defined masking negatively impacts specular highlight
+    effects and makes edges look jagged.
+
+    If you do import a background layer, make sure it's full-bleed and opaque.
+
+So: square, full-bleed, opaque, UNMASKED, 1024x1024. macOS 26 applies the
+rounded-rectangle mask itself. An icon that does not meet this gets adapted by
+the system instead — which is how abner's Dock icon ended up shrunk inside a
+lighter plate and looking permanently padded (see HISTORY.md).
+
+The renders in assets/icons/ do not meet it: they arrive as a rounded body
+floating in a transparent margin, at ~89% of their canvas. This trims to the
+alpha bounding box and scales the artwork up until the 1024x1024 centre crop is
+fully opaque corner to corner, so the render's own rounded corners are cropped
+away and the system's mask supplies the silhouette.
 
     python3 scripts/trim-icon.py assets/icons/app-icon-07.png assets/app-icon.png
 
 Run it whenever an alternate is copied over the icon SLOT (assets/app-icon.png).
 
---zoom is how far past the canvas the artwork is scaled before the crop, so
-1/zoom of it survives. The default keeps 95%: measured against the tile shape
-macOS composites for a system app, 1.05 is the point where the artwork covers
-the mask completely (1.00 leaves 0.9% of it bare, and the plate returns).
-Raise it to crop in tighter, never lower it below 1.05.
+--zoom defaults to the SMALLEST value that is fully opaque, found by search, so
+the crop is never tighter than the guideline requires; pass one to crop further.
+The HIG also says to avoid soft, feathered edges and to leave specular
+highlights, bevels and glows to the system — worth remembering when picking the
+next render, since these all carry their own.
 """
 import argparse
 
@@ -31,8 +39,37 @@ from PIL import Image
 import numpy as np
 
 CANVAS = 1024
-ALPHA_FLOOR = 2   # low, so the render's soft glow isn't mistaken for margin
-POWER = 5         # superellipse exponent; squarer than Apple's corner, deliberately
+ALPHA_FLOOR = 2     # low, so the render's soft glow isn't mistaken for margin
+OPAQUE = 250        # "fully opaque" allowing for resample ringing
+
+
+def crop_at(art0, zoom):
+    scale = CANVAS * zoom / max(art0.size)
+    art = art0.resize((round(art0.size[0] * scale), round(art0.size[1] * scale)), Image.LANCZOS)
+    ox, oy = (art.size[0] - CANVAS) // 2, (art.size[1] - CANVAS) // 2
+    if ox < 0 or oy < 0:
+        return None
+    return art.crop((ox, oy, ox + CANVAS, oy + CANVAS))
+
+
+def minimum_zoom(art0):
+    lo, hi = 1.0, 2.0
+    for _ in range(24):
+        mid = (lo + hi) / 2
+        out = crop_at(art0, mid)
+        if out is not None and np.array(out)[:, :, 3].min() >= OPAQUE:
+            hi = mid
+        else:
+            lo = mid
+    # rounding in the resample makes opacity non-monotonic right at the boundary,
+    # so step up until the value actually returned survives its own crop
+    z = round(hi, 3)
+    for _ in range(20):
+        out = crop_at(art0, z)
+        if out is not None and np.array(out)[:, :, 3].min() >= OPAQUE:
+            return z
+        z = round(z + 0.005, 3)
+    return z
 
 
 def main():
@@ -40,37 +77,30 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("src")
     ap.add_argument("dst")
-    ap.add_argument("--zoom", type=float, default=1.05,
-                    help="scale past the canvas before cropping; keeps 1/zoom (default 1.05)")
+    ap.add_argument("--zoom", type=float, default=None,
+                    help="scale past the canvas before cropping; default = smallest fully opaque")
     args = ap.parse_args()
 
     im = Image.open(args.src).convert("RGBA")
     ys, xs = np.where(np.array(im)[:, :, 3] > ALPHA_FLOOR)
-    art = im.crop((xs.min(), ys.min(), xs.max() + 1, ys.max() + 1))
+    art0 = im.crop((xs.min(), ys.min(), xs.max() + 1, ys.max() + 1))
 
-    scale = CANVAS * args.zoom / max(art.size)
-    art = art.resize((round(art.size[0] * scale), round(art.size[1] * scale)), Image.LANCZOS)
-    ox, oy = (art.size[0] - CANVAS) // 2, (art.size[1] - CANVAS) // 2
-    out = np.array(art.crop((ox, oy, ox + CANVAS, oy + CANVAS)))
+    floor = minimum_zoom(art0)
+    zoom = args.zoom if args.zoom is not None else floor
+    out = crop_at(art0, zoom)
+    if out is None:
+        raise SystemExit(f"--zoom {zoom} is too small to cover the canvas")
 
-    y, x = np.mgrid[0:CANVAS, 0:CANVAS]
-    c = (CANVAS - 1) / 2
-    d = np.abs((x - c) / c) ** POWER + np.abs((y - c) / c) ** POWER
-    mask = np.clip((1.0 - d) * 170 + 0.5, 0, 1)          # antialiased edge
+    alpha = np.array(out)[:, :, 3]
+    out.convert("RGB").save(args.dst)      # flatten: full-bleed and opaque, no mask
 
-    inside = d < 0.95
-    bare = int((inside & (out[:, :, 3] < 250)).sum())
-
-    out[:, :, 3] = np.minimum(out[:, :, 3], (mask * 255).astype("uint8"))
-    Image.fromarray(out).save(args.dst)
-
-    print(f"{args.src} -> {args.dst} {CANVAS}x{CANVAS}, zoom {args.zoom} "
-          f"(keeps {1/args.zoom:.0%} of the artwork)")
-    if bare:
-        print(f"  WARNING: {bare} px inside the tile are not opaque — the white plate "
-              f"will come back. Raise --zoom.")
+    print(f"{args.src} -> {args.dst} {CANVAS}x{CANVAS} RGB, "
+          f"zoom {zoom} (keeps {100/zoom:.0f}% of the artwork)")
+    if alpha.min() < OPAQUE:
+        print(f"  WARNING: not full-bleed at this zoom (min alpha {alpha.min()}); "
+              f"the transparent edge is flattened to white. Smallest opaque zoom is {floor}.")
     else:
-        print("  tile fully covered by the artwork")
+        print(f"  square, full-bleed, opaque, unmasked — per HIG (smallest opaque zoom: {floor})")
 
 
 if __name__ == "__main__":
