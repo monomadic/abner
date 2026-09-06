@@ -160,8 +160,16 @@ the "VIDEO QUALITY TESTING TOOLKIT" line that used to be a second text run.
   redraw cadence (`schedule::tests`), and slot-filling drops (0 → 1 → 2 → 3, asserting
   the clock rewinds and the streams stay inside a frame period of each other).
   Keep it green — sync IS the product.
-- Building needs the ffmpeg 8.x dev libraries (brew ffmpeg) — same as switchblade.
-  The only other non-obvious dependency is `png`, for the wordmark texture.
+- Building needs the ffmpeg **8.x** dev libraries — `brew install ffmpeg@8`, which is
+  keg-only, so `.cargo/config.toml` puts its pkgconfig dir on `PKG_CONFIG_PATH` (not
+  forced: an explicit `PKG_CONFIG_PATH` still wins). Plain `brew ffmpeg` is 9.x now and
+  **rsmpeg does not build against it** — 0.18 is the newest release, it generates its
+  bindings from whatever headers pkg-config finds, and on 9.x `AVCodec::pix_fmts` and
+  friends became accessor functions while `AVCodecID` changed signedness, so the errors
+  land inside rsmpeg's own source and read like a broken crate rather than a wrong
+  ffmpeg. Keep ffmpeg 9 linked in PATH — the startup `ffprobe` is a separate process and
+  is happy on either. The only other non-obvious dependency is `png`, for the wordmark
+  texture.
 - **`./packaging/build-app.sh [--open|--install]` builds `Abner.app`** — switchblade's
   recipe: release build, `assets/app-icon.png` → `AppIcon.icns`, `Info.plist.in` with
   version + git hash, every non-system dylib copied into `Contents/Frameworks` with

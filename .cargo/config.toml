@@ -1,0 +1,13 @@
+# rsmpeg 0.18 (the newest release) generates its bindings from whatever
+# ffmpeg headers pkg-config finds, but only compiles against 8.x: on 9.x
+# `AVCodec::pix_fmts` and friends are gone (accessor functions now) and
+# `AVCodecID` changed signedness, so the crate itself fails to build.
+# Homebrew's plain `ffmpeg` is 9.x as of 2026, so point pkg-config at the
+# keg-only `ffmpeg@8` (brew install ffmpeg@8) — which leaves the ffmpeg 9
+# in PATH alone, and that's all the startup ffprobe needs.
+#
+# Not `force`d: an explicit PKG_CONFIG_PATH in the environment still wins.
+# Both Homebrew prefixes are listed (Apple Silicon, then Intel); pkg-config
+# ignores directories that don't exist.
+[env]
+PKG_CONFIG_PATH = "/opt/homebrew/opt/ffmpeg@8/lib/pkgconfig:/usr/local/opt/ffmpeg@8/lib/pkgconfig"

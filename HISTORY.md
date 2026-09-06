@@ -24,6 +24,34 @@ builds and passes codesign verification. A live targeted-window drag confirmed t
 continuous blue stroke and brush ring, and S produced a verified 1280×720 grayscale
 PNG with the save confirmation visible in the HUD. Clippy reports pre-existing lints.
 
+## 2026-09-06 — build against the keg-only ffmpeg@8
+
+A clean `cargo build --release` stopped compiling, with five errors reported inside
+`rsmpeg 0.18.0+ffmpeg.8.0`'s own source — `attempted to take value of method pix_fmts`,
+`supported_framerates`, `sample_fmts`, and an `AVCodecID` expected `u32`, found `i32`.
+Nothing in this repo had changed.
+
+**Cause.** Homebrew's `ffmpeg` moved to 9.0.1 (libavcodec 63). rusty_ffmpeg generates its
+bindings with bindgen from whatever headers pkg-config finds, so the build silently
+retargeted ffmpeg 9, where the `AVCodec` array fields are accessor functions and
+`AVCodecID` changed signedness. rsmpeg's source is written against the 8.x layout, so the
+mismatch surfaces as a broken dependency crate rather than as "wrong ffmpeg" — which is
+the whole trap: the errors point at a file nobody here wrote. 0.18 is rsmpeg's newest
+release; there is no ffmpeg 9 support upstream to upgrade to.
+
+**Fix.** `brew install ffmpeg@8` (8.1.2, keg-only, so it doesn't unlink ffmpeg 9) and a
+new `.cargo/config.toml` that puts its pkgconfig dir on `PKG_CONFIG_PATH` for both
+Homebrew prefixes. Not `force`d, so an explicit `PKG_CONFIG_PATH` still wins, and
+pkg-config ignores the prefix that doesn't exist. A bare `cargo build --release` works
+again with no shell setup — which matters, because the failure mode is confusing enough
+that a required export would eventually be forgotten.
+
+The two ffmpegs coexist deliberately. Decoding links the 8.x dylibs (the bundle now
+carries `libavcodec.62`, and `build-app.sh` picks that up unchanged since it walks
+`otool -L`); the startup probe shells out to `ffprobe` from PATH, which is ffmpeg 9 and
+parses identically. Suite green, both sync tests included: the test clips are generated
+by the ffmpeg 9 CLI and decoded by the ffmpeg 8 libs.
+
 ## 2026-09-05 — 18. app icon conforms to the macOS 26 icon guideline
 
 The Dock drew the app icon shrunk inside a lighter rounded plate, visibly smaller than
