@@ -10,17 +10,7 @@ Effort estimates come from the 2026-09-04 comparison against switchblade.
 
 1. *(done 2026-09-04 — see HISTORY.md)*
 2. *(done 2026-09-04 — see HISTORY.md)*
-3. **Open With / double-click a file on the .app.** LaunchServices delivers opened
-   files as an Apple Event, never argv, so a bundled abner opened by double-click shows
-   an empty window. Port switchblade's `open.rs` + `open_shim.m` (~130 lines, needs a
-   `build.rs` + `cc`): it grafts `application:openURLs:` onto winit's delegate class,
-   because winit 0.30 owns the NSApplicationDelegate and panics if it is replaced.
-   The runtime-load path it needs now exists (task 1): drain the opened paths in
-   `about_to_wait` and hand them to `Runner::files_dropped(paths, false)` — always an
-   ADD, never the ⌘-replace, since a ⌘ held while picking a menu item must not wipe
-   the set. Land the `CFBundleDocumentTypes` +
-   `UTImportedTypeDeclarations` block from switchblade's `Info.plist.in` in the same
-   change — `packaging/Info.plist.in` deliberately omits it until then.
+3. *(done 2026-09-16 — see HISTORY.md)*
 
 ## Next
 

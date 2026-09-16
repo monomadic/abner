@@ -9,6 +9,7 @@
 
 mod app;
 mod mask;
+mod open;
 mod player;
 mod probe;
 mod render;
@@ -110,6 +111,11 @@ fn main() -> anyhow::Result<()> {
     for v in &videos {
         v.player.set_notify(notify.clone());
     }
+    // Open With / Finder double-click: LaunchServices delivers those as an
+    // Apple Event to the application delegate, never argv. Grafted onto
+    // winit's delegate now, before the run loop starts, because AppKit
+    // checks for the handler at finishLaunching (see open.rs).
+    open::install(notify.clone());
 
     let title = title_for(&videos);
 
@@ -565,6 +571,17 @@ impl ApplicationHandler for Runner {
         if !self.dropped.is_empty() {
             let paths = std::mem::take(&mut self.dropped);
             self.files_dropped(paths, os_primary_modifier_down());
+            self.animating = true;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+        // Files opened through the OS (Open With / double-click) ride the
+        // same path, always as an ADD: a ⌘ held while picking a menu item
+        // must not wipe the set.
+        let opened = open::drain();
+        if !opened.is_empty() {
+            self.files_dropped(opened, false);
             self.animating = true;
             if let Some(w) = &self.window {
                 w.request_redraw();

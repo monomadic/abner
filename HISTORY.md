@@ -24,6 +24,33 @@ builds and passes codesign verification. A live targeted-window drag confirmed t
 continuous blue stroke and brush ring, and S produced a verified 1280×720 grayscale
 PNG with the save confirmation visible in the HUD. Clippy reports pre-existing lints.
 
+## 2026-09-16 — Open With / double-click on the .app (TASKS.md 3)
+
+Opening two mp4s on the installed bundle produced AppKit's own dialog — *"Abner cannot
+open files in the “MPEG-4 movie” format"* — because the plist declared no document types
+and nothing answered the odoc Apple Event: LaunchServices delivers opened files to the
+application delegate, never as argv, so without a handler the default
+`NSDocumentController` answers for the app.
+
+**Fix.** switchblade's `open.rs` + `open_shim.m`, ported as `src/open.rs` +
+`src/open_shim.m` (compiled by a new `build.rs` via `cc`). winit 0.30 owns the
+`NSApplicationDelegate` and panics if it is replaced, so the shim grafts
+`application:openURLs:` onto winit's delegate CLASS with `class_addMethod`, right after
+`EventLoop::new` and before the run loop starts (AppKit checks `respondsToSelector` at
+`finishLaunching`, and the cold-launch open event fires then). Paths buffer in a static
+and `about_to_wait` drains them into `Runner::files_dropped(paths, false)` — the drop
+path already does the right thing, and it is always an ADD, never the ⌘-replace, since
+a ⌘ held while picking a menu item must not wipe the set. The player `Notify` hook wakes
+the loop, so an open into an idling app redraws promptly.
+
+`packaging/Info.plist.in` now carries `CFBundleDocumentTypes` (mp4/m4v, mov, mkv, webm,
+avi, mpeg/ts, wmv, flv, 3gp and `public.movie`) plus `UTImportedTypeDeclarations` for
+the containers macOS has no UTI for, using the identifiers VLC/IINA already import so
+LaunchServices unifies rather than forks the type. No `CFBundleTypeIconFile` — the app
+icon stands in. Verified with `open -a /Applications/Abner.app a.mp4 b.mp4` (title
+`a.mp4 vs b.mp4`, both slots filled) and a second `open` of `c.mp4` into the running
+instance (same pid, title gains `vs c.mp4`).
+
 ## 2026-09-06 — build against the keg-only ffmpeg@8
 
 A clean `cargo build --release` stopped compiling, with five errors reported inside

@@ -37,6 +37,12 @@ objc2-foundation = { version = "0.2", features = ["NSData"] }
 # 0.5 to match objc2-app-kit 0.2's objc2 (only needed for the ClassType trait).
 objc2 = "0.5"
 
+# Compiles src/open_shim.m (the Open With delegate graft, see src/open.rs).
+# `cc` is already in the dependency tree transitively, so this pulls in no
+# new crate download.
+[target.'cfg(target_os = "macos")'.build-dependencies]
+cc = "1"
+
 [profile.dev]
 # wgpu + shader-heavy code is unusably slow at opt-level 0
 opt-level = 1

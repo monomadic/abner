@@ -177,8 +177,14 @@ the "VIDEO QUALITY TESTING TOOLKIT" line that used to be a second text run.
   `install_name_tool`), then `lsregister -f` so an in-place reinstall doesn't keep the
   old icon. `CFBundleExecutable` is a thin launcher that prepends the Homebrew bin dirs
   to PATH, because a Finder-launched app gets no PATH and the startup `ffprobe` would
-  fail. The plist declares NO document types yet — that lands with the open-files
-  delegate (TASKS.md 3), or Open With would show an empty launch window.
+  fail. **Open With / double-click** is `src/open.rs` + `src/open_shim.m` (switchblade's,
+  compiled by `build.rs`): LaunchServices delivers opened files as an Apple Event, never
+  argv, and winit 0.30 panics if its `NSApplicationDelegate` is replaced, so the shim
+  grafts `application:openURLs:` onto winit's delegate class before the run loop starts.
+  Opened paths drain in `about_to_wait` into `files_dropped(paths, false)` — always an
+  add, never the ⌘-replace. The plist's `CFBundleDocumentTypes` are the other half; without
+  the handler, declaring them makes AppKit's `NSDocumentController` answer with "Abner
+  cannot open files in the “MPEG-4 movie” format".
 - Verify visual changes with a targeted window capture, never by injecting global
   keystrokes — a `--view` flag exists so every mode is reachable from the CLI.
   `scripts/window-id.swift` prints the window id:

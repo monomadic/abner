@@ -25,6 +25,7 @@ dependencies = [
  "ab_glyph",
  "anyhow",
  "bytemuck",
+ "cc",
  "env_logger",
  "log",
  "objc2 0.5.2",
