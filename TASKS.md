@@ -4,6 +4,8 @@ Numbered for reference; order is priority. Move a task to [HISTORY.md](HISTORY.m
 when it lands (keep its number there so old references still resolve).
 Effort estimates come from the 2026-09-04 comparison against switchblade.
 
+19. *(done 2026-09-20 — mask painting; see HISTORY.md)*
+
 ## Now
 
 1. *(done 2026-09-04 — see HISTORY.md)*

@@ -262,6 +262,7 @@ pub enum Item {
     /// The wordmark, drawn from the renderer's own texture. `alpha` fades
     /// it; the rect must already carry the logo's aspect (`Gpu::logo_aspect`).
     Logo { r: RectPx, alpha: f32 },
+    Mask { r: RectPx, id: u64, revision: u64, width: u32, height: u32, pixels: Arc<Vec<u8>> },
 }
 
 /// Everything the renderer needs for one frame.
@@ -322,6 +323,9 @@ pub struct Gpu {
     /// all — it is drawn at a fraction of its native size), uploaded once
     /// and bound in every group so mode 7 needs no batch key.
     logo: VideoTex,
+    mask_tex: wgpu::Texture,
+    mask_view: wgpu::TextureView,
+    mask_version: Option<(u64, u64)>,
     logo_uv: [f32; 4],
     logo_aspect: f32,
     /// Bind groups per (a, b) texture pair, created lazily.
@@ -450,6 +454,7 @@ impl Gpu {
                     count: None,
                 },
                 tex_entry(5),
+                tex_entry(6),
             ],
         });
 
@@ -580,6 +585,8 @@ impl Gpu {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
+        let mask_tex = Self::make_mask_tex(&device, 1, 1);
+        let mask_view = mask_tex.create_view(&wgpu::TextureViewDescriptor::default());
         let glyph_view = glyph_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
         let instance_capacity = 1024;
@@ -601,6 +608,9 @@ impl Gpu {
             videos,
             // Mips are blitted on the first frame, like a video upload.
             logo: VideoTex { dirty: true, ..logo },
+            mask_tex,
+            mask_view,
+            mask_version: None,
             logo_uv: logo_img.uv,
             logo_aspect: logo_img.aspect,
             pair_bgs: HashMap::new(),
@@ -709,6 +719,18 @@ impl Gpu {
         }
     }
 
+    fn make_mask_tex(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("mask"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        })
+    }
+
     fn make_instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("instances"),
@@ -745,6 +767,10 @@ impl Gpu {
                     wgpu::BindGroupEntry {
                         binding: 5,
                         resource: wgpu::BindingResource::TextureView(&self.logo.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::TextureView(&self.mask_view),
                     },
                 ],
             });
@@ -824,6 +850,25 @@ impl Gpu {
         for up in &desc.uploads {
             self.upload_video(up);
         }
+        for item in &desc.items {
+            if let Item::Mask { id, revision, width, height, pixels, .. } = item {
+                if self.mask_version == Some((*id, *revision)) { continue; }
+                if self.mask_tex.width() != *width || self.mask_tex.height() != *height {
+                    self.mask_tex = Self::make_mask_tex(&self.device, *width, *height);
+                    self.mask_view = self.mask_tex.create_view(&wgpu::TextureViewDescriptor::default());
+                    self.pair_bgs.clear();
+                    self.pair_bg(0, 0);
+                }
+                self.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo { texture: &self.mask_tex, mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                    pixels,
+                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(*width), rows_per_image: Some(*height) },
+                    wgpu::Extent3d { width: *width, height: *height, depth_or_array_layers: 1 },
+                );
+                self.mask_version = Some((*id, *revision));
+            }
+        }
         // A deferred atlas reset lands here, before any layout in this
         // frame hands out a UV; the wiped texture goes up whole.
         if self.text.begin_frame() {
@@ -875,6 +920,10 @@ impl Gpu {
                         pad: 0.0,
                     });
                 }
+                Item::Mask { r, .. } => push(&mut data, &mut batches, None, Instance {
+                    pos: [r.x, r.y], size: [r.w, r.h], uv: [0.0, 0.0, 1.0, 1.0],
+                    color: [0.0; 4], mode: 8.0, p0: 0.0, p1: 0.0, pad: 0.0,
+                }),
                 Item::Logo { r, alpha } => push(&mut data, &mut batches, None, Instance {
                     pos: [r.x, r.y],
                     size: [r.w, r.h],

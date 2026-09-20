@@ -15,6 +15,7 @@ struct U {
 // The launch wordmark. One texture for the life of the process, bound in
 // every group so mode 7 needs no batch key of its own.
 @group(0) @binding(5) var tex_l: texture_2d<f32>;
+@group(0) @binding(6) var tex_m: texture_2d<f32>;
 
 struct In {
     @location(0) pos: vec2<f32>,
@@ -95,6 +96,7 @@ fn ui_color(c: vec4<f32>) -> vec4<f32> {
 // 0 rect (p0 radius, p1 border width, uv = border colour, pad = fade-up)
 // 1 video A  2 delta |A-B|*gain  3 split at p0  4 checker(p0 px)
 // 5 blend mix(A,B,p0)  6 glyph (tex_g.r * color)  7 logo (tex_l * color.a)
+// 8 binary mask (tex_m.r selects red/blue, alpha 0.5)
 
 @fragment
 fn fs_main(in: Out) -> @location(0) vec4<f32> {
@@ -160,6 +162,13 @@ fn fs_main(in: Out) -> @location(0) vec4<f32> {
         case 6u: {
             let c = ui_color(in.color);
             return vec4<f32>(c.rgb, c.a * g);
+        }
+        case 8u: {
+            // Exact binary texel selection: no purple interpolation at mask edges.
+            let size = textureDimensions(tex_m);
+            let p = clamp(vec2<i32>(in.uv * vec2<f32>(size)), vec2<i32>(0), vec2<i32>(size) - vec2<i32>(1));
+            let painted = textureLoad(tex_m, p, 0).r > 0.5;
+            return vec4<f32>(select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), painted), 0.5);
         }
         case 7u: {
             // The logo texture is sRGB, so sampling already decoded it —

@@ -86,6 +86,12 @@ from one to the other, keeping its number.
   can't re-land on the same frame — then the delivered frame's true pts is ADOPTED as
   `t` (`pending` flags + `take_next`). The clock wraps at the shortest stream duration
   and exact-seeks everyone to 0.
+- `src/mask.rs` — per-video native-resolution binary masks and atomic grayscale PNG
+  export. `App` owns lazy masks and converts pointer positions through `content_rect`;
+  never invent a second zoom transform. `M` temporarily draws the focused video alone,
+  `+/-` sizes the image-pixel brush, `S` snapshots to a save worker. Blue = 255, red = 0.
+  Renderer mode 8 samples one R8 mask texture; `(id, revision)` avoids idle uploads.
+  `--mask a.mp4 b.mp4` reaches this state for targeted captures without global keys.
 - `src/render.rs` — one wgpu pipeline for everything (rects, video quads, compare
   modes, glyphs, the logo), instanced quads in logical px. Per-video textures carry a blit-filled
   mip chain (4K fit-to-window without shimmer). Bind groups are cached per (A,B) texture

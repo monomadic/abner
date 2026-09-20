@@ -10,6 +10,7 @@
 use std::time::Instant;
 
 use crate::player::Player;
+use crate::mask::{self, Mask};
 use crate::probe::VideoInfo;
 use crate::render::{
     Align, FrameDesc, Item, RectItem, RectPx, TextBg, TextItem, Upload, VAlign, VideoMode,
@@ -82,6 +83,14 @@ pub struct Video {
 pub struct App {
     pub videos: Vec<Video>,
     active: usize,
+    masks: Vec<Option<Mask>>,
+    mask_mode: bool,
+    brush_diameter: f32,
+    painting: bool,
+    stroke_last: Option<(f32, f32)>,
+    cursor_inside: bool,
+    mask_status: String,
+    mask_save: Option<std::sync::mpsc::Receiver<Result<std::path::PathBuf, String>>>,
     /// Master clock, seconds of content time.
     t: f64,
     playing: bool,
@@ -146,6 +155,14 @@ impl App {
         let fps = Self::fps_of(&videos);
         let wrap = Self::wrap_of(&videos);
         Self {
+            masks: (0..videos.len()).map(|_| None).collect(),
+            mask_mode: false,
+            brush_diameter: 64.0,
+            painting: false,
+            stroke_last: None,
+            cursor_inside: false,
+            mask_status: String::new(),
+            mask_save: None,
             videos,
             active: 0,
             t: 0.0,
@@ -171,6 +188,90 @@ impl App {
             drag_hover: false,
             logo_aspect: 3.0,
             cmds: Vec::new(),
+        }
+    }
+
+    fn ensure_mask(&mut self) {
+        if self.masks[self.active].is_none() {
+            let player = &self.videos[self.active].player;
+            self.masks[self.active] = Some(Mask::new(player.w, player.h));
+        }
+    }
+
+    fn resize_brush(&mut self, factor: f32) {
+        self.brush_diameter = (self.brush_diameter * factor).clamp(1.0, 4096.0);
+        self.stroke_last = None;
+    }
+
+    pub fn cursor_left(&mut self) {
+        self.cursor_inside = false;
+        self.mouse_up();
+    }
+
+    /// The mask uses exactly the full-window video transform. The status strip
+    /// and letterbox are not paint targets; leaving them breaks stroke continuity.
+    pub fn brush_cursor_visible(&self) -> bool {
+        if !self.mask_mode || !self.cursor_inside || !self.ready() { return false; }
+        let r = self.content_rect(self.active);
+        let (x, y) = self.cursor;
+        x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h
+            && x >= 0.0 && x < self.vp.0 && y >= self.top_inset() + 44.0 && y < self.vp.1
+    }
+
+    fn paint_at_cursor(&mut self) {
+        if !self.brush_cursor_visible() { self.stroke_last = None; return; }
+        let r = self.content_rect(self.active);
+        let mask = self.masks[self.active].as_mut().unwrap();
+        let point = ((self.cursor.0 - r.x) / r.w * mask.width as f32,
+                     (self.cursor.1 - r.y) / r.h * mask.height as f32);
+        mask.paint(self.stroke_last.unwrap_or(point), point, self.brush_diameter * 0.5);
+        self.stroke_last = Some(point);
+        self.mask_status.clear();
+    }
+
+    fn save_mask(&mut self) {
+        if self.mask_save.is_some() { return; }
+        let mask = self.masks[self.active].as_ref().unwrap();
+        let (width, height, pixels) = (mask.width, mask.height, mask.pixels.clone());
+        let path = mask::output_path(&self.videos[self.active].info.path);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.mask_save = Some(receiver);
+        self.mask_status = "Saving…".into();
+        std::thread::spawn(move || {
+            let result = mask::save(&path, width, height, &pixels)
+                .map(|()| path).map_err(|e| e.to_string());
+            let _ = sender.send(result);
+        });
+    }
+
+    fn build_mask_layer(&self, items: &mut Vec<Item>) {
+        let mask = self.masks[self.active].as_ref().unwrap();
+        let r = self.content_rect(self.active);
+        items.push(Item::Mask { r, id: mask.id, revision: mask.revision,
+            width: mask.width, height: mask.height, pixels: mask.pixels.clone() });
+        items.push(Item::Rect(RectItem::new(
+            RectPx { x: 0.0, y: 0.0, w: self.vp.0, h: self.top_inset() + 44.0 },
+            [0.02, 0.02, 0.02, 0.94],
+        )));
+        let name = self.videos[self.active].info.path.file_name().unwrap_or_default().to_string_lossy();
+        let status = if self.mask_status.is_empty() { "blue → white · red → black" } else { &self.mask_status };
+        items.push(Item::Text(TextItem::new(18.0, self.top_inset() + 7.0, 11.0, [1.0; 4],
+            format!("MASK {} · {} · brush {:.0}px · +/- size · S save · M close · Enter next",
+                (b'A' + self.active as u8) as char, ellipsize(&name, 28), self.brush_diameter))));
+        items.push(Item::Text(TextItem::new(18.0, self.top_inset() + 24.0, 10.0, [0.75, 0.75, 0.75, 1.0],
+            ellipsize(status, (self.vp.0 / 6.5).max(12.0) as usize))));
+        if self.brush_cursor_visible() {
+            let diameter = self.brush_diameter * r.w / mask.width as f32;
+            // Two contrasting outlines keep the actual brush footprint visible
+            // over both overlay colours and bright or dark footage.
+            for (extra, width, color) in [(2.0, 3.0, [0.0, 0.0, 0.0, 0.9]), (0.0, 1.0, [1.0; 4])] {
+                let d = diameter + extra;
+                items.push(Item::Rect(RectItem {
+                    r: RectPx { x: self.cursor.0 - d * 0.5, y: self.cursor.1 - d * 0.5, w: d, h: d },
+                    radius: d * 0.5, border_w: width, border_color: color,
+                    color: [0.0; 4], ..Default::default()
+                }));
+            }
         }
     }
 
@@ -217,12 +318,18 @@ impl App {
         }
         if replace {
             self.videos.clear();
+            self.masks.clear();
         }
         for v in &mut self.videos {
             v.player.seek(0.0, true);
             v.pending = false;
             v.delivered = false;
         }
+        self.masks.extend((0..videos.len()).map(|_| None));
+        self.mask_mode = false;
+        self.painting = false;
+        self.stroke_last = None;
+        self.mask_status.clear();
         self.videos.append(&mut videos);
         self.fps = Self::fps_of(&self.videos);
         self.wrap = Self::wrap_of(&self.videos);
@@ -322,10 +429,31 @@ impl App {
             }
             return;
         }
+        if k == Key::Char('m') || k == Key::Char('M') {
+            self.mask_mode = !self.mask_mode;
+            self.mouse_up();
+            if self.mask_mode {
+                self.playing = false;
+                self.ensure_mask();
+            }
+            return;
+        }
+        if self.mask_mode {
+            match k {
+                Key::Char('+' | '=') => { self.resize_brush(1.25); return; }
+                Key::Char('-' | '_') => { self.resize_brush(0.8); return; }
+                Key::Char('s' | 'S') => { self.save_mask(); return; }
+                Key::Escape => { self.mask_mode = false; self.mouse_up(); return; }
+                _ => {}
+            }
+            self.stroke_last = None;
+        }
         match k {
             Key::Enter => {
                 self.active = (self.active + 1) % self.videos.len();
                 self.badge_flash = 1.2;
+                self.mouse_up();
+                if self.mask_mode { self.ensure_mask(); self.mask_status.clear(); }
             }
             Key::Space => self.playing = !self.playing,
             Key::Tab => self.show_ui = !self.show_ui,
@@ -368,6 +496,12 @@ impl App {
     }
 
     pub fn cursor_moved(&mut self, x: f32, y: f32) {
+        self.cursor_inside = true;
+        if self.mask_mode {
+            self.cursor = (x, y);
+            if self.painting { self.paint_at_cursor(); }
+            return;
+        }
         // Any motion re-reveals the transport.
         self.since_pointer = 0.0;
         if self.scrubbing {
@@ -388,6 +522,14 @@ impl App {
     }
 
     pub fn mouse_down(&mut self, x: f32, y: f32) {
+        if self.mask_mode {
+            self.cursor = (x, y);
+            self.cursor_inside = true;
+            self.painting = self.brush_cursor_visible();
+            self.stroke_last = None;
+            if self.painting { self.paint_at_cursor(); }
+            return;
+        }
         self.since_pointer = 0.0;
         // While the transport is up, its controls take the press: the
         // buttons act, the seek band scrubs. Anything else pans.
@@ -418,6 +560,8 @@ impl App {
     }
 
     pub fn mouse_up(&mut self) {
+        self.painting = false;
+        self.stroke_last = None;
         self.drag = None;
         self.scrubbing = false;
     }
@@ -433,6 +577,7 @@ impl App {
     }
 
     pub fn scroll(&mut self, dx: f32, dy: f32) {
+        self.stroke_last = None;
         if self.zoom > 1.001 {
             let base = self.gesture_base(self.cursor.0, self.cursor.1);
             self.center.0 -= dx / (base.w * self.zoom);
@@ -445,6 +590,7 @@ impl App {
     /// sits under it stays put, and every stream shares the resulting
     /// center. Positive delta = fingers spreading = zoom in.
     pub fn pinch(&mut self, delta: f32) {
+        self.stroke_last = None;
         if !self.ready() {
             return;
         }
@@ -499,7 +645,7 @@ impl App {
     /// otherwise.
     fn gesture_base(&self, x: f32, _y: f32) -> RectPx {
         let n = self.videos.len();
-        if self.mode == Mode::SideBySide {
+        if self.mode == Mode::SideBySide && !self.mask_mode {
             let cw = (self.vp.0 / n as f32).max(1.0);
             let i = ((x / cw) as usize).min(n - 1);
             let dims = (self.videos[i].info.width, self.videos[i].info.height);
@@ -517,7 +663,24 @@ impl App {
     }
 
     pub fn tick(&mut self, dt: f32, vp: (f32, f32), _scale: f32) -> FrameDesc {
+        if self.vp != vp { self.stroke_last = None; }
         self.vp = vp;
+        if let Some(receiver) = &self.mask_save {
+            match receiver.try_recv() {
+                Ok(result) => {
+                    self.mask_status = match result {
+                        Ok(path) => format!("Saved {}", path.file_name().unwrap_or_default().to_string_lossy()),
+                        Err(error) => { log::error!("Mask save failed: {error}"); format!("Save failed: {error}") }
+                    };
+                    self.mask_save = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.mask_status = "Save failed: worker stopped".into();
+                    self.mask_save = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
         // Not a pair yet — paint the launch window (2b) and stop. With
         // one clip loaded its slot shows filled and B keeps waiting.
         if !self.ready() {
@@ -572,7 +735,7 @@ impl App {
         let mut items = Vec::new();
         let a = self.active;
         let b = (self.active + 1) % n;
-        match self.mode {
+        match if self.mask_mode { Mode::Overlay } else { self.mode } {
             Mode::Overlay => items.push(Item::Video {
                 a,
                 b: a,
@@ -621,7 +784,7 @@ impl App {
         // set interpolates across). Always on with the UI up, a brief
         // flash after Enter when it's hidden.
         let badge_alpha = if self.show_ui { 1.0 } else { (self.badge_flash / 0.4).min(1.0) };
-        if badge_alpha > 0.0 {
+        if badge_alpha > 0.0 && !self.mask_mode {
             // The design sizes the badge against the frame (130px on a
             // 506px-tall mock); keep that proportion so it stays the
             // dominant graphic at any window size.
@@ -681,7 +844,9 @@ impl App {
             }
         }
 
-        if self.show_ui {
+        if self.mask_mode {
+            self.build_mask_layer(&mut items);
+        } else if self.show_ui {
             self.build_hud(&mut items, vp);
         }
 
@@ -1320,6 +1485,69 @@ mod tests {
     use std::path::PathBuf;
     use std::process::Command;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn mask_painting_tracks_zoom_focus_and_export() {
+        let Some(clip) = test_clip() else { return; };
+        let mut app = mk_app(&clip, 2);
+        app.mode = Mode::SideBySide;
+        app.key(Key::Char('m'));
+        assert!(!app.playing);
+        assert!(app.mask_mode);
+        app.brush_diameter = 8.0;
+        app.mouse_down(640.0, 790.0); // bottom letterbox
+        app.mouse_up();
+        assert_eq!(app.masks[0].as_ref().unwrap().revision, 0);
+        // In a 1280x800 viewport the 320x180 video is 1280x720 at y=40.
+        app.mouse_down(640.0, 400.0);
+        app.cursor_moved(800.0, 400.0);
+        app.mouse_up();
+        let mask = app.masks[0].as_ref().unwrap();
+        assert_eq!(mask.pixels[90 * 320 + 160], 255);
+        assert_eq!(mask.pixels[90 * 320 + 180], 255);
+        assert_eq!(mask.pixels[90 * 320 + 200], 255);
+        assert_eq!(mask.pixels[70 * 320 + 180], 0);
+        // Pinch in mask mode must use the full-window fit, not the SBS cell.
+        app.cursor_moved(640.0, 400.0);
+        app.pinch(1.0);
+        assert_eq!(app.center, (0.5, 0.5));
+        app.mouse_down(640.0, 560.0);
+        app.mouse_up();
+        assert_eq!(app.masks[0].as_ref().unwrap().pixels[110 * 320 + 160], 255);
+        // Status strip is not a paint target.
+        let revision = app.masks[0].as_ref().unwrap().revision;
+        app.mouse_down(300.0, 30.0);
+        app.mouse_up();
+        assert_eq!(app.masks[0].as_ref().unwrap().revision, revision);
+        app.key(Key::Char('+'));
+        assert!(app.brush_diameter > 8.0);
+        app.key(Key::Char('-'));
+        assert!((app.brush_diameter - 8.0).abs() < 0.01);
+        app.key(Key::Enter);
+        assert!(app.masks[1].as_ref().unwrap().pixels.iter().all(|p| *p == 0));
+        app.mouse_down(640.0, 400.0);
+        app.cursor_left();
+        assert!(!app.painting);
+        assert!(!app.brush_cursor_visible());
+        let output_video = std::env::temp_dir().join(format!("abner-focused-{}.mp4", std::process::id()));
+        app.videos[1].info.path = output_video.clone();
+        app.key(Key::Char('s'));
+        assert!(tick_until(&mut app, Duration::from_secs(2), |a| a.mask_save.is_none()));
+        assert!(app.mask_status.starts_with("Saved"), "{}", app.mask_status);
+        let output = mask::output_path(&output_video);
+        assert!(output.exists());
+        std::fs::remove_file(output).unwrap();
+        app.key(Key::Char('m'));
+        assert_eq!(app.mode, Mode::SideBySide);
+        app.key(Key::Char('m'));
+        app.key(Key::Enter);
+        assert_eq!(app.masks[0].as_ref().unwrap().revision, revision);
+        app.add_videos(vec![mk_video(&clip)], false);
+        assert!(app.masks[0].is_some());
+        assert!(!app.mask_mode);
+        app.add_videos(vec![mk_video(&clip), mk_video(&clip)], true);
+        assert!(app.masks.iter().all(Option::is_none));
+    }
 
     fn test_clip() -> Option<PathBuf> {
         if Command::new("ffmpeg").arg("-version").output().is_err() {

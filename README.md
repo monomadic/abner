@@ -57,6 +57,9 @@ frame's true pts is adopted back into the clock, so stepping can't accumulate dr
 | `6` | **blend** — dissolve between A and B (`-`/`=` adjusts mix) |
 | pinch | photo-style zoom on the pointer — every video pans/zooms to the same spot |
 | drag / scroll | pan while zoomed (synced across videos) |
+| `M` | toggle mask painting on the focused video (pauses on entry) |
+| `+` / `-` | enlarge / shrink the brush in mask mode (`=` also enlarges) |
+| `S` | save the focused mask in mask mode |
 | `Z` | reset zoom |
 | `[` `]` | slow down / speed up playback (0.25×–4×; `Backspace` resets) |
 | `F` | fullscreen (borderless, same Space, instant) |
@@ -68,6 +71,28 @@ In compare modes (delta/split/checker/blend) the pair is the active video vs the
 one; `Enter` rotates which pair you're looking at. Big letter badges mark what you're
 seeing — A hugs the left edge, B the right. With the overlay hidden, `Enter` still
 flashes the letter briefly so you know where you are.
+
+## Mask painting
+
+Press **M** with a comparison loaded. The focused video fills the window with a
+50% red overlay. Click or drag to paint with the circular brush: painted pixels
+become 50% blue, replacing red rather than stacking another tint. **+ / -** changes
+brush diameter (shown in source-image pixels); pinch to zoom and scroll to pan.
+The brush outline follows the same transform as the image. **Enter** switches the
+focused video and its separate mask. **M** or **Esc** hides the layer and restores
+the comparison view; masks persist in memory, and playback stays paused until Space.
+
+**S** saves beside the focused video: `example.mov` becomes `example.mask.png`.
+The PNG is 8-bit grayscale at the displayed video's native resolution (including
+its display rotation), with **painted blue = white (255)** and **untouched red =
+black (0)**. Saving runs in the background and reports success or failure in the
+mask strip; a successful save replaces an existing file at that path. Masks apply
+to the whole clip, not an individual frame. They start blank each session; existing
+PNG masks are not loaded automatically. Replacing the video set clears its masks.
+
+For a direct visual check without keyboard automation:
+`abner --mask a.mp4 b.mp4`. The ordinary `--view` selection is restored when leaving
+mask mode.
 
 ## The HUD
 

@@ -8,6 +8,7 @@
 //! window-shadow trick for macOS Tahoe's contour line.
 
 mod app;
+mod mask;
 mod player;
 mod probe;
 mod render;
@@ -33,7 +34,7 @@ use text::TextCtx;
 const USAGE: &str = "\
 abner — A/B video comparison player
 
-usage: abner [--view <overlay|sbs|delta|split|checker|blend>] [<video-a> <video-b> [more...]]
+usage: abner [--mask] [--view <overlay|sbs|delta|split|checker|blend>] [<video-a> <video-b> [more...]]
 
 Run with no arguments (or launched from the .app bundle) to open the
 launch window, then drag clips onto it: one drop fills slot A and waits,
@@ -50,6 +51,9 @@ keys:
   1..6         view: 1 overlay  2 side-by-side  3 delta  4 split  5 checker  6 blend
   - =          adjust delta gain / blend / checker size
   pinch        zoom on the pointer, photo-style (drag or scroll to pan; synced)
+  M            toggle mask painting (pauses; Enter changes focused video)
+  + -          change brush size in mask mode
+  S            save focused video mask as <name>.mask.png
   Z            reset zoom
   F            fullscreen (borderless, same Space)
   Tab          toggle info overlay
@@ -65,6 +69,7 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     let mut mode = app::Mode::Overlay;
+    let mut mask_mode = false;
     let mut paths: Vec<PathBuf> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -77,6 +82,8 @@ fn main() -> anyhow::Result<()> {
                     std::process::exit(2);
                 }
             }
+        } else if a == "--mask" {
+            mask_mode = true;
         } else if !a.starts_with('-') {
             paths.push(PathBuf::from(a));
         }
@@ -119,6 +126,7 @@ fn main() -> anyhow::Result<()> {
         redraw_at: None,
         occluded: false,
     };
+    if mask_mode { runner.app.key(Key::Char('m')); }
     event_loop.run_app(&mut runner)?;
     Ok(())
 }
@@ -467,6 +475,9 @@ impl ApplicationHandler for Runner {
                     WinitKey::Character(s) => s.chars().next().map(Key::Char),
                     _ => None,
                 };
+                if event.repeat && matches!(key, Some(Key::Char('m' | 'M' | 's' | 'S'))) {
+                    return;
+                }
                 if let Some(key) = key {
                     self.app.key(key);
                     self.apply_cmds(event_loop);
@@ -490,6 +501,13 @@ impl ApplicationHandler for Runner {
                 self.cursor = (p.x, p.y);
                 self.app.cursor_moved(p.x, p.y);
             }
+            WindowEvent::CursorLeft { .. } => {
+                self.app.cursor_left();
+                self.animating = true;
+            }
+            WindowEvent::Focused(false) => {
+                self.app.cursor_left();
+            }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
                 let (x, y) = self.cursor;
                 match state {
@@ -508,6 +526,7 @@ impl ApplicationHandler for Runner {
                 let size = window.inner_size();
                 let vp = (size.width as f32 / scale, size.height as f32 / scale);
                 let desc = self.app.tick(dt, vp, scale);
+                window.set_cursor_visible(!self.app.brush_cursor_visible());
                 gpu.render(&desc, vp);
                 self.animating = desc.animating;
                 self.redraw_at = desc.redraw_at;

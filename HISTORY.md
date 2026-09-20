@@ -3,6 +3,27 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-09-20 — 19. per-video mask painting and grayscale export
+
+M pauses and opens a mask over the focused video, temporarily showing it full-window.
+A native-resolution binary raster supplies one 50%-alpha red/blue overlay: painted
+blue replaces untouched red. Circular strokes sweep between pointer events, so quick
+drags have no gaps. The brush is measured in image pixels; the overlay, pointer
+outline, and hit mapping share the existing zoom/pan transform. +/- changes diameter,
+Enter switches per-video masks, and M/Esc returns to the previous comparison view.
+
+S snapshots the focused mask and saves `<video-stem>.mask.png` on a worker thread,
+with white painted pixels and black untouched pixels. PNG encoding finishes before
+an atomic sibling-file replacement; failures are visible in the mask strip. No new
+dependencies. `--mask` makes the state directly reachable for window-capture checks.
+
+Regression tests cover continuous/clipped strokes, exact grayscale PNG bytes and
+polarity, zoom mapping, letterbox/status hit rejection, independent video masks,
+focused export, and drop/replacement lifetime; all 18 tests pass. The release bundle
+builds and passes codesign verification. A live targeted-window drag confirmed the
+continuous blue stroke and brush ring, and S produced a verified 1280×720 grayscale
+PNG with the save confirmation visible in the HUD. Clippy reports pre-existing lints.
+
 ## 2026-09-05 — 18. app icon conforms to the macOS 26 icon guideline
 
 The Dock drew the app icon shrunk inside a lighter rounded plate, visibly smaller than
