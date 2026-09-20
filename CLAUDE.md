@@ -16,8 +16,10 @@ from one to the other, keeping its number.
   `animating` decides if the loop stays hot, occluded windows never run the continuous
   path (no vsync present to pace them = pegged core), `MIN_FRAME` floors the Poll
   cadence, idle ticks at 100ms. `about_to_wait` is the only caller — don't grow a
-  second copy of the rules there. Fake fullscreen = `set_simple_fullscreen` +
-  `setHasShadow(false)` (macOS Tahoe draws its window contour with the shadow).
+  second copy of the rules there. Fake fullscreen = `set_simple_fullscreen`. **No window
+  border**: macOS Tahoe draws a ~1px contour around every window WITH the window
+  shadow, so `setHasShadow(false)` at creation kills it for good, windowed included
+  (switchblade's trick) — the shadow is never restored.
   **No visible titlebar** (`set_titlebar_glass`, switchblade's): transparent bar,
   hidden title, and `FullSizeContentView` so the wgpu surface runs UNDER the strip —
   a transparent bar alone shows the default system grey, not the app's clear, so the
@@ -132,10 +134,14 @@ from one to the other, keeping its number.
 
 The HUD implements **2a** from the Claude Design project "A/B testing window mockups
 for Abner" (`Abner AB Window.dc.html`, project `e16025af-9465-4a81-bdc3-97780f3399eb`,
-read via the DesignSync tool). 2b (launch/empty state) is implemented too, and its drop
-targets are live: a filled slot shows the clip's name and `● WxH · codec` behind a
-solid border, and a drag over the window brightens the empty ones (winit gives no
-drop POSITION, so both light together and the file fills the next free slot).
+read via the DesignSync tool). 2b (launch/empty state) WAS implemented — A/B drop
+targets, terminal hint, keycap legend — and was stripped back (2026-09-20) to just the
+wordmark and one line, "drop a video file to begin" (a drag over the window turns it
+into an accent "release to open"; the whole window is the target, since winit gives
+no drop POSITION). **One clip is enough to play**: `App::ready()` is "any video", a
+lone clip lands in slot A and plays, and `shown_mode()` draws it plain whatever
+`mode` says (b == a, so a delta would be a black frame) while keeping `mode` for when
+a second clip arrives. The old zones are in git (`a39538f`) if 2b comes back.
 Deliberate deviations from the mock are noted where they occur: higher panel alphas
 and a saturating scrim (bright real footage, not the mock's dark plate), `ENTER`
 instead of ⏎, and solid rather than dashed drop-zone borders.
@@ -143,13 +149,8 @@ instead of ⏎, and solid rather than dashed drop-zone borders.
 **The palette comes from the logo, not the mock.** 2a's lime (#a6e22e) read as a
 different product next to `assets/logo.png`, so `ACCENT` is the mark's upper bar
 (#006dcf, lifted to #1580de — the bar itself clears only ~4:1 against the HUD's black,
-under the bar for 10–11px mono) and `ACCENT_B` its lower one (#e71b24, used as-is) —
-the launch window gives slot A the blue and slot B the red, so the pair on screen is
-the pair on the mark above it.
-Both are far more saturated than lime, so the drop-zone washes run thinner than the
-mock's: blending is linear-space, and 5% of a primary already reads as a coloured
-panel. The zone that the NEXT drop lands in is the bright one; later empty slots stay
-quiet. The launch window's wordmark is the logo IMAGE, not type — it already carries
+under the bar for 10–11px mono). The lower bar (#e71b24) was `ACCENT_B`, slot B's
+colour on the old launch zones; it went with them. The launch window's wordmark is the logo IMAGE, not type — it already carries
 the "VIDEO QUALITY TESTING TOOLKIT" line that used to be a second text run.
 
 ## Rules
@@ -158,7 +159,7 @@ the "VIDEO QUALITY TESTING TOOLKIT" line that used to be a second text run.
   draining, exact seek, two-player sync, framestep adoption, reader-thread cleanup
   (condvar-parked AND wedged-in-libav-I/O, the latter via a mkfifo dribble), and the
   redraw cadence (`schedule::tests`), and slot-filling drops (0 → 1 → 2 → 3, asserting
-  the clock rewinds and the streams stay inside a frame period of each other).
+  a lone clip plays, the clock rewinds and the streams stay inside a frame period of each other).
   Keep it green — sync IS the product.
 - Building needs the ffmpeg **8.x** dev libraries — `brew install ffmpeg@8`, which is
   keg-only, so `.cargo/config.toml` puts its pkgconfig dir on `PKG_CONFIG_PATH` (not
@@ -172,7 +173,11 @@ the "VIDEO QUALITY TESTING TOOLKIT" line that used to be a second text run.
   texture.
 - **`./packaging/build-app.sh [--open|--install]` builds `Abner.app`** — switchblade's
   recipe: release build, `assets/app-icon.png` → `AppIcon.icns`, `Info.plist.in` with
-  version + git hash, every non-system dylib copied into `Contents/Frameworks` with
+  version + a NUMERIC build stamp (`CFBundleVersion` = UTC `YYYYMMDD.HHMMSS`; the git
+  hash rides in `AbnerGitHash` — when two bundles share an id `open -a Abner` goes to
+  the higher version, a hash parses as ~0, and a stale cargo-bundle leftover in
+  `target/` answered for the installed app and exited with usage; `--install` also
+  unregisters the build-tree twin), every non-system dylib copied into `Contents/Frameworks` with
   load paths rewritten to `@rpath`, ad-hoc codesign (mandatory on Apple Silicon after
   `install_name_tool`), then `lsregister -f` so an in-place reinstall doesn't keep the
   old icon. `CFBundleExecutable` is a thin launcher that prepends the Homebrew bin dirs

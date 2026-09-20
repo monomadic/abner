@@ -10,6 +10,8 @@
 	<string>{{BUNDLE_ID}}</string>
 	<key>CFBundleVersion</key>
 	<string>{{BUILD}}</string>
+	<key>AbnerGitHash</key>
+	<string>{{GIT_HASH}}</string>
 	<key>CFBundleShortVersionString</key>
 	<string>{{VERSION}}</string>
 	<key>CFBundleExecutable</key>

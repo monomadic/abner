@@ -285,11 +285,18 @@ impl App {
         if self.fullscreen { 0.0 } else { TITLEBAR_H }
     }
 
-    /// Enough streams to compare. One clip (a single drop, or `abner
-    /// one.mp4`) is a HALF-filled launch window, not a player: slot A
-    /// holds it and B keeps waiting.
+    /// Something to show. One clip (a single drop, or `abner one.mp4`)
+    /// is enough: it lands in slot A and plays; the compare modes just
+    /// have nothing to compare against until a second one arrives.
     pub fn ready(&self) -> bool {
-        self.videos.len() >= 2
+        !self.videos.is_empty()
+    }
+
+    /// The mode actually drawn. A lone clip has nothing to compare
+    /// against (b == a: the delta would be a black frame), so every mode
+    /// shows it plain; `self.mode` is kept for when a second one arrives.
+    fn shown_mode(&self) -> Mode {
+        if self.videos.len() < 2 { Mode::Overlay } else { self.mode }
     }
 
     fn fps_of(videos: &[Video]) -> f64 {
@@ -406,7 +413,7 @@ impl App {
     }
 
     pub fn key(&mut self, k: Key) {
-        // Launch state (fewer than two clips): only global keys are live.
+        // Launch state (no clips): only global keys are live.
         if !self.ready() {
             match k {
                 Key::Escape => {
@@ -681,8 +688,7 @@ impl App {
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
         }
-        // Not a pair yet — paint the launch window (2b) and stop. With
-        // one clip loaded its slot shows filled and B keeps waiting.
+        // Nothing loaded — paint the launch window and stop.
         if !self.ready() {
             return self.launch_frame(vp);
         }
@@ -735,7 +741,8 @@ impl App {
         let mut items = Vec::new();
         let a = self.active;
         let b = (self.active + 1) % n;
-        match if self.mask_mode { Mode::Overlay } else { self.mode } {
+        let mode = if self.mask_mode { Mode::Overlay } else { self.shown_mode() };
+        match mode {
             Mode::Overlay => items.push(Item::Video {
                 a,
                 b: a,
@@ -816,7 +823,7 @@ impl App {
                     ..TextItem::new(x, vp.1 / 2.0, px, c, letter)
                 }));
             };
-            match self.mode {
+            match mode {
                 Mode::Overlay => push_letter(&mut items, a, big, true),
                 // Comparing a pair: both letters, active in the accent.
                 Mode::Delta | Mode::Split | Mode::Checker | Mode::Blend => {
@@ -1199,7 +1206,8 @@ impl App {
         }));
 
         // Status readout, right-aligned inside the reserved strip.
-        let extra = match self.mode {
+        let mode = self.shown_mode();
+        let extra = match mode {
             Mode::Delta => format!("  gain ×{:.1}", self.gain),
             Mode::Blend => format!("  blend {:.0}%", self.blend * 100.0),
             Mode::Checker => format!("  checker {:.0}px", self.checker_px),
@@ -1234,7 +1242,7 @@ impl App {
                 fade(TIME_OFF),
             ),
             (fmt_time(self.t), fade(TEXT)),
-            (format!("[{}] {}{}", self.mode.key(), self.mode.name(), extra), fade(ACCENT)),
+            (format!("[{}] {}{}", mode.key(), mode.name(), extra), fade(ACCENT)),
         ] {
             items.push(Item::Text(TextItem {
                 align: Align::Right,
@@ -1283,190 +1291,38 @@ impl App {
         }
     }
 
-    /// The 2b launch window: corner brackets, wordmark, two drop targets,
-    /// a terminal hint and the keycap legend. Drawn from flat rects and
-    /// text only (no video items), so it renders with zero streams loaded.
+    /// The launch window: the wordmark and one line asking for a clip.
+    /// (2b's A/B drop targets, terminal hint and keycap legend are gone
+    /// for now — one clip already plays, so there is no half-filled pair
+    /// to explain.) No video items, so it renders with zero streams loaded.
     fn launch_frame(&self, vp: (f32, f32)) -> FrameDesc {
         let (w, h) = vp;
         let mut items: Vec<Item> = Vec::new();
-        // Only used to step BETWEEN runs (the renderer measures and
-        // centres each run itself).
-        let adv = |px: f32, n: usize| MONO_ADV * px * n as f32;
 
-        // ---- corner brackets ----
-        let inset = 22.0;
-        let arm = 26.0;
-        let t = 2.0;
-        // (horizontal-arm x/y, vertical-arm x/y) for each corner.
-        let top = inset + self.top_inset();
-        let corners = [
-            (inset, top, inset, top),
-            (w - inset - arm, top, w - inset - t, top),
-            (inset, h - inset - t, inset, h - inset - arm),
-            (w - inset - arm, h - inset - t, w - inset - t, h - inset - arm),
-        ];
-        for (hx, hy, vx, vy) in corners {
-            items.push(Item::Rect(RectItem::new(
-                RectPx { x: hx, y: hy, w: arm, h: t },
-                ACCENT_DIM,
-            )));
-            items.push(Item::Rect(RectItem::new(
-                RectPx { x: vx, y: vy, w: t, h: arm },
-                ACCENT_DIM,
-            )));
-        }
-
-        // ---- wordmark ----
-        //
         // The logo image, not type: it already carries the "VIDEO QUALITY
-        // TESTING TOOLKIT" line that used to be a separate text run, and
-        // the palette below is sampled from its two bars. Width is capped
-        // against the window so a narrow one doesn't run it edge to edge;
-        // the renderer owns the aspect, the way it owns glyph metrics.
+        // TESTING TOOLKIT" line. Width is capped against the window so a
+        // narrow one doesn't run it edge to edge; the renderer owns the
+        // aspect, the way it owns glyph metrics. Logo + message are
+        // centred in the window as one group.
         let lw = (w * 0.34).clamp(240.0, 460.0).min(w - 96.0);
         let lh = lw / self.logo_aspect;
+        let (gap, mpx) = (36.0, 13.0);
+        let top = (h - (lh + gap + mpx)) / 2.0;
         items.push(Item::Logo {
-            r: RectPx { x: (w - lw) / 2.0, y: h * 0.13 - lh * 0.28, w: lw, h: lh },
+            r: RectPx { x: (w - lw) / 2.0, y: top, w: lw, h: lh },
             alpha: 1.0,
         });
-
-        // ---- two drop zones ----
-        //
-        // A slot holding a clip shows what it holds (name + format) and
-        // goes solid; the rest keep their prompt. A drag over the window
-        // brightens the empty ones — winit reports no drop position, so
-        // both light together and the file fills the next free slot.
-        let zw = 320.0;
-        let zh = 190.0;
-        let gap = 24.0;
-        let zx0 = (w - (zw * 2.0 + gap)) / 2.0;
-        let zy = (h - zh) / 2.0 - 6.0;
-        // Characters that fit across a zone at the label size.
-        let zone_ch = ((zw - 28.0) / (13.0 * MONO_ADV)) as usize;
-        for i in 0..2usize {
-            let zx = zx0 + i as f32 * (zw + gap);
-            let loaded = self.videos.get(i);
-            // Each slot wears one of the logo's two bars — A the blue,
-            // B the red — so the pair on screen reads as the same pair on
-            // the mark directly above it. Both hues are far more saturated
-            // than 2a's lime, so the washes below run thinner than the
-            // mock's: blending is linear-space (see shader.wgsl), and 5%
-            // of a primary already reads as a coloured panel.
-            let (hue, hue_dim) = match i {
-                0 => (ACCENT, ACCENT_DIM),
-                _ => (ACCENT_B, ACCENT_B_DIM),
-            };
-            let tint = |a: f32| [hue[0], hue[1], hue[2], a];
-            // Which slot the next drop lands in — the one target worth
-            // pointing at. A later empty slot stays quiet so the eye has
-            // somewhere to go first.
-            let next = i == self.videos.len();
-            let (letter_col, fill, border) = match (loaded.is_some(), next, self.drag_hover) {
-                // Loaded. An empty target is ALREADY a tint of its hue, so
-                // fill alone can't say "filled" — the step up in fill
-                // reads only next to the solid border, the coloured name
-                // and the ● (the HUD's own "● SHOWN" idiom).
-                (true, _, _) => (hue, tint(0.055), hue),
-                (false, true, false) => (hue, tint(0.035), tint(0.55)),
-                (false, true, true) => (hue, tint(0.085), hue),
-                (false, false, false) => (hue_dim, tint(0.012), tint(0.20)),
-                (false, false, true) => (hue, tint(0.045), tint(0.55)),
-            };
-            let (label, sublabel) = match loaded {
-                Some(v) => (
-                    ellipsize(
-                        &v.info
-                            .path
-                            .file_name()
-                            .map(|f| f.to_string_lossy().into_owned())
-                            .unwrap_or_default(),
-                        zone_ch,
-                    ),
-                    format!("● {}×{} · {}", v.info.width, v.info.height, v.info.codec),
-                ),
-                None if i == 0 => {
-                    ("drop the reference clip".into(), "mp4 · mov · mkv · prores".into())
-                }
-                None => ("drop the encode to test".into(), "or a third, fourth clip".into()),
-            };
-            items.push(Item::Rect(RectItem {
-                radius: 12.0,
-                border_w: 1.5,
-                border_color: border,
-                ..RectItem::new(RectPx { x: zx, y: zy, w: zw, h: zh }, fill)
-            }));
-            let cx = zx + zw / 2.0;
-            items.push(Item::Text(TextItem {
-                align: Align::Center,
-                ..TextItem::new(cx, zy + 34.0, 46.0, letter_col, ["A", "B"][i])
-            }));
-            items.push(Item::Text(TextItem {
-                align: Align::Center,
-                ..TextItem::new(cx, zy + 108.0, 13.0, if loaded.is_some() { hue } else { TEXT }, label)
-            }));
-            items.push(Item::Text(TextItem {
-                align: Align::Center,
-                ..TextItem::new(cx, zy + 134.0, 11.0, if loaded.is_some() { hue_dim } else { DIM }, sublabel)
-            }));
-        }
-
-        // ---- terminal hint (dim · accent command · dim), centered as a group ----
-        let hpx = 12.0;
-        let seg: [(&str, [f32; 4]); 3] = if self.videos.is_empty() {
-            [("or run  ", DIM), ("abner reference.mp4 encode.mp4", ACCENT), ("  in the terminal", DIM)]
+        // A drag over the window lights the line — the whole window is
+        // the target (winit gives no drop position anyway).
+        let (msg, col) = if self.drag_hover {
+            ("release to open", ACCENT)
         } else {
-            // Half a pair: say what is still missing rather than repeat
-            // the terminal invocation the user has clearly moved past.
-            [("drop a ", DIM), ("second clip", ACCENT), (" to start comparing", DIM)]
+            ("drop a video file to begin", DIM)
         };
-        let hint_w: f32 = seg.iter().map(|(s, _)| adv(hpx, s.chars().count())).sum();
-        let mut hx = (w - hint_w) / 2.0;
-        let hy = h - 84.0;
-        for (s, c) in seg {
-            items.push(Item::Text(TextItem::new(hx, hy, hpx, c, s)));
-            hx += adv(hpx, s.chars().count());
-        }
-
-        // ---- keycap legend ----
-        let legend: [(&str, &str, bool); 4] = [
-            ("ENTER", "flip A/B", true),
-            ("SPACE", "play", false),
-            ("1-6", "view mode", false),
-            ("F", "fullscreen", false),
-        ];
-        let kpx = 11.0;
-        let chip_pad = 18.0;
-        let cap_gap = 7.0;
-        let entry_gap = 20.0;
-        let entry_w = |cap: &str, label: &str| {
-            adv(kpx, cap.chars().count()) + chip_pad + cap_gap + adv(kpx, label.chars().count())
-        };
-        let legend_w: f32 = legend.iter().map(|e| entry_w(e.0, e.1)).sum::<f32>()
-            + entry_gap * (legend.len() - 1) as f32;
-        let mut lx = (w - legend_w) / 2.0;
-        let ly = h - 44.0;
-        for (cap, label, hot) in legend {
-            let (fg, chip, shadow) = if hot {
-                (DARK, ACCENT, ACCENT_SHADOW)
-            } else {
-                (KEYCAP_FG, KEYCAP_BG, KEYCAP_SHADOW)
-            };
-            items.push(Item::Text(TextItem {
-                bg: Some(TextBg {
-                    radius: 5.0,
-                    pad_x: 9.0,
-                    pad_y: 4.0,
-                    shadow,
-                    shadow_dy: 2.0,
-                    ..TextBg::new(chip)
-                }),
-                ..TextItem::new(lx + 9.0, ly, kpx, fg, cap)
-            }));
-            let capw = adv(kpx, cap.chars().count()) + chip_pad;
-            let labx = lx + capw + cap_gap;
-            items.push(Item::Text(TextItem::new(labx, ly, kpx, DIM, label)));
-            lx = labx + adv(kpx, label.chars().count()) + entry_gap;
-        }
+        items.push(Item::Text(TextItem {
+            align: Align::Center,
+            ..TextItem::new(w / 2.0, top + lh + gap, mpx, col, msg)
+        }));
 
         FrameDesc {
             clear: LAUNCH_BG,
@@ -1605,9 +1461,9 @@ mod tests {
     }
 
 
-    /// Dropped clips fill slots in order: one file leaves B empty (the
-    /// launch window stays up, half filled), a second completes the pair
-    /// and starts playing, and a further drop appends C. Whatever the
+    /// Dropped clips fill slots in order: one file lands in A and plays
+    /// on its own, a second makes the pair (both back at 0), and a
+    /// further drop appends C. Whatever the
     /// route in, every stream must come back to the same instant — a
     /// stream that kept its old position would be silently unsynced.
     #[test]
@@ -1616,17 +1472,25 @@ mod tests {
         let mut app = mk_app(&clip, 0);
         assert!(!app.ready(), "no clips is the launch window");
 
-        // One clip: slot A holds it, B is still an empty target.
-        app.add_videos(vec![mk_video(&clip)], false);
-        assert_eq!(app.videos.len(), 1);
-        assert!(!app.ready(), "one clip can't be a comparison");
-        // The launch window still draws (no video items, so no uploads).
+        // The launch window draws with nothing loaded (no uploads).
         assert!(app.tick(0.016, (1280.0, 800.0), 2.0).uploads.is_empty());
 
-        // A second clip completes the pair and playback begins.
+        // One clip: slot A holds it and it plays — in any view mode, since
+        // a lone clip has nothing to be compared against.
+        app.add_videos(vec![mk_video(&clip)], false);
+        assert_eq!(app.videos.len(), 1);
+        assert!(app.ready(), "one clip is enough to play");
+        app.mode = Mode::Delta;
+        assert!(
+            tick_until(&mut app, Duration::from_secs(10), |a| a.started && a.t > 0.3),
+            "a lone clip never started playing"
+        );
+        app.mode = Mode::Overlay;
+
+        // A second clip makes the pair, and the clock rewinds for it.
         app.add_videos(vec![mk_video(&clip)], false);
         assert_eq!(app.videos.len(), 2);
-        assert!(app.ready());
+        assert_eq!(app.t, 0.0);
         assert!(
             tick_until(&mut app, Duration::from_secs(10), |a| a.started && a.t > 0.3),
             "playback never started after the pair completed"
@@ -1822,15 +1686,9 @@ mod tests {
 /// 10–11px mono. Side by side with the mark it still reads as the same
 /// blue; illegible status text would not.
 const ACCENT: [f32; 4] = [0.082, 0.502, 0.871, 1.0];
-const ACCENT_DIM: [f32; 4] = [0.082, 0.502, 0.871, 0.5];
 /// Hairlines and pill outlines drawn in the accent, well under full.
 const ACCENT_EDGE: [f32; 4] = [0.082, 0.502, 0.871, 0.28];
 const ACCENT_SHADOW: [f32; 4] = [0.020, 0.278, 0.510, 0.95];
-/// The logo's lower bar (#e71b24), used as-is — red carries enough
-/// luminance to stay readable. Only where the mark itself pairs the two:
-/// slot B against slot A on the launch window.
-const ACCENT_B: [f32; 4] = [0.906, 0.106, 0.141, 1.0];
-const ACCENT_B_DIM: [f32; 4] = [0.906, 0.106, 0.141, 0.5];
 /// Frame background / ink on the accent (#050506). The alpha is the
 /// window's: the surface is transparent (`with_transparent` in main.rs),
 /// so the desktop shows faintly through the letterbox — opaque video
@@ -1862,8 +1720,7 @@ const KEYCAP_FG: [f32; 4] = [0.910, 0.910, 0.918, 1.0];
 const KEYCAP_BG: [f32; 4] = [0.149, 0.149, 0.173, 1.0];
 const KEYCAP_SHADOW: [f32; 4] = [0.0, 0.0, 0.0, 0.6];
 
-// Launch window (2b) palette.
-const DARK: [f32; 4] = [0.02, 0.02, 0.024, 1.0];
+// Launch window.
 const LAUNCH_BG: [f32; 4] = [0.027, 0.027, 0.035, 0.90];
 
 /// Info block width, and how many monospace chars fit inside it.

@@ -80,6 +80,12 @@ GIT_HASH="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 if ! git diff --quiet --ignore-submodules 2>/dev/null || ! git diff --quiet --cached --ignore-submodules 2>/dev/null; then
   GIT_HASH="${GIT_HASH}-dirty"
 fi
+# CFBundleVersion must be NUMERIC and monotonic: when two bundles share an id,
+# LaunchServices hands `open -a Abner` to the higher version, and a git hash
+# parses as ~0 — so a months-old leftover in target/ stamped 20260722.115043
+# answered for the freshly installed /Applications copy. The hash rides in
+# its own key (AbnerGitHash) instead.
+BUILD="$(date -u +%Y%m%d.%H%M%S)"
 
 echo "==> building $BIN_NAME ($PROFILE, v$VERSION-$GIT_HASH)"
 cargo build $CARGO_PROFILE_FLAG
@@ -156,7 +162,8 @@ make_icns "$ICON_SRC" "$RESOURCES/AppIcon.icns"
 # --- Info.plist ------------------------------------------------------------
 sed \
   -e "s/{{VERSION}}/$VERSION/g" \
-  -e "s/{{BUILD}}/$GIT_HASH/g" \
+  -e "s/{{BUILD}}/$BUILD/g" \
+  -e "s/{{GIT_HASH}}/$GIT_HASH/g" \
   -e "s/{{BUNDLE_ID}}/$BUNDLE_ID/g" \
   "$ROOT/packaging/Info.plist.in" > "$CONTENTS/Info.plist"
 
@@ -273,6 +280,12 @@ LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchSe
 echo "==> refreshing LaunchServices for $APP"
 touch "$APP"
 [ -x "$LSREGISTER" ] && "$LSREGISTER" -f "$APP" || true
+# With --install the /Applications copy is the one that should answer for the
+# id; the build-tree twin carries the same id AND version, so drop its record
+# rather than leave the pick to LaunchServices.
+if [ "$INSTALL_AFTER" = 1 ] && [ -x "$LSREGISTER" ]; then
+  "$LSREGISTER" -u "$OUT_DIR/$APP_NAME.app" || true
+fi
 
 if [ "$OPEN_AFTER" = 1 ]; then
   open "$APP"

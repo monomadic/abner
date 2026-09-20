@@ -35,12 +35,12 @@ use text::TextCtx;
 const USAGE: &str = "\
 abner — A/B video comparison player
 
-usage: abner [--mask] [--view <overlay|sbs|delta|split|checker|blend>] [<video-a> <video-b> [more...]]
+usage: abner [--mask] [--view <overlay|sbs|delta|split|checker|blend>] [<video-a> [<video-b> [more...]]]
 
 Run with no arguments (or launched from the .app bundle) to open the
-launch window, then drag clips onto it: one drop fills slot A and waits,
-two fill A and B and start playing, more add C, D… Dropping onto a
-running comparison ADDS streams; hold Cmd while dropping to replace the
+launch window, then drag clips onto it: one drop fills slot A and plays
+on its own, two fill A and B, more add C, D… Dropping onto a running
+clip or comparison ADDS streams; hold Cmd while dropping to replace the
 whole set. A single path on the command line loads slot A the same way.
 
 keys:
@@ -90,8 +90,8 @@ fn main() -> anyhow::Result<()> {
         }
     }
     // Zero paths (bundle double-click / bare `abner`) opens the launch
-    // window; one path fills slot A there and waits for a drop — the same
-    // half-filled state a single dropped file produces.
+    // window; one path fills slot A and plays alone — the same state a
+    // single dropped file produces.
     let mut videos = Vec::new();
     for p in &paths {
         videos.push(load_video(p)?);
@@ -269,7 +269,8 @@ fn toggle_fast_fullscreen(w: &Window) {
         use winit::platform::macos::WindowExtMacOS;
         let entering = !w.simple_fullscreen();
         w.set_simple_fullscreen(entering);
-        set_window_shadow(w, !entering);
+        // The shadow stays off on the way back out too — see `resumed`.
+        set_window_shadow(w, false);
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -407,6 +408,11 @@ impl ApplicationHandler for Runner {
         // (traffic lights kept) — switchblade's treatment.
         #[cfg(target_os = "macos")]
         set_titlebar_glass(&window);
+        // Kill the macOS Tahoe (26) ~1px window contour for good, windowed
+        // included: it's drawn with the window shadow, so `hasShadow(false)`
+        // suppresses it, and it is never restored. (switchblade.)
+        #[cfg(target_os = "macos")]
+        set_window_shadow(&window, false);
         let dims: Vec<(u32, u32)> =
             self.app.videos.iter().map(|v| (v.player.w, v.player.h)).collect();
         let gpu = pollster::block_on(Gpu::new(window.clone(), &dims, TextCtx::load()))
