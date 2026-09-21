@@ -90,9 +90,15 @@ from one to the other, keeping its number.
   and exact-seeks everyone to 0.
   **Keys**: `1`–`9` pick a clip directly (`select`), `V`/Shift-V cycle the view.
   The bottom **status line** (`build_status_line`) is vim/helix-style: a fixed-width
-  accent chip naming the input mode (`A/B TEST`, `MASK`), that mode's keycaps, and
-  mode status on the right. It never fades (the transport above it does) and is drawn
-  in mask mode too; it is not a paint target (`brush_cursor_visible`).
+  chip naming the input mode (`A/B TEST` on the accent, `MASK` on the logo's red), that
+  mode's keycaps, and mode status on the right; the bar itself is tinted by mode (dark
+  blue / dark red, ~0.93 alpha). It never fades (the transport above it does) and is
+  drawn in mask mode too; it is not a paint target (`brush_cursor_visible`). **Keycaps
+  are switchblade's design-system cap** (`keycap()`/`cap_width()`, ported from its
+  `theme.rs::keycap` at the inline 22px size, tokens copied verbatim) — lowercase
+  labels, like switchblade's. The A|B pill sits IN the titlebar strip, level with the
+  traffic lights. Transport glyphs are geometry (`Item::Triangle`, shader mode 9), never
+  font glyphs: a font's ▶ is placed by its metrics, not its ink, and never centres.
 - `src/mask.rs` — per-video native-resolution binary masks and atomic grayscale PNG
   export. `App` owns lazy masks and converts pointer positions through `content_rect`;
   never invent a second zoom transform. `M` temporarily draws the focused video alone,
@@ -119,7 +125,7 @@ from one to the other, keeping its number.
   it, so the desktop shows faintly through the app background and the letterbox while
   opaque video quads (they write alpha 1) stay solid.
 - `src/shader.wgsl` — modes: 0 rect, 1 tex, 2 delta, 3 split, 4 checker, 5 blend,
-  6 glyph, 7 logo. Textures are sampled unconditionally then selected (uniform-control-flow
+  6 glyph, 7 logo, 8 mask, 9 triangle. Textures are sampled unconditionally then selected (uniform-control-flow
   rule), `mode` is a flat varying. Mode 0 is an SDF rounded box with `fwidth`-based
   1px AA, an optional border (colour smuggled through the unused `uv` slot) and a
   bottom-anchored scrim ramp. **UI colours are authored as sRGB hex and decoded by

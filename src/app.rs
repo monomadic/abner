@@ -13,7 +13,7 @@ use crate::player::Player;
 use crate::mask::{self, Mask};
 use crate::probe::VideoInfo;
 use crate::render::{
-    Align, FrameDesc, Item, RectItem, RectPx, TextBg, TextItem, Upload, VAlign, VideoMode,
+    Align, FrameDesc, Item, RectItem, RectPx, TextItem, Upload, VAlign, VideoMode,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -945,16 +945,18 @@ impl App {
         }
 
         // ---- centre A|B toggle ----
-        let (seg_w, seg_h, seg_gap, pill_pad) = (42.0, 22.0, 3.0, 4.0);
+        // Sits IN the titlebar strip, level with the traffic lights (the
+        // strip is otherwise empty past them); fake fullscreen has no strip.
+        let (seg_w, seg_h, seg_gap, pill_pad) = (38.0, 18.0, 2.0, 3.0);
         let pill_w = n as f32 * seg_w + (n as f32 - 1.0) * seg_gap + pill_pad * 2.0;
         let pill = RectPx {
             x: (w - pill_w) / 2.0,
-            y: 20.0 + self.top_inset(),
+            y: if self.fullscreen { 10.0 } else { (TITLEBAR_H - seg_h - pill_pad * 2.0) / 2.0 },
             w: pill_w,
             h: seg_h + pill_pad * 2.0,
         };
         items.push(Item::Rect(RectItem {
-            radius: 9.0,
+            radius: 7.0,
             border_w: 1.0,
             border_color: ACCENT_EDGE,
             ..RectItem::new(pill, PILL_BG)
@@ -964,7 +966,7 @@ impl App {
             let on = i == a;
             if on {
                 items.push(Item::Rect(RectItem {
-                    radius: 6.0,
+                    radius: 4.5,
                     ..RectItem::new(
                         RectPx { x: sx, y: pill.y + pill_pad, w: seg_w, h: seg_h },
                         ACCENT,
@@ -977,7 +979,7 @@ impl App {
                 ..TextItem::new(
                     sx + seg_w / 2.0,
                     pill.y + pill.h / 2.0,
-                    12.0,
+                    11.0,
                     if on { FRAME_INK } else { SEG_OFF },
                     ((b'A' + i as u8) as char).to_string(),
                 )
@@ -1125,49 +1127,52 @@ impl App {
         }));
         items.push(Item::Rect(RectItem::new(
             RectPx { x: bar.x, y: bar.y, w: bar.w, h: 1.0 },
-            fade(ACCENT_EDGE),
+            fade(TRANSPORT_RULE),
         )));
 
         let cy = bar.y + 13.0 + 16.0;
         // Prev / play-pause / next — the middle one on an accent disc.
-        // The design's ⏮/⏸/⏭ are absent from the system mono fonts (they
-        // render as nothing), so the triangles come from the geometric
-        // block, which every candidate font carries, and pause is drawn
-        // from two rects.
+        // All drawn as geometry (`Item::Triangle` + rects): the system mono
+        // fonts lack ⏮/⏸/⏭, and a font's ▶ is placed by its metrics, not
+        // its ink, so it never lands in the middle of the disc.
         let prev = self.btn_prev();
         let next = self.btn_next();
         let disc = self.btn_play();
-        items.push(Item::Text(TextItem {
-            align: Align::Center,
-            valign: VAlign::Middle,
-            ..TextItem::new(prev.x + prev.w / 2.0, cy, 11.0, fade(GLYPH), "◀◀")
-        }));
+        let tri = |items: &mut Vec<Item>, r: RectPx, left: bool, c: [f32; 4]| {
+            items.push(Item::Triangle { r, color: c, left, radius: 1.0 });
+        };
+        // Skip glyphs: two small triangles nose to tail, centred.
+        let (sw, sh) = (7.0, 9.0);
+        for (b, left) in [(prev, true), (next, false)] {
+            let x0 = b.x + b.w / 2.0 - sw;
+            for i in 0..2 {
+                tri(items, RectPx { x: x0 + i as f32 * sw, y: cy - sh / 2.0, w: sw, h: sh },
+                    left, fade(GLYPH));
+            }
+        }
         items.push(Item::Rect(RectItem {
             radius: disc.w / 2.0,
             ..RectItem::new(disc, fade(ACCENT))
         }));
+        let dcx = disc.x + disc.w / 2.0;
         if self.playing {
             for dx in [-4.5, 1.5] {
                 items.push(Item::Rect(RectItem {
                     radius: 1.0,
                     ..RectItem::new(
-                        RectPx { x: disc.x + 16.0 + dx, y: cy - 6.0, w: 3.0, h: 12.0 },
+                        RectPx { x: dcx + dx, y: cy - 6.0, w: 3.0, h: 12.0 },
                         fade(FRAME_INK),
                     )
                 }));
             }
         } else {
-            items.push(Item::Text(TextItem {
-                align: Align::Center,
-                valign: VAlign::Middle,
-                ..TextItem::new(disc.x + 17.0, cy, PLAY_PX, fade(FRAME_INK), "▶")
-            }));
+            // Same 12px height as the pause bars (plus the rounding), and
+            // nudged right of the box centre toward the centroid — a
+            // box-centred triangle reads as sitting left in a circle.
+            let (tw, th) = (PLAY_W, PLAY_H);
+            tri(items, RectPx { x: dcx - tw * 0.42, y: cy - th / 2.0, w: tw, h: th },
+                false, fade(FRAME_INK));
         }
-        items.push(Item::Text(TextItem {
-            align: Align::Center,
-            valign: VAlign::Middle,
-            ..TextItem::new(next.x + next.w / 2.0, cy, 11.0, fade(GLYPH), "▶▶")
-        }));
 
         // Seek bar: track, accent fill to the playhead, white knob.
         let seek = self.seek_rect(vp);
@@ -1251,57 +1256,58 @@ impl App {
 
     /// The bottom status line, vim/helix style: a fixed-width chip naming
     /// the input mode on the left, that mode's keys beside it, mode status
-    /// on the right. Unlike the transport above it, it never fades — it is
-    /// how you tell which keys are live — and only Tab (A/B) hides it.
+    /// on the right. The bar is tinted by mode (dark blue A/B, dark red
+    /// mask) so the mode reads before the chip does. Unlike the transport
+    /// above it, it never fades — it is how you tell which keys are live —
+    /// and only Tab (A/B) hides it.
     fn build_status_line(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
         let bar = RectPx { x: 0.0, y: vp.1 - STATUS_H, w: vp.0, h: STATUS_H };
         let cy = bar.y + bar.h / 2.0;
-        items.push(Item::Rect(RectItem::new(bar, STATUS_BG)));
+        let (bg, chip, name) = if self.mask_mode {
+            (STATUS_BG_MASK, MASK_RED, "MASK")
+        } else {
+            (STATUS_BG_AB, ACCENT, "A/B TEST")
+        };
+        items.push(Item::Rect(RectItem::new(bar, bg)));
         items.push(Item::Rect(RectItem::new(
             RectPx { x: 0.0, y: bar.y, w: MODE_W, h: bar.h },
-            ACCENT,
+            chip,
         )));
         items.push(Item::Text(TextItem {
             align: Align::Center,
             valign: VAlign::Middle,
             tracking: 1.5,
-            ..TextItem::new(
-                MODE_W / 2.0,
-                cy,
-                11.0,
-                TEXT,
-                if self.mask_mode { "MASK" } else { "A/B TEST" },
-            )
+            ..TextItem::new(MODE_W / 2.0, cy, 11.0, TEXT, name)
         }));
 
         let clips = match self.videos.len() {
             1 => "1".to_string(),
             n => format!("1-{}", n.min(9)),
         };
-        let keys: &[(&str, &str, bool)] = if self.mask_mode {
+        let keys: &[(&str, &str)] = if self.mask_mode {
             &[
-                ("DRAG", "paint", true),
-                ("+ -", "brush", false),
-                ("S", "save", false),
-                ("ENTER", "next clip", false),
-                (&clips, "clip", false),
-                ("M", "exit", false),
+                ("drag", "paint"),
+                ("+ -", "brush"),
+                ("s", "save"),
+                (&clips, "clip"),
+                ("m", "exit"),
+                ("enter", "next clip"),
             ]
         } else {
             &[
-                ("ENTER", "flip", true),
-                (&clips, "clip", false),
-                ("SPACE", "play", false),
-                ("< >", "frame-step", false),
-                ("[ ]", "speed", false),
-                ("V", "view", false),
-                ("M", "mask", false),
-                ("TAB", "info", false),
-                ("F", "fullscreen", false),
+                (&clips, "clip"),
+                ("space", "play"),
+                ("< >", "frame-step"),
+                ("[ ]", "speed"),
+                ("v", "view"),
+                ("m", "mask"),
+                ("tab", "info"),
+                ("f", "fullscreen"),
+                ("enter", "flip"),
             ]
         };
 
-        // Right-hand status, measured first so the keycaps stop short of it.
+        // Right-hand status first, so the keycaps stop short of it.
         let status = if self.mask_mode {
             let v = &self.videos[self.active];
             let name = v.info.path.file_name().unwrap_or_default().to_string_lossy();
@@ -1320,45 +1326,31 @@ impl App {
         } else {
             String::new()
         };
-        let status_w = status.chars().count() as f32 * 10.5 * MONO_ADV;
+        let status_w = status.chars().count() as f32 * 11.0 * MONO_ADV;
         let limit = vp.0 - 16.0 - if status_w > 0.0 { status_w + 24.0 } else { 0.0 };
         if !status.is_empty() {
             items.push(Item::Text(TextItem {
                 align: Align::Right,
                 valign: VAlign::Middle,
-                ..TextItem::new(vp.0 - 16.0, cy, 10.5, LABEL, status)
+                ..TextItem::new(vp.0 - 16.0, cy, 11.0, LABEL, status)
             }));
         }
 
+        // Caps and their key+drop sit centred in the bar together.
+        let cap_y = bar.y + (bar.h - CAP_H - CAP_DROP) / 2.0;
         let mut kx = MODE_W + 14.0;
-        for &(cap, label, hot) in keys {
-            let cap_w = cap.chars().count() as f32 * 11.0 * MONO_ADV + 18.0;
-            let step = cap_w + 7.0 + label.chars().count() as f32 * 10.5 * MONO_ADV;
+        for &(cap, label) in keys {
+            let cap_w = cap_width(cap);
+            let step = cap_w + 8.0 + label.chars().count() as f32 * KEY_LABEL_PX * MONO_ADV;
             if kx + step > limit {
                 break;
             }
-            let (fg, chip, shadow) = if hot {
-                (FRAME_INK, ACCENT, ACCENT_SHADOW)
-            } else {
-                (KEYCAP_FG, KEYCAP_BG, KEYCAP_SHADOW)
-            };
+            keycap(items, kx, cap_y, cap);
             items.push(Item::Text(TextItem {
                 valign: VAlign::Middle,
-                bg: Some(TextBg {
-                    radius: 4.0,
-                    pad_x: 9.0,
-                    pad_y: 3.0,
-                    shadow,
-                    shadow_dy: 1.5,
-                    ..TextBg::new(chip)
-                }),
-                ..TextItem::new(kx, cy - 0.5, 11.0, fg, cap)
+                ..TextItem::new(kx + cap_w + 8.0, cap_y + CAP_H / 2.0, KEY_LABEL_PX, TEXT, label)
             }));
-            items.push(Item::Text(TextItem {
-                valign: VAlign::Middle,
-                ..TextItem::new(kx + cap_w + 7.0, cy, 10.5, LABEL, label)
-            }));
-            kx += step + 18.0;
+            kx += step + 20.0;
         }
     }
 
@@ -1777,7 +1769,6 @@ mod tests {
 const ACCENT: [f32; 4] = [0.082, 0.502, 0.871, 1.0];
 /// Hairlines and pill outlines drawn in the accent, well under full.
 const ACCENT_EDGE: [f32; 4] = [0.082, 0.502, 0.871, 0.28];
-const ACCENT_SHADOW: [f32; 4] = [0.020, 0.278, 0.510, 0.95];
 /// Frame background / ink on the accent (#050506). The alpha is the
 /// window's: the surface is transparent (`with_transparent` in main.rs),
 /// so the desktop shows faintly through the letterbox — opaque video
@@ -1805,11 +1796,30 @@ const RULE_OFF: [f32; 4] = [1.0, 1.0, 1.0, 0.14];
 const SCRIM: [f32; 4] = [0.016, 0.016, 0.024, 0.97];
 const TRACK: [f32; 4] = [1.0, 1.0, 1.0, 0.14];
 const KNOB: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
-const KEYCAP_FG: [f32; 4] = [0.910, 0.910, 0.918, 1.0];
-const KEYCAP_BG: [f32; 4] = [0.149, 0.149, 0.173, 1.0];
-const KEYCAP_SHADOW: [f32; 4] = [0.0, 0.0, 0.0, 0.6];
-/// Status line: see-through grey, so the footage stays readable behind it.
-const STATUS_BG: [f32; 4] = [0.22, 0.22, 0.24, 0.62];
+/// Status line, tinted by mode and only just see-through: dark blue in
+/// A/B (#0b1d3a), dark red in mask (#3a0b10). Mask's chip takes the
+/// logo's lower bar (#e71b24), as A/B's takes the upper.
+const STATUS_BG_AB: [f32; 4] = [0.043, 0.114, 0.227, 0.93];
+const STATUS_BG_MASK: [f32; 4] = [0.227, 0.043, 0.063, 0.93];
+const MASK_RED: [f32; 4] = [0.906, 0.106, 0.141, 1.0];
+/// The hairline over the transport: faint grey, not the accent.
+const TRANSPORT_RULE: [f32; 4] = [1.0, 1.0, 1.0, 0.07];
+/// Keycaps — switchblade's design system (`switchblade.toml` [theme] and
+/// [theme.keycap], the inline 22px cap): surface, hairline, highlight,
+/// shadow and ink are its tokens verbatim.
+const KEY_SURFACE: [f32; 4] = [0.043, 0.051, 0.067, 1.0];
+const KEY_HAIRLINE: [f32; 4] = [1.0, 1.0, 1.0, 0.11];
+const KEY_HIGHLIGHT: [f32; 4] = [1.0, 1.0, 1.0, 0.07];
+const KEY_SHADOW: [f32; 4] = [0.0, 0.0, 0.0, 0.55];
+const KEY_INK: [f32; 4] = [0.957, 0.961, 0.969, 0.9];
+const CAP_H: f32 = 22.0;
+const CAP_R: f32 = 5.0;
+const CAP_FONT: f32 = 13.5;
+const CAP_PAD_EM: f32 = 0.58;
+const CAP_DROP: f32 = 3.0;
+/// The word beside each cap: full ink, a touch larger than the old dim
+/// label, so what a key DOES reads as easily as the key.
+const KEY_LABEL_PX: f32 = 12.0;
 
 // Launch window.
 const LAUNCH_BG: [f32; 4] = [0.027, 0.027, 0.035, 0.90];
@@ -1822,11 +1832,11 @@ const INFO_CH: usize = ((INFO_W - 16.0) / (10.5 * MONO_ADV)) as usize;
 const TRANSPORT_H: f32 = 56.0 + STATUS_H;
 /// Bottom status line (mode chip + keycaps), and its mode chip's fixed
 /// width — constant across modes, like helix's, so the keys never shift.
-const STATUS_H: f32 = 28.0;
+const STATUS_H: f32 = 34.0;
 const MODE_W: f32 = 92.0;
-/// The play triangle's font size: sized so the glyph matches the 12px
-/// pause bars it swaps with (the ▶ glyph is well under its em).
-const PLAY_PX: f32 = 31.0;
+/// The play triangle, matched to the 12px pause bars it swaps with.
+const PLAY_W: f32 = 11.5;
+const PLAY_H: f32 = 13.0;
 /// Extra scrim drawn above the strip so the gradient's transparent end
 /// falls on bare frame rather than on the controls.
 const SCRIM_LEAD: f32 = 54.0;
@@ -1849,6 +1859,43 @@ const MONO_ADV: f32 = 0.60;
 /// edge. Zero in fake fullscreen: that window is borderless, buttons and
 /// all.
 const TITLEBAR_H: f32 = 28.0;
+
+/// Width of a keycap for `label` — switchblade's rule: `pad_em` of air
+/// each side of a monospace run, floored at the cap height so a single
+/// glyph stays square.
+fn cap_width(label: &str) -> f32 {
+    (CAP_FONT * CAP_PAD_EM * 2.0 + CAP_FONT * MONO_ADV * label.chars().count() as f32).max(CAP_H)
+}
+
+/// One keycap, top-left at `(x, y)`: switchblade's design-system cap
+/// (`theme.rs::keycap`, inline size) — a hard drop shadow, a near-black
+/// face with a hairline outline, and an inset top highlight held off the
+/// corners. That highlight is the whole difference between "a dark
+/// rectangle" and "a key".
+fn keycap(items: &mut Vec<Item>, x: f32, y: f32, label: &str) {
+    let (w, h, r) = (cap_width(label), CAP_H, CAP_R);
+    items.push(Item::Rect(RectItem {
+        radius: r,
+        ..RectItem::new(RectPx { x, y: y + CAP_DROP, w, h }, KEY_SHADOW)
+    }));
+    items.push(Item::Rect(RectItem {
+        radius: r,
+        border_w: 1.0,
+        border_color: KEY_HAIRLINE,
+        ..RectItem::new(RectPx { x, y, w, h }, KEY_SURFACE)
+    }));
+    let inset = r * 0.55;
+    items.push(Item::Rect(RectItem {
+        radius: 0.5,
+        ..RectItem::new(RectPx { x: x + inset, y: y + 1.0, w: (w - inset * 2.0).max(0.0), h: 1.0 },
+            KEY_HIGHLIGHT)
+    }));
+    items.push(Item::Text(TextItem {
+        align: Align::Center,
+        valign: VAlign::Middle,
+        ..TextItem::new(x + w / 2.0, y + h / 2.0, CAP_FONT, KEY_INK, label)
+    }));
+}
 
 /// Clip a run to `max` characters, marking the cut with an ellipsis.
 fn ellipsize(s: &str, max: usize) -> String {

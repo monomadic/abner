@@ -73,6 +73,20 @@ fn sd_round_box(p: vec2<f32>, half: vec2<f32>, r: f32) -> f32 {
     return length(max(q, vec2<f32>(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - r;
 }
 
+/// Signed distance to the triangle (a, b, c) — iq's exact formulation.
+fn sd_triangle(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>, c: vec2<f32>) -> f32 {
+    let e0 = b - a; let e1 = c - b; let e2 = a - c;
+    let v0 = p - a; let v1 = p - b; let v2 = p - c;
+    let pq0 = v0 - e0 * clamp(dot(v0, e0) / dot(e0, e0), 0.0, 1.0);
+    let pq1 = v1 - e1 * clamp(dot(v1, e1) / dot(e1, e1), 0.0, 1.0);
+    let pq2 = v2 - e2 * clamp(dot(v2, e2) / dot(e2, e2), 0.0, 1.0);
+    let s = sign(e0.x * e2.y - e0.y * e2.x);
+    let d = min(min(vec2<f32>(dot(pq0, pq0), s * (v0.x * e0.y - v0.y * e0.x)),
+                    vec2<f32>(dot(pq1, pq1), s * (v1.x * e1.y - v1.y * e1.x))),
+                    vec2<f32>(dot(pq2, pq2), s * (v2.x * e2.y - v2.y * e2.x)));
+    return -sqrt(d.x) * sign(d.y);
+}
+
 /// Analytic 1-pixel coverage from a signed distance, using the screen
 /// derivative so the antialiasing stays one PHYSICAL pixel wide at any
 /// scale factor or window size.
@@ -97,6 +111,7 @@ fn ui_color(c: vec4<f32>) -> vec4<f32> {
 // 1 video A  2 delta |A-B|*gain  3 split at p0  4 checker(p0 px)
 // 5 blend mix(A,B,p0)  6 glyph (tex_g.r * color)  7 logo (tex_l * color.a)
 // 8 binary mask (tex_m.r selects red/blue, alpha 0.5)
+// 9 triangle filling the quad, pointing right (p1 = 1: left), p0 corner radius
 
 @fragment
 fn fs_main(in: Out) -> @location(0) vec4<f32> {
@@ -169,6 +184,18 @@ fn fs_main(in: Out) -> @location(0) vec4<f32> {
             let p = clamp(vec2<i32>(in.uv * vec2<f32>(size)), vec2<i32>(0), vec2<i32>(size) - vec2<i32>(1));
             let painted = textureLoad(tex_m, p, 0).r > 0.5;
             return vec4<f32>(select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), painted), 0.5);
+        }
+        case 9u: {
+            // Inset by the radius, then grow back by it: rounded corners
+            // without changing the triangle's footprint.
+            let r = in.p0;
+            let w = in.size.x; let h = in.size.y;
+            var p = in.local;
+            if in.p1 > 0.5 { p.x = w - p.x; }
+            let d = sd_triangle(p, vec2<f32>(r, r * 1.7), vec2<f32>(w - r * 1.2, h * 0.5),
+                                vec2<f32>(r, h - r * 1.7)) - r;
+            let c = ui_color(in.color);
+            return vec4<f32>(c.rgb, c.a * cov(d));
         }
         case 7u: {
             // The logo texture is sRGB, so sampling already decoded it —

@@ -98,14 +98,14 @@ mask mode.
 
 ## The HUD
 
-Corner brackets frame the active stream, a centre A|B toggle shows what's on screen,
+Corner brackets frame the active stream, an A|B toggle in the title bar shows what's on screen,
 and the top-left block lists every clip's filename, resolution, fps, codec, bitrate,
 size, duration and path. Along the bottom sits a transport — prev / play-pause / next,
 a seek bar you can click and drag, and the view and timecode readout. The transport is
 hover-revealed: it fades out after a few seconds of stillness and any pointer movement
-brings it back. Beneath it a see-through grey status line stays put, vim/helix style: a
-chip on the left names the input mode (**A/B TEST**, or **MASK** while painting) and
-keycaps beside it list that mode's keys; mask mode adds the focused clip, brush size and
+brings it back. Beneath it a status line stays put, vim/helix style — dark blue in A/B,
+dark red while masking: a chip on the left names the input mode (**A/B TEST** or
+**MASK**) and keycaps beside it list that mode's keys; mask mode adds the focused clip, brush size and
 save status on the right. `Tab` hides the whole HUD (the status line stays in mask mode).
 
 ## Ideas for more views

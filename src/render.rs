@@ -203,6 +203,7 @@ pub struct TextBg {
 }
 
 impl TextBg {
+    #[allow(dead_code)] // no chip-backed text right now (keycaps are drawn as shapes)
     pub fn new(color: [f32; 4]) -> Self {
         Self {
             color,
@@ -263,6 +264,10 @@ pub enum Item {
     /// it; the rect must already carry the logo's aspect (`Gpu::logo_aspect`).
     Logo { r: RectPx, alpha: f32 },
     Mask { r: RectPx, id: u64, revision: u64, width: u32, height: u32, pixels: Arc<Vec<u8>> },
+    /// A triangle filling `r`, pointing right (or left): transport glyphs
+    /// drawn as geometry, so they centre on their shape — a font's ▶ sits
+    /// wherever its metrics put it, which is never the middle of a disc.
+    Triangle { r: RectPx, color: [f32; 4], left: bool, radius: f32 },
 }
 
 /// Everything the renderer needs for one frame.
@@ -923,6 +928,16 @@ impl Gpu {
                 Item::Mask { r, .. } => push(&mut data, &mut batches, None, Instance {
                     pos: [r.x, r.y], size: [r.w, r.h], uv: [0.0, 0.0, 1.0, 1.0],
                     color: [0.0; 4], mode: 8.0, p0: 0.0, p1: 0.0, pad: 0.0,
+                }),
+                Item::Triangle { r, color, left, radius } => push(&mut data, &mut batches, None, Instance {
+                    pos: [r.x, r.y],
+                    size: [r.w, r.h],
+                    uv: [0.0; 4],
+                    color: *color,
+                    mode: 9.0,
+                    p0: *radius,
+                    p1: if *left { 1.0 } else { 0.0 },
+                    pad: 0.0,
                 }),
                 Item::Logo { r, alpha } => push(&mut data, &mut batches, None, Instance {
                     pos: [r.x, r.y],
