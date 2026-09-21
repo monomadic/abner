@@ -88,6 +88,11 @@ from one to the other, keeping its number.
   can't re-land on the same frame — then the delivered frame's true pts is ADOPTED as
   `t` (`pending` flags + `take_next`). The clock wraps at the shortest stream duration
   and exact-seeks everyone to 0.
+  **Keys**: `1`–`9` pick a clip directly (`select`), `V`/Shift-V cycle the view.
+  The bottom **status line** (`build_status_line`) is vim/helix-style: a fixed-width
+  accent chip naming the input mode (`A/B TEST`, `MASK`), that mode's keycaps, and
+  mode status on the right. It never fades (the transport above it does) and is drawn
+  in mask mode too; it is not a paint target (`brush_cursor_visible`).
 - `src/mask.rs` — per-video native-resolution binary masks and atomic grayscale PNG
   export. `App` owns lazy masks and converts pointer positions through `content_rect`;
   never invent a second zoom transform. `M` temporarily draws the focused video alone,

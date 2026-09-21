@@ -41,15 +41,12 @@ impl Mode {
             Mode::Blend => "blend",
         }
     }
-    fn key(self) -> u8 {
-        match self {
-            Mode::Overlay => 1,
-            Mode::SideBySide => 2,
-            Mode::Delta => 3,
-            Mode::Split => 4,
-            Mode::Checker => 5,
-            Mode::Blend => 6,
-        }
+    const ALL: [Mode; 6] =
+        [Mode::Overlay, Mode::SideBySide, Mode::Delta, Mode::Split, Mode::Checker, Mode::Blend];
+    /// Next (or previous) view in `V`'s cycle.
+    fn cycle(self, dir: i32) -> Mode {
+        let i = Self::ALL.iter().position(|m| *m == self).unwrap() as i32;
+        Self::ALL[(i + dir).rem_euclid(Self::ALL.len() as i32) as usize]
     }
 }
 
@@ -208,14 +205,15 @@ impl App {
         self.mouse_up();
     }
 
-    /// The mask uses exactly the full-window video transform. The status strip
-    /// and letterbox are not paint targets; leaving them breaks stroke continuity.
+    /// The mask uses exactly the full-window video transform. The status line,
+    /// the traffic-light strip and the letterbox are not paint targets; leaving
+    /// them breaks stroke continuity.
     pub fn brush_cursor_visible(&self) -> bool {
         if !self.mask_mode || !self.cursor_inside || !self.ready() { return false; }
         let r = self.content_rect(self.active);
         let (x, y) = self.cursor;
         x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h
-            && x >= 0.0 && x < self.vp.0 && y >= self.top_inset() + 44.0 && y < self.vp.1
+            && x >= 0.0 && x < self.vp.0 && y >= self.top_inset() && y < self.vp.1 - STATUS_H
     }
 
     fn paint_at_cursor(&mut self) {
@@ -249,17 +247,6 @@ impl App {
         let r = self.content_rect(self.active);
         items.push(Item::Mask { r, id: mask.id, revision: mask.revision,
             width: mask.width, height: mask.height, pixels: mask.pixels.clone() });
-        items.push(Item::Rect(RectItem::new(
-            RectPx { x: 0.0, y: 0.0, w: self.vp.0, h: self.top_inset() + 44.0 },
-            [0.02, 0.02, 0.02, 0.94],
-        )));
-        let name = self.videos[self.active].info.path.file_name().unwrap_or_default().to_string_lossy();
-        let status = if self.mask_status.is_empty() { "blue → white · red → black" } else { &self.mask_status };
-        items.push(Item::Text(TextItem::new(18.0, self.top_inset() + 7.0, 11.0, [1.0; 4],
-            format!("MASK {} · {} · brush {:.0}px · +/- size · S save · M close · Enter next",
-                (b'A' + self.active as u8) as char, ellipsize(&name, 28), self.brush_diameter))));
-        items.push(Item::Text(TextItem::new(18.0, self.top_inset() + 24.0, 10.0, [0.75, 0.75, 0.75, 1.0],
-            ellipsize(status, (self.vp.0 / 6.5).max(12.0) as usize))));
         if self.brush_cursor_visible() {
             let diameter = self.brush_diameter * r.w / mask.width as f32;
             // Two contrasting outlines keep the actual brush footprint visible
@@ -456,12 +443,7 @@ impl App {
             self.stroke_last = None;
         }
         match k {
-            Key::Enter => {
-                self.active = (self.active + 1) % self.videos.len();
-                self.badge_flash = 1.2;
-                self.mouse_up();
-                if self.mask_mode { self.ensure_mask(); self.mask_status.clear(); }
-            }
+            Key::Enter => self.select((self.active + 1) % self.videos.len()),
             Key::Space => self.playing = !self.playing,
             Key::Tab => self.show_ui = !self.show_ui,
             Key::Left => self.seek_by(-1.0),
@@ -475,6 +457,13 @@ impl App {
                 }
             }
             Key::Backspace => self.speed = 1.0,
+            Key::Char('V') => self.mode = self.mode.cycle(-1),
+            Key::Char(c @ '1'..='9') => {
+                let idx = c as usize - '1' as usize;
+                if idx < self.videos.len() {
+                    self.select(idx);
+                }
+            }
             Key::Char(c) => match c.to_ascii_lowercase() {
                 'q' => self.cmds.push(Cmd::Quit),
                 'f' => {
@@ -491,15 +480,18 @@ impl App {
                 '.' | '>' => self.step(1),
                 '-' => self.adjust_param(false),
                 '=' | '+' => self.adjust_param(true),
-                '1' => self.mode = Mode::Overlay,
-                '2' => self.mode = Mode::SideBySide,
-                '3' => self.mode = Mode::Delta,
-                '4' => self.mode = Mode::Split,
-                '5' => self.mode = Mode::Checker,
-                '6' => self.mode = Mode::Blend,
+                'v' => self.mode = self.mode.cycle(1),
                 _ => {}
             },
         }
+    }
+
+    /// Show clip `idx` (Enter's flip, or its number key directly).
+    fn select(&mut self, idx: usize) {
+        self.active = idx;
+        self.badge_flash = 1.2;
+        self.mouse_up();
+        if self.mask_mode { self.ensure_mask(); self.mask_status.clear(); }
     }
 
     pub fn cursor_moved(&mut self, x: f32, y: f32) {
@@ -853,8 +845,10 @@ impl App {
 
         if self.mask_mode {
             self.build_mask_layer(&mut items);
+            self.build_status_line(&mut items, vp);
         } else if self.show_ui {
             self.build_hud(&mut items, vp);
+            self.build_status_line(&mut items, vp);
         }
 
         let animating =
@@ -1166,7 +1160,7 @@ impl App {
             items.push(Item::Text(TextItem {
                 align: Align::Center,
                 valign: VAlign::Middle,
-                ..TextItem::new(disc.x + 17.0, cy, 13.0, fade(FRAME_INK), "▶")
+                ..TextItem::new(disc.x + 17.0, cy, PLAY_PX, fade(FRAME_INK), "▶")
             }));
         }
         items.push(Item::Text(TextItem {
@@ -1242,7 +1236,7 @@ impl App {
                 fade(TIME_OFF),
             ),
             (fmt_time(self.t), fade(TEXT)),
-            (format!("[{}] {}{}", mode.key(), mode.name(), extra), fade(ACCENT)),
+            (format!("{}{}", mode.name(), extra), fade(ACCENT)),
         ] {
             items.push(Item::Text(TextItem {
                 align: Align::Right,
@@ -1253,18 +1247,96 @@ impl App {
             sx -= txt.chars().count() as f32 * 11.0 * MONO_ADV + 8.0;
         }
 
-        // ---- keycap row ----
-        let ky = bar.y + 13.0 + 32.0 + 12.0 + 8.0;
-        let mut kx = 22.0;
-        for (cap, label, hot) in [
-            ("ENTER", "flip A/B", true),
-            ("SPACE", "play", false),
-            ("< >", "frame-step", false),
-            ("[ ]", "speed", false),
-            ("1-6", "view mode", false),
-            ("TAB", "info", false),
-            ("F", "fullscreen", false),
-        ] {
+    }
+
+    /// The bottom status line, vim/helix style: a fixed-width chip naming
+    /// the input mode on the left, that mode's keys beside it, mode status
+    /// on the right. Unlike the transport above it, it never fades — it is
+    /// how you tell which keys are live — and only Tab (A/B) hides it.
+    fn build_status_line(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
+        let bar = RectPx { x: 0.0, y: vp.1 - STATUS_H, w: vp.0, h: STATUS_H };
+        let cy = bar.y + bar.h / 2.0;
+        items.push(Item::Rect(RectItem::new(bar, STATUS_BG)));
+        items.push(Item::Rect(RectItem::new(
+            RectPx { x: 0.0, y: bar.y, w: MODE_W, h: bar.h },
+            ACCENT,
+        )));
+        items.push(Item::Text(TextItem {
+            align: Align::Center,
+            valign: VAlign::Middle,
+            tracking: 1.5,
+            ..TextItem::new(
+                MODE_W / 2.0,
+                cy,
+                11.0,
+                TEXT,
+                if self.mask_mode { "MASK" } else { "A/B TEST" },
+            )
+        }));
+
+        let clips = match self.videos.len() {
+            1 => "1".to_string(),
+            n => format!("1-{}", n.min(9)),
+        };
+        let keys: &[(&str, &str, bool)] = if self.mask_mode {
+            &[
+                ("DRAG", "paint", true),
+                ("+ -", "brush", false),
+                ("S", "save", false),
+                ("ENTER", "next clip", false),
+                (&clips, "clip", false),
+                ("M", "exit", false),
+            ]
+        } else {
+            &[
+                ("ENTER", "flip", true),
+                (&clips, "clip", false),
+                ("SPACE", "play", false),
+                ("< >", "frame-step", false),
+                ("[ ]", "speed", false),
+                ("V", "view", false),
+                ("M", "mask", false),
+                ("TAB", "info", false),
+                ("F", "fullscreen", false),
+            ]
+        };
+
+        // Right-hand status, measured first so the keycaps stop short of it.
+        let status = if self.mask_mode {
+            let v = &self.videos[self.active];
+            let name = v.info.path.file_name().unwrap_or_default().to_string_lossy();
+            let tail = if self.mask_status.is_empty() {
+                "blue → white · red → black"
+            } else {
+                &self.mask_status
+            };
+            format!(
+                "{} {} · brush {:.0}px · {}",
+                (b'A' + self.active as u8) as char,
+                ellipsize(&name, 28),
+                self.brush_diameter,
+                tail
+            )
+        } else {
+            String::new()
+        };
+        let status_w = status.chars().count() as f32 * 10.5 * MONO_ADV;
+        let limit = vp.0 - 16.0 - if status_w > 0.0 { status_w + 24.0 } else { 0.0 };
+        if !status.is_empty() {
+            items.push(Item::Text(TextItem {
+                align: Align::Right,
+                valign: VAlign::Middle,
+                ..TextItem::new(vp.0 - 16.0, cy, 10.5, LABEL, status)
+            }));
+        }
+
+        let mut kx = MODE_W + 14.0;
+        for &(cap, label, hot) in keys {
+            let cap_w = cap.chars().count() as f32 * 11.0 * MONO_ADV + 18.0;
+            let step = cap_w + 7.0 + label.chars().count() as f32 * 10.5 * MONO_ADV;
+            if kx + step > limit {
+                break;
+            }
             let (fg, chip, shadow) = if hot {
                 (FRAME_INK, ACCENT, ACCENT_SHADOW)
             } else {
@@ -1273,21 +1345,20 @@ impl App {
             items.push(Item::Text(TextItem {
                 valign: VAlign::Middle,
                 bg: Some(TextBg {
-                    radius: 5.0,
+                    radius: 4.0,
                     pad_x: 9.0,
-                    pad_y: 4.0,
-                    shadow: fade(shadow),
-                    shadow_dy: 2.0,
-                    ..TextBg::new(fade(chip))
+                    pad_y: 3.0,
+                    shadow,
+                    shadow_dy: 1.5,
+                    ..TextBg::new(chip)
                 }),
-                ..TextItem::new(kx, ky, 11.0, fade(fg), cap)
+                ..TextItem::new(kx, cy - 0.5, 11.0, fg, cap)
             }));
-            kx += cap.chars().count() as f32 * 11.0 * MONO_ADV + 18.0 + 7.0;
             items.push(Item::Text(TextItem {
                 valign: VAlign::Middle,
-                ..TextItem::new(kx, ky, 10.5, fade(LABEL), label)
+                ..TextItem::new(kx + cap_w + 7.0, cy, 10.5, LABEL, label)
             }));
-            kx += label.chars().count() as f32 * 10.5 * MONO_ADV + 18.0;
+            kx += step + 18.0;
         }
     }
 
@@ -1343,6 +1414,24 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
+    fn number_keys_pick_clips_and_v_cycles_views() {
+        let Some(clip) = test_clip() else { return; };
+        let mut app = mk_app(&clip, 2);
+        app.key(Key::Char('2'));
+        assert_eq!(app.active, 1);
+        app.key(Key::Char('3')); // no third clip: ignored
+        assert_eq!(app.active, 1);
+        app.key(Key::Char('1'));
+        assert_eq!(app.active, 0);
+        assert_eq!(app.mode, Mode::Overlay, "number keys no longer pick views");
+        app.key(Key::Char('v'));
+        assert_eq!(app.mode, Mode::SideBySide);
+        app.key(Key::Char('V'));
+        app.key(Key::Char('V'));
+        assert_eq!(app.mode, Mode::Blend, "Shift-V wraps backwards");
+    }
+
+    #[test]
     fn mask_painting_tracks_zoom_focus_and_export() {
         let Some(clip) = test_clip() else { return; };
         let mut app = mk_app(&clip, 2);
@@ -1370,9 +1459,9 @@ mod tests {
         app.mouse_down(640.0, 560.0);
         app.mouse_up();
         assert_eq!(app.masks[0].as_ref().unwrap().pixels[110 * 320 + 160], 255);
-        // Status strip is not a paint target.
+        // The status line is not a paint target (zoomed, video covers it).
         let revision = app.masks[0].as_ref().unwrap().revision;
-        app.mouse_down(300.0, 30.0);
+        app.mouse_down(300.0, 790.0);
         app.mouse_up();
         assert_eq!(app.masks[0].as_ref().unwrap().revision, revision);
         app.key(Key::Char('+'));
@@ -1719,6 +1808,8 @@ const KNOB: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 const KEYCAP_FG: [f32; 4] = [0.910, 0.910, 0.918, 1.0];
 const KEYCAP_BG: [f32; 4] = [0.149, 0.149, 0.173, 1.0];
 const KEYCAP_SHADOW: [f32; 4] = [0.0, 0.0, 0.0, 0.6];
+/// Status line: see-through grey, so the footage stays readable behind it.
+const STATUS_BG: [f32; 4] = [0.22, 0.22, 0.24, 0.62];
 
 // Launch window.
 const LAUNCH_BG: [f32; 4] = [0.027, 0.027, 0.035, 0.90];
@@ -1727,8 +1818,15 @@ const LAUNCH_BG: [f32; 4] = [0.027, 0.027, 0.035, 0.90];
 const INFO_W: f32 = 430.0;
 const INFO_CH: usize = ((INFO_W - 16.0) / (10.5 * MONO_ADV)) as usize;
 
-/// Transport strip: 13px pad + 32px controls + 12px gap + keycaps + 14px.
-const TRANSPORT_H: f32 = 92.0;
+/// Transport strip: 13px pad + 32px controls + 11px gap + the status line.
+const TRANSPORT_H: f32 = 56.0 + STATUS_H;
+/// Bottom status line (mode chip + keycaps), and its mode chip's fixed
+/// width — constant across modes, like helix's, so the keys never shift.
+const STATUS_H: f32 = 28.0;
+const MODE_W: f32 = 92.0;
+/// The play triangle's font size: sized so the glyph matches the 12px
+/// pause bars it swaps with (the ▶ glyph is well under its em).
+const PLAY_PX: f32 = 31.0;
 /// Extra scrim drawn above the strip so the gradient's transparent end
 /// falls on bare frame rather than on the controls.
 const SCRIM_LEAD: f32 = 54.0;

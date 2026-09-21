@@ -49,12 +49,14 @@ frame's true pts is adopted back into the clock, so stepping can't accumulate dr
 | `Space` | pause / play |
 | `<` `>` (or `,` `.`) | frame-step back / forward |
 | `←` `→` | seek ±1s |
-| `1` | **overlay** — videos stacked, flip with Enter (the classic A/B) |
-| `2` | **side-by-side** — all videos in a row |
-| `3` | **delta** — amplified \|A−B\| difference (`-`/`=` adjusts gain) |
-| `4` | **split** — vertical wipe, divider follows the pointer |
-| `5` | **checker** — checkerboard mix (`-`/`=` adjusts tile size) |
-| `6` | **blend** — dissolve between A and B (`-`/`=` adjusts mix) |
+| `1`…`9` | show clip 1, 2, … (A, B, …) directly |
+| `V` / `Shift-V` | next / previous view, cycling through: |
+| | **overlay** — videos stacked, flip with Enter (the classic A/B) |
+| | **side-by-side** — all videos in a row |
+| | **delta** — amplified \|A−B\| difference (`-`/`=` adjusts gain) |
+| | **split** — vertical wipe, divider follows the pointer |
+| | **checker** — checkerboard mix (`-`/`=` adjusts tile size) |
+| | **blend** — dissolve between A and B (`-`/`=` adjusts mix) |
 | pinch | photo-style zoom on the pointer — every video pans/zooms to the same spot |
 | drag / scroll | pan while zoomed (synced across videos) |
 | `M` | toggle mask painting on the focused video (pauses on entry) |
@@ -78,15 +80,15 @@ Press **M** with a comparison loaded. The focused video fills the window with a
 50% red overlay. Click or drag to paint with the circular brush: painted pixels
 become 50% blue, replacing red rather than stacking another tint. **+ / -** changes
 brush diameter (shown in source-image pixels); pinch to zoom and scroll to pan.
-The brush outline follows the same transform as the image. **Enter** switches the
+The brush outline follows the same transform as the image. **Enter** (or a clip's number key) switches the
 focused video and its separate mask. **M** or **Esc** hides the layer and restores
 the comparison view; masks persist in memory, and playback stays paused until Space.
 
 **S** saves beside the focused video: `example.mov` becomes `example.mask.png`.
 The PNG is 8-bit grayscale at the displayed video's native resolution (including
 its display rotation), with **painted blue = white (255)** and **untouched red =
-black (0)**. Saving runs in the background and reports success or failure in the
-mask strip; a successful save replaces an existing file at that path. Masks apply
+black (0)**. Saving runs in the background and reports success or failure on the
+right of the status line; a successful save replaces an existing file at that path. Masks apply
 to the whole clip, not an individual frame. They start blank each session; existing
 PNG masks are not loaded automatically. Replacing the video set clears its masks.
 
@@ -99,9 +101,12 @@ mask mode.
 Corner brackets frame the active stream, a centre A|B toggle shows what's on screen,
 and the top-left block lists every clip's filename, resolution, fps, codec, bitrate,
 size, duration and path. Along the bottom sits a transport — prev / play-pause / next,
-a seek bar you can click and drag, the mode and timecode readout, and a keycap legend.
-The transport is hover-revealed: it fades out after a few seconds of stillness and any
-pointer movement brings it back. `Tab` hides the whole HUD.
+a seek bar you can click and drag, and the view and timecode readout. The transport is
+hover-revealed: it fades out after a few seconds of stillness and any pointer movement
+brings it back. Beneath it a see-through grey status line stays put, vim/helix style: a
+chip on the left names the input mode (**A/B TEST**, or **MASK** while painting) and
+keycaps beside it list that mode's keys; mask mode adds the focused clip, brush size and
+save status on the right. `Tab` hides the whole HUD (the status line stays in mask mode).
 
 ## Ideas for more views
 

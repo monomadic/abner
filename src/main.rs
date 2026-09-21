@@ -49,7 +49,8 @@ keys:
   < >  (, .)   frame-step back / forward
   ← →          seek ±1s
   [ ]          slow down / speed up playback (Backspace resets)
-  1..6         view: 1 overlay  2 side-by-side  3 delta  4 split  5 checker  6 blend
+  1..9         show clip 1, 2, … directly (A, B, …)
+  V            next view (Shift-V previous): overlay  side-by-side  delta  split  checker  blend
   - =          adjust delta gain / blend / checker size
   pinch        zoom on the pointer, photo-style (drag or scroll to pan; synced)
   M            toggle mask painting (pauses; Enter changes focused video)
