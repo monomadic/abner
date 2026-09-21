@@ -127,9 +127,16 @@ fn fs_main(in: Out) -> @location(0) vec4<f32> {
             let d = sd_round_box(in.local - half, half, r);
             var col = ui_color(in.color);
             // Border band: the outer `p1` pixels take the border colour,
-            // so a transparent fill leaves a hairline outline.
+            // so a transparent fill leaves a hairline outline. Mixed
+            // PREMULTIPLIED: straight colours of different alpha mix into
+            // a fringe — a faint white border over an opaque dark fill
+            // came out as a solid grey ring along the AA edge, whatever
+            // the border's alpha said.
             if in.p1 > 0.0 {
-                col = mix(ui_color(in.border), col, cov(d + in.p1));
+                let bd = ui_color(in.border);
+                let pm = mix(vec4<f32>(bd.rgb * bd.a, bd.a), vec4<f32>(col.rgb * col.a, col.a),
+                             cov(d + in.p1));
+                col = vec4<f32>(pm.rgb / max(pm.a, 1e-5), pm.a);
             }
             var alpha = col.a * cov(d);
             // Bottom-anchored scrim: opaque at the bottom edge, fading

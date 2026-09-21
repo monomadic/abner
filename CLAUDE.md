@@ -96,7 +96,7 @@ from one to the other, keeping its number.
   drawn in mask mode too; it is not a paint target (`brush_cursor_visible`). **Keycaps
   are switchblade's design-system cap** (`keycap()`/`cap_width()`, ported from its
   `theme.rs::keycap` at the inline 22px size, tokens copied verbatim except the
-  outline, deliberately brighter than its 0.11 hairline against the tinted bar) — lowercase
+  outline, deliberately fainter than its 0.11 hairline) — lowercase
   labels, like switchblade's. The A|B pill sits IN the titlebar strip, level with the
   traffic lights. Transport glyphs are geometry (`Item::Triangle`, shader mode 9), never
   font glyphs: a font's ▶ is placed by its metrics, not its ink, and never centres.
