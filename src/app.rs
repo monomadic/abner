@@ -1808,7 +1808,9 @@ const TRANSPORT_RULE: [f32; 4] = [1.0, 1.0, 1.0, 0.07];
 /// [theme.keycap], the inline 22px cap): surface, hairline, highlight,
 /// shadow and ink are its tokens verbatim.
 const KEY_SURFACE: [f32; 4] = [0.043, 0.051, 0.067, 1.0];
-const KEY_HAIRLINE: [f32; 4] = [1.0, 1.0, 1.0, 0.11];
+/// Brighter than switchblade's 0.11 hairline token: on the tinted status bar
+/// the caps need a clearly lit edge.
+const KEY_HAIRLINE: [f32; 4] = [1.0, 1.0, 1.0, 0.38];
 const KEY_HIGHLIGHT: [f32; 4] = [1.0, 1.0, 1.0, 0.07];
 const KEY_SHADOW: [f32; 4] = [0.0, 0.0, 0.0, 0.55];
 const KEY_INK: [f32; 4] = [0.957, 0.961, 0.969, 0.9];
