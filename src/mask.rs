@@ -58,18 +58,152 @@ impl Mask {
     }
 }
 
+/// The crop marquee, in image pixels — the same grid the mask uses, so a
+/// crop cuts the mask and the video frame to identical rectangles. App owns
+/// the dragging (screen space); this owns the geometry and the pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Crop {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+/// Small enough to crop tightly, big enough that the handles stay grabbable
+/// and the export is still an image.
+const MIN_CROP: f32 = 8.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Corner {
+    Nw,
+    Ne,
+    Sw,
+    Se,
+}
+
+impl Corner {
+    /// This corner's point on `c` — where the handle is drawn and grabbed.
+    pub fn of(self, c: Crop) -> (f32, f32) {
+        let (x1, y1) = (c.x + c.w, c.y + c.h);
+        match self {
+            Corner::Nw => (c.x, c.y),
+            Corner::Ne => (x1, c.y),
+            Corner::Sw => (c.x, y1),
+            Corner::Se => (x1, y1),
+        }
+    }
+}
+
+impl Crop {
+    /// The whole frame — where `C` starts, sitting directly on the video.
+    pub fn full(width: u32, height: u32) -> Self {
+        Self { x: 0.0, y: 0.0, w: width as f32, h: height as f32 }
+    }
+
+    /// Slide without resizing, staying inside the image.
+    pub fn moved_to(self, x: f32, y: f32, width: u32, height: u32) -> Self {
+        Self {
+            x: x.clamp(0.0, (width as f32 - self.w).max(0.0)),
+            y: y.clamp(0.0, (height as f32 - self.h).max(0.0)),
+            ..self
+        }
+    }
+
+    /// Drag one corner to (x, y); the opposite corner is the anchor. The
+    /// pointer is clamped to the image first, so the rect can never be
+    /// dragged outside it, and `MIN_CROP` stops it collapsing.
+    pub fn with_corner(self, corner: Corner, x: f32, y: f32, width: u32, height: u32) -> Self {
+        let (ax, ay) = match corner {
+            Corner::Nw => (self.x + self.w, self.y + self.h),
+            Corner::Ne => (self.x, self.y + self.h),
+            Corner::Sw => (self.x + self.w, self.y),
+            Corner::Se => (self.x, self.y),
+        };
+        let x = x.clamp(0.0, width as f32);
+        let y = y.clamp(0.0, height as f32);
+        let (x0, x1) = (ax.min(x), ax.max(x));
+        let (y0, y1) = (ay.min(y), ay.max(y));
+        Self {
+            x: x0.min((width as f32 - MIN_CROP).max(0.0)),
+            y: y0.min((height as f32 - MIN_CROP).max(0.0)),
+            w: (x1 - x0).max(MIN_CROP).min(width as f32),
+            h: (y1 - y0).max(MIN_CROP).min(height as f32),
+        }
+    }
+
+    /// A rect from outside (`--crop x,y,w,h`) pulled inside the image.
+    pub fn clamped(self, width: u32, height: u32) -> Self {
+        Self {
+            w: self.w.clamp(MIN_CROP, width as f32),
+            h: self.h.clamp(MIN_CROP, height as f32),
+            ..self
+        }
+        .moved_to(self.x, self.y, width, height)
+    }
+
+    pub fn contains(self, x: f32, y: f32) -> bool {
+        x >= self.x && x <= self.x + self.w && y >= self.y && y <= self.y + self.h
+    }
+
+    /// Rounded to whole pixels and clipped to the image, for export:
+    /// (x, y, w, h), always at least one pixel each way.
+    pub fn pixels(self, width: u32, height: u32) -> (u32, u32, u32, u32) {
+        let x = (self.x.round().max(0.0) as u32).min(width.saturating_sub(1));
+        let y = (self.y.round().max(0.0) as u32).min(height.saturating_sub(1));
+        let w = (self.w.round().max(1.0) as u32).min(width - x);
+        let h = (self.h.round().max(1.0) as u32).min(height - y);
+        (x, y, w, h)
+    }
+}
+
+/// Copy a sub-rectangle out of a tightly packed image (`channels` bytes per
+/// pixel, `width * channels` per row) — the mask at 1, an RGBA frame at 4.
+pub fn crop_pixels(
+    pixels: &[u8],
+    width: u32,
+    channels: usize,
+    (x, y, w, h): (u32, u32, u32, u32),
+) -> Vec<u8> {
+    let row = width as usize * channels;
+    let (x, w) = (x as usize * channels, w as usize * channels);
+    (y as usize..(y + h) as usize)
+        .flat_map(|r| pixels[r * row + x..r * row + x + w].iter().copied())
+        .collect()
+}
+
 pub fn output_path(video: &Path) -> PathBuf {
     video.with_extension("mask.png")
+}
+
+/// Where a crop's video pixels land, beside the mask they match.
+pub fn crop_output_path(video: &Path) -> PathBuf {
+    video.with_extension("crop.png")
 }
 
 /// Write beside the source, then atomically replace the destination only after
 /// PNG encoding succeeds. A failed save leaves an existing mask intact.
 pub fn save(path: &Path, width: u32, height: u32, pixels: &[u8]) -> anyhow::Result<()> {
+    write_png(path, width, height, pixels, png::ColorType::Grayscale)
+}
+
+/// The same atomic write for a crop's colour pixels (the decoder hands the
+/// app RGBA, so that is what lands on disk).
+pub fn save_rgba(path: &Path, width: u32, height: u32, pixels: &[u8]) -> anyhow::Result<()> {
+    write_png(path, width, height, pixels, png::ColorType::Rgba)
+}
+
+fn write_png(
+    path: &Path,
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+    color: png::ColorType,
+) -> anyhow::Result<()> {
     use std::io::Write;
     let mut encoded = Vec::new();
     {
         let mut encoder = png::Encoder::new(&mut encoded, width, height);
-        encoder.set_color(png::ColorType::Grayscale);
+        encoder.set_color(color);
         encoder.set_depth(png::BitDepth::Eight);
         let mut writer = encoder.write_header()?;
         writer.write_image_data(pixels)?;
@@ -110,6 +244,44 @@ mod tests {
         mask.paint((-4.0, 8.0), (36.0, 8.0), 2.0);
         assert_eq!(mask.revision, revision);
     }
+    /// The crop is the contract between the two exported files: whatever
+    /// rectangle it names must cut the mask and the RGBA frame to the same
+    /// pixels, and it can never leave the image.
+    #[test]
+    fn crop_stays_inside_the_image_and_cuts_both_planes_alike() {
+        let full = Crop::full(32, 16);
+        assert_eq!(full.pixels(32, 16), (0, 0, 32, 16));
+        // Dragged past the edges, a move keeps its size and stops at them.
+        assert_eq!(full.moved_to(9.0, 9.0, 32, 16), full);
+        let c = Crop { x: 8.0, y: 4.0, w: 8.0, h: 4.0 };
+        assert_eq!(c.moved_to(100.0, -100.0, 32, 16), Crop { x: 24.0, y: 0.0, ..c });
+        // A corner drag anchors the opposite corner, clamps to the image…
+        let d = c.with_corner(Corner::Se, 100.0, 100.0, 32, 16);
+        assert_eq!(d, Crop { x: 8.0, y: 4.0, w: 24.0, h: 12.0 });
+        assert_eq!(Corner::Se.of(d), (32.0, 16.0));
+        // …and refuses to collapse past MIN_CROP, even dragged inside out.
+        let e = c.with_corner(Corner::Nw, 40.0, 40.0, 32, 16);
+        assert!(e.w >= MIN_CROP && e.h >= MIN_CROP);
+        assert!(e.x + e.w <= 32.0 && e.y + e.h <= 16.0);
+
+        // Same rect, one channel and four: the crop's pixel (i, j) is the
+        // image's (x + i, y + j) in both.
+        let rect = (3, 2, 4, 3);
+        let gray: Vec<u8> = (0..32u32 * 16).map(|i| i as u8).collect();
+        let rgba: Vec<u8> = gray.iter().flat_map(|p| [*p, 0, 0, 255]).collect();
+        let cut_gray = crop_pixels(&gray, 32, 1, rect);
+        let cut_rgba = crop_pixels(&rgba, 32, 4, rect);
+        assert_eq!(cut_gray.len(), 4 * 3);
+        assert_eq!(cut_rgba.len(), 4 * 3 * 4);
+        for j in 0..3usize {
+            for i in 0..4usize {
+                let source = gray[(2 + j) * 32 + 3 + i];
+                assert_eq!(cut_gray[j * 4 + i], source);
+                assert_eq!(cut_rgba[(j * 4 + i) * 4..][..4], [source, 0, 0, 255]);
+            }
+        }
+    }
+
     #[test]
     fn saved_png_preserves_dimensions_polarity_and_pixels() {
         let video =

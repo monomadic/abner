@@ -10,7 +10,7 @@
 use std::time::Instant;
 
 use crate::player::Player;
-use crate::mask::{self, Mask};
+use crate::mask::{self, Corner, Crop, Mask};
 use crate::probe::VideoInfo;
 use crate::render::{
     Align, FrameDesc, Item, RectItem, RectPx, TextItem, Upload, VAlign, VideoMode,
@@ -68,6 +68,15 @@ pub enum Cmd {
     ToggleFullscreen,
 }
 
+/// What a press on the crop marquee took hold of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CropGrab {
+    /// Anywhere inside: slide the whole rect, size unchanged.
+    Move,
+    /// One of the white squares: drag it, opposite corner anchored.
+    Corner(Corner),
+}
+
 pub struct Video {
     pub info: VideoInfo,
     pub player: Player,
@@ -75,6 +84,10 @@ pub struct Video {
     pub delivered: bool,
     /// Waiting to adopt the first frame after an exact seek while paused.
     pub pending: bool,
+    /// The frame on screen, kept only while mask mode is on: a crop export
+    /// writes these pixels, and the GPU's copy can't be read back. Mask
+    /// mode is paused, so this costs one copy per seek, not per frame.
+    pub last_frame: Option<std::sync::Arc<Vec<u8>>>,
 }
 
 pub struct App {
@@ -87,7 +100,14 @@ pub struct App {
     stroke_last: Option<(f32, f32)>,
     cursor_inside: bool,
     mask_status: String,
-    mask_save: Option<std::sync::mpsc::Receiver<Result<std::path::PathBuf, String>>>,
+    mask_save: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+    /// The crop marquee (`C`), in the ACTIVE video's image pixels. While
+    /// it is up the pointer moves/resizes it instead of painting, and `S`
+    /// exports what it holds instead of the whole frame.
+    crop: Option<Crop>,
+    /// What the pointer grabbed, and where inside it (image px), so the
+    /// marquee doesn't jump to the cursor on the first move.
+    crop_drag: Option<(CropGrab, (f32, f32))>,
     /// Master clock, seconds of content time.
     t: f64,
     playing: bool,
@@ -160,6 +180,8 @@ impl App {
             cursor_inside: false,
             mask_status: String::new(),
             mask_save: None,
+            crop: None,
+            crop_drag: None,
             videos,
             active: 0,
             t: 0.0,
@@ -205,11 +227,104 @@ impl App {
         self.mouse_up();
     }
 
+    /// Show the marquee at the full frame, or hide it again. Hiding drops
+    /// the rect: `S` goes back to exporting the whole mask.
+    fn toggle_crop(&mut self) {
+        self.crop_drag = None;
+        self.painting = false;
+        self.stroke_last = None;
+        self.mask_status.clear();
+        self.crop = match self.crop {
+            Some(_) => None,
+            None => Some(self.full_crop()),
+        };
+    }
+
+    /// Open mask mode with the marquee up (`--crop`), optionally at an
+    /// explicit image-pixel rect. The CLI route into the state, so a
+    /// visual check never needs injected keystrokes.
+    pub fn start_crop(&mut self, rect: Option<[f32; 4]>) {
+        if !self.ready() {
+            return;
+        }
+        if !self.mask_mode {
+            self.key(Key::Char('m'));
+        }
+        if self.crop.is_none() {
+            self.toggle_crop();
+        }
+        if let Some([x, y, w, h]) = rect {
+            let mask = self.masks[self.active].as_ref().unwrap();
+            self.crop = Some(Crop { x, y, w, h }.clamped(mask.width, mask.height));
+        }
+    }
+
+    fn full_crop(&self) -> Crop {
+        let mask = self.masks[self.active].as_ref().unwrap();
+        Crop::full(mask.width, mask.height)
+    }
+
+    /// Pointer position in the active video's image pixels — the mask's
+    /// grid, and the crop's. The one zoom transform, never a second one.
+    fn image_point(&self, x: f32, y: f32) -> (f32, f32) {
+        let r = self.content_rect(self.active);
+        let mask = self.masks[self.active].as_ref().unwrap();
+        ((x - r.x) / r.w * mask.width as f32, (y - r.y) / r.h * mask.height as f32)
+    }
+
+    /// The marquee on screen, through the same transform the video uses.
+    fn crop_rect(&self, c: Crop) -> RectPx {
+        let r = self.content_rect(self.active);
+        let mask = self.masks[self.active].as_ref().unwrap();
+        let (sx, sy) = (r.w / mask.width as f32, r.h / mask.height as f32);
+        RectPx { x: r.x + c.x * sx, y: r.y + c.y * sy, w: c.w * sx, h: c.h * sy }
+    }
+
+    /// Take hold of the marquee: a white square if the press is on one,
+    /// otherwise the body. A press outside it grabs nothing (the dimmed
+    /// area isn't part of the export, so there is nothing to do there).
+    fn crop_grab(&mut self, x: f32, y: f32) {
+        let Some(c) = self.crop else { return };
+        let s = self.crop_rect(c);
+        let point = self.image_point(x, y);
+        for (corner, sx, sy) in [
+            (Corner::Nw, s.x, s.y),
+            (Corner::Ne, s.x + s.w, s.y),
+            (Corner::Sw, s.x, s.y + s.h),
+            (Corner::Se, s.x + s.w, s.y + s.h),
+        ] {
+            if (x - sx).abs() <= CROP_GRAB && (y - sy).abs() <= CROP_GRAB {
+                let (hx, hy) = corner.of(c);
+                self.crop_drag = Some((CropGrab::Corner(corner), (point.0 - hx, point.1 - hy)));
+                return;
+            }
+        }
+        if c.contains(point.0, point.1) {
+            self.crop_drag = Some((CropGrab::Move, (point.0 - c.x, point.1 - c.y)));
+        }
+    }
+
+    fn crop_drag_to(&mut self, x: f32, y: f32) {
+        let (Some(c), Some((grab, (ox, oy)))) = (self.crop, self.crop_drag) else { return };
+        let mask = self.masks[self.active].as_ref().unwrap();
+        let (w, h) = (mask.width, mask.height);
+        let (px, py) = self.image_point(x, y);
+        self.crop = Some(match grab {
+            CropGrab::Move => c.moved_to(px - ox, py - oy, w, h),
+            CropGrab::Corner(corner) => c.with_corner(corner, px - ox, py - oy, w, h),
+        });
+        self.mask_status.clear();
+    }
+
     /// The mask uses exactly the full-window video transform. The status line,
     /// the traffic-light strip and the letterbox are not paint targets; leaving
     /// them breaks stroke continuity.
     pub fn brush_cursor_visible(&self) -> bool {
-        if !self.mask_mode || !self.cursor_inside || !self.ready() { return false; }
+        // The marquee owns the pointer while it is up — the brush would be
+        // painting into a region the crop is about to throw away.
+        if !self.mask_mode || !self.cursor_inside || !self.ready() || self.crop.is_some() {
+            return false;
+        }
         let r = self.content_rect(self.active);
         let (x, y) = self.cursor;
         x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h
@@ -227,17 +342,46 @@ impl App {
         self.mask_status.clear();
     }
 
+    /// Export the mask — and, with the marquee up, the crop of it plus the
+    /// video pixels underneath, cut to the very same rectangle so the two
+    /// files line up pixel for pixel.
     fn save_mask(&mut self) {
         if self.mask_save.is_some() { return; }
         let mask = self.masks[self.active].as_ref().unwrap();
-        let (width, height, pixels) = (mask.width, mask.height, mask.pixels.clone());
-        let path = mask::output_path(&self.videos[self.active].info.path);
+        let video = &self.videos[self.active];
+        let path = mask::output_path(&video.info.path);
+        let (width, height, pixels, frame) = match self.crop {
+            None => (mask.width, mask.height, mask.pixels.clone(), None),
+            Some(c) => {
+                let rect = c.pixels(mask.width, mask.height);
+                // The frame is whatever mask mode last put on screen; it is
+                // missing only if no frame has arrived yet, and then the
+                // mask alone still saves.
+                let frame = video.last_frame.as_ref().map(|f| {
+                    (
+                        mask::crop_output_path(&video.info.path),
+                        mask::crop_pixels(f, mask.width, 4, rect),
+                    )
+                });
+                (rect.2, rect.3, std::sync::Arc::new(
+                    mask::crop_pixels(&mask.pixels, mask.width, 1, rect),
+                ), frame)
+            }
+        };
         let (sender, receiver) = std::sync::mpsc::channel();
         self.mask_save = Some(receiver);
         self.mask_status = "Saving…".into();
         std::thread::spawn(move || {
-            let result = mask::save(&path, width, height, &pixels)
-                .map(|()| path).map_err(|e| e.to_string());
+            let result = (|| -> anyhow::Result<String> {
+                mask::save(&path, width, height, &pixels)?;
+                let mut saved = name_of(&path);
+                if let Some((crop_path, crop_pixels)) = frame {
+                    mask::save_rgba(&crop_path, width, height, &crop_pixels)?;
+                    saved = format!("{saved} + {}", name_of(&crop_path));
+                }
+                Ok(format!("{saved} ({width}×{height})"))
+            })()
+            .map_err(|e| e.to_string());
             let _ = sender.send(result);
         });
     }
@@ -247,6 +391,11 @@ impl App {
         let r = self.content_rect(self.active);
         items.push(Item::Mask { r, id: mask.id, revision: mask.revision,
             width: mask.width, height: mask.height, pixels: mask.pixels.clone() });
+        // The old top strip is gone — mask state lives in the bottom status
+        // line now, which is drawn after this layer and so stays undimmed.
+        if let Some(c) = self.crop {
+            self.build_crop_layer(items, c);
+        }
         if self.brush_cursor_visible() {
             let diameter = self.brush_diameter * r.w / mask.width as f32;
             // Two contrasting outlines keep the actual brush footprint visible
@@ -258,6 +407,66 @@ impl App {
                     radius: d * 0.5, border_w: width, border_color: color,
                     color: [0.0; 4], ..Default::default()
                 }));
+            }
+        }
+    }
+
+    /// The marquee: everything outside it dimmed away, a dashed border and
+    /// a white square on each corner. The dashes are little rects — the
+    /// renderer has no line primitive — and every piece is drawn twice,
+    /// dark underlay then white, so the box holds against bright footage
+    /// the way the brush cursor does.
+    fn build_crop_layer(&self, items: &mut Vec<Item>, c: Crop) {
+        let r = self.crop_rect(c);
+        let (vw, vh) = self.vp;
+        let (x1, y1) = ((r.x + r.w).clamp(0.0, vw), (r.y + r.h).clamp(0.0, vh));
+        let (x0, y0) = (r.x.clamp(0.0, vw), r.y.clamp(0.0, vh));
+        for dim in [
+            RectPx { x: 0.0, y: 0.0, w: vw, h: y0 },
+            RectPx { x: 0.0, y: y1, w: vw, h: vh - y1 },
+            RectPx { x: 0.0, y: y0, w: x0, h: y1 - y0 },
+            RectPx { x: x1, y: y0, w: vw - x1, h: y1 - y0 },
+        ] {
+            if dim.w > 0.0 && dim.h > 0.0 {
+                items.push(Item::Rect(RectItem::new(dim, CROP_DIM)));
+            }
+        }
+        let mut edge = |x: f32, y: f32, run: f32, horizontal: bool| {
+            let mut at = 0.0;
+            while at < run {
+                let len = CROP_DASH.min(run - at);
+                let seg = if horizontal {
+                    RectPx { x: x + at, y, w: len, h: CROP_LINE_W }
+                } else {
+                    RectPx { x, y: y + at, w: CROP_LINE_W, h: len }
+                };
+                for (grow, color) in [(1.0, CROP_INK), (0.0, CROP_LINE)] {
+                    items.push(Item::Rect(RectItem::new(
+                        RectPx {
+                            x: seg.x - grow,
+                            y: seg.y - grow,
+                            w: seg.w + grow * 2.0,
+                            h: seg.h + grow * 2.0,
+                        },
+                        color,
+                    )));
+                }
+                at += CROP_DASH + CROP_GAP;
+            }
+        };
+        let half = CROP_LINE_W * 0.5;
+        edge(r.x, r.y - half, r.w, true);
+        edge(r.x, r.y + r.h - half, r.w, true);
+        edge(r.x - half, r.y, r.h, false);
+        edge(r.x + r.w - half, r.y, r.h, false);
+        for (hx, hy) in
+            [(r.x, r.y), (r.x + r.w, r.y), (r.x, r.y + r.h), (r.x + r.w, r.y + r.h)]
+        {
+            for (size, color) in [(CROP_HANDLE + 2.0, CROP_INK), (CROP_HANDLE, CROP_LINE)] {
+                items.push(Item::Rect(RectItem::new(
+                    RectPx { x: hx - size * 0.5, y: hy - size * 0.5, w: size, h: size },
+                    color,
+                )));
             }
         }
     }
@@ -429,15 +638,21 @@ impl App {
             if self.mask_mode {
                 self.playing = false;
                 self.ensure_mask();
+                // Re-deliver the frame on screen so a crop export has the
+                // pixels: the ones already shown went back to the decoder.
+                self.seek_all(self.t, true);
+            } else {
+                self.leave_mask_mode();
             }
             return;
         }
         if self.mask_mode {
             match k {
-                Key::Char('+' | '=') => { self.resize_brush(1.25); return; }
-                Key::Char('-' | '_') => { self.resize_brush(0.8); return; }
+                Key::Char(']' | '+' | '=') => { self.resize_brush(1.25); return; }
+                Key::Char('[' | '-' | '_') => { self.resize_brush(0.8); return; }
+                Key::Char('c' | 'C') => { self.toggle_crop(); return; }
                 Key::Char('s' | 'S') => { self.save_mask(); return; }
-                Key::Escape => { self.mask_mode = false; self.mouse_up(); return; }
+                Key::Escape => { self.mask_mode = false; self.leave_mask_mode(); return; }
                 _ => {}
             }
             self.stroke_last = None;
@@ -491,14 +706,24 @@ impl App {
         self.active = idx;
         self.badge_flash = 1.2;
         self.mouse_up();
-        if self.mask_mode { self.ensure_mask(); self.mask_status.clear(); }
+        if self.mask_mode {
+            self.ensure_mask();
+            self.mask_status.clear();
+            // The new video has its own dimensions; a marquee carried over
+            // from the old one would mean nothing.
+            if self.crop.is_some() { self.crop = Some(self.full_crop()); }
+        }
     }
 
     pub fn cursor_moved(&mut self, x: f32, y: f32) {
         self.cursor_inside = true;
         if self.mask_mode {
             self.cursor = (x, y);
-            if self.painting { self.paint_at_cursor(); }
+            if self.crop_drag.is_some() {
+                self.crop_drag_to(x, y);
+            } else if self.painting {
+                self.paint_at_cursor();
+            }
             return;
         }
         // Any motion re-reveals the transport.
@@ -524,8 +749,12 @@ impl App {
         if self.mask_mode {
             self.cursor = (x, y);
             self.cursor_inside = true;
-            self.painting = self.brush_cursor_visible();
             self.stroke_last = None;
+            if self.crop.is_some() {
+                self.crop_grab(x, y);
+                return;
+            }
+            self.painting = self.brush_cursor_visible();
             if self.painting { self.paint_at_cursor(); }
             return;
         }
@@ -563,6 +792,17 @@ impl App {
         self.stroke_last = None;
         self.drag = None;
         self.scrubbing = false;
+        self.crop_drag = None;
+    }
+
+    /// Leaving mask mode drops the marquee and the frames it was holding
+    /// for export — a full RGBA copy per video.
+    fn leave_mask_mode(&mut self) {
+        self.mouse_up();
+        self.crop = None;
+        for v in &mut self.videos {
+            v.last_frame = None;
+        }
     }
 
     /// Seek to the position the pointer names on the seek bar.
@@ -668,7 +908,7 @@ impl App {
             match receiver.try_recv() {
                 Ok(result) => {
                     self.mask_status = match result {
-                        Ok(path) => format!("Saved {}", path.file_name().unwrap_or_default().to_string_lossy()),
+                        Ok(saved) => format!("Saved {saved}"),
                         Err(error) => { log::error!("Mask save failed: {error}"); format!("Save failed: {error}") }
                     };
                     self.mask_save = None;
@@ -699,6 +939,7 @@ impl App {
         let mut uploads = Vec::new();
         let t = self.t;
         let active = self.active;
+        let capture = self.mask_mode;
         let mut adopt = None;
         for (i, v) in self.videos.iter_mut().enumerate() {
             let got = if v.pending {
@@ -716,6 +957,12 @@ impl App {
                 }
                 v.shown_pts = pts;
                 v.delivered = true;
+                // The GPU's copy can't be read back, so a crop export needs
+                // its own. Mask mode is paused: this runs on entry and on
+                // seeks, not once a frame.
+                if capture {
+                    v.last_frame = Some(std::sync::Arc::new(buf.clone()));
+                }
                 uploads.push(Upload { idx: i, w: v.player.w, h: v.player.h, buf });
             }
         }
@@ -1264,7 +1511,9 @@ impl App {
         let bar = RectPx { x: 0.0, y: vp.1 - STATUS_H, w: vp.0, h: STATUS_H };
         let cy = bar.y + bar.h / 2.0;
         let (bg, chip, name) = if self.mask_mode {
-            (STATUS_BG_MASK, MASK_RED, "MASK")
+            // The marquee is a sub-mode of mask: same tint, its own name,
+            // because its keys are not the painting ones.
+            (STATUS_BG_MASK, MASK_RED, if self.crop.is_some() { "CROP" } else { "MASK" })
         } else {
             (STATUS_BG_AB, ACCENT, "A/B TEST")
         };
@@ -1285,14 +1534,27 @@ impl App {
             n => format!("1-{}", n.min(9)),
         };
         let keys: &[(&str, &str)] = if self.mask_mode {
-            &[
-                ("drag", "paint"),
-                ("+ -", "brush"),
-                ("s", "save"),
-                (&clips, "clip"),
-                ("m", "exit"),
-                ("enter", "next clip"),
-            ]
+            // The marquee owns the pointer while it is up, so the brush keys
+            // would be lying about what a drag does.
+            if self.crop.is_some() {
+                &[
+                    ("drag", "move / resize"),
+                    ("c", "hide"),
+                    ("s", "save"),
+                    (&clips, "clip"),
+                    ("m", "exit"),
+                ]
+            } else {
+                &[
+                    ("drag", "paint"),
+                    ("+ -", "brush"),
+                    ("c", "crop"),
+                    ("s", "save"),
+                    (&clips, "clip"),
+                    ("m", "exit"),
+                    ("enter", "next clip"),
+                ]
+            }
         } else {
             &[
                 (&clips, "clip"),
@@ -1311,16 +1573,25 @@ impl App {
         let status = if self.mask_mode {
             let v = &self.videos[self.active];
             let name = v.info.path.file_name().unwrap_or_default().to_string_lossy();
-            let tail = if self.mask_status.is_empty() {
-                "blue → white · red → black"
-            } else {
-                &self.mask_status
+            // With the marquee up the crop's size is the thing to watch —
+            // the mask and the video under it both export at exactly it.
+            let (middle, hint) = match self.crop {
+                Some(c) => {
+                    let mask = self.masks[self.active].as_ref().unwrap();
+                    let (_, _, w, h) = c.pixels(mask.width, mask.height);
+                    (format!("crop {w}×{h}"), "S writes the crop and the video under it")
+                }
+                None => (
+                    format!("brush {:.0}px", self.brush_diameter),
+                    "blue → white · red → black",
+                ),
             };
+            let tail = if self.mask_status.is_empty() { hint } else { &self.mask_status };
             format!(
-                "{} {} · brush {:.0}px · {}",
+                "{} {} · {} · {}",
                 (b'A' + self.active as u8) as char,
                 ellipsize(&name, 28),
-                self.brush_diameter,
+                middle,
                 tail
             )
         } else {
@@ -1486,6 +1757,86 @@ mod tests {
         assert!(app.masks.iter().all(Option::is_none));
     }
 
+    /// The crop marquee: it starts on the whole frame, the corners resize
+    /// and the body moves (both staying inside the image), it takes the
+    /// pointer away from the brush while it is up, and S writes the mask
+    /// and the video pixels cut to the SAME rectangle — that pairing is
+    /// the whole point of the feature.
+    #[test]
+    fn crop_marquee_drags_and_exports_mask_and_video_at_one_size() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 2);
+        app.key(Key::Char('m'));
+        // The export needs real pixels, so wait for a decoded frame.
+        assert!(
+            tick_until(&mut app, Duration::from_secs(10), |a| a.videos[0].last_frame.is_some()),
+            "mask mode never captured a frame to crop"
+        );
+        // A 320x180 clip in a 1280x800 viewport draws 1280x720 at y=40, so
+        // image (ix, iy) is screen (4·ix, 40 + 4·iy).
+        app.key(Key::Char('c'));
+        assert_eq!(app.crop, Some(Crop { x: 0.0, y: 0.0, w: 320.0, h: 180.0 }));
+        assert!(!app.brush_cursor_visible(), "the marquee owns the pointer");
+
+        // Drag the SE handle in to a quarter frame.
+        app.mouse_down(1280.0, 760.0);
+        app.cursor_moved(640.0, 400.0);
+        app.mouse_up();
+        assert_eq!(app.crop, Some(Crop { x: 0.0, y: 0.0, w: 160.0, h: 90.0 }));
+
+        // Drag the body far past the corner: it keeps its size and stops
+        // at the edge rather than leaving the image.
+        app.mouse_down(320.0, 220.0);
+        app.cursor_moved(4000.0, 4000.0);
+        app.mouse_up();
+        assert_eq!(app.crop, Some(Crop { x: 160.0, y: 90.0, w: 160.0, h: 90.0 }));
+
+        // A press inside paints nothing while the marquee is up.
+        app.mouse_down(1000.0, 600.0);
+        app.cursor_moved(1100.0, 620.0);
+        app.mouse_up();
+        assert_eq!(app.masks[0].as_ref().unwrap().revision, 0);
+
+        let video = std::env::temp_dir().join(format!("abner-crop-{}.mp4", std::process::id()));
+        app.videos[0].info.path = video.clone();
+        app.key(Key::Char('s'));
+        assert!(tick_until(&mut app, Duration::from_secs(5), |a| a.mask_save.is_none()));
+        assert!(app.mask_status.starts_with("Saved"), "{}", app.mask_status);
+        let (mask_png, crop_png) = (mask::output_path(&video), mask::crop_output_path(&video));
+        let read = |path: &PathBuf| {
+            let mut reader = png::Decoder::new(std::io::BufReader::new(
+                std::fs::File::open(path).unwrap(),
+            ))
+            .read_info()
+            .unwrap();
+            let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
+            let info = reader.next_frame(&mut pixels).unwrap();
+            (info.width, info.height, info.color_type)
+        };
+        let cut = read(&mask_png);
+        assert_eq!(cut, (160, 90, png::ColorType::Grayscale));
+        assert_eq!(read(&crop_png), (160, 90, png::ColorType::Rgba));
+        std::fs::remove_file(mask_png).unwrap();
+        std::fs::remove_file(crop_png).unwrap();
+
+        // Hiding the marquee gives the brush back — and the mask its
+        // full size, since the crop is gone with it.
+        app.key(Key::Char('c'));
+        assert_eq!(app.crop, None);
+        app.mouse_down(640.0, 400.0);
+        app.mouse_up();
+        assert!(app.masks[0].as_ref().unwrap().revision > 0);
+        // [ and ] size the brush.
+        let brush = app.brush_diameter;
+        app.key(Key::Char(']'));
+        assert!(app.brush_diameter > brush);
+        app.key(Key::Char('['));
+        assert!((app.brush_diameter - brush).abs() < 0.01);
+        // Leaving mask mode lets the retained frames go.
+        app.key(Key::Char('m'));
+        assert!(app.videos.iter().all(|v| v.last_frame.is_none()));
+    }
+
     fn test_clip() -> Option<PathBuf> {
         if Command::new("ffmpeg").arg("-version").output().is_err() {
             eprintln!("skipping: ffmpeg not on PATH");
@@ -1518,7 +1869,7 @@ mod tests {
             info.rotation,
         )
         .expect("spawn");
-        Video { info, player, shown_pts: 0.0, delivered: false, pending: false }
+        Video { info, player, shown_pts: 0.0, delivered: false, pending: false, last_frame: None }
     }
 
     fn mk_app(clip: &PathBuf, n: usize) -> App {
@@ -1827,6 +2178,19 @@ const KEY_LABEL_PX: f32 = 12.0;
 // Launch window.
 const LAUNCH_BG: [f32; 4] = [0.027, 0.027, 0.035, 0.90];
 
+// Crop marquee. The dimmer runs high for the reason the HUD's panels do
+// (see shader.wgsl): linear-space blending means a modest alpha barely
+// touches bright footage, and this one has to read as "not exported".
+const CROP_DIM: [f32; 4] = [0.0, 0.0, 0.0, 0.72];
+const CROP_LINE: [f32; 4] = [1.0, 1.0, 1.0, 0.95];
+const CROP_INK: [f32; 4] = [0.0, 0.0, 0.0, 0.75];
+const CROP_LINE_W: f32 = 1.5;
+const CROP_DASH: f32 = 7.0;
+const CROP_GAP: f32 = 5.0;
+const CROP_HANDLE: f32 = 9.0;
+/// Half-size of a corner's grab square — a little wider than it is drawn.
+const CROP_GRAB: f32 = 11.0;
+
 /// Info block width, and how many monospace chars fit inside it.
 const INFO_W: f32 = 430.0;
 const INFO_CH: usize = ((INFO_W - 16.0) / (10.5 * MONO_ADV)) as usize;
@@ -1901,6 +2265,10 @@ fn keycap(items: &mut Vec<Item>, x: f32, y: f32, label: &str) {
 }
 
 /// Clip a run to `max` characters, marking the cut with an ellipsis.
+fn name_of(path: &std::path::Path) -> String {
+    path.file_name().unwrap_or_default().to_string_lossy().into_owned()
+}
+
 fn ellipsize(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();

@@ -35,7 +35,7 @@ use text::TextCtx;
 const USAGE: &str = "\
 abner — A/B video comparison player
 
-usage: abner [--mask] [--view <overlay|sbs|delta|split|checker|blend>] [<video-a> [<video-b> [more...]]]
+usage: abner [--mask] [--crop [x,y,w,h]] [--view <overlay|sbs|delta|split|checker|blend>] [<video-a> [<video-b> [more...]]]
 
 Run with no arguments (or launched from the .app bundle) to open the
 launch window, then drag clips onto it: one drop fills slot A and plays
@@ -54,8 +54,11 @@ keys:
   - =          adjust delta gain / blend / checker size
   pinch        zoom on the pointer, photo-style (drag or scroll to pan; synced)
   M            toggle mask painting (pauses; Enter changes focused video)
-  + -          change brush size in mask mode
-  S            save focused video mask as <name>.mask.png
+  [ ]          change brush size in mask mode
+  C            crop marquee in mask mode: drag to move, corners to resize
+               (--crop opens there; --crop x,y,w,h sets it in image pixels)
+  S            save the mask as <name>.mask.png — with a crop up, both it
+               and the video under it (<name>.crop.png), cut to the marquee
   Z            reset zoom
   F            fullscreen (borderless, same Space)
   Tab          toggle info overlay
@@ -72,6 +75,7 @@ fn main() -> anyhow::Result<()> {
     }
     let mut mode = app::Mode::Overlay;
     let mut mask_mode = false;
+    let mut crop: Option<Option<[f32; 4]>> = None;
     let mut paths: Vec<PathBuf> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -86,6 +90,12 @@ fn main() -> anyhow::Result<()> {
             }
         } else if a == "--mask" {
             mask_mode = true;
+        } else if a == "--crop" {
+            // The marquee, optionally at an explicit image-pixel rect.
+            // Bare `--crop` starts on the whole frame, as C does.
+            crop = Some(it.clone().next().and_then(|v| parse_rect(v)).inspect(|_| {
+                it.next();
+            }));
         } else if !a.starts_with('-') {
             paths.push(PathBuf::from(a));
         }
@@ -134,6 +144,7 @@ fn main() -> anyhow::Result<()> {
         occluded: false,
     };
     if mask_mode { runner.app.key(Key::Char('m')); }
+    if let Some(rect) = crop { runner.app.start_crop(rect); }
     event_loop.run_app(&mut runner)?;
     Ok(())
 }
@@ -142,6 +153,13 @@ fn main() -> anyhow::Result<()> {
 /// ffprobe under a hard deadline (`probe::run_deadlined`), which is what
 /// makes it safe to call straight from the event loop on a drop: a file
 /// on a dead mount fails in bounded time instead of hanging the window.
+/// `x,y,w,h` in image pixels, for `--crop`.
+fn parse_rect(s: &str) -> Option<[f32; 4]> {
+    let mut it = s.split(',').map(|v| v.trim().parse::<f32>());
+    let rect = [it.next()?.ok()?, it.next()?.ok()?, it.next()?.ok()?, it.next()?.ok()?];
+    it.next().is_none().then_some(rect)
+}
+
 fn load_video(path: &Path) -> anyhow::Result<Video> {
     let info = probe::probe(path)?;
     log::info!(
@@ -160,7 +178,7 @@ fn load_video(path: &Path) -> anyhow::Result<Video> {
         info.rotation,
     )
     .ok_or_else(|| anyhow::anyhow!("failed to start decoder for {}", path.display()))?;
-    Ok(Video { info, player, shown_pts: 0.0, delivered: false, pending: false })
+    Ok(Video { info, player, shown_pts: 0.0, delivered: false, pending: false, last_frame: None })
 }
 
 fn title_for(videos: &[Video]) -> String {

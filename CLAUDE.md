@@ -100,12 +100,25 @@ from one to the other, keeping its number.
   labels, like switchblade's. The A|B pill sits IN the titlebar strip, level with the
   traffic lights. Transport glyphs are geometry (`Item::Triangle`, shader mode 9), never
   font glyphs: a font's ▶ is placed by its metrics, not its ink, and never centres.
-- `src/mask.rs` — per-video native-resolution binary masks and atomic grayscale PNG
-  export. `App` owns lazy masks and converts pointer positions through `content_rect`;
-  never invent a second zoom transform. `M` temporarily draws the focused video alone,
-  `+/-` sizes the image-pixel brush, `S` snapshots to a save worker. Blue = 255, red = 0.
-  Renderer mode 8 samples one R8 mask texture; `(id, revision)` avoids idle uploads.
-  `--mask a.mp4 b.mp4` reaches this state for targeted captures without global keys.
+- `src/mask.rs` — per-video native-resolution binary masks, the crop marquee's geometry,
+  and atomic PNG export. `App` owns lazy masks and converts pointer positions through
+  `content_rect`; never invent a second zoom transform. `M` temporarily draws the focused
+  video alone, `+`/`-` (or `[`/`]`) size the image-pixel brush, `S` snapshots to a save
+  worker. Blue = 255, red = 0. Renderer mode 8 samples one R8 mask texture;
+  `(id, revision)` avoids idle uploads. Mask mode has no panel of its own any more — its
+  readout is the bottom status line, which names the sub-mode in its chip (`MASK` /
+  `CROP`) and is drawn AFTER `build_mask_layer` so the marquee's dimming never touches
+  it. **`C` is the crop marquee** (2026-09-20): a `Crop` in IMAGE pixels
+  — the mask's own grid, so one rectangle cuts both planes — drawn as dashed rects
+  (the renderer has no line primitive) with white corner handles, everything outside it
+  dimmed. While it is up the pointer moves/resizes it and `brush_cursor_visible()` is
+  false, so painting can't run into a drag; `C` again drops it. `S` then writes the mask
+  AND the video pixels under it at the same size (`<name>.mask.png` + `<name>.crop.png`).
+  That second file is why `Video::last_frame` exists: the GPU's copy can't be read back,
+  so mask mode keeps one RGBA frame per video (cheap — it's paused, so the copy happens
+  on entry and on seeks, and entering mask mode re-seeks to re-deliver the frame already
+  handed back to the decoder). `--mask a.mp4 b.mp4` reaches this state for targeted
+  captures without global keys, and `--crop [x,y,w,h]` reaches the marquee the same way.
 - `src/render.rs` — one wgpu pipeline for everything (rects, video quads, compare
   modes, glyphs, the logo), instanced quads in logical px. Per-video textures carry a blit-filled
   mip chain (4K fit-to-window without shimmer). Bind groups are cached per (A,B) texture
@@ -170,7 +183,8 @@ the "VIDEO QUALITY TESTING TOOLKIT" line that used to be a second text run.
 - `cargo test` generates tiny ffmpeg test clips; the suite covers master-clock
   draining, exact seek, two-player sync, framestep adoption, reader-thread cleanup
   (condvar-parked AND wedged-in-libav-I/O, the latter via a mkfifo dribble), and the
-  redraw cadence (`schedule::tests`), and slot-filling drops (0 → 1 → 2 → 3, asserting
+  redraw cadence (`schedule::tests`), crop drags and the paired crop export, and
+  slot-filling drops (0 → 1 → 2 → 3, asserting
   a lone clip plays, the clock rewinds and the streams stay inside a frame period of each other).
   Keep it green — sync IS the product.
 - Building needs the ffmpeg **8.x** dev libraries — `brew install ffmpeg@8`, which is
