@@ -24,7 +24,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key as WinitKey, NamedKey};
+use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 use app::{App, Cmd, Key, Video};
@@ -62,6 +62,7 @@ keys:
   Z            reset zoom
   F            fullscreen (borderless, same Space)
   Tab          toggle info overlay
+  Cmd-W        close the focused clip (on the empty window: quit)
   Q            quit
   Esc          leave fullscreen, else quit
 ";
@@ -139,6 +140,7 @@ fn main() -> anyhow::Result<()> {
         gpu: None,
         last_frame: Instant::now(),
         cursor: (0.0, 0.0),
+        mods: ModifiersState::empty(),
         animating: true,
         redraw_at: None,
         occluded: false,
@@ -210,6 +212,7 @@ struct Runner {
     gpu: Option<Gpu>,
     last_frame: Instant,
     cursor: (f32, f32),
+    mods: ModifiersState,
     animating: bool,
     redraw_at: Option<Instant>,
     occluded: bool,
@@ -227,6 +230,21 @@ impl Runner {
     /// than taken as a reason to fail the app, because a drop is a guess
     /// by definition. Survivors fill the next free slots; `replace` (⌘
     /// held) starts over from the first of them.
+    /// The GPU's per-video textures are indexed by video slot, so they
+    /// follow the app's list; unchanged slots keep their texture (see
+    /// `set_video_dims`), so an append never blanks what is on screen.
+    fn sync_videos(&mut self) {
+        let dims: Vec<(u32, u32)> =
+            self.app.videos.iter().map(|v| (v.player.w, v.player.h)).collect();
+        if let Some(gpu) = &mut self.gpu {
+            gpu.set_video_dims(&dims);
+        }
+        self.title = title_for(&self.app.videos);
+        if let Some(w) = &self.window {
+            w.set_title(&self.title);
+        }
+    }
+
     fn files_dropped(&mut self, paths: Vec<PathBuf>, replace: bool) {
         self.app.set_drag_hover(false);
         let mut videos = Vec::new();
@@ -248,18 +266,7 @@ impl Runner {
             if replace { "replace" } else { "add" }
         );
         self.app.add_videos(videos, replace);
-        // The GPU's per-video textures are indexed by video slot, so they
-        // follow the app's list; unchanged slots keep their texture (see
-        // `set_video_dims`), so an append never blanks what is on screen.
-        let dims: Vec<(u32, u32)> =
-            self.app.videos.iter().map(|v| (v.player.w, v.player.h)).collect();
-        if let Some(gpu) = &mut self.gpu {
-            gpu.set_video_dims(&dims);
-        }
-        self.title = title_for(&self.app.videos);
-        if let Some(w) = &self.window {
-            w.set_title(&self.title);
-        }
+        self.sync_videos();
     }
 
     fn apply_cmds(&mut self, event_loop: &ActiveEventLoop) {
@@ -269,6 +276,13 @@ impl Runner {
                 Cmd::ToggleFullscreen => {
                     if let Some(w) = &self.window {
                         toggle_fast_fullscreen(w);
+                    }
+                }
+                Cmd::VideosChanged => {
+                    self.sync_videos();
+                    self.animating = true;
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
                     }
                 }
             }
@@ -491,11 +505,19 @@ impl ApplicationHandler for Runner {
                     self.animating = true;
                 }
             }
+            WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
                     return;
                 }
                 let key = match &event.logical_key {
+                    // ⌘W closes the focused clip, like a document window.
+                    // Other ⌘-chords still fall through as their bare key.
+                    WinitKey::Character(s)
+                        if self.mods.super_key() && s.eq_ignore_ascii_case("w") =>
+                    {
+                        Some(Key::Close)
+                    }
                     WinitKey::Named(NamedKey::ArrowLeft) => Some(Key::Left),
                     WinitKey::Named(NamedKey::ArrowRight) => Some(Key::Right),
                     WinitKey::Named(NamedKey::Enter) => Some(Key::Enter),

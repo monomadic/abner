@@ -42,10 +42,13 @@ from one to the other, keeping its number.
   picking the next render). The script trims to the alpha bbox and scales up
   until the 1024² centre crop is opaque corner to corner — `--zoom` defaults to
   the smallest such value, found by search, so the crop is never tighter than the
-  guideline needs. Switchblade's slot icon already satisfies this (1254², fully
-  opaque, edge to edge), which is why its Dock icon was always right on an
-  identical `CFBundleIconFile`-only bundle. `packaging/check-icon.swift` there
-  renders what the OS composites, for verifying a change against the source art) and pushed to `NSApp.setApplicationIconImage` at startup — a
+  guideline needs. `packaging/check-icon.swift` (switchblade's, extended to take a PNG) renders
+  what the OS composites — `swift packaging/check-icon.swift assets/app-icon.png`
+  checks the slot BEFORE a build; run it after every icon change and look for the
+  plate. Do NOT port switchblade's `seat-icon.sh`/`squircle.sh`: they seat a
+  pre-masked 824px body on a transparent 1024 canvas, the opposite rule, and
+  switchblade's own slot has been plated since it adopted them (checked 2026-09-22
+  — the older claim here that its slot was opaque edge to edge had gone stale)) and pushed to `NSApp.setApplicationIconImage` at startup — a
   bare Mach-O has no `CFBundleIconFile`, and running from a shell is the common case
   here. **Drops** are switchblade's `FilesDropped` path: winit sends one `DroppedFile`
   per file with no end-of-batch marker, so `window_event` accumulates into `dropped`
@@ -89,6 +92,11 @@ from one to the other, keeping its number.
   `t` (`pending` flags + `take_next`). The clock wraps at the shortest stream duration
   and exact-seeks everyone to 0.
   **Keys**: `1`–`9` pick a clip directly (`select`), `V`/Shift-V cycle the view.
+  ⌘W (`Key::Close`, from winit's `ModifiersChanged` state) closes the focused clip
+  (`close_active`): survivors shift down a slot and are exact-seeked to the current `t`
+  so each re-delivers into its new texture slot; `started` is NOT reset (the seek lands
+  just past `t`, so a delivery-gated clock would deadlock). `Cmd::VideosChanged` makes
+  the runner re-sync textures + title. Last clip closed = launch window; ⌘W there quits.
   The bottom **status line** (`build_status_line`) is vim/helix-style: a fixed-width
   chip naming the input mode (`A/B TEST` on the accent, `MASK` on the logo's red), that
   mode's keycaps, and mode status on the right; the bar itself is tinted by mode (dark

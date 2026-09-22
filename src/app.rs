@@ -60,12 +60,17 @@ pub enum Key {
     Escape,
     Tab,
     Backspace,
+    /// ⌘W: close the focused clip.
+    Close,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum Cmd {
     Quit,
     ToggleFullscreen,
+    /// The clip list changed shape outside a drop (⌘W): the runner
+    /// re-syncs the GPU's per-slot textures and the window title.
+    VideosChanged,
 }
 
 /// What a press on the crop marquee took hold of.
@@ -549,6 +554,46 @@ impl App {
         self.drag_hover = false;
     }
 
+    /// Drop the focused clip (⌘W). The survivors shift down a slot, and
+    /// the GPU's textures are indexed by slot, so every survivor is
+    /// exact-seeked to the current `t`: each re-delivers the frame for
+    /// this moment into its new slot (a paused one too, via `pending`)
+    /// rather than showing its neighbour's last frame. Closing the last
+    /// clip returns to the launch window.
+    fn close_active(&mut self) {
+        if self.videos.is_empty() {
+            return;
+        }
+        let idx = self.active.min(self.videos.len() - 1);
+        self.videos.remove(idx);
+        self.masks.remove(idx);
+        self.cmds.push(Cmd::VideosChanged);
+        self.mouse_up();
+        self.stroke_last = None;
+        if self.videos.is_empty() {
+            self.mask_mode = false;
+            self.mask_status.clear();
+            self.active = 0;
+            self.t = 0.0;
+            self.zoom = 1.0;
+            self.center = (0.5, 0.5);
+            return;
+        }
+        self.active = idx.min(self.videos.len() - 1);
+        self.badge_flash = 1.2;
+        self.fps = Self::fps_of(&self.videos);
+        self.wrap = Self::wrap_of(&self.videos);
+        let max = if self.wrap.is_finite() { (self.wrap - 0.05).max(0.0) } else { f64::MAX };
+        // `started` stays as it is: an exact seek lands on the first frame
+        // AT OR AFTER `t`, so gating the clock on delivery would wait
+        // forever for a pts it never advances to (as with `seek_by`).
+        self.seek_all(self.t.clamp(0.0, max), true);
+        if self.mask_mode {
+            self.ensure_mask();
+            self.mask_status.clear();
+        }
+    }
+
     /// A file drag entered or left the window (winit's `HoveredFile` /
     /// `HoveredFileCancelled`).
     pub fn set_drag_hover(&mut self, on: bool) {
@@ -612,6 +657,9 @@ impl App {
         // Launch state (no clips): only global keys are live.
         if !self.ready() {
             match k {
+                // Nothing left to close: ⌘W on the empty window closes
+                // it, which for a one-window app is quitting.
+                Key::Close => self.cmds.push(Cmd::Quit),
                 Key::Escape => {
                     if self.fullscreen {
                         self.fullscreen = false;
@@ -630,6 +678,10 @@ impl App {
                 },
                 _ => {}
             }
+            return;
+        }
+        if k == Key::Close {
+            self.close_active();
             return;
         }
         if k == Key::Char('m') || k == Key::Char('M') {
@@ -672,6 +724,7 @@ impl App {
                 }
             }
             Key::Backspace => self.speed = 1.0,
+            Key::Close => {} // handled above
             Key::Char('V') => self.mode = self.mode.cycle(-1),
             Key::Char(c @ '1'..='9') => {
                 let idx = c as usize - '1' as usize;
@@ -1947,6 +2000,32 @@ mod tests {
         app.add_videos(vec![mk_video(&clip), mk_video(&clip)], true);
         assert_eq!(app.videos.len(), 2, "replace starts a fresh comparison");
         assert_eq!(app.t, 0.0);
+    }
+
+    /// ⌘W closes the focused clip: survivors keep playing in sync from
+    /// the same moment, and closing the last returns to the launch window.
+    #[test]
+    fn cmd_w_closes_the_focused_clip() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 3);
+        assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.started && a.t > 0.5));
+        app.key(Key::Char('3'));
+        app.key(Key::Close);
+        assert_eq!(app.videos.len(), 2);
+        assert_eq!(app.active, 1, "focus clamps to the new last slot");
+        assert!(app.take_cmds().iter().any(|c| matches!(c, Cmd::VideosChanged)));
+        let t0 = app.t;
+        assert!(t0 > 0.4, "closing a clip must not rewind the survivors");
+        assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.started && a.t > t0 + 0.3));
+        let (p0, p1) = (app.videos[0].shown_pts, app.videos[1].shown_pts);
+        assert!((p0 - p1).abs() < 1.5 / app.fps, "survivors drifted: {p0} vs {p1}");
+
+        app.key(Key::Close);
+        app.key(Key::Close);
+        assert!(!app.ready(), "closing the last clip is the launch window");
+        app.take_cmds();
+        app.key(Key::Close);
+        assert!(app.take_cmds().iter().any(|c| matches!(c, Cmd::Quit)), "⌘W on empty quits");
     }
 
     /// The 2a transport is a real control surface, not a picture of one:
