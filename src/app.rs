@@ -159,7 +159,22 @@ pub struct App {
     /// handed over by the renderer the same way (`Gpu::plate_horizon`).
     plate_size: (f32, f32),
     plate_horizon: f32,
+    /// The launch backdrop video (none when the asset is missing or failed
+    /// to decode: the still plate stays), and its decoder while
+    /// the launch window is up.
+    backdrop_src: Option<VideoInfo>,
+    backdrop: Option<Backdrop>,
     cmds: Vec<Cmd>,
+}
+
+/// The launch window's moving floor: a decoder of its own and a clock of
+/// its own that wraps at the clip's length. The clip is authored as a
+/// seamless loop (`assets/banner/background-02-loop.mp4`), so the wrap is
+/// just an exact seek to 0. It only runs while there are no clips — a
+/// loaded clip drops it, so it never competes with the streams.
+struct Backdrop {
+    player: Player,
+    t: f64,
 }
 
 impl Mode {
@@ -217,6 +232,8 @@ impl App {
             logo_aspect: 3.0,
             plate_size: (1448.0, 1086.0),
             plate_horizon: 0.616,
+            backdrop_src: None,
+            backdrop: None,
             cmds: Vec::new(),
         }
     }
@@ -490,6 +507,50 @@ impl App {
     pub fn set_plate(&mut self, size: (f32, f32), horizon: f32) {
         self.plate_size = size;
         self.plate_horizon = horizon;
+    }
+
+    /// The video the launch window plays as its floor (probed by main).
+    pub fn set_backdrop(&mut self, info: VideoInfo) {
+        self.backdrop_src = Some(info);
+    }
+
+    /// A backdrop frame goes back to its decoder's pool.
+    pub fn recycle_backdrop(&mut self, buf: Vec<u8>) {
+        if let Some(b) = &self.backdrop {
+            b.player.recycle(buf);
+        }
+    }
+
+    /// Advance the backdrop's clock and take the frame now due, spawning
+    /// the decoder on the launch window's first frame.
+    fn tick_backdrop(&mut self, dt: f32) -> Option<Upload> {
+        let src = self.backdrop_src.as_ref()?;
+        if self.backdrop.is_none() {
+            let player = Player::spawn(
+                &src.path,
+                src.width,
+                src.height,
+                crate::probe::vt_accel(&src.codec),
+                src.rotation,
+            )?;
+            self.backdrop = Some(Backdrop { player, t: 0.0 });
+        }
+        let b = self.backdrop.as_mut()?;
+        if b.player.failed() {
+            log::warn!("launch backdrop failed to decode; keeping the still plate");
+            self.backdrop = None;
+            self.backdrop_src = None;
+            return None;
+        }
+        b.t += dt as f64;
+        // Wrap half a frame early so the last frame isn't held while the
+        // seek lands.
+        if src.duration > 0.0 && b.t >= src.duration - 0.5 / src.fps.max(1.0) {
+            b.player.seek(0.0, true);
+            b.t = 0.0;
+        }
+        let (_, buf) = b.player.take_upto(b.t + 1e-6)?;
+        Some(Upload { idx: 0, w: b.player.w, h: b.player.h, buf })
     }
 
     /// Top margin for HUD rows that would otherwise sit under the
@@ -987,8 +1048,19 @@ impl App {
         }
         // Nothing loaded — paint the launch window and stop.
         if !self.ready() {
-            return self.launch_frame(vp);
+            let plate = self.tick_backdrop(dt);
+            let mut desc = self.launch_frame(vp);
+            // The floor moves at the clip's own rate: wake for its next
+            // frame instead of running the loop hot at the display's.
+            if let Some(b) = &self.backdrop_src {
+                desc.redraw_at =
+                    Some(Instant::now() + std::time::Duration::from_secs_f64(1.0 / b.fps.max(1.0)));
+            }
+            desc.plate = plate;
+            return desc;
         }
+        // Clips are up: the backdrop's decoder has nothing left to do.
+        self.backdrop = None;
         let n = self.videos.len();
         let full_uv = [0.0, 0.0, 1.0, 1.0];
 
@@ -1168,6 +1240,7 @@ impl App {
         FrameDesc {
             clear: FRAME_BG,
             uploads,
+            plate: None,
             items,
             animating,
             redraw_at: if animating {
@@ -1713,12 +1786,15 @@ impl App {
         // owns glyph metrics; the width is capped against the window so a
         // narrow one doesn't run it edge to edge.
         let lw = if splash {
-            (w * 0.58).clamp(320.0, 980.0).min(w - LOCKUP_CLEAR * 2.0)
+            (w * LOCKUP_W).clamp(320.0, 980.0).min(w - LOCKUP_CLEAR * 2.0)
         } else {
             (w * 0.34).clamp(240.0, 460.0).min(w - 96.0)
         };
         let lh = lw / self.logo_aspect;
-        let (gap, mpx) = (36.0, 13.0);
+        // The card is drawn on a 640px frame with a 391px lockup; its
+        // shadow offsets are in that lockup's px and scale with the mark.
+        let card = lw / 391.0;
+        let gap = 36.0;
 
         // The plate is cover-fitted, then slid until its lit line sits at
         // HORIZON_Y — clamped so the fit can never open a gap, and the
@@ -1736,18 +1812,6 @@ impl App {
                 r: RectPx { x: (w - dw) / 2.0, y, w: dw, h: dh },
                 alpha: LAUNCH_BG[3],
             });
-            // Two grounds: the traffic lights float over the haze at the
-            // top, the message sits on the grid at the bottom, and type
-            // over either drops below 4.5:1 without them.
-            items.push(Item::Rect(RectItem {
-                fade_down: true,
-                ..RectItem::new(RectPx { x: 0.0, y: 0.0, w, h: h * 0.26 }, SPLASH_SCRIM)
-            }));
-            items.push(Item::Rect(RectItem {
-                fade_up: true,
-                ..RectItem::new(RectPx { x: 0.0, y: h * 0.70, w, h: h * 0.30 }, SPLASH_SCRIM)
-            }));
-
             // The reflection lies flat on the floor BEYOND the horizon,
             // hinged where the mark meets it. Its quad is the projected
             // footprint: the plane widens by `k` at the far end, which is
@@ -1757,57 +1821,112 @@ impl App {
             let (fw, fh) = (lw * spread, lh * FLOOR_TILT.cos() * spread);
             floor_h = fh;
             items.push(Item::LogoFloor {
-                r: RectPx { x: (w - fw) / 2.0, y: horizon, w: fw, h: fh },
+                r: RectPx { x: (w - fw) / 2.0, y: horizon + lh * FLOOR_DROP, w: fw, h: fh },
                 alpha: FLOOR_ALPHA,
                 persp,
                 tilt: FLOOR_TILT,
                 src_h: lh,
             });
+            // Pulls the haze in from the corners, so the colour stays
+            // round the mark instead of running to the window's edge.
+            items.push(Item::Vignette { r: RectPx { x: 0.0, y: 0.0, w, h }, color: VOID });
+            // Two grounds: the traffic lights float over the haze at the
+            // top, the message sits on the grid at the bottom, and type
+            // over either drops below 4.5:1 without them.
+            items.push(Item::Rect(RectItem {
+                fade_down: true,
+                ..RectItem::new(RectPx { x: 0.0, y: 0.0, w, h: h * 0.255 }, SPLASH_SCRIM)
+            }));
+            items.push(Item::Rect(RectItem {
+                fade_up: true,
+                ..RectItem::new(RectPx { x: 0.0, y: h * 0.72, w, h: h * 0.28 }, SPLASH_SCRIM)
+            }));
+
         }
 
         // Standing on the line, not floating over it.
         let top = if splash {
             horizon - lh * LOCKUP_LIFT - lh
         } else {
-            (h - (lh + gap + mpx)) / 2.0
+            (h - (lh + gap + FOOT_H)) / 2.0
         };
         let mark = RectPx { x: (w - lw) / 2.0, y: top, w: lw, h: lh };
         if splash {
-            items.push(Item::LogoShadow {
-                r: RectPx {
-                    x: mark.x - lw * SHADOW_SPREAD,
-                    y: mark.y + lh * SHADOW_DROP,
-                    w: lw * (1.0 + SHADOW_SPREAD * 2.0),
-                    h: lh * (1.0 + SHADOW_SPREAD * 2.0),
-                },
-                alpha: SHADOW_ALPHA,
-                blur: SHADOW_BLUR,
-            });
+            for (dy, blur, alpha) in SHADOW_PASSES {
+                items.push(Item::LogoShadow { mark, dy: dy * card, blur: blur * card, alpha });
+            }
         }
         items.push(Item::Logo { r: mark, alpha: 1.0 });
+        if splash {
+            // Over the art, under the chrome and the type.
+            items.push(Item::Scanlines { r: RectPx { x: 0.0, y: 0.0, w, h }, color: SCANLINE });
+        }
 
-        // A drag over the window lights the line — the whole window is
-        // the target (winit gives no drop position anyway).
+        // The lamp and word at the top right, level with the traffic
+        // lights.
+        let sy = if self.fullscreen { 14.0 } else { TITLEBAR_H / 2.0 };
+        let label = TextItem {
+            align: Align::Right,
+            valign: VAlign::Middle,
+            tracking: 10.0 * 0.09,
+            ..TextItem::new(w - 16.0, sy, 10.0, INK_MUTED, "READY")
+        };
+        let lamp_x = w - 16.0 - MONO_ADV * 10.0 * 1.09 * 5.0 - 8.0 - 7.0;
+        items.push(Item::Rect(RectItem {
+            radius: 6.5,
+            ..RectItem::new(RectPx { x: lamp_x - 3.0, y: sy - 6.5, w: 13.0, h: 13.0 }, LAMP_GLOW)
+        }));
+        items.push(Item::Rect(RectItem {
+            radius: 3.5,
+            ..RectItem::new(RectPx { x: lamp_x, y: sy - 3.5, w: 7.0, h: 7.0 }, LAMP)
+        }));
+        items.push(Item::Text(label));
+
+        // The foot: a hairline, the one instruction, and the accepted
+        // formats between a blue and a red tick. A drag over the window
+        // lights the instruction — the whole window is the target (winit
+        // gives no drop position anyway).
         let (msg, col) = if self.drag_hover {
             ("release to open", ACCENT)
         } else {
-            ("drop a video file to begin", DIM)
+            ("drop a video file to begin", INSTRUCTION)
         };
-        // On the plate the message goes past the reflection, onto the
-        // near floor where the ground is closest to black.
-        let msg_y = if splash {
-            (horizon + floor_h + MSG_DROP).min(h - MSG_FOOT)
+        let (rule_h, fmt_px, msg_px, step) = (1.0, 11.0, 13.0, 13.0);
+        // On the plate the foot sits on the near floor, past the
+        // reflection, where the ground is closest to black.
+        let foot = if splash {
+            let bottom = h - h * FOOT_BOTTOM;
+            (bottom - (rule_h + msg_px + fmt_px + step * 2.0)).max(horizon + lh * FLOOR_DROP + floor_h * 0.5)
         } else {
             top + lh + gap
         };
+        items.push(Item::Rect(RectItem {
+            fade_x: true,
+            ..RectItem::new(RectPx { x: w / 2.0 - 150.0, y: foot, w: 300.0, h: rule_h }, RULE)
+        }));
+        let msg_y = foot + rule_h + step;
         items.push(Item::Text(TextItem {
             align: Align::Center,
-            ..TextItem::new(w / 2.0, msg_y, mpx, col, msg)
+            tracking: msg_px * 0.16,
+            ..TextItem::new(w / 2.0, msg_y, msg_px, col, msg)
         }));
+        let fmt_y = msg_y + msg_px + step + fmt_px / 2.0;
+        let fmt_track = fmt_px * 0.09;
+        let fmt_w = FORMATS.chars().count() as f32 * (MONO_ADV * fmt_px + fmt_track);
+        items.push(Item::Text(TextItem {
+            align: Align::Center,
+            valign: VAlign::Middle,
+            tracking: fmt_track,
+            ..TextItem::new(w / 2.0, fmt_y, fmt_px, INK_MUTED, FORMATS)
+        }));
+        for (x, c) in [(w / 2.0 - fmt_w / 2.0 - 10.0 - 26.0, BRAND_BLUE), (w / 2.0 + fmt_w / 2.0 + 10.0, BRAND_RED)] {
+            items.push(Item::Rect(RectItem::new(RectPx { x, y: fmt_y - 1.0, w: 26.0, h: 2.0 }, c)));
+        }
 
         FrameDesc {
             clear: LAUNCH_BG,
             uploads: Vec::new(),
+            plate: None,
             items,
             animating: false,
             redraw_at: None,
@@ -2293,11 +2412,9 @@ mod tests {
 const ACCENT: [f32; 4] = [0.082, 0.502, 0.871, 1.0];
 /// Hairlines and pill outlines drawn in the accent, well under full.
 const ACCENT_EDGE: [f32; 4] = [0.082, 0.502, 0.871, 0.28];
-/// Frame background / ink on the accent (#050506). The alpha is the
-/// window's: the surface is transparent (`with_transparent` in main.rs),
-/// so the desktop shows faintly through the letterbox — opaque video
-/// quads are unaffected.
-const FRAME_BG: [f32; 4] = [0.0196, 0.0196, 0.0235, 0.92];
+/// Frame background / ink on the accent (#050506). Opaque: the window
+/// no longer lets the desktop through.
+const FRAME_BG: [f32; 4] = [0.0196, 0.0196, 0.0235, 1.0];
 const FRAME_INK: [f32; 4] = [0.0196, 0.0196, 0.0235, 1.0];
 const TEXT: [f32; 4] = [0.941, 0.941, 0.949, 1.0];
 const TEXT_OFF: [f32; 4] = [0.784, 0.784, 0.824, 0.85];
@@ -2349,7 +2466,7 @@ const CAP_DROP: f32 = 3.0;
 const KEY_LABEL_PX: f32 = 12.0;
 
 // Launch window — the design system's `Splash` surface.
-const LAUNCH_BG: [f32; 4] = [0.027, 0.027, 0.035, 0.90];
+const LAUNCH_BG: [f32; 4] = [0.027, 0.027, 0.035, 1.0];
 /// Smallest window that still gets the plate. Under it the vanishing
 /// point leaves the frame and the horizon stops reading, so the launch
 /// window falls back to the mark centred on the flat ground.
@@ -2359,31 +2476,55 @@ const SPLASH_MIN_H: f32 = 520.0;
 const HORIZON_Y: f32 = 0.578;
 /// Clear space each side of the mark at the plate's size.
 const LOCKUP_CLEAR: f32 = 80.0;
+/// The lockup's width, as a fraction of the frame (the card's 61%).
+const LOCKUP_W: f32 = 0.61;
 /// The mark stands ON the line: its baseline sits this fraction of its
-/// own height above it. Flush to the line the tagline lands IN the
-/// horizon's glow, which is the one part of the artwork with no keyline
-/// of its own.
-const LOCKUP_LIFT: f32 = 0.09;
-/// Contact shadow under the standing mark: how far it spreads, how far
-/// it drops, how dark it is, and how many mip levels blur it. The drop
-/// stays TIGHT — at a twentieth of the mark's height the tagline's own
-/// shadow clears the tagline and reads as a second line of type.
-const SHADOW_SPREAD: f32 = 0.012;
-const SHADOW_DROP: f32 = 0.014;
-const SHADOW_ALPHA: f32 = 0.70;
-const SHADOW_BLUR: f32 = 2.8;
+/// own height above it — the card's 5px under a 130px lockup.
+const LOCKUP_LIFT: f32 = 0.04;
+/// Three stacked shadows, (dy, blur, alpha) in the card lockup's px: a
+/// tight contact shadow, a wider fall, and an ambient halo that
+/// separates the metal from the lit horizon. Tighter than the card's
+/// (6/9, 14/20, 0/16): at the card's drops the tagline's shadow parts
+/// from the tagline and reads as a second, blurred line of type. Alphas
+/// run above the card's for the linear-blending reason the scrims do.
+const SHADOW_PASSES: [(f32, f32, f32); 3] = [(2.0, 4.0, 0.80), (5.0, 10.0, 0.55), (0.0, 9.0, 0.65)];
 /// The floor projection: pinhole distance as a multiple of the mark's
 /// width, the floor's tilt from the screen plane, and how much light
 /// the floor gives back.
 const FLOOR_PERSP: f32 = 1.36;
-const FLOOR_TILT: f32 = 1.2566; // 72°
-const FLOOR_ALPHA: f32 = 0.26;
+const FLOOR_TILT: f32 = 1.0472; // 60° — shallower than the card's 72°, so it runs further toward the viewer
+const FLOOR_ALPHA: f32 = 0.15;
+/// How far below the horizon the reflection starts, as a fraction of the
+/// mark's height — a gap of floor between the tagline and its mirror,
+/// so the two never read as one doubled line.
+const FLOOR_DROP: f32 = 0.10;
+/// The brand's `void` (#06070a): the ground every Splash layer darkens to.
+const VOID: [f32; 4] = [0.024, 0.027, 0.039, 1.0];
 /// Ground under the traffic lights and under the message.
 const SPLASH_SCRIM: [f32; 4] = [0.024, 0.027, 0.039, 0.80];
-/// Gap from the end of the reflection to the message, and the floor the
-/// message keeps off the bottom edge.
-const MSG_DROP: f32 = 46.0;
-const MSG_FOOT: f32 = 72.0;
+/// The brand's `scanline` token is white at 0.07, composited in sRGB;
+/// blended in linear space that would glow, so it runs far lower here.
+const SCANLINE: [f32; 4] = [1.0, 1.0, 1.0, 0.012];
+/// How far the foot's last line sits off the bottom edge, as a fraction
+/// of the frame (the card's 41px of 400).
+const FOOT_BOTTOM: f32 = 0.10;
+/// The foot's height (rule, instruction, formats and the two steps
+/// between them) — what centres the lockup in the bare fallback.
+const FOOT_H: f32 = 51.0;
+/// The instruction (#c3ccd6), the design system's `ink-muted` for the
+/// labels, and the hairline above them (#616b7b at half).
+const INSTRUCTION: [f32; 4] = [0.765, 0.800, 0.839, 1.0];
+const INK_MUTED: [f32; 4] = [0.604, 0.651, 0.706, 1.0];
+const RULE: [f32; 4] = [0.380, 0.420, 0.482, 0.5];
+/// The logo's own blue and red (the brand's `blue` #00adfa and `red`
+/// #fc0a1c), for the ticks either side of the formats.
+const BRAND_BLUE: [f32; 4] = [0.0, 0.678, 0.980, 1.0];
+const BRAND_RED: [f32; 4] = [0.988, 0.039, 0.110, 1.0];
+/// The status lamp (`green` #16d97e) and its glow.
+const LAMP: [f32; 4] = [0.086, 0.851, 0.494, 1.0];
+const LAMP_GLOW: [f32; 4] = [0.086, 0.851, 0.494, 0.07];
+/// What the launch window says it opens.
+const FORMATS: &str = "MP4 · MOV · MKV · Y4M";
 
 // Crop marquee. The dimmer runs high for the reason the HUD's panels do
 // (see shader.wgsl): linear-space blending means a modest alpha barely

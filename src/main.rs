@@ -131,8 +131,16 @@ fn main() -> anyhow::Result<()> {
 
     let title = title_for(&videos);
 
+    let mut app = App::new(videos, mode);
+    if let Some(path) = backdrop_path() {
+        match probe::probe(&path) {
+            Ok(info) => app.set_backdrop(info),
+            Err(e) => log::warn!("launch backdrop {}: {e}", path.display()),
+        }
+    }
+
     let mut runner = Runner {
-        app: App::new(videos, mode),
+        app,
         title,
         notify,
         dropped: Vec::new(),
@@ -181,6 +189,19 @@ fn load_video(path: &Path) -> anyhow::Result<Video> {
     )
     .ok_or_else(|| anyhow::anyhow!("failed to start decoder for {}", path.display()))?;
     Ok(Video { info, player, shown_pts: 0.0, delivered: false, pending: false, last_frame: None })
+}
+
+/// The launch window's floor video: `Contents/Resources/background.mp4`
+/// in the bundle (build-app.sh copies it there), else the asset in the
+/// source tree for a bare `cargo run`. None leaves the still plate.
+fn backdrop_path() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let bundled = exe.parent()?.parent()?.join("Resources/background.mp4");
+    if bundled.is_file() {
+        return Some(bundled);
+    }
+    let dev = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/banner/background-02-loop.mp4");
+    dev.is_file().then_some(dev)
 }
 
 fn title_for(videos: &[Video]) -> String {
@@ -430,11 +451,9 @@ impl ApplicationHandler for Runner {
         }
         let attrs = Window::default_attributes()
             .with_title(&self.title)
-            // The app background is drawn with an alpha (see FRAME_BG /
-            // LAUNCH_BG in app.rs), so the desktop shows faintly through
-            // the letterbox and the launch window. Video quads write
-            // alpha 1, so the picture itself is never see-through.
-            .with_transparent(true)
+            // Opaque: the desktop showing faintly through the letterbox
+            // and the launch window was tried and dropped (2026-09-23).
+            .with_transparent(false)
             .with_inner_size(LogicalSize::new(1280.0, 800.0));
         let window = Arc::new(_event_loop.create_window(attrs).expect("create window"));
         // Text-free glass titlebar with the video running underneath it
@@ -589,6 +608,11 @@ impl ApplicationHandler for Runner {
                 // Frame buffers go back to their decoders' pools.
                 for u in desc.uploads {
                     self.app.recycle(u.idx, u.buf);
+                }
+                if let Some(u) = desc.plate {
+                    // The first backdrop frame resized the plate.
+                    self.app.set_plate(gpu.plate_size(), gpu.plate_horizon());
+                    self.app.recycle_backdrop(u.buf);
                 }
                 self.apply_cmds(event_loop);
             }

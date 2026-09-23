@@ -133,14 +133,17 @@ from one to the other, keeping its number.
   pair; keyless items (rects/text) ride the current batch. `TextItem` carries
   align/valign/tracking and an optional rounded chip: the renderer owns the font, so
   it MEASURES each run — never estimate glyph positions app-side (`MONO_ADV` exists
-  only to step *between* runs). The **wordmark** (`assets/logo.png`) is
+  only to step *between* runs). The **wordmark** (`assets/logo.png`, the SLOT —
+  currently a straight copy of `assets/logo/logo-05.png`; an alternate becomes the
+  mark by `cp`, since the trim below makes its margins irrelevant) is
   `include_bytes!`'d and decoded with the `png` crate — the Dock icon goes through
   AppKit, but a texture needs the pixels in-process — into a mipped texture bound at
   slot 5 of EVERY bind group, so `Item::Logo` needs no batch key of its own. The
   renderer owns the image, so it MEASURES it: `decode_logo` takes the alpha bounding
   box and hands `App` the trimmed aspect plus the uv rect to draw, so the launch
-  layout doesn't inherit whatever margin the export left (logo.png is padded ~12% top,
-  ~18% bottom — drawn whole, the mark sits visibly high in its own box). Same rule as
+  layout doesn't inherit whatever margin the export left (the exports carry
+  uneven transparent padding — drawn whole, the mark sits visibly off-centre in its
+  own box). Same rule as
   text: never estimate what the renderer can measure.
   The **launch plate** (`assets/banner/background-02.png`, the brand's bare grid-floor
   ground) is baked in the same way and bound at slot 7 of every group, and it is
@@ -149,19 +152,44 @@ from one to the other, keeping its number.
   instead of needing a hard-coded fraction. Modes 10 (the plate), 11 (the mark projected
   onto its floor) and 12 (the mark as a soft shadow) are keyless for the same reason
   mode 7 is.
-  The surface is **transparent** (`with_transparent` in main.rs + a premultiplied
-  alpha mode): `FrameDesc::clear` carries an alpha and the clear colour is scaled by
-  it, so the desktop shows faintly through the app background and the letterbox while
-  opaque video quads (they write alpha 1) stay solid.
+  **The plate moves** (2026-09-23): `assets/banner/background-02-loop.mp4` plays as
+  the launch floor — `App::tick_backdrop` runs its own `Player` and its own clock
+  while there are no clips (a loaded clip drops the decoder), wraps with an exact
+  seek to 0, and hands each frame over as `FrameDesc::plate`; `Gpu::upload_plate`
+  rebuilds the plate texture at the video's size on the first frame, and main re-reads
+  `plate_size` after it. The redraw is paced by `redraw_at` at the clip's fps, not
+  the display's. The still PNG stays baked in: it's the horizon measurement (same
+  scene, same lit line) and the fallback when the video is missing or fails. The loop
+  file is DERIVED from the camera move `background-02.MP4`, whose last frame doesn't
+  match its first: its last second is crossfaded into its first —
+  `ffmpeg -i background-02.MP4 -filter_complex "[0:v]split[a][b];[a]trim=start=1,setpts=PTS-STARTPTS[main];[b]trim=end=1,setpts=PTS-STARTPTS[head];[main][head]xfade=transition=fade:duration=1:offset=3.0417,format=yuv420p[v]" -map "[v]" -c:v libx264 -crf 18 -preset slow -g 24 -movflags +faststart -an background-02-loop.mp4`.
+  The bundle carries it as `Contents/Resources/background.mp4` (build-app.sh); a bare
+  binary finds it in the source tree (`backdrop_path`).
+  The surface is **opaque** (`with_transparent(false)` in main.rs, `Opaque` alpha
+  mode). It used to be transparent, the desktop showing faintly through the letterbox
+  and the launch window; dropped 2026-09-23. `FrameDesc::clear` still carries an alpha
+  (now 1) for the plumbing that remains.
+  The **floor reflection is hard-light blended** onto the plate IN the shader: fixed-
+  function blending can't read the destination, but the plate is our own texture, so
+  mode 11 samples it where the fragment lands (the plate's rect rides the uniforms,
+  `Uniforms::plate`) and writes the blended result. That's also why `LogoFloor` is
+  pushed straight after `Plate`: what's under it must BE the plate, not the plate
+  under the vignette.
 - `src/shader.wgsl` — modes: 0 rect, 1 tex, 2 delta, 3 split, 4 checker, 5 blend,
   6 glyph, 7 logo, 8 mask, 9 triangle, 10 launch plate, 11 the wordmark projected onto
-  the plate's floor, 12 the wordmark as a soft shadow. Mode 11 inverts a pinhole
+  the plate's floor, 12 the wordmark as a soft shadow, 13 the launch overlays (radial
+  vignette / scanlines). Mode 11 inverts a pinhole
   projection of a plane hinged at the horizon and tilted 72°, so a screen row becomes a
   distance along the ground — the same hyperbola that makes the grid converge, which is
   why it reads as light on a floor rather than a mirror on glass. It samples an EXPLICIT
   LOD: implicit derivatives are illegal in non-uniform control flow (a switch arm is
-  exactly that), and the blur toward the viewer is wanted anyway. Mode 0's `pad` is now
-  three-valued: 0 none, 1 fade up (the bottom-anchored scrim), 2 fade down. Textures are sampled unconditionally then selected (uniform-control-flow
+  exactly that), and the blur toward the viewer is wanted anyway. Mode 0's `pad` is
+  four-valued: 0 none, 1 fade up (the bottom-anchored scrim), 2 fade down, 3 fade out
+  to both sides (the Splash foot's hairline). The reflection deliberately does NOT follow the
+  card's dark ripple/falloff group (tried 2026-09-23: the mirrored tagline under the
+  real one read as weird) — it stays a faint banded mirror. Dark overlays the card
+  specifies in CSS alphas are lifted to `1 − (1 − a)^2.2` (and the white scanline cut
+  to ~0.012) because blending here is linear-space. Textures are sampled unconditionally then selected (uniform-control-flow
   rule), `mode` is a flat varying. Mode 0 is an SDF rounded box with `fwidth`-based
   1px AA, an optional border (colour smuggled through the unused `uv` slot) and a
   bottom-anchored scrim ramp. **UI colours are authored as sRGB hex and decoded by
@@ -195,8 +223,10 @@ instead of ⏎, and solid rather than dashed drop-zone borders.
 
 The launch window is the design system's **`Splash`** surface (Abner > Components >
 Splash, in the Claude design system at `claude.ai/artifact/CqpfyGsUrKR6f7ZeV9fAdV`):
-the brand's grid-floor plate, the mark standing on its measured horizon with a contact
-shadow and a floor reflection, the message on the near floor. The card's geometry notes
+the brand's grid-floor plate under a radial vignette, the mark standing on its measured
+horizon with the card's three stacked shadows and a floor reflection, a 3px scanline
+over the art, a `READY` lamp level with the traffic lights, and the foot on the near
+floor (hairline, instruction, formats between a blue and a red tick). The card's geometry notes
 and `app.rs`'s launch constants are the same numbers, so change them together. Under
 900×520 it falls back to the bare mark on the flat clear — the card's own rule, because
 below that the plate's vanishing point leaves the frame. The shadow is the single

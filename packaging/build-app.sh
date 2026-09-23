@@ -159,6 +159,13 @@ ICON_SRC="$ROOT/assets/app-icon.png"
 [ -f "$ICON_SRC" ] || { echo "error: $ICON_SRC missing" >&2; exit 1; }
 make_icns "$ICON_SRC" "$RESOURCES/AppIcon.icns"
 
+# The launch window's moving floor (main.rs `backdrop_path`). Optional:
+# without it the app draws the still plate baked into the binary.
+BACKDROP_SRC="$ROOT/assets/banner/background-02-loop.mp4"
+if [ -f "$BACKDROP_SRC" ]; then
+  cp "$BACKDROP_SRC" "$RESOURCES/background.mp4"
+fi
+
 # --- Info.plist ------------------------------------------------------------
 sed \
   -e "s/{{VERSION}}/$VERSION/g" \

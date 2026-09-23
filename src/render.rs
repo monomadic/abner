@@ -84,9 +84,9 @@ fn decode_plate() -> Plate {
 /// hence the one image-format dependency in the tree.
 ///
 /// The measuring matters: an exported logo carries whatever margin the
-/// exporter left (assets/logo.png is padded ~12% at the top and ~18% at
-/// the bottom, so drawing it whole would sit the mark visibly high in its
-/// own box). Trimming to the ink here keeps the launch layout independent
+/// exporter left (the alternates in assets/logo/ all carry uneven
+/// transparent padding, so drawing one whole would sit the mark visibly
+/// off-centre in its own box). Trimming to the ink here keeps the launch layout independent
 /// of the file's framing — the same reason the renderer measures text
 /// rather than letting callers estimate it.
 fn decode_logo() -> Logo {
@@ -198,6 +198,9 @@ pub struct RectItem {
     /// bottom. The launch plate needs a ground under the traffic lights
     /// as well as one under the message.
     pub fade_down: bool,
+    /// Alpha peaks at the horizontal centre and runs out to zero at both
+    /// ends — a hairline rule that fades into the ground.
+    pub fade_x: bool,
 }
 
 impl RectItem {
@@ -216,6 +219,7 @@ impl Default for RectItem {
             border_color: [0.0; 4],
             fade_up: false,
             fade_down: false,
+            fade_x: false,
         }
     }
 }
@@ -311,7 +315,7 @@ pub enum Item {
     Logo { r: RectPx, alpha: f32 },
     /// The launch plate, drawn from the renderer's own texture. `r` is
     /// the cover-fitted rect and may hang outside the window; `alpha`
-    /// keeps the launch window's glassiness (see `LAUNCH_BG`).
+    /// fades it over the clear.
     Plate { r: RectPx, alpha: f32 },
     /// The wordmark laid FLAT on the plate's floor — the same texture,
     /// hinged at the horizon and projected into the ground plane, so it
@@ -321,9 +325,18 @@ pub enum Item {
     /// inverts the projection back to. `r` must be the projected
     /// footprint of that mark (`App::launch_frame` sizes it).
     LogoFloor { r: RectPx, alpha: f32, persp: f32, tilt: f32, src_h: f32 },
-    /// The mark's own silhouette, blurred by `blur` mip levels and laid
-    /// under it as a contact shadow.
-    LogoShadow { r: RectPx, alpha: f32, blur: f32 },
+    /// The mark's own silhouette as a soft shadow: `mark` is where the
+    /// mark itself is drawn, `dy` drops the shadow below it and `blur` is
+    /// its softness in logical px (a CSS `drop-shadow`). The renderer
+    /// grows the quad by the blur and picks the mip level that matches
+    /// it, since only it knows the texture's resolution.
+    LogoShadow { mark: RectPx, dy: f32, blur: f32, alpha: f32 },
+    /// A radial vignette in `color` across `r`: clear through the middle,
+    /// darkening toward the corners (the Splash card's `sp-vignette`).
+    Vignette { r: RectPx, color: [f32; 4] },
+    /// One-logical-px lines in `color` every 3px down `r` — the brand's
+    /// `scanline` overlay.
+    Scanlines { r: RectPx, color: [f32; 4] },
     Mask { r: RectPx, id: u64, revision: u64, width: u32, height: u32, pixels: Arc<Vec<u8>> },
     /// A triangle filling `r`, pointing right (or left): transport glyphs
     /// drawn as geometry, so they centre on their shape — a font's ▶ sits
@@ -335,6 +348,9 @@ pub enum Item {
 pub struct FrameDesc {
     pub clear: [f32; 4],
     pub uploads: Vec<Upload>,
+    /// A new frame of the launch backdrop video, for the plate texture
+    /// (`idx` unused). The plate is resized to fit the first one.
+    pub plate: Option<Upload>,
     pub items: Vec<Item>,
     pub animating: bool,
     pub redraw_at: Option<Instant>,
@@ -345,6 +361,10 @@ pub struct FrameDesc {
 struct Uniforms {
     viewport: [f32; 2],
     _pad: [f32; 2],
+    /// Where this frame's `Item::Plate` was drawn (x, y, w, h, logical
+    /// px): mode 11 samples the plate under itself to hard-light the
+    /// reflection onto it, which fixed-function blending can't do.
+    plate: [f32; 4],
 }
 
 #[repr(C)]
@@ -397,6 +417,9 @@ pub struct Gpu {
     mask_version: Option<(u64, u64)>,
     logo_uv: [f32; 4],
     logo_aspect: f32,
+    /// The logo texture's full width in texels, for picking a shadow's
+    /// mip level.
+    logo_w: f32,
     plate_size: (f32, f32),
     plate_horizon: f32,
     /// Bind groups per (a, b) texture pair, created lazily.
@@ -454,15 +477,9 @@ impl Gpu {
             width: size.width.max(1),
             height: size.height.max(1),
             present_mode: wgpu::PresentMode::AutoVsync,
-            // The window is transparent (see main.rs): the clear colour
-            // carries an alpha, so the desktop shows through the app's
-            // background while opaque video quads stay solid. Premultiplied
-            // is what `BlendState::ALPHA_BLENDING` accumulates; fall back to
-            // whatever the surface does offer, opaque included.
-            alpha_mode: [
-                wgpu::CompositeAlphaMode::PreMultiplied,
-                wgpu::CompositeAlphaMode::PostMultiplied,
-            ]
+            // The window is opaque (see main.rs): whatever alpha the
+            // blending leaves in the target, the compositor must ignore it.
+            alpha_mode: [wgpu::CompositeAlphaMode::Opaque]
             .into_iter()
             .find(|m| caps.alpha_modes.contains(m))
             .unwrap_or(caps.alpha_modes[0]),
@@ -507,7 +524,8 @@ impl Gpu {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    // Fragment too: mode 11 reads the plate's rect.
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -705,6 +723,7 @@ impl Gpu {
             mask_version: None,
             logo_uv: logo_img.uv,
             logo_aspect: logo_img.aspect,
+            logo_w: logo_img.w as f32,
             plate_size: (plate_w as f32, plate_h as f32),
             plate_horizon: plate_img.horizon,
             pair_bgs: HashMap::new(),
@@ -934,6 +953,43 @@ impl Gpu {
         v.dirty = true;
     }
 
+    /// A frame of the launch backdrop video into the plate texture. The
+    /// still baked in at startup is a different size, so the first frame
+    /// rebuilds the texture (and every cached bind group that holds it);
+    /// `plate_size` follows, and the app re-reads it after the frame. The
+    /// horizon stays the still's measurement: the video is the same
+    /// scene with the same lit line.
+    fn upload_plate(&mut self, up: &Upload) {
+        if up.buf.len() != (up.w * up.h * 4) as usize {
+            log::warn!("bad plate upload: {}x{} {}B", up.w, up.h, up.buf.len());
+            return;
+        }
+        let sz = self.plate.tex.size();
+        if up.w != sz.width || up.h != sz.height {
+            self.plate =
+                Self::make_video_tex(&self.device, &self.blit_bgl, &self.sampler, up.w, up.h);
+            self.plate_size = (up.w as f32, up.h as f32);
+            self.pair_bgs.clear();
+            self.pair_bg(0, 0);
+        }
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.plate.tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &up.buf,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(up.w * 4),
+                rows_per_image: Some(up.h),
+            },
+            wgpu::Extent3d { width: up.w, height: up.h, depth_or_array_layers: 1 },
+        );
+        self.plate.dirty = true;
+    }
+
     /// Upload one rect of the CPU glyph atlas. The source slice starts at
     /// the rect's first byte with the atlas width as its row pitch, so no
     /// copy-out is needed.
@@ -959,6 +1015,9 @@ impl Gpu {
     pub fn render(&mut self, desc: &FrameDesc, viewport: (f32, f32)) {
         for up in &desc.uploads {
             self.upload_video(up);
+        }
+        if let Some(up) = &desc.plate {
+            self.upload_plate(up);
         }
         for item in &desc.items {
             if let Item::Mask { id, revision, width, height, pixels, .. } = item {
@@ -1016,11 +1075,17 @@ impl Gpu {
                 1.0
             } else if ri.fade_down {
                 2.0
+            } else if ri.fade_x {
+                3.0
             } else {
                 0.0
             },
         };
+        let mut plate_rect = [0.0, 0.0, 1.0, 1.0];
         for item in &desc.items {
+            if let Item::Plate { r, .. } = item {
+                plate_rect = [r.x, r.y, r.w, r.h];
+            }
             match item {
                 Item::Rect(ri) => push(&mut data, &mut batches, None, rect_inst(ri)),
                 Item::Video { a, b, r, uv, mode, p0, p1 } => {
@@ -1085,18 +1150,49 @@ impl Gpu {
                         pad: *src_h,
                     })
                 }
-                Item::LogoShadow { r, alpha, blur } => {
+                Item::LogoShadow { mark, dy, blur, alpha } => {
+                    // Grow the quad (and its uv box with it) so the blur
+                    // has room to fall off instead of being cut at the
+                    // ink's edge; outside the ink the texture's own
+                    // transparent margin supplies the zeros.
+                    let [u0, v0, u1, v1] = self.logo_uv;
+                    let e = blur * 1.5;
+                    let (du, dv) = (e / mark.w * (u1 - u0), e / mark.h * (v1 - v0));
+                    // One mip level halves the resolution: pick the level
+                    // whose texel is as wide as the blur.
+                    let texel = mark.w / ((u1 - u0) * self.logo_w);
+                    let level = (blur / texel).max(1.0).log2();
                     push(&mut data, &mut batches, None, Instance {
-                        pos: [r.x, r.y],
-                        size: [r.w, r.h],
-                        uv: self.logo_uv,
+                        pos: [mark.x - e, mark.y + dy - e],
+                        size: [mark.w + e * 2.0, mark.h + e * 2.0],
+                        uv: [u0 - du, v0 - dv, u1 + du, v1 + dv],
                         color: [0.0, 0.0, 0.0, *alpha],
                         mode: 12.0,
-                        p0: *blur,
+                        p0: level,
                         p1: 0.0,
                         pad: 0.0,
                     })
                 }
+                Item::Vignette { r, color } => push(&mut data, &mut batches, None, Instance {
+                    pos: [r.x, r.y],
+                    size: [r.w, r.h],
+                    uv: [0.0; 4],
+                    color: *color,
+                    mode: 13.0,
+                    p0: 0.0,
+                    p1: 0.0,
+                    pad: 0.0,
+                }),
+                Item::Scanlines { r, color } => push(&mut data, &mut batches, None, Instance {
+                    pos: [r.x, r.y],
+                    size: [r.w, r.h],
+                    uv: [0.0; 4],
+                    color: *color,
+                    mode: 13.0,
+                    p0: 1.0,
+                    p1: 0.0,
+                    pad: 0.0,
+                }),
                 Item::Text(t) => {
                     let laid = self.text.layout(&t.text, t.px * scale, t.tracking * scale);
                     let (tw, th) = (laid.w / scale, laid.h / scale);
@@ -1167,7 +1263,11 @@ impl Gpu {
         self.queue.write_buffer(
             &self.uniforms,
             0,
-            bytemuck::bytes_of(&Uniforms { viewport: [viewport.0, viewport.1], _pad: [0.0; 2] }),
+            bytemuck::bytes_of(&Uniforms {
+                viewport: [viewport.0, viewport.1],
+                _pad: [0.0; 2],
+                plate: plate_rect,
+            }),
         );
 
         let surface_tex = match self.surface.get_current_texture() {

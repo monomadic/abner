@@ -1,0 +1,12 @@
+{
+  version: 2,
+  mediaFileName: 'background-02-loop.mp4',
+  cutSegments: [
+    {
+      start: 1.5102218268716578,
+      end: 2.8421348155080217,
+      name: '',
+      selected: true,
+    },
+  ],
+}

@@ -6,6 +6,8 @@
 struct U {
     viewport: vec2<f32>,
     _pad: vec2<f32>,
+    // The launch plate's rect this frame, logical px (see mode 11).
+    plate: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var tex_a: texture_2d<f32>;
@@ -44,6 +46,8 @@ struct Out {
     // colour, so borders cost no extra vertex attribute.
     @location(7) @interpolate(flat) border: vec4<f32>,
     @location(8) @interpolate(flat) pad: f32,
+    // Window position, logical px — mode 11 finds the plate under itself.
+    @location(9) screen: vec2<f32>,
 };
 
 @vertex
@@ -66,6 +70,7 @@ fn vs_main(@builtin(vertex_index) vi: u32, in: In) -> Out {
     out.size = in.size;
     out.border = in.uv;
     out.pad = in.pad;
+    out.screen = p;
     return out;
 }
 
@@ -110,7 +115,8 @@ fn ui_color(c: vec4<f32>) -> vec4<f32> {
 }
 
 // Modes (keep in sync with render.rs):
-// 0 rect (p0 radius, p1 border width, uv = border colour, pad = fade-up)
+// 0 rect (p0 radius, p1 border width, uv = border colour,
+//   pad 1 fade up, 2 fade down, 3 fade out to both sides)
 // 1 video A  2 delta |A-B|*gain  3 split at p0  4 checker(p0 px)
 // 5 blend mix(A,B,p0)  6 glyph (tex_g.r * color)  7 logo (tex_l * color.a)
 // 8 binary mask (tex_m.r selects red/blue, alpha 0.5)
@@ -119,6 +125,7 @@ fn ui_color(c: vec4<f32>) -> vec4<f32> {
 // 11 wordmark projected onto the plate's floor (p0 pinhole distance,
 //    p1 floor tilt, pad the standing mark's height, uv slot = its ink box)
 // 12 the wordmark's silhouette as a soft shadow (p0 = mip level)
+// 13 launch overlays: p0 0 radial vignette in color, 1 scanlines in color
 
 @fragment
 fn fs_main(in: Out) -> @location(0) vec4<f32> {
@@ -160,7 +167,12 @@ fn fs_main(in: Out) -> @location(0) vec4<f32> {
             // pad 2 is the same ramp hung the other way up (opaque at
             // the top edge): the launch plate needs a ground under the
             // traffic lights as well as one under its message.
-            if in.pad > 0.5 {
+            // pad 3 fades the other axis, out to both ends from a peak in
+            // the middle: a hairline rule that dissolves into the ground.
+            if in.pad > 2.5 {
+                let fx = clamp(in.local.x / max(in.size.x, 1.0), 0.0, 1.0);
+                alpha = alpha * (1.0 - abs(fx * 2.0 - 1.0));
+            } else if in.pad > 0.5 {
                 let f = clamp(in.local.y / max(in.size.y, 1.0), 0.0, 1.0);
                 let t = select(f, 1.0 - f, in.pad > 1.5);
                 alpha = alpha * smoothstep(0.0, 0.5, t);
@@ -250,14 +262,45 @@ fn fs_main(in: Out) -> @location(0) vec4<f32> {
             let k = persp / max(persp - y_src * st, 1e-3);
             let src_w = in.size.x * max(persp - src_h * st, 1e-3) / persp;
             let x_src = (in.local.x - in.size.x * 0.5) / max(k, 1e-3) + src_w * 0.5;
-            let inside = y_src <= src_h && x_src >= 0.0 && x_src <= src_w;
+            // Ripple: the floor is a disturbed surface, so each row of the
+            // mark is pushed sideways by a slow sine — two frequencies,
+            // so the wobble never repeats cleanly. Measured in the
+            // plane's own units, the waves bunch toward the horizon the
+            // way the grid does. Static: the launch window never animates.
+            let ripple = src_h * (0.010 * sin(y_src / src_h * 38.0) + 0.006 * sin(y_src / src_h * 91.0 + 1.3));
+            let xr = x_src + ripple;
+            let inside = y_src <= src_h && x_src >= -src_w * 0.04 && x_src <= src_w * 1.04;
             // v runs backwards: the ground meets the mark at its baseline.
-            let u = mix(in.border.x, in.border.z, clamp(x_src / src_w, 0.0, 1.0));
             let v = mix(in.border.w, in.border.y, clamp(y_src / src_h, 0.0, 1.0));
+            // Sideways Gaussian blur, both directions: taps along the row
+            // weighted by a Gaussian (sigma = 0.4 of the reach), reaching
+            // further as the floor comes toward the viewer. Taps outside the ink sample the texture's own
+            // transparent margin, so the smear runs off the ends softly
+            // (hence `inside` allowing a little past the mark).
             // Explicit LOD, not a derivative: this is non-uniform control
             // flow, and the softening is wanted anyway — the reflection
             // blurs as it comes toward the viewer.
-            let s = textureSampleLevel(tex_l, samp, vec2<f32>(u, v), clamp(log2(k) * 2.0 + 1.2, 0.0, 3.0));
+            let lod = clamp(log2(k) * 2.0 + 1.2, 0.0, 3.0);
+            let reach = src_w * (0.018 + 0.030 * clamp(y_src / src_h, 0.0, 1.0));
+            let du = (in.border.z - in.border.x) / src_w;
+            let u0 = in.border.x + xr * du;
+            var s = vec4<f32>(0.0);
+            var wsum = 0.0;
+            for (var i = -6; i <= 6; i = i + 1) {
+                let t = f32(i) / 6.0;
+                let wt = exp(-t * t / (2.0 * 0.16));
+                let tap = textureSampleLevel(tex_l, samp, vec2<f32>(u0 + t * reach * du, v), lod);
+                // Premultiplied, so transparent taps don't grey the edges.
+                s = s + vec4<f32>(tap.rgb * tap.a, tap.a) * wt;
+                wsum = wsum + wt;
+            }
+            s = s / wsum;
+            s = vec4<f32>(s.rgb / max(s.a, 1e-5), s.a);
+            // Saturated: the blur greys the mark's blue and red out, and
+            // light thrown on a dark floor should read as colour, not as
+            // a dimmer copy. Pushed away from its luma, then clamped.
+            let luma = dot(s.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+            s = vec4<f32>(clamp(mix(vec3<f32>(luma), s.rgb, 1.8), vec3<f32>(0.0), vec3<f32>(1.0)), s.a);
             let f = clamp(in.local.y / max(in.size.y, 1.0), 0.0, 1.0);
             // Fades IN as well as out: at the horizon itself the
             // projection is barely foreshortened, so a full-strength
@@ -268,7 +311,21 @@ fn fs_main(in: Out) -> @location(0) vec4<f32> {
             // reads as a disturbed surface rather than a second logo.
             let band = select(0.35, 1.0, fract(in.local.y / 7.0) > 0.42);
             let keep = select(0.0, 1.0, inside);
-            return vec4<f32>(s.rgb, s.a * in.color.a * fade * band * keep);
+            let a = s.a * in.color.a * fade * band * keep;
+            // Hard light onto the floor: where the reflection is dark it
+            // multiplies the plate down, where it is light it screens the
+            // plate up — light thrown on the ground rather than a picture
+            // laid over it. The plate is sampled right here (it's this
+            // renderer's own texture) because blend state can't read the
+            // destination. Computed in gamma space, where the mode is
+            // defined, then decoded back.
+            let puv = (in.screen - u.plate.xy) / max(u.plate.zw, vec2<f32>(1.0));
+            let base = pow(textureSampleLevel(tex_p, samp, puv, 0.0).rgb, vec3<f32>(1.0 / 2.2));
+            let top = pow(s.rgb, vec3<f32>(1.0 / 2.2));
+            let mult = base * top * 2.0;
+            let scr = vec3<f32>(1.0) - (vec3<f32>(1.0) - base) * (vec3<f32>(1.0) - (top * 2.0 - vec3<f32>(1.0)));
+            let hl = pow(select(scr, mult, top <= vec3<f32>(0.5)), vec3<f32>(2.2));
+            return vec4<f32>(hl, a);
         }
         case 12u: {
             // A contact shadow for the standing mark: its own silhouette
@@ -279,6 +336,25 @@ fn fs_main(in: Out) -> @location(0) vec4<f32> {
             // drop shadow, and it reads as contact with the floor.
             let sh = textureSampleLevel(tex_l, samp, in.uv, in.p0);
             return vec4<f32>(0.0, 0.0, 0.0, sh.a * in.color.a);
+        }
+        case 13u: {
+            // Full-frame overlays for the launch plate. p0 = 0: the
+            // Splash card's radial vignette — an ellipse 68% × 56% of the
+            // frame centred at (50%, 40%), clear to 36% of its radius,
+            // then 0.5 at 76% and 0.8 at the rim (CSS alphas, lifted for
+            // linear blending as in mode 11). p0 = 1: the scanline, one
+            // logical px lit in every three.
+            let c = ui_color(in.color);
+            if in.p0 < 0.5 {
+                let q = (in.local / max(in.size, vec2<f32>(1.0)) - vec2<f32>(0.5, 0.4))
+                    / vec2<f32>(0.68, 0.56);
+                let d = length(q);
+                var v = mix(0.0, 0.78, smoothstep(0.36, 0.76, d));
+                v = select(v, mix(0.78, 0.97, smoothstep(0.76, 1.0, d)), d > 0.76);
+                return vec4<f32>(c.rgb, v * c.a);
+            }
+            let lit = fract(in.local.y / 3.0) < 1.0 / 3.0;
+            return vec4<f32>(c.rgb, select(0.0, c.a, lit));
         }
         default: {
             return in.color;
