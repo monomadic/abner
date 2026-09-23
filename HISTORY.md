@@ -3,6 +3,50 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-09-23 — the launch window becomes the Splash surface
+
+The launch window now stands on the brand's grid-floor plate instead of a flat
+clear: `assets/banner/background-02.png` baked in beside the wordmark (a bare
+binary still has no resource directory), cover-fitted and slid until its lit
+horizon sits at 57.8% of the window, with the mark standing on that line and its
+reflection running out across the floor. This is the design system's `Splash`
+surface (Abner > Components > Splash); the geometry notes there and the constants
+in `app.rs` are the same numbers.
+
+The horizon is MEASURED, not assumed: `decode_plate` takes the plate's brightest
+row and hands `App` its v, the same rule the wordmark's ink box and the glyph
+metrics already follow — a different render in the slot moves the layout with it,
+and `launch_frame` reads back where the cover fit actually left the line rather
+than trusting the fraction it asked for (the clamp that stops the fit opening a
+gap can move it).
+
+Three renderer modes, all keyless like the wordmark (the plate is bound at slot 7
+of every group): **10** draws the plate, **11** projects the mark onto the floor,
+**12** is its contact shadow. Mode 11 inverts a pinhole projection of a plane
+hinged at the horizon and tilted 72° — a screen row becomes a distance along the
+ground, which is the same hyperbola that makes the grid converge. A straight
+vertical flip is a mirror on glass; this is light on a floor. It samples an
+explicit LOD (non-uniform control flow forbids derivatives there, and the
+softening toward the viewer is wanted anyway), fades in from the horizon as well
+as out toward the viewer, and breaks into bands at the plate's own 3px pitch.
+
+Two shipped mistakes, both found in a window capture and worth keeping written
+down: at full strength the reflection's first row is barely foreshortened, so it
+landed as a second copy of the tagline directly under the real one (hence the
+fade-IN); and a contact shadow dropped a twentieth of the mark's height does the
+same thing, because the tagline's shadow clears the tagline. The drop is now
+1.4%, and the shadow is the one place the brand book allows the lockup a shadow —
+the plate's lit horizon runs straight behind the wordmark and leaves the metal
+nothing to sit against.
+
+`RectItem` gained `fade_down`, the mirror of `fade_up`: the plate needs a ground
+under the traffic lights as well as one under its message. Under 900×520 the
+window falls back to the bare mark on the flat clear — below that the vanishing
+point leaves the frame and the horizon stops reading, which is the Splash card's
+own rule. The message, the drag-hover accent swap and the launch window's alpha
+are unchanged; the plate is drawn AT that alpha, so the desktop still shows
+faintly through.
+
 ## 2026-09-20 — 19. per-video mask painting and grayscale export
 
 M pauses and opens a mask over the focused video, temporarily showing it full-window.

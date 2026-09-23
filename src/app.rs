@@ -155,6 +155,10 @@ pub struct App {
     /// renderer once it has decoded the image (`Gpu::logo_aspect`). The
     /// placeholder only ever shows in tests, which draw no pixels.
     logo_aspect: f32,
+    /// The launch plate's pixel size and the v of its measured horizon,
+    /// handed over by the renderer the same way (`Gpu::plate_horizon`).
+    plate_size: (f32, f32),
+    plate_horizon: f32,
     cmds: Vec<Cmd>,
 }
 
@@ -211,6 +215,8 @@ impl App {
             wrap,
             drag_hover: false,
             logo_aspect: 3.0,
+            plate_size: (1448.0, 1086.0),
+            plate_horizon: 0.616,
             cmds: Vec::new(),
         }
     }
@@ -478,6 +484,12 @@ impl App {
 
     pub fn set_logo_aspect(&mut self, aspect: f32) {
         self.logo_aspect = aspect;
+    }
+
+    /// The plate's proportions and horizon, measured by the renderer.
+    pub fn set_plate(&mut self, size: (f32, f32), horizon: f32) {
+        self.plate_size = size;
+        self.plate_horizon = horizon;
     }
 
     /// Top margin for HUD rows that would otherwise sit under the
@@ -1678,27 +1690,102 @@ impl App {
         }
     }
 
-    /// The launch window: the wordmark and one line asking for a clip.
+    /// The launch window: the brand's grid-floor plate, the mark
+    /// standing on its horizon with its reflection running out across
+    /// the floor, and one line asking for a clip. This is the design
+    /// system's `Splash` surface (Abner > Components > Splash); the
+    /// geometry notes there and the code here are the same numbers.
     /// (2b's A/B drop targets, terminal hint and keycap legend are gone
     /// for now — one clip already plays, so there is no half-filled pair
-    /// to explain.) No video items, so it renders with zero streams loaded.
+    /// to explain.) No video items, so it renders with zero streams
+    /// loaded.
     fn launch_frame(&self, vp: (f32, f32)) -> FrameDesc {
         let (w, h) = vp;
         let mut items: Vec<Item> = Vec::new();
 
+        // Below this the plate's vanishing point falls outside the frame
+        // and the horizon stops reading, so the window drops back to the
+        // bare mark on the flat ground — the Splash card's own rule.
+        let splash = w >= SPLASH_MIN_W && h >= SPLASH_MIN_H;
+
         // The logo image, not type: it already carries the "VIDEO QUALITY
-        // TESTING TOOLKIT" line. Width is capped against the window so a
-        // narrow one doesn't run it edge to edge; the renderer owns the
-        // aspect, the way it owns glyph metrics. Logo + message are
-        // centred in the window as one group.
-        let lw = (w * 0.34).clamp(240.0, 460.0).min(w - 96.0);
+        // TESTING TOOLKIT" line. The renderer owns the aspect, the way it
+        // owns glyph metrics; the width is capped against the window so a
+        // narrow one doesn't run it edge to edge.
+        let lw = if splash {
+            (w * 0.58).clamp(320.0, 980.0).min(w - LOCKUP_CLEAR * 2.0)
+        } else {
+            (w * 0.34).clamp(240.0, 460.0).min(w - 96.0)
+        };
         let lh = lw / self.logo_aspect;
         let (gap, mpx) = (36.0, 13.0);
-        let top = (h - (lh + gap + mpx)) / 2.0;
-        items.push(Item::Logo {
-            r: RectPx { x: (w - lw) / 2.0, y: top, w: lw, h: lh },
-            alpha: 1.0,
-        });
+
+        // The plate is cover-fitted, then slid until its lit line sits at
+        // HORIZON_Y — clamped so the fit can never open a gap, and the
+        // LAYOUT follows wherever that leaves the line rather than
+        // assuming it landed where it was asked to.
+        let mut horizon = h * HORIZON_Y;
+        let mut floor_h = 0.0;
+        if splash {
+            let (pw, ph) = self.plate_size;
+            let k = (w / pw).max(h / ph);
+            let (dw, dh) = (pw * k, ph * k);
+            let y = (h * HORIZON_Y - dh * self.plate_horizon).clamp(h - dh, 0.0);
+            horizon = y + dh * self.plate_horizon;
+            items.push(Item::Plate {
+                r: RectPx { x: (w - dw) / 2.0, y, w: dw, h: dh },
+                alpha: LAUNCH_BG[3],
+            });
+            // Two grounds: the traffic lights float over the haze at the
+            // top, the message sits on the grid at the bottom, and type
+            // over either drops below 4.5:1 without them.
+            items.push(Item::Rect(RectItem {
+                fade_down: true,
+                ..RectItem::new(RectPx { x: 0.0, y: 0.0, w, h: h * 0.26 }, SPLASH_SCRIM)
+            }));
+            items.push(Item::Rect(RectItem {
+                fade_up: true,
+                ..RectItem::new(RectPx { x: 0.0, y: h * 0.70, w, h: h * 0.30 }, SPLASH_SCRIM)
+            }));
+
+            // The reflection lies flat on the floor BEYOND the horizon,
+            // hinged where the mark meets it. Its quad is the projected
+            // footprint: the plane widens by `k` at the far end, which is
+            // also how the shader recovers the mark's own width.
+            let persp = lw * FLOOR_PERSP;
+            let spread = persp / (persp - lh * FLOOR_TILT.sin());
+            let (fw, fh) = (lw * spread, lh * FLOOR_TILT.cos() * spread);
+            floor_h = fh;
+            items.push(Item::LogoFloor {
+                r: RectPx { x: (w - fw) / 2.0, y: horizon, w: fw, h: fh },
+                alpha: FLOOR_ALPHA,
+                persp,
+                tilt: FLOOR_TILT,
+                src_h: lh,
+            });
+        }
+
+        // Standing on the line, not floating over it.
+        let top = if splash {
+            horizon - lh * LOCKUP_LIFT - lh
+        } else {
+            (h - (lh + gap + mpx)) / 2.0
+        };
+        let mark = RectPx { x: (w - lw) / 2.0, y: top, w: lw, h: lh };
+        if splash {
+            items.push(Item::LogoShadow {
+                r: RectPx {
+                    x: mark.x - lw * SHADOW_SPREAD,
+                    y: mark.y + lh * SHADOW_DROP,
+                    w: lw * (1.0 + SHADOW_SPREAD * 2.0),
+                    h: lh * (1.0 + SHADOW_SPREAD * 2.0),
+                },
+                alpha: SHADOW_ALPHA,
+                blur: SHADOW_BLUR,
+            });
+        }
+        items.push(Item::Logo { r: mark, alpha: 1.0 });
+
         // A drag over the window lights the line — the whole window is
         // the target (winit gives no drop position anyway).
         let (msg, col) = if self.drag_hover {
@@ -1706,9 +1793,16 @@ impl App {
         } else {
             ("drop a video file to begin", DIM)
         };
+        // On the plate the message goes past the reflection, onto the
+        // near floor where the ground is closest to black.
+        let msg_y = if splash {
+            (horizon + floor_h + MSG_DROP).min(h - MSG_FOOT)
+        } else {
+            top + lh + gap
+        };
         items.push(Item::Text(TextItem {
             align: Align::Center,
-            ..TextItem::new(w / 2.0, top + lh + gap, mpx, col, msg)
+            ..TextItem::new(w / 2.0, msg_y, mpx, col, msg)
         }));
 
         FrameDesc {
@@ -2254,8 +2348,42 @@ const CAP_DROP: f32 = 3.0;
 /// label, so what a key DOES reads as easily as the key.
 const KEY_LABEL_PX: f32 = 12.0;
 
-// Launch window.
+// Launch window — the design system's `Splash` surface.
 const LAUNCH_BG: [f32; 4] = [0.027, 0.027, 0.035, 0.90];
+/// Smallest window that still gets the plate. Under it the vanishing
+/// point leaves the frame and the horizon stops reading, so the launch
+/// window falls back to the mark centred on the flat ground.
+const SPLASH_MIN_W: f32 = 900.0;
+const SPLASH_MIN_H: f32 = 520.0;
+/// Where the plate's horizon is driven to, down the window.
+const HORIZON_Y: f32 = 0.578;
+/// Clear space each side of the mark at the plate's size.
+const LOCKUP_CLEAR: f32 = 80.0;
+/// The mark stands ON the line: its baseline sits this fraction of its
+/// own height above it. Flush to the line the tagline lands IN the
+/// horizon's glow, which is the one part of the artwork with no keyline
+/// of its own.
+const LOCKUP_LIFT: f32 = 0.09;
+/// Contact shadow under the standing mark: how far it spreads, how far
+/// it drops, how dark it is, and how many mip levels blur it. The drop
+/// stays TIGHT — at a twentieth of the mark's height the tagline's own
+/// shadow clears the tagline and reads as a second line of type.
+const SHADOW_SPREAD: f32 = 0.012;
+const SHADOW_DROP: f32 = 0.014;
+const SHADOW_ALPHA: f32 = 0.70;
+const SHADOW_BLUR: f32 = 2.8;
+/// The floor projection: pinhole distance as a multiple of the mark's
+/// width, the floor's tilt from the screen plane, and how much light
+/// the floor gives back.
+const FLOOR_PERSP: f32 = 1.36;
+const FLOOR_TILT: f32 = 1.2566; // 72°
+const FLOOR_ALPHA: f32 = 0.26;
+/// Ground under the traffic lights and under the message.
+const SPLASH_SCRIM: [f32; 4] = [0.024, 0.027, 0.039, 0.80];
+/// Gap from the end of the reflection to the message, and the floor the
+/// message keeps off the bottom edge.
+const MSG_DROP: f32 = 46.0;
+const MSG_FOOT: f32 = 72.0;
 
 // Crop marquee. The dimmer runs high for the reason the HUD's panels do
 // (see shader.wgsl): linear-space blending means a modest alpha barely

@@ -453,6 +453,9 @@ impl ApplicationHandler for Runner {
         // The renderer decoded the wordmark, so it owns its proportions;
         // the launch window sizes its quad from them.
         self.app.set_logo_aspect(gpu.logo_aspect());
+        // Same rule for the launch plate: the renderer decoded it, so it
+        // measured where its horizon falls.
+        self.app.set_plate(gpu.plate_size(), gpu.plate_horizon());
         self.window = Some(window);
         self.gpu = Some(gpu);
         self.last_frame = Instant::now();

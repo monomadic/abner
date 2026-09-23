@@ -16,6 +16,9 @@ struct U {
 // every group so mode 7 needs no batch key of its own.
 @group(0) @binding(5) var tex_l: texture_2d<f32>;
 @group(0) @binding(6) var tex_m: texture_2d<f32>;
+// The launch plate — bound in every group for the same reason as the
+// wordmark, so modes 10 and 11 need no batch key either.
+@group(0) @binding(7) var tex_p: texture_2d<f32>;
 
 struct In {
     @location(0) pos: vec2<f32>,
@@ -112,6 +115,10 @@ fn ui_color(c: vec4<f32>) -> vec4<f32> {
 // 5 blend mix(A,B,p0)  6 glyph (tex_g.r * color)  7 logo (tex_l * color.a)
 // 8 binary mask (tex_m.r selects red/blue, alpha 0.5)
 // 9 triangle filling the quad, pointing right (p1 = 1: left), p0 corner radius
+// 10 launch plate (tex_p * color.a)
+// 11 wordmark projected onto the plate's floor (p0 pinhole distance,
+//    p1 floor tilt, pad the standing mark's height, uv slot = its ink box)
+// 12 the wordmark's silhouette as a soft shadow (p0 = mip level)
 
 @fragment
 fn fs_main(in: Out) -> @location(0) vec4<f32> {
@@ -120,6 +127,7 @@ fn fs_main(in: Out) -> @location(0) vec4<f32> {
     let b = textureSample(tex_b, samp, in.uv);
     let g = textureSample(tex_g, samp, in.uv).r;
     let l = textureSample(tex_l, samp, in.uv);
+    let pl = textureSample(tex_p, samp, in.uv);
     switch in.mode {
         case 0u: {
             let half = in.size * 0.5;
@@ -149,9 +157,13 @@ fn fs_main(in: Out) -> @location(0) vec4<f32> {
             // alpha only cuts perceived brightness by ~40%. The lower
             // part is fully opaque; only the lead-in above the controls
             // gradates.
+            // pad 2 is the same ramp hung the other way up (opaque at
+            // the top edge): the launch plate needs a ground under the
+            // traffic lights as well as one under its message.
             if in.pad > 0.5 {
                 let f = clamp(in.local.y / max(in.size.y, 1.0), 0.0, 1.0);
-                alpha = alpha * smoothstep(0.0, 0.5, f);
+                let t = select(f, 1.0 - f, in.pad > 1.5);
+                alpha = alpha * smoothstep(0.0, 0.5, t);
             }
             return vec4<f32>(col.rgb, alpha);
         }
@@ -210,6 +222,63 @@ fn fs_main(in: Out) -> @location(0) vec4<f32> {
             // which is what ALPHA_BLENDING expects; color.a fades the
             // whole mark.
             return vec4<f32>(l.rgb, l.a * in.color.a);
+        }
+        case 10u: {
+            // Already decoded by the sample (the plate texture is sRGB),
+            // so no ui_color. color.a is the launch window's alpha: the
+            // desktop still shows faintly through, as it did when this
+            // window was a flat clear.
+            return vec4<f32>(pl.rgb, pl.a * in.color.a);
+        }
+        case 11u: {
+            // Lay the mark flat on the floor. The quad is hinged along
+            // its TOP edge (the horizon) and tilted `p1` away from the
+            // viewer, so inverting the pinhole projection turns a screen
+            // row into a distance along the ground: near the horizon a
+            // pixel covers a lot of mark, near the viewer very little,
+            // which is the same hyperbola that makes the grid converge.
+            // A straight vertical flip would be a mirror on glass; this
+            // is light on a floor.
+            let ct = cos(in.p1);
+            let st = sin(in.p1);
+            let persp = max(in.p0, 1.0);
+            let src_h = max(in.pad, 1.0);
+            let y_src = in.local.y * persp / max(persp * ct + in.local.y * st, 1e-3);
+            // How much the plane widens at that distance, and the mark's
+            // own width — the quad was sized as width * this at its far
+            // end, so dividing recovers it without another attribute.
+            let k = persp / max(persp - y_src * st, 1e-3);
+            let src_w = in.size.x * max(persp - src_h * st, 1e-3) / persp;
+            let x_src = (in.local.x - in.size.x * 0.5) / max(k, 1e-3) + src_w * 0.5;
+            let inside = y_src <= src_h && x_src >= 0.0 && x_src <= src_w;
+            // v runs backwards: the ground meets the mark at its baseline.
+            let u = mix(in.border.x, in.border.z, clamp(x_src / src_w, 0.0, 1.0));
+            let v = mix(in.border.w, in.border.y, clamp(y_src / src_h, 0.0, 1.0));
+            // Explicit LOD, not a derivative: this is non-uniform control
+            // flow, and the softening is wanted anyway — the reflection
+            // blurs as it comes toward the viewer.
+            let s = textureSampleLevel(tex_l, samp, vec2<f32>(u, v), clamp(log2(k) * 2.0 + 1.2, 0.0, 3.0));
+            let f = clamp(in.local.y / max(in.size.y, 1.0), 0.0, 1.0);
+            // Fades IN as well as out: at the horizon itself the
+            // projection is barely foreshortened, so a full-strength
+            // first row lands as a second copy of the tagline sitting
+            // directly under the real one.
+            let fade = (1.0 - smoothstep(0.1, 1.0, f)) * smoothstep(0.0, 0.16, f);
+            // Broken into bands at the plate's own scanline pitch, so it
+            // reads as a disturbed surface rather than a second logo.
+            let band = select(0.35, 1.0, fract(in.local.y / 7.0) > 0.42);
+            let keep = select(0.0, 1.0, inside);
+            return vec4<f32>(s.rgb, s.a * in.color.a * fade * band * keep);
+        }
+        case 12u: {
+            // A contact shadow for the standing mark: its own silhouette
+            // taken from a coarse mip so the edge is soft, flattened to
+            // black. The plate's lit horizon runs straight behind the
+            // wordmark, which leaves the metal nothing to sit against —
+            // the one surface where the brand book allows the lockup a
+            // drop shadow, and it reads as contact with the floor.
+            let sh = textureSampleLevel(tex_l, samp, in.uv, in.p0);
+            return vec4<f32>(0.0, 0.0, 0.0, sh.a * in.color.a);
         }
         default: {
             return in.color;

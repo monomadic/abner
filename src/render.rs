@@ -18,6 +18,12 @@ const MIP_LEVELS: u32 = 4;
 /// window works from a bare binary with no resource directory.
 const LOGO_PNG: &[u8] = include_bytes!("../assets/logo.png");
 
+/// The grid-floor plate the launch window stands on, baked in for the
+/// same reason as the wordmark. This is the brand's BARE plate
+/// (Backgrounds > `background-02.png`); the composed hero from the same
+/// group already carries a lockup and can't be used here.
+const PLATE_PNG: &[u8] = include_bytes!("../assets/banner/background-02.png");
+
 /// The decoded wordmark: pixels, size, and the sub-rect the ink actually
 /// occupies.
 struct Logo {
@@ -28,6 +34,49 @@ struct Logo {
     uv: [f32; 4],
     /// Aspect of that box — what the layout wants, never the file's.
     aspect: f32,
+}
+
+/// The decoded plate: pixels, size, and where its lit horizon sits.
+struct Plate {
+    rgba: Vec<u8>,
+    w: u32,
+    h: u32,
+    /// v of the horizon — the brightest row in the image.
+    horizon: f32,
+}
+
+/// Widen a baked-in PNG (palette, 16-bit, no alpha) to the RGBA8 a
+/// texture wants.
+fn decode_png(bytes: &'static [u8], what: &str) -> (Vec<u8>, u32, u32) {
+    let mut dec = png::Decoder::new(std::io::Cursor::new(bytes));
+    dec.set_transformations(png::Transformations::EXPAND | png::Transformations::ALPHA);
+    let mut reader = dec.read_info().unwrap_or_else(|_| panic!("{what} png header"));
+    let mut buf = vec![0u8; reader.output_buffer_size().unwrap_or_else(|| panic!("{what} png size"))];
+    let info = reader.next_frame(&mut buf).unwrap_or_else(|_| panic!("{what} png pixels"));
+    buf.truncate(info.buffer_size());
+    (buf, info.width, info.height)
+}
+
+/// Decode the launch plate and find its horizon — the brightest row,
+/// which is the lit line where the grid floor meets the haze. Measuring
+/// it rather than hard-coding a fraction keeps the launch layout
+/// independent of which render sits in the slot, the same rule the
+/// wordmark's ink box and the glyph metrics follow.
+fn decode_plate() -> Plate {
+    let (rgba, w, h) = decode_png(PLATE_PNG, "plate");
+    let (mut best, mut row) = (-1.0f32, 0u32);
+    for y in 0..h {
+        let line = &rgba[(y * w * 4) as usize..((y + 1) * w * 4) as usize];
+        let mut sum = 0.0f32;
+        for x in 0..w as usize {
+            sum += line[x * 4] as f32 + line[x * 4 + 1] as f32 + line[x * 4 + 2] as f32;
+        }
+        if sum > best {
+            best = sum;
+            row = y;
+        }
+    }
+    Plate { rgba, w, h, horizon: (row as f32 + 0.5) / h as f32 }
 }
 
 /// Decode the wordmark to straight-alpha RGBA8 and measure it. The Dock
@@ -41,15 +90,7 @@ struct Logo {
 /// of the file's framing — the same reason the renderer measures text
 /// rather than letting callers estimate it.
 fn decode_logo() -> Logo {
-    let mut dec = png::Decoder::new(std::io::Cursor::new(LOGO_PNG));
-    // Widen whatever the file happens to be (palette, 16-bit, no alpha)
-    // to the RGBA8 the texture wants.
-    dec.set_transformations(png::Transformations::EXPAND | png::Transformations::ALPHA);
-    let mut reader = dec.read_info().expect("logo png header");
-    let mut buf = vec![0u8; reader.output_buffer_size().expect("logo png size")];
-    let info = reader.next_frame(&mut buf).expect("logo png pixels");
-    buf.truncate(info.buffer_size());
-    let (w, h) = (info.width, info.height);
+    let (buf, w, h) = decode_png(LOGO_PNG, "logo");
 
     // Alpha bounding box. The cutoff ignores the near-zero fringe a soft
     // export leaves outside the artwork.
@@ -153,6 +194,10 @@ pub struct RectItem {
     pub border_color: [f32; 4],
     /// Alpha ramps to zero at the top edge — a bottom-anchored gradient.
     pub fade_up: bool,
+    /// The mirror of `fade_up`: opaque at the top edge, gone at the
+    /// bottom. The launch plate needs a ground under the traffic lights
+    /// as well as one under the message.
+    pub fade_down: bool,
 }
 
 impl RectItem {
@@ -170,6 +215,7 @@ impl Default for RectItem {
             border_w: 0.0,
             border_color: [0.0; 4],
             fade_up: false,
+            fade_down: false,
         }
     }
 }
@@ -263,6 +309,21 @@ pub enum Item {
     /// The wordmark, drawn from the renderer's own texture. `alpha` fades
     /// it; the rect must already carry the logo's aspect (`Gpu::logo_aspect`).
     Logo { r: RectPx, alpha: f32 },
+    /// The launch plate, drawn from the renderer's own texture. `r` is
+    /// the cover-fitted rect and may hang outside the window; `alpha`
+    /// keeps the launch window's glassiness (see `LAUNCH_BG`).
+    Plate { r: RectPx, alpha: f32 },
+    /// The wordmark laid FLAT on the plate's floor — the same texture,
+    /// hinged at the horizon and projected into the ground plane, so it
+    /// recedes with the grid instead of mirroring straight down. `persp`
+    /// is the pinhole distance and `tilt` the floor angle; `src_h` is
+    /// the standing mark's drawn height, which is what the shader
+    /// inverts the projection back to. `r` must be the projected
+    /// footprint of that mark (`App::launch_frame` sizes it).
+    LogoFloor { r: RectPx, alpha: f32, persp: f32, tilt: f32, src_h: f32 },
+    /// The mark's own silhouette, blurred by `blur` mip levels and laid
+    /// under it as a contact shadow.
+    LogoShadow { r: RectPx, alpha: f32, blur: f32 },
     Mask { r: RectPx, id: u64, revision: u64, width: u32, height: u32, pixels: Arc<Vec<u8>> },
     /// A triangle filling `r`, pointing right (or left): transport glyphs
     /// drawn as geometry, so they centre on their shape — a font's ▶ sits
@@ -328,11 +389,16 @@ pub struct Gpu {
     /// all — it is drawn at a fraction of its native size), uploaded once
     /// and bound in every group so mode 7 needs no batch key.
     logo: VideoTex,
+    /// The launch plate: one texture for the life of the process, bound
+    /// in every group like the wordmark, so mode 10 needs no batch key.
+    plate: VideoTex,
     mask_tex: wgpu::Texture,
     mask_view: wgpu::TextureView,
     mask_version: Option<(u64, u64)>,
     logo_uv: [f32; 4],
     logo_aspect: f32,
+    plate_size: (f32, f32),
+    plate_horizon: f32,
     /// Bind groups per (a, b) texture pair, created lazily.
     pair_bgs: HashMap<(usize, usize), wgpu::BindGroup>,
     glyph_tex: wgpu::Texture,
@@ -460,6 +526,7 @@ impl Gpu {
                 },
                 tex_entry(5),
                 tex_entry(6),
+                tex_entry(7),
             ],
         });
 
@@ -580,6 +647,25 @@ impl Gpu {
             wgpu::Extent3d { width: logo_w, height: logo_h, depth_or_array_layers: 1 },
         );
 
+        let plate_img = decode_plate();
+        let (plate_w, plate_h) = (plate_img.w, plate_img.h);
+        let plate = Self::make_video_tex(&device, &blit_bgl, &sampler, plate_w, plate_h);
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &plate.tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &plate_img.rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(plate_w * 4),
+                rows_per_image: Some(plate_h),
+            },
+            wgpu::Extent3d { width: plate_w, height: plate_h, depth_or_array_layers: 1 },
+        );
+
         let glyph_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("glyphs"),
             size: wgpu::Extent3d { width: ATLAS, height: ATLAS, depth_or_array_layers: 1 },
@@ -613,11 +699,14 @@ impl Gpu {
             videos,
             // Mips are blitted on the first frame, like a video upload.
             logo: VideoTex { dirty: true, ..logo },
+            plate: VideoTex { dirty: true, ..plate },
             mask_tex,
             mask_view,
             mask_version: None,
             logo_uv: logo_img.uv,
             logo_aspect: logo_img.aspect,
+            plate_size: (plate_w as f32, plate_h as f32),
+            plate_horizon: plate_img.horizon,
             pair_bgs: HashMap::new(),
             glyph_tex,
             glyph_view,
@@ -777,6 +866,10 @@ impl Gpu {
                         binding: 6,
                         resource: wgpu::BindingResource::TextureView(&self.mask_view),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::TextureView(&self.plate.view),
+                    },
                 ],
             });
             self.pair_bgs.insert(key, bg);
@@ -802,6 +895,18 @@ impl Gpu {
     /// rule as text.
     pub fn logo_aspect(&self) -> f32 {
         self.logo_aspect
+    }
+
+    /// The launch plate's pixel size, for the cover fit.
+    pub fn plate_size(&self) -> (f32, f32) {
+        self.plate_size
+    }
+
+    /// Where the plate's lit horizon sits, 0..1 down the image. The
+    /// renderer measured it (`decode_plate`) — the launch layout stands
+    /// the mark on that line rather than guessing at a fraction.
+    pub fn plate_horizon(&self) -> f32 {
+        self.plate_horizon
     }
 
     fn upload_video(&mut self, up: &Upload) {
@@ -907,7 +1012,13 @@ impl Gpu {
             mode: 0.0,
             p0: ri.radius,
             p1: ri.border_w,
-            pad: if ri.fade_up { 1.0 } else { 0.0 },
+            pad: if ri.fade_up {
+                1.0
+            } else if ri.fade_down {
+                2.0
+            } else {
+                0.0
+            },
         };
         for item in &desc.items {
             match item {
@@ -949,6 +1060,43 @@ impl Gpu {
                     p1: 0.0,
                     pad: 0.0,
                 }),
+                Item::Plate { r, alpha } => push(&mut data, &mut batches, None, Instance {
+                    pos: [r.x, r.y],
+                    size: [r.w, r.h],
+                    uv: [0.0, 0.0, 1.0, 1.0],
+                    color: [0.0, 0.0, 0.0, *alpha],
+                    mode: 10.0,
+                    p0: 0.0,
+                    p1: 0.0,
+                    pad: 0.0,
+                }),
+                // The logo's uv box rides the flat `border` slot (see
+                // shader.wgsl): mode 11 computes its own varying uv, so
+                // the interpolated one is of no use to it.
+                Item::LogoFloor { r, alpha, persp, tilt, src_h } => {
+                    push(&mut data, &mut batches, None, Instance {
+                        pos: [r.x, r.y],
+                        size: [r.w, r.h],
+                        uv: self.logo_uv,
+                        color: [0.0, 0.0, 0.0, *alpha],
+                        mode: 11.0,
+                        p0: *persp,
+                        p1: *tilt,
+                        pad: *src_h,
+                    })
+                }
+                Item::LogoShadow { r, alpha, blur } => {
+                    push(&mut data, &mut batches, None, Instance {
+                        pos: [r.x, r.y],
+                        size: [r.w, r.h],
+                        uv: self.logo_uv,
+                        color: [0.0, 0.0, 0.0, *alpha],
+                        mode: 12.0,
+                        p0: *blur,
+                        p1: 0.0,
+                        pad: 0.0,
+                    })
+                }
                 Item::Text(t) => {
                     let laid = self.text.layout(&t.text, t.px * scale, t.tracking * scale);
                     let (tw, th) = (laid.w / scale, laid.h / scale);
@@ -1040,7 +1188,12 @@ impl Gpu {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
 
         // Refresh dirty video mip chains (queued writes land first).
-        for v in self.videos.iter_mut().chain(std::iter::once(&mut self.logo)) {
+        for v in self
+            .videos
+            .iter_mut()
+            .chain(std::iter::once(&mut self.logo))
+            .chain(std::iter::once(&mut self.plate))
+        {
             if !v.dirty {
                 continue;
             }

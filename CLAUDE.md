@@ -142,12 +142,26 @@ from one to the other, keeping its number.
   layout doesn't inherit whatever margin the export left (logo.png is padded ~12% top,
   ~18% bottom — drawn whole, the mark sits visibly high in its own box). Same rule as
   text: never estimate what the renderer can measure.
+  The **launch plate** (`assets/banner/background-02.png`, the brand's bare grid-floor
+  ground) is baked in the same way and bound at slot 7 of every group, and it is
+  measured the same way too: `decode_plate` takes its BRIGHTEST ROW as the horizon and
+  hands `App` that v, so a different render in the slot moves the launch layout with it
+  instead of needing a hard-coded fraction. Modes 10 (the plate), 11 (the mark projected
+  onto its floor) and 12 (the mark as a soft shadow) are keyless for the same reason
+  mode 7 is.
   The surface is **transparent** (`with_transparent` in main.rs + a premultiplied
   alpha mode): `FrameDesc::clear` carries an alpha and the clear colour is scaled by
   it, so the desktop shows faintly through the app background and the letterbox while
   opaque video quads (they write alpha 1) stay solid.
 - `src/shader.wgsl` — modes: 0 rect, 1 tex, 2 delta, 3 split, 4 checker, 5 blend,
-  6 glyph, 7 logo, 8 mask, 9 triangle. Textures are sampled unconditionally then selected (uniform-control-flow
+  6 glyph, 7 logo, 8 mask, 9 triangle, 10 launch plate, 11 the wordmark projected onto
+  the plate's floor, 12 the wordmark as a soft shadow. Mode 11 inverts a pinhole
+  projection of a plane hinged at the horizon and tilted 72°, so a screen row becomes a
+  distance along the ground — the same hyperbola that makes the grid converge, which is
+  why it reads as light on a floor rather than a mirror on glass. It samples an EXPLICIT
+  LOD: implicit derivatives are illegal in non-uniform control flow (a switch arm is
+  exactly that), and the blur toward the viewer is wanted anyway. Mode 0's `pad` is now
+  three-valued: 0 none, 1 fade up (the bottom-anchored scrim), 2 fade down. Textures are sampled unconditionally then selected (uniform-control-flow
   rule), `mode` is a flat varying. Mode 0 is an SDF rounded box with `fwidth`-based
   1px AA, an optional border (colour smuggled through the unused `uv` slot) and a
   bottom-anchored scrim ramp. **UI colours are authored as sRGB hex and decoded by
@@ -178,6 +192,15 @@ a second clip arrives. The old zones are in git (`a39538f`) if 2b comes back.
 Deliberate deviations from the mock are noted where they occur: higher panel alphas
 and a saturating scrim (bright real footage, not the mock's dark plate), `ENTER`
 instead of ⏎, and solid rather than dashed drop-zone borders.
+
+The launch window is the design system's **`Splash`** surface (Abner > Components >
+Splash, in the Claude design system at `claude.ai/artifact/CqpfyGsUrKR6f7ZeV9fAdV`):
+the brand's grid-floor plate, the mark standing on its measured horizon with a contact
+shadow and a floor reflection, the message on the near floor. The card's geometry notes
+and `app.rs`'s launch constants are the same numbers, so change them together. Under
+900×520 it falls back to the bare mark on the flat clear — the card's own rule, because
+below that the plate's vanishing point leaves the frame. The shadow is the single
+documented exception to the brand book's "no drop shadow on the lockup".
 
 **The palette comes from the logo, not the mock.** 2a's lime (#a6e22e) read as a
 different product next to `assets/logo.png`, so `ACCENT` is the mark's upper bar
