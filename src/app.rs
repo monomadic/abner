@@ -106,6 +106,10 @@ pub struct App {
     cursor_inside: bool,
     mask_status: String,
     mask_save: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+    /// The ProRes crop export (`E`), an ffmpeg child on a worker. Separate
+    /// from `mask_save` because it runs for as long as the clip takes to
+    /// encode, and a PNG save shouldn't queue behind it.
+    crop_export: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     /// The crop marquee (`C`), in the ACTIVE video's image pixels. While
     /// it is up the pointer moves/resizes it instead of painting, and `S`
     /// exports what it holds instead of the whole frame.
@@ -204,6 +208,7 @@ impl App {
             cursor_inside: false,
             mask_status: String::new(),
             mask_save: None,
+            crop_export: None,
             crop: None,
             crop_drag: None,
             videos,
@@ -410,6 +415,28 @@ impl App {
                 Ok(format!("{saved} ({width}×{height})"))
             })()
             .map_err(|e| e.to_string());
+            let _ = sender.send(result);
+        });
+    }
+
+    /// Re-encode the active clip, whole, cut to the marquee, as ProRes 422
+    /// Proxy beside the source (`clip.crop.mov`). The frame-accurate twin
+    /// of `S`'s still: same rectangle, every frame.
+    fn export_crop(&mut self) {
+        let Some(c) = self.crop else { return };
+        if self.crop_export.is_some() { return; }
+        let mask = self.masks[self.active].as_ref().unwrap();
+        let rect = c.pixels(mask.width, mask.height);
+        let (_, _, w, h) = mask::even_rect(rect);
+        let source = self.videos[self.active].info.path.clone();
+        let dest = mask::crop_video_path(&source);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.crop_export = Some(receiver);
+        self.mask_status = format!("Exporting {} ({w}×{h})…", name_of(&dest));
+        std::thread::spawn(move || {
+            let result = mask::export_prores(&source, &dest, rect)
+                .map(|()| format!("{} ({w}×{h} ProRes Proxy)", name_of(&dest)))
+                .map_err(|e| e.to_string());
             let _ = sender.send(result);
         });
     }
@@ -777,6 +804,7 @@ impl App {
                 Key::Char('[' | '-' | '_') => { self.resize_brush(0.8); return; }
                 Key::Char('c' | 'C') => { self.toggle_crop(); return; }
                 Key::Char('s' | 'S') => { self.save_mask(); return; }
+                Key::Char('e' | 'E') if self.crop.is_some() => { self.export_crop(); return; }
                 Key::Escape => { self.mask_mode = false; self.leave_mask_mode(); return; }
                 _ => {}
             }
@@ -1030,18 +1058,22 @@ impl App {
     pub fn tick(&mut self, dt: f32, vp: (f32, f32), _scale: f32) -> FrameDesc {
         if self.vp != vp { self.stroke_last = None; }
         self.vp = vp;
-        if let Some(receiver) = &self.mask_save {
+        for (slot, what, done) in [
+            (&mut self.mask_save, "Save", "Saved"),
+            (&mut self.crop_export, "Export", "Exported"),
+        ] {
+            let Some(receiver) = slot else { continue };
             match receiver.try_recv() {
                 Ok(result) => {
                     self.mask_status = match result {
-                        Ok(saved) => format!("Saved {saved}"),
-                        Err(error) => { log::error!("Mask save failed: {error}"); format!("Save failed: {error}") }
+                        Ok(saved) => format!("{done} {saved}"),
+                        Err(error) => { log::error!("{what} failed: {error}"); format!("{what} failed: {error}") }
                     };
-                    self.mask_save = None;
+                    *slot = None;
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    self.mask_status = "Save failed: worker stopped".into();
-                    self.mask_save = None;
+                    self.mask_status = format!("{what} failed: worker stopped");
+                    *slot = None;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
@@ -1679,6 +1711,7 @@ impl App {
                     ("drag", "move / resize"),
                     ("c", "hide"),
                     ("s", "save"),
+                    ("e", "export crop"),
                     (&clips, "clip"),
                     ("m", "exit"),
                 ]
@@ -1717,7 +1750,7 @@ impl App {
                 Some(c) => {
                     let mask = self.masks[self.active].as_ref().unwrap();
                     let (_, _, w, h) = c.pixels(mask.width, mask.height);
-                    (format!("crop {w}×{h}"), "S writes the crop and the video under it")
+                    (format!("crop {w}×{h}"), "S writes the crop and the video under it · E exports it as ProRes")
                 }
                 None => (
                     format!("brush {:.0}px", self.brush_diameter),
@@ -2101,6 +2134,34 @@ mod tests {
         // Leaving mask mode lets the retained frames go.
         app.key(Key::Char('m'));
         assert!(app.videos.iter().all(|v| v.last_frame.is_none()));
+    }
+
+    /// `E` with the marquee up re-encodes the whole clip, cut to it, as
+    /// ProRes 422 Proxy beside the source — odd sides floored to even.
+    #[test]
+    fn crop_export_writes_a_prores_proxy_at_the_marquee_size() {
+        let Some(clip) = test_clip() else { return };
+        let dir = std::env::temp_dir().join(format!("abner-export-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("clip.mp4");
+        std::fs::copy(&clip, &source).unwrap();
+        let mut app = mk_app(&source, 1);
+        app.start_crop(Some([10.0, 20.0, 101.0, 61.0]));
+        assert!(app.crop.is_some());
+        app.key(Key::Char('e'));
+        assert!(app.crop_export.is_some());
+        assert!(tick_until(&mut app, Duration::from_secs(30), |a| a.crop_export.is_none()));
+        assert!(app.mask_status.starts_with("Exported"), "{}", app.mask_status);
+        let out = mask::crop_video_path(&source);
+        assert_eq!(out, dir.join("clip.crop.mov"));
+        let probe = Command::new("ffprobe")
+            .args(["-v", "error", "-select_streams", "v:0", "-show_entries",
+                   "stream=codec_name,profile,width,height", "-of", "csv=p=0"])
+            .arg(&out)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&probe.stdout).trim(), "prores,Proxy,100,60");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn test_clip() -> Option<PathBuf> {

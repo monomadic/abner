@@ -121,7 +121,9 @@ from one to the other, keeping its number.
   (the renderer has no line primitive) with white corner handles, everything outside it
   dimmed. While it is up the pointer moves/resizes it and `brush_cursor_visible()` is
   false, so painting can't run into a drag; `C` again drops it. `S` then writes the mask
-  AND the video pixels under it at the same size (`<name>.mask.png` + `<name>.crop.png`).
+  AND the video pixels under it at the same size (`<name>.mask.png` + `<name>.crop.png`). `E` (marquee up) re-encodes the whole clip cut to the same rectangle
+  (floored to even sides) as ProRes 422 Proxy, `<name>.crop.mov`, via an `ffmpeg` child
+  on a worker (`mask::export_prores`, its own `crop_export` receiver).
   That second file is why `Video::last_frame` exists: the GPU's copy can't be read back,
   so mask mode keeps one RGBA frame per video (cheap — it's paused, so the copy happens
   on entry and on seeks, and entering mask mode re-seeks to re-deliver the frame already

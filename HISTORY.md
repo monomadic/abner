@@ -3,6 +3,19 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-09-28 — `E` exports the crop as ProRes
+
+With the marquee up, `E` re-encodes the focused clip — every frame, audio as PCM —
+cut to the marquee, as ProRes 422 Proxy beside the source: `clip.mp4` →
+`clip.crop.mov` (ProRes lives in QuickTime, so `.mov` whatever the source was).
+It shells out to `ffmpeg` on a worker (`mask::export_prores`) rather than going
+through the in-process decoder: it's an offline transcode, and ffmpeg's autorotate
+puts the crop filter in the same display-pixel space as the marquee. Written to a
+temporary and renamed on success, like the PNGs. The rectangle is the same one `S`
+cuts, floored to even sides (`mask::even_rect`) because 4:2:2 needs whole chroma
+pairs; the origin doesn't move. Progress/result ride the status line through their
+own receiver (`crop_export`), so a PNG save never queues behind a long encode.
+
 ## 2026-09-23 — the launch window becomes the Splash surface
 
 The launch window now stands on the brand's grid-floor plate instead of a flat

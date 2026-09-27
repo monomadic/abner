@@ -228,6 +228,52 @@ fn write_png(
     result
 }
 
+/// Where a crop's video lands: `clip.mp4` → `clip.crop.mov`. ProRes lives
+/// in QuickTime, so the extension is `.mov` whatever the source's was.
+pub fn crop_video_path(video: &Path) -> PathBuf {
+    video.with_extension("crop.mov")
+}
+
+/// The ProRes 422 Proxy rectangle for an image-pixel crop: 4:2:2 halves the
+/// chroma horizontally and the encoder wants whole macroblock pairs, so both
+/// sides are floored to even (never below 2), shrinking from the far edge so
+/// the origin still matches the mask's.
+pub fn even_rect((x, y, w, h): (u32, u32, u32, u32)) -> (u32, u32, u32, u32) {
+    (x, y, (w & !1).max(2), (h & !1).max(2))
+}
+
+/// Re-encode the whole of `source`, cut to `rect` (display pixels, rotation
+/// applied — ffmpeg autorotates before the filter, same as the decoder), as
+/// ProRes 422 Proxy with the audio as PCM. Writes a temporary beside the
+/// destination and renames only on success, like the PNGs. Blocks for as
+/// long as the encode takes, so it runs on a worker.
+pub fn export_prores(source: &Path, dest: &Path, rect: (u32, u32, u32, u32)) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let (x, y, w, h) = even_rect(rect);
+    let nonce = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let temporary = dest.with_extension(format!("mov.{}.{nonce}.tmp", std::process::id()));
+    let out = std::process::Command::new("ffmpeg")
+        .args(["-nostdin", "-y", "-v", "error", "-i"])
+        .arg(source)
+        .args(["-map", "0:v:0", "-map", "0:a?"])
+        .args(["-vf", &format!("crop={w}:{h}:{x}:{y}")])
+        .args(["-c:v", "prores_ks", "-profile:v", "0", "-pix_fmt", "yuv422p10le"])
+        .args(["-c:a", "pcm_s16le", "-f", "mov"])
+        .arg(&temporary)
+        .output()
+        .context("running ffmpeg (is ffmpeg installed?)")?;
+    if !out.status.success() {
+        let _ = std::fs::remove_file(&temporary);
+        let err = String::from_utf8_lossy(&out.stderr);
+        anyhow::bail!("ffmpeg: {}", err.lines().last().unwrap_or("failed").trim());
+    }
+    if let Err(e) = std::fs::rename(&temporary, dest) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(e.into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
