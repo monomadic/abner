@@ -9,10 +9,15 @@ abner original.mp4 encoded.mp4
 abner --view delta original.mp4 encoded.mp4
 abner a.mp4 b.mp4 c.mp4          # three-way works too
 abner                            # launch window — drag clips onto it
+abner --no-video-splash           # just the centered logo — drag clips onto it
 ```
 
 `--view` takes `overlay`, `sbs`, `delta`, `split`, `checker` or `blend`, so every
 mode is reachable from the command line.
+
+The animated splash appears only when launched with no arguments. Video paths
+start playback directly without probing or decoding the splash video. Any arguments
+also make the empty window logo-only, including after closing the last clip.
 
 ## Configuration
 

@@ -64,6 +64,14 @@ cuts, floored to even sides (`mask::even_rect`) because 4:2:2 needs whole chroma
 pairs; the origin doesn't move. Progress/result ride the status line through their
 own receiver (`crop_export`), so a PNG save never queues behind a long encode.
 
+## 2026-09-27 — skip the splash for command-line launches
+
+Any arguments disable the animated launch splash and skip probing its video asset.
+Video paths go straight to playback; `--no-video-splash` alone opens a static,
+centered logo without the plate, reflection, status lamp, or footer. Drag-and-drop
+still loads clips, and closing the last clip returns to that same logo-only window.
+Launching without arguments keeps the existing animated splash.
+
 ## 2026-09-23 — the launch window becomes the Splash surface
 
 The launch window now stands on the brand's grid-floor plate instead of a flat

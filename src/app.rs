@@ -187,6 +187,8 @@ pub struct App {
     /// handed over by the renderer the same way (`Gpu::plate_horizon`).
     plate_size: (f32, f32),
     plate_horizon: f32,
+    /// False for launches with arguments: the empty window shows only the logo.
+    video_splash: bool,
     /// The launch backdrop video (none when the asset is missing or failed
     /// to decode: the still plate stays), and its decoder while
     /// the launch window is up.
@@ -381,6 +383,7 @@ impl App {
             logo_aspect: 3.0,
             plate_size: (1448.0, 1086.0),
             plate_horizon: 0.616,
+            video_splash: true,
             backdrop_src: None,
             backdrop: None,
             hidden: false,
@@ -833,6 +836,17 @@ impl App {
     pub fn set_hidden(&mut self, hidden: bool) {
         self.hidden = hidden;
     }
+
+    /// Whether the launch window animates its plate. Off (any command-line
+    /// argument) leaves the bare centered mark and no backdrop decoder.
+    pub fn set_video_splash(&mut self, enabled: bool) {
+        self.video_splash = enabled;
+        if !enabled {
+            self.backdrop = None;
+            self.backdrop_src = None;
+        }
+    }
+
 
     /// A backdrop frame goes back to its decoder's pool.
     pub fn recycle_backdrop(&mut self, buf: Vec<u8>) {
@@ -1424,10 +1438,14 @@ impl App {
         // Nothing loaded — paint the launch window and stop.
         if !self.ready() {
             let plate = self.tick_backdrop(dt);
-            if self.recent.stale {
-                self.recent.refresh();
+            // The logo-only window (any command-line argument) draws no
+            // recent row, so it spawns no thumbnail workers either.
+            if self.video_splash {
+                if self.recent.stale {
+                    self.recent.refresh();
+                }
+                self.recent.drain();
             }
-            self.recent.drain();
             let mut desc = self.launch_frame(vp);
             desc.thumbs = self.recent.uploads();
             // The floor moves at the clip's own rate: wake for its next
@@ -1846,6 +1864,22 @@ impl App {
     fn launch_frame(&mut self, vp: (f32, f32)) -> FrameDesc {
         let (w, h) = vp;
         let mut items: Vec<Item> = Vec::new();
+
+        if !self.video_splash {
+            let lw = (w * 0.34).clamp(240.0, 460.0).min((w - 96.0).max(1.0));
+            let lh = lw / self.logo_aspect;
+            return FrameDesc {
+                clear: LAUNCH_BG,
+                uploads: Vec::new(),
+                plate: None,
+                items: vec![Item::Logo {
+                    r: RectPx { x: (w - lw) / 2.0, y: (h - lh) / 2.0, w: lw, h: lh },
+                    alpha: 1.0,
+                }],
+                animating: false,
+                redraw_at: None,
+            };
+        }
 
         // Below this the plate's vanishing point falls outside the frame
         // and the horizon stops reading, so the window drops back to the

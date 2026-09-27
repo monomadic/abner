@@ -37,13 +37,15 @@ use text::TextCtx;
 const USAGE: &str = "\
 abner — video comparison and editing workspace
 
-usage: abner [--config <file.toml>] [--mask] [--crop [x,y,w,h]] [--view <overlay|sbs|delta|split|checker|blend>] [<video-a> [<video-b> [more...]]]
+usage: abner [--config <file.toml>] [--no-video-splash] [--mask] [--crop [x,y,w,h]] [--view <overlay|sbs|delta|split|checker|blend>] [<video-a> [<video-b> [more...]]]
 
 Run with no arguments (or launched from the .app bundle) to open the
 launch window, then drag clips onto it: one drop fills slot 1 and plays
 on its own, two fill 1 and 2, more add 3, 4… Dropping onto a running
 clip or comparison ADDS streams; hold Cmd while dropping to replace the
 whole set. A single path on the command line loads slot 1 the same way.
+Any arguments skip the animated splash; video paths play directly.
+Use --no-video-splash alone for just the centered logo and drag clips onto it.
 
 config: abner.default.toml (built in) overlaid by the first of
   --config <file>, ./abner.toml, ~/.config/abner/abner.toml,
@@ -78,6 +80,7 @@ keys:
 fn main() -> anyhow::Result<()> {
     env_logger::init();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let video_splash = args.is_empty();
     if args.iter().any(|a| a == "-h" || a == "--help") {
         print!("{USAGE}");
         return Ok(());
@@ -110,6 +113,8 @@ fn main() -> anyhow::Result<()> {
                     std::process::exit(2);
                 }
             }
+        } else if a == "--no-video-splash" {
+            // Any arguments already disable the splash, including this flag alone.
         } else if a == "--mask" {
             mask_mode = true;
         } else if a == "--crop" {
@@ -170,7 +175,8 @@ fn main() -> anyhow::Result<()> {
 
     let mut app = App::new(videos, &config);
     app.set_recent(recent::load());
-    if let Some(path) = backdrop_path() {
+    app.set_video_splash(video_splash);
+    if let Some(path) = video_splash.then(backdrop_path).flatten() {
         match probe::probe(&path) {
             Ok(info) => app.set_backdrop(info),
             Err(e) => log::warn!("launch backdrop {}: {e}", path.display()),
