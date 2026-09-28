@@ -1282,13 +1282,21 @@ impl Gpu {
 
         let surface_tex = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
-            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
-                self.surface.configure(&self.device, &self.config);
-                return;
-            }
-            wgpu::CurrentSurfaceTexture::Occluded => return,
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Validation => {
-                log::warn!("no surface texture this frame");
+            other => {
+                match other {
+                    wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
+                        self.surface.configure(&self.device, &self.config);
+                    }
+                    wgpu::CurrentSurfaceTexture::Occluded => {}
+                    _ => log::warn!("no surface texture this frame"),
+                }
+                // The uploads above are only STAGED: wgpu holds every
+                // write_texture/write_buffer until the next submit. With no
+                // surface nothing else submits, so an occluded launch window
+                // grew by one backdrop frame (~3.7MB) per idle tick without
+                // bound. An empty submit flushes them; the dirty mip chains
+                // wait for the next real frame.
+                self.queue.submit(std::iter::empty());
                 return;
             }
         };

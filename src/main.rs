@@ -560,6 +560,7 @@ impl ApplicationHandler for Runner {
             }
             WindowEvent::Occluded(occluded) => {
                 self.occluded = occluded;
+                self.app.set_hidden(occluded);
                 if !occluded {
                     self.animating = true;
                 }

@@ -162,6 +162,9 @@ pub struct App {
     /// the launch window is up.
     backdrop_src: Option<VideoInfo>,
     backdrop: Option<Backdrop>,
+    /// The window is occluded: the backdrop's clock stops, so nothing
+    /// drains its queue and backpressure parks the decoder.
+    hidden: bool,
     cmds: Vec<Cmd>,
 }
 
@@ -235,6 +238,7 @@ impl App {
             plate_horizon: 0.616,
             backdrop_src: None,
             backdrop: None,
+            hidden: false,
             cmds: Vec::new(),
         }
     }
@@ -560,6 +564,11 @@ impl App {
         self.backdrop_src = Some(info);
     }
 
+    /// Occluded windows don't decode the backdrop (see `hidden`).
+    pub fn set_hidden(&mut self, hidden: bool) {
+        self.hidden = hidden;
+    }
+
     /// A backdrop frame goes back to its decoder's pool.
     pub fn recycle_backdrop(&mut self, buf: Vec<u8>) {
         if let Some(b) = &self.backdrop {
@@ -571,6 +580,12 @@ impl App {
     /// the decoder on the launch window's first frame.
     fn tick_backdrop(&mut self, dt: f32) -> Option<Upload> {
         let src = self.backdrop_src.as_ref()?;
+        // Nobody can see the floor: hold the clock and take nothing. The
+        // full queue stalls the reader, so a hidden launch window costs no
+        // decode, and it resumes where it left off.
+        if self.hidden {
+            return None;
+        }
         if self.backdrop.is_none() {
             let player = Player::spawn(
                 &src.path,
