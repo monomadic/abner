@@ -3,6 +3,24 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-09-28 — native comparison and editing workspace
+
+Implemented the approved Superdesign workspace in the native renderer: left-aligned
+Compare/Mask/Crop tools, colored numbered source rows with metadata, focused
+inspector, neutral comparison controls, charcoal canvas, persistent transport and
+compact status footer. Replaced the giant letter and overlay panels. All controls
+use the existing comparison, brush, crop and export actions; `C` opens crop directly.
+
+Drawing and pointer routing share the workspace geometry. Pan/zoom, frame-locked
+comparison, painting and crop exports retain a single image transform; GPU scissors
+keep zoomed images and mask overlays inside each canvas cell. Text truncation uses
+actual font advances. Responsive layout narrows the source rail below 900px and
+hides the inspector below 600px high; `Tab` gives the image the full window.
+
+Validation: all 30 tests pass, including workspace input routing, clip scrolling,
+side-by-side zoom anchoring, text fitting, GPU scissor bounds, sync and crop exports.
+The native comparison workspace was checked with a targeted window capture.
+
 ## 2026-09-28 — `E` exports the crop as ProRes
 
 With the marquee up, `E` re-encodes the focused clip — every frame, audio as PCM —

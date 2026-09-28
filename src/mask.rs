@@ -131,6 +131,56 @@ impl Crop {
         }
     }
 
+    /// The largest rect of `ratio` (w/h) the image holds, centred where this
+    /// one was (then slid back inside). Snapping to the largest fit rather
+    /// than keeping the size means stepping presets never ratchets the
+    /// marquee smaller — a tall preset clamped to the frame height would
+    /// otherwise shrink every preset after it.
+    pub fn with_aspect(self, ratio: f32, width: u32, height: u32) -> Self {
+        let (fw, fh) = (width as f32, height as f32);
+        let (w, h) = if fw / fh > ratio { (fh * ratio, fh) } else { (fw, fw / ratio) };
+        let (cx, cy) = (self.x + self.w * 0.5, self.y + self.h * 0.5);
+        Self { w, h, ..self }.moved_to(cx - w * 0.5, cy - h * 0.5, width, height)
+    }
+
+    /// `with_corner` with the ratio locked: the corner follows whichever
+    /// axis the pointer has pulled further, the other axis follows the
+    /// ratio, and both stop where the image runs out on the anchored side.
+    pub fn with_corner_locked(
+        self,
+        corner: Corner,
+        x: f32,
+        y: f32,
+        ratio: f32,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        let (fw, fh) = (width as f32, height as f32);
+        let (ax, ay, east, south) = match corner {
+            Corner::Nw => (self.x + self.w, self.y + self.h, false, false),
+            Corner::Ne => (self.x, self.y + self.h, true, false),
+            Corner::Sw => (self.x + self.w, self.y, false, true),
+            Corner::Se => (self.x, self.y, true, true),
+        };
+        let x = x.clamp(0.0, fw);
+        let y = y.clamp(0.0, fh);
+        // The side of the anchor the pointer is on; exactly on it keeps the
+        // corner's own side, so the rect never flips on a zero.
+        let east = if x == ax { east } else { x > ax };
+        let south = if y == ay { south } else { y > ay };
+        let room_w = if east { fw - ax } else { ax };
+        let room_h = if south { fh - ay } else { ay };
+        let w = (x - ax).abs().max((y - ay).abs() * ratio);
+        let w = w.max(MIN_CROP * ratio.max(1.0)).min(room_w).min(room_h * ratio);
+        let h = w / ratio;
+        Self {
+            x: if east { ax } else { ax - w },
+            y: if south { ay } else { ay - h },
+            w,
+            h,
+        }
+    }
+
     /// A rect from outside (`--crop x,y,w,h`) pulled inside the image.
     pub fn clamped(self, width: u32, height: u32) -> Self {
         Self {
@@ -293,6 +343,33 @@ mod tests {
     /// The crop is the contract between the two exported files: whatever
     /// rectangle it names must cut the mask and the RGBA frame to the same
     /// pixels, and it can never leave the image.
+    /// A preset reshapes about the centre and stays inside; a locked drag
+    /// keeps the ratio on whichever axis leads, and stops at the image edge.
+    #[test]
+    fn aspect_presets_hold_their_ratio() {
+        let full = Crop::full(1920, 1080);
+        let square = full.with_aspect(1.0, 1920, 1080);
+        assert_eq!(square, Crop { x: 420.0, y: 0.0, w: 1080.0, h: 1080.0 });
+        let tall = full.with_aspect(9.0 / 16.0, 1920, 1080);
+        assert!((tall.w / tall.h - 9.0 / 16.0).abs() < 1e-4 && tall.h <= 1080.0);
+        assert!((tall.x + tall.w * 0.5 - 960.0).abs() < 1e-3);
+
+        let c = Crop { x: 100.0, y: 100.0, w: 160.0, h: 90.0 };
+        let r = 16.0 / 9.0;
+        // Pulled mostly down: height leads.
+        let d = c.with_corner_locked(Corner::Se, 300.0, 460.0, r, 1920, 1080);
+        assert!((d.h - 360.0).abs() < 1e-3 && (d.w / d.h - r).abs() < 1e-4);
+        assert_eq!((d.x, d.y), (100.0, 100.0));
+        // Far past the corner of the image: capped by the room below.
+        let d = c.with_corner_locked(Corner::Se, 9999.0, 9999.0, r, 1920, 1080);
+        assert!(d.y + d.h <= 1080.001 && d.x + d.w <= 1920.001);
+        assert!((d.w / d.h - r).abs() < 1e-4);
+        // NW drag grows up-left from the SE anchor (260, 190), capped by
+        // the 190px above it.
+        let d = c.with_corner_locked(Corner::Nw, 0.0, 0.0, 1.0, 1920, 1080);
+        assert_eq!(d, Crop { x: 70.0, y: 0.0, w: 190.0, h: 190.0 });
+    }
+
     #[test]
     fn crop_stays_inside_the_image_and_cuts_both_planes_alike() {
         let full = Crop::full(32, 16);

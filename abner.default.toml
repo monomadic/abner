@@ -1,0 +1,41 @@
+# abner — default configuration.
+#
+# This file is compiled into the binary and is the complete configuration:
+# every key abner reads is declared here, with its default. A user config
+# is an OVERLAY on top of it — set only the keys you want to change, in the
+# same tables. The first of these that exists is used (later ones are not
+# read):
+#
+#   1. --config <path>           (an explicit path must exist)
+#   2. ./abner.toml              (the working directory)
+#   3. ~/.config/abner/abner.toml
+#   4. ~/.config/abner.toml
+#
+# Unknown keys, wrong types and out-of-range values are errors: abner
+# refuses to start and says which file and key.
+
+[window]
+# Initial window size in logical points (minimum 720×480).
+width = 1280
+height = 800
+
+[playback]
+# Starting view: overlay, sbs, delta, split, checker or blend.
+# --view on the command line overrides it.
+view = "overlay"
+# Open paused instead of playing.
+start_paused = false
+# Seconds jumped by ← / →.
+seek_step = 1.0
+
+[compare]
+# Delta amplification (1–64; - / = adjust it live).
+delta_gain = 4.0
+# Blend mix, 0 = all A, 1 = all B.
+blend = 0.5
+# Checker square size in pixels (4–512).
+checker_size = 48.0
+
+[mask]
+# Brush diameter in image pixels (1–4096; [ / ] adjust it live).
+brush_size = 64.0

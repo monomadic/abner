@@ -24,8 +24,8 @@ from one to the other, keeping its number.
   hidden title, and `FullSizeContentView` so the wgpu surface runs UNDER the strip —
   a transparent bar alone shows the default system grey, not the app's clear, so the
   only way to match exactly is to let the same GPU clear paint it. The traffic lights
-  stay, floating over the content, which is why the top HUD row is offset by
-  `App::top_inset` (`TITLEBAR_H`, zero in fake fullscreen — that window is borderless).
+  stay, floating over the content; the workspace toolbar starts at x=100 to clear
+  them (x=16 in borderless fullscreen).
   The title is still SET, just hidden, so anything reading it sees the clip names.
   The Dock icon for the BARE binary is `include_bytes!`'d from `assets/app-icon.png`
   (the icon SLOT — `packaging/build-app.sh` renders the bundle's `.icns` from the same
@@ -97,33 +97,37 @@ from one to the other, keeping its number.
   so each re-delivers into its new texture slot; `started` is NOT reset (the seek lands
   just past `t`, so a delivery-gated clock would deadlock). `Cmd::VideosChanged` makes
   the runner re-sync textures + title. Last clip closed = launch window; ⌘W there quits.
-  The bottom **status line** (`build_status_line`) is vim/helix-style: a fixed-width
-  chip naming the input mode (`A/B TEST` on the accent, `MASK` on the logo's red), that
-  mode's keycaps, and mode status on the right; the bar itself is tinted by mode (dark
-  blue / dark red, ~0.93 alpha). It never fades (the transport above it does) and is
-  drawn in mask mode too; it is not a paint target (`brush_cursor_visible`). **Keycaps
-  are switchblade's design-system cap** (`keycap()`/`cap_width()`, ported from its
-  `theme.rs::keycap` at the inline 22px size, tokens copied verbatim except the
-  outline, deliberately fainter than its 0.11 hairline) — lowercase
-  labels, like switchblade's. The A|B pill sits IN the titlebar strip, level with the
-  traffic lights. Transport glyphs are geometry (`Item::Triangle`, shader mode 9), never
-  font glyphs: a font's ▶ is placed by its metrics, not its ink, and never centres.
+  The **workspace** (`Workspace`, `controls`, `build_hud`) shares geometry between
+  drawing and pointer hit testing: a numbered source rail, focused inspector,
+  Compare/Mask/Crop toolbar, contextual controls, canvas, persistent transport and
+  status line. The rail is 280px (210 below 900px wide), the inspector hides below
+  600px high, and the minimum window is 720×480. `Tab` hides the whole shell.
+  `base_rect` fits within the canvas (or an individual side-by-side cell); every
+  gesture and crop/mask transform uses that same rect. Shell clicks cannot paint.
+  `Item::Clip` scissors video and overlays to the canvas/cell, including when zoomed.
+  Source badges use numbers and nine distinct colors; keyboard selection scrolls
+  the rail to keep the selected row visible. Text truncation uses measured font
+  advances (`TextItem::max_width`), not character counts. Transport glyphs remain
+  geometry (`Item::Triangle`), not font glyphs.
 - `src/mask.rs` — per-video native-resolution binary masks, the crop marquee's geometry,
   and atomic PNG export. `App` owns lazy masks and converts pointer positions through
   `content_rect`; never invent a second zoom transform. `M` temporarily draws the focused
   video alone, `+`/`-` (or `[`/`]`) size the image-pixel brush, `S` snapshots to a save
   worker. Blue = 255, red = 0. Renderer mode 8 samples one R8 mask texture;
-  `(id, revision)` avoids idle uploads. Mask mode has no panel of its own any more — its
-  readout is the bottom status line, which names the sub-mode in its chip (`MASK` /
-  `CROP`) and is drawn AFTER `build_mask_layer` so the marquee's dimming never touches
-  it. **`C` is the crop marquee** (2026-09-20): a `Crop` in IMAGE pixels
+  `(id, revision)` avoids idle uploads. Mask/crop controls occupy the context row and results appear in the
+  footer. The mask layer is clipped to the canvas, so dimming never touches the shell. **`C` is the crop marquee** (2026-09-20): a `Crop` in IMAGE pixels
   — the mask's own grid, so one rectangle cuts both planes — drawn as dashed rects
   (the renderer has no line primitive) with white corner handles, everything outside it
   dimmed. While it is up the pointer moves/resizes it and `brush_cursor_visible()` is
   false, so painting can't run into a drag; `C` again drops it. `S` then writes the mask
   AND the video pixels under it at the same size (`<name>.mask.png` + `<name>.crop.png`). `E` (marquee up) re-encodes the whole clip cut to the same rectangle
   (floored to even sides) as ProRes 422 Proxy, `<name>.crop.mov`, via an `ffmpeg` child
-  on a worker (`mask::export_prores`, its own `crop_export` receiver).
+  on a worker (`mask::export_prores`, its own `crop_export` receiver). With the marquee up the mask
+  tint is NOT drawn (the footage shows plain, everything outside dimmed near-black at
+  `CROP_DIM` 0.95 — linear blending, so lower reads grey). `A`/Shift-A step the ratio
+  presets (`ASPECTS`: free, 16:9, 9:16, 4:3, 1:1, 2.39:1); a preset snaps to its largest
+  fit about the marquee's centre (keeping the size ratchets smaller), and corner drags
+  keep the ratio (`Crop::with_corner_locked`).
   That second file is why `Video::last_frame` exists: the GPU's copy can't be read back,
   so mask mode keeps one RGBA frame per video (cheap — it's paused, so the copy happens
   on entry and on seeks, and entering mask mode re-seeks to re-deliver the frame already
@@ -209,19 +213,17 @@ from one to the other, keeping its number.
 
 ## Design source
 
-The HUD implements **2a** from the Claude Design project "A/B testing window mockups
-for Abner" (`Abner AB Window.dc.html`, project `e16025af-9465-4a81-bdc3-97780f3399eb`,
-read via the DesignSync tool). 2b (launch/empty state) WAS implemented — A/B drop
-targets, terminal hint, keycap legend — and was stripped back (2026-09-20) to just the
-wordmark and one line, "drop a video file to begin" (a drag over the window turns it
-into an accent "release to open"; the whole window is the target, since winit gives
-no drop POSITION). **One clip is enough to play**: `App::ready()` is "any video", a
-lone clip lands in slot A and plays, and `shown_mode()` draws it plain whatever
-`mode` says (b == a, so a delta would be a black frame) while keeping `mode` for when
-a second clip arrives. The old zones are in git (`a39538f`) if 2b comes back.
-Deliberate deviations from the mock are noted where they occur: higher panel alphas
-and a saturating scrim (bright real footage, not the mock's dark plate), `ENTER`
-instead of ⏎, and solid rather than dashed drop-zone borders.
+The loaded workspace implements the approved Superdesign draft
+`https://p.superdesign.dev/draft/2e39910e-e4b1-4236-bc2f-c1e0d5ce6f0c`
+(local reference: `.superdesign/proposals/canvas.html`). It replaces the old 2a
+Instrument HUD: no giant letter, Sources/View headings or fading transport.
+The canvas surround is #1d1b1b; controls use neutral #1a1a1a fills and #d1d1d1
+selected text. The user-requested negative border width is represented as no border.
+The source palette starts #61b5ee, #e6ac69, #b89ae8 and repeats after nine slots.
+
+**One clip is enough to play**: `App::ready()` is "any video", a lone clip lands in
+slot 1 and `shown_mode()` draws it plain while keeping the selected comparison mode
+for when another clip arrives. The whole empty window remains the drop target.
 
 The launch window is the design system's **`Splash`** surface (Abner > Components >
 Splash, in the Claude design system at `claude.ai/artifact/CqpfyGsUrKR6f7ZeV9fAdV`):

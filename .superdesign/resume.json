@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "targets": {
+    "video-workspace": {
+      "targetKind": "existing-ui",
+      "projectId": "75c88099-f958-43d3-8150-064a8d4841b9",
+      "baselineDraftId": "2e39910e-e4b1-4236-bc2f-c1e0d5ce6f0c",
+      "activeDraftId": "2e39910e-e4b1-4236-bc2f-c1e0d5ce6f0c",
+      "designSystemPath": ".superdesign/design-system.md",
+      "referenceIds": [
+        "1bb92794-841c-4188-9124-0096db60041c"
+      ],
+      "contextFiles": [
+        ".superdesign/design-system.md",
+        "src/app.rs:1198:1800",
+        "src/render.rs:180:300",
+        ".superdesign/init/theme.md"
+      ],
+      "fingerprints": {
+        ".superdesign/design-system.md": "ca67e8d0c9f2ffdd2bef0dc5aaa5d0def259739a16b5c2055956467bc2cefc03",
+        "src/app.rs": "22fe5300d2abbd6303155d4d88c1a97ea4131a8d96ea55147935cfbdc0e02c5a",
+        "src/render.rs": "42904e2226d36cdf144b5af59244a794cce5656da54b44c3ff7bdd7424509c41",
+        ".superdesign/init/theme.md": "d6e0690d1e772d80d86bbf0105821a2a9ef31db08c66a3f8a5e2b695dd3857f4"
+      },
+      "components": [],
+      "drafts": {
+        "2e39910e-e4b1-4236-bc2f-c1e0d5ce6f0c": {
+          "title": "Abner Workspace Redesign",
+          "visualDirection": "Numbered color-coded clips with inline resolution/fps/codec, neutral borderless comparison controls, charcoal canvas surround, left-aligned operation tools",
+          "currentVersion": 7
+        }
+      },
+      "updatedAt": "2026-09-27T21:37:05.084617+00:00",
+      "baselineVersion": 1
+    }
+  }
+}

@@ -1,4 +1,4 @@
-//! abner — A/B video comparison player.
+//! abner — video comparison and editing workspace.
 //!
 //! Plays two or more videos in frame-locked sync and flips/blends/diffs
 //! between them. The window loop carries switchblade's learnings: idle
@@ -8,6 +8,7 @@
 //! window-shadow trick for macOS Tahoe's contour line.
 
 mod app;
+mod config;
 mod mask;
 mod open;
 mod player;
@@ -33,15 +34,20 @@ use render::Gpu;
 use text::TextCtx;
 
 const USAGE: &str = "\
-abner — A/B video comparison player
+abner — video comparison and editing workspace
 
-usage: abner [--mask] [--crop [x,y,w,h]] [--view <overlay|sbs|delta|split|checker|blend>] [<video-a> [<video-b> [more...]]]
+usage: abner [--config <file.toml>] [--mask] [--crop [x,y,w,h]] [--view <overlay|sbs|delta|split|checker|blend>] [<video-a> [<video-b> [more...]]]
 
 Run with no arguments (or launched from the .app bundle) to open the
-launch window, then drag clips onto it: one drop fills slot A and plays
-on its own, two fill A and B, more add C, D… Dropping onto a running
+launch window, then drag clips onto it: one drop fills slot 1 and plays
+on its own, two fill 1 and 2, more add 3, 4… Dropping onto a running
 clip or comparison ADDS streams; hold Cmd while dropping to replace the
-whole set. A single path on the command line loads slot A the same way.
+whole set. A single path on the command line loads slot 1 the same way.
+
+config: abner.default.toml (built in) overlaid by the first of
+  --config <file>, ./abner.toml, ~/.config/abner/abner.toml,
+  ~/.config/abner.toml — set only the keys you change. A config error
+  stops startup.
 
 keys:
   Enter        flip to the next video (overlay mode)
@@ -49,19 +55,20 @@ keys:
   < >  (, .)   frame-step back / forward
   ← →          seek ±1s
   [ ]          slow down / speed up playback (Backspace resets)
-  1..9         show clip 1, 2, … directly (A, B, …)
+  1..9         show clip 1, 2, … directly
   V            next view (Shift-V previous): overlay  side-by-side  delta  split  checker  blend
   - =          adjust delta gain / blend / checker size
   pinch        zoom on the pointer, photo-style (drag or scroll to pan; synced)
   M            toggle mask painting (pauses; Enter changes focused video)
   [ ]          change brush size in mask mode
-  C            crop marquee in mask mode: drag to move, corners to resize
+  C            open crop: drag to move, corners to resize
                (--crop opens there; --crop x,y,w,h sets it in image pixels)
   S            save the mask as <name>.mask.png — with a crop up, both it
                and the video under it (<name>.crop.png), cut to the marquee
+  E            export the cropped clip as ProRes 422 Proxy
   Z            reset zoom
   F            fullscreen (borderless, same Space)
-  Tab          toggle info overlay
+  Tab          toggle workspace controls
   Cmd-W        close the focused clip (on the empty window: quit)
   Q            quit
   Esc          leave fullscreen, else quit
@@ -74,7 +81,8 @@ fn main() -> anyhow::Result<()> {
         print!("{USAGE}");
         return Ok(());
     }
-    let mut mode = app::Mode::Overlay;
+    let mut mode: Option<app::Mode> = None;
+    let mut config_path: Option<PathBuf> = None;
     let mut mask_mode = false;
     let mut crop: Option<Option<[f32; 4]>> = None;
     let mut paths: Vec<PathBuf> = Vec::new();
@@ -83,9 +91,21 @@ fn main() -> anyhow::Result<()> {
         if a == "--view" {
             let v = it.next().and_then(|v| app::Mode::parse(v));
             match v {
-                Some(m) => mode = m,
+                Some(m) => mode = Some(m),
                 None => {
                     eprintln!("--view needs one of: overlay sbs delta split checker blend");
+                    std::process::exit(2);
+                }
+            }
+        } else if a == "--config" || a.starts_with("--config=") {
+            let v = match a.strip_prefix("--config=") {
+                Some(v) => Some(v.to_string()),
+                None => it.next().cloned(),
+            };
+            match v.filter(|v| !v.is_empty()) {
+                Some(v) => config_path = Some(PathBuf::from(v)),
+                None => {
+                    eprintln!("--config needs a path to a .toml file");
                     std::process::exit(2);
                 }
             }
@@ -101,6 +121,19 @@ fn main() -> anyhow::Result<()> {
             paths.push(PathBuf::from(a));
         }
     }
+    // Before anything else touches the disk or opens a window: a broken
+    // config refuses to start, naming the file and the key.
+    let mut config = match config::Config::load(config_path.as_deref()) {
+        Ok((c, used)) => {
+            if let Some(p) = used { log::info!("config {}", p.display()); }
+            c
+        }
+        Err(e) => {
+            eprintln!("abner: {e:#}");
+            std::process::exit(2);
+        }
+    };
+    if let Some(m) = mode { config.playback.view = m; }
     // Zero paths (bundle double-click / bare `abner`) opens the launch
     // window; one path fills slot A and plays alone — the same state a
     // single dropped file produces.
@@ -131,7 +164,7 @@ fn main() -> anyhow::Result<()> {
 
     let title = title_for(&videos);
 
-    let mut app = App::new(videos, mode);
+    let mut app = App::new(videos, &config);
     if let Some(path) = backdrop_path() {
         match probe::probe(&path) {
             Ok(info) => app.set_backdrop(info),
@@ -142,6 +175,7 @@ fn main() -> anyhow::Result<()> {
     let mut runner = Runner {
         app,
         title,
+        window_size: (config.window.width, config.window.height),
         notify,
         dropped: Vec::new(),
         window: None,
@@ -220,6 +254,8 @@ fn title_for(videos: &[Video]) -> String {
 struct Runner {
     app: App,
     title: String,
+    /// Initial window size in logical points (config `window`).
+    window_size: (f64, f64),
     /// Handed to every player, including ones spawned by a drop, so a
     /// frame arriving while the loop idles still wakes it.
     notify: player::Notify,
@@ -396,8 +432,8 @@ fn set_app_icon() {}
 /// is the only way the strip matches the frame exactly. The traffic-light
 /// buttons float above the content and are untouched; the window title is
 /// still set (and still correct for anything that reads it), just hidden.
-/// The app's top HUD row keeps clear of the buttons via
-/// `App::top_inset`. (switchblade, `set_titlebar_glass`.)
+/// The workspace toolbar starts after the traffic lights.
+/// (switchblade, `set_titlebar_glass`.)
 #[cfg(target_os = "macos")]
 fn set_titlebar_glass(w: &Window) {
     use objc2_app_kit::{NSView, NSWindowStyleMask, NSWindowTitleVisibility};
@@ -454,7 +490,8 @@ impl ApplicationHandler for Runner {
             // Opaque: the desktop showing faintly through the letterbox
             // and the launch window was tried and dropped (2026-09-23).
             .with_transparent(false)
-            .with_inner_size(LogicalSize::new(1280.0, 800.0));
+            .with_inner_size(LogicalSize::new(self.window_size.0, self.window_size.1))
+            .with_min_inner_size(LogicalSize::new(config::MIN_WINDOW.0, config::MIN_WINDOW.1));
         let window = Arc::new(_event_loop.create_window(attrs).expect("create window"));
         // Text-free glass titlebar with the video running underneath it
         // (traffic lights kept) — switchblade's treatment.

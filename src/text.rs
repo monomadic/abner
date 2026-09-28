@@ -179,6 +179,27 @@ impl TextCtx {
         self.cache.get(&key).and_then(|e| e.as_ref())
     }
 
+    /// Fit a label before rasterizing it. Count real font advances, including
+    /// tracking, rather than guessing a character limit in the app.
+    pub fn fit(&self, text: &str, px: f32, tracking: f32, limit: f32) -> String {
+        let Some(font) = &self.font else { return String::new() };
+        let sf = font.as_scaled(px);
+        let advance = |c| sf.h_advance(sf.glyph_id(c)) + tracking;
+        let width = |s: &str| s.chars().map(advance).sum::<f32>() - if s.is_empty() { 0.0 } else { tracking };
+        if width(text) <= limit { return text.to_string(); }
+        let ellipsis = "…";
+        if width(ellipsis) > limit { return String::new(); }
+        let mut result = String::new();
+        let mut used = 0.0;
+        for c in text.chars() {
+            if used + advance(c) + width(ellipsis) > limit { break; }
+            used += advance(c);
+            result.push(c);
+        }
+        result.push('…');
+        result
+    }
+
     /// Lay out one line at `px` physical pixels, adding `tracking` px of
     /// extra advance per glyph (CSS letter-spacing). Quads are relative
     /// to the line box's top-left.
@@ -220,5 +241,21 @@ impl TextCtx {
             pen -= tracking;
         }
         LaidText { quads, w: pen, h: line_h }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn fitted_unicode_labels_respect_measured_width() {
+        let mut text = TextCtx::load();
+        let label = "長いファイル名 — résumé clip.mp4";
+        for (px, tracking, width) in [(11.0, 0.0, 85.0), (22.0, 1.2, 170.0), (11.0, 0.0, 0.0)] {
+            let fit = text.fit(label, px, tracking, width);
+            assert!(text.layout(&fit, px, tracking).w <= width + 0.001);
+            if !fit.is_empty() { assert!(fit.ends_with('…')); }
+        }
+        assert_eq!(text.fit("clip.mp4", 11.0, 0.0, 400.0), "clip.mp4");
     }
 }

@@ -17,10 +17,10 @@ mode is reachable from the command line.
 ## Drag and drop
 
 Run `abner` with no arguments and drag clips onto the launch window. One file fills
-slot **A** and the window keeps waiting; two land as **A** and **B** and start playing;
-more add C, D… — in the order the platform hands them over, which for a Finder
+slot **1** and starts playing; two land as **1** and **2**;
+more add 3, 4… — in the order the platform hands them over, which for a Finder
 multi-select is the order they appear in that window, so drop them one at a time if it
-matters which is A. Dropping onto a running comparison **adds** streams — hold **⌘** while
+matters which is first. Dropping onto a running comparison **adds** streams — hold **⌘** while
 dropping to replace the whole set instead. A single path on the command line
 (`abner reference.mp4`) opens the same half-filled window.
 
@@ -49,7 +49,7 @@ frame's true pts is adopted back into the clock, so stepping can't accumulate dr
 | `Space` | pause / play |
 | `<` `>` (or `,` `.`) | frame-step back / forward |
 | `←` `→` | seek ±1s |
-| `1`…`9` | show clip 1, 2, … (A, B, …) directly |
+| `1`…`9` | show clip 1, 2, … directly |
 | `V` / `Shift-V` | next / previous view, cycling through: |
 | | **overlay** — videos stacked, flip with Enter (the classic A/B) |
 | | **side-by-side** — all videos in a row |
@@ -65,18 +65,18 @@ frame's true pts is adopted back into the clock, so stepping can't accumulate dr
 | `Z` | reset zoom |
 | `[` `]` | slow down / speed up playback (0.25×–4×; `Backspace` resets) |
 | `F` | fullscreen (borderless, same Space, instant) |
-| `Tab` | toggle the info overlay (filename, path, res, fps, codec, bitrate, size, duration) |
+| `Tab` | toggle the workspace controls |
 | `Q` | quit |
 | `Esc` | leave fullscreen, else quit |
 
 In compare modes (delta/split/checker/blend) the pair is the active video vs the next
-one; `Enter` rotates which pair you're looking at. Big letter badges mark what you're
-seeing — A hugs the left edge, B the right. With the overlay hidden, `Enter` still
-flashes the letter briefly so you know where you are.
+one; `Enter` rotates which pair you're looking at. Small colored number badges match
+the source list and the `1`–`9` shortcuts. With the controls hidden, `Enter` still
+flashes the number briefly so you know where you are.
 
 ## Mask painting
 
-Press **M** with a comparison loaded. The focused video fills the window with a
+Press **M** with a comparison loaded. The focused video fills the canvas with a
 50% red overlay. Click or drag to paint with the circular brush: painted pixels
 become 50% blue, replacing red rather than stacking another tint. **+ / -** changes
 brush diameter (shown in source-image pixels); pinch to zoom and scroll to pan.
@@ -96,17 +96,22 @@ For a direct visual check without keyboard automation:
 `abner --mask a.mp4 b.mp4`. The ordinary `--view` selection is restored when leaving
 mask mode.
 
-## The HUD
+## The workspace
 
-Corner brackets frame the active stream, an A|B toggle in the title bar shows what's on screen,
-and the top-left block lists every clip's filename, resolution, fps, codec, bitrate,
-size, duration and path. Along the bottom sits a transport — prev / play-pause / next,
-a seek bar you can click and drag, and the view and timecode readout. The transport is
-hover-revealed: it fades out after a few seconds of stillness and any pointer movement
-brings it back. Beneath it a status line stays put, vim/helix style — dark blue in A/B,
-dark red while masking: a chip on the left names the input mode (**A/B TEST** or
-**MASK**) and keycaps beside it list that mode's keys; mask mode adds the focused clip, brush size and
-save status on the right. `Tab` hides the whole HUD (the status line stays in mask mode).
+Compare, Mask and Crop sit beside the window controls. The source rail uses colored
+numbers matching the `1`–`9` shortcuts; each clip shows its filename, resolution,
+frame rate, codec and duration. The inspector below shows the focused clip's details.
+Scroll the rail when there are more clips than fit.
+
+The context row switches comparison views or exposes brush and export controls.
+The charcoal canvas holds the videos, with shared pan and zoom. The transport stays
+visible below it, with frame stepping, play/pause, scrubbing and timecodes. A quiet
+footer shows the current tool, clip, zoom and save/export status. `Tab` hides the
+whole interface to give the image the window.
+
+The rail narrows below 900px and the inspector hides below 600px high; the minimum
+window is 720×480. These changes keep tools and source selection reachable without
+covering the image.
 
 ## Ideas for more views
 

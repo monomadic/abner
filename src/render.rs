@@ -280,6 +280,8 @@ pub struct TextItem {
     /// Extra advance per glyph, logical px (CSS letter-spacing).
     pub tracking: f32,
     pub bg: Option<TextBg>,
+    /// Maximum logical width, ellipsized using the renderer's font metrics.
+    pub max_width: Option<f32>,
 }
 
 impl TextItem {
@@ -294,11 +296,14 @@ impl TextItem {
             valign: VAlign::Top,
             tracking: 0.0,
             bg: None,
+            max_width: None,
         }
     }
 }
 
 pub enum Item {
+    /// Scissor subsequent items to this logical rectangle; None restores the surface.
+    Clip(Option<RectPx>),
     Rect(RectItem),
     Video {
         a: usize,
@@ -1046,18 +1051,18 @@ impl Gpu {
 
         // Build instances + draw batches (bind-group key per range).
         let mut data: Vec<Instance> = Vec::new();
-        let mut batches: Vec<((usize, usize), std::ops::Range<u32>)> = Vec::new();
+        let mut batches: Vec<((usize, usize), Option<[u32; 4]>, std::ops::Range<u32>)> = Vec::new();
         let push = |data: &mut Vec<Instance>,
-                        batches: &mut Vec<((usize, usize), std::ops::Range<u32>)>,
+                        batches: &mut Vec<((usize, usize), Option<[u32; 4]>, std::ops::Range<u32>)>,
+                        clip: Option<[u32; 4]>,
                         key: Option<(usize, usize)>,
                         inst: Instance| {
             let idx = data.len() as u32;
             data.push(inst);
-            match (batches.last_mut(), key) {
-                // Keyless items (text/rects) ride the current batch.
-                (Some((_, range)), None) => range.end = idx + 1,
-                (Some((k, range)), Some(key)) if *k == key => range.end = idx + 1,
-                (_, key) => batches.push((key.unwrap_or((0, 0)), idx..idx + 1)),
+            let key = key.unwrap_or_else(|| batches.last().map(|b| b.0).unwrap_or((0, 0)));
+            match batches.last_mut() {
+                Some((k, c, range)) if *k == key && *c == clip => range.end = idx + 1,
+                _ => batches.push((key, clip, idx..idx + 1)),
             }
         };
 
@@ -1081,16 +1086,20 @@ impl Gpu {
                 0.0
             },
         };
+        let mut clip = None;
         let mut plate_rect = [0.0, 0.0, 1.0, 1.0];
         for item in &desc.items {
             if let Item::Plate { r, .. } = item {
                 plate_rect = [r.x, r.y, r.w, r.h];
             }
             match item {
-                Item::Rect(ri) => push(&mut data, &mut batches, None, rect_inst(ri)),
+                Item::Clip(rect) => {
+                    clip = rect.map(|r| scissor(r, scale, self.config.width, self.config.height));
+                }
+                Item::Rect(ri) => push(&mut data, &mut batches, clip, None, rect_inst(ri)),
                 Item::Video { a, b, r, uv, mode, p0, p1 } => {
                     let key = self.pair_bg(*a, *b);
-                    push(&mut data, &mut batches, Some(key), Instance {
+                    push(&mut data, &mut batches, clip, Some(key), Instance {
                         pos: [r.x, r.y],
                         size: [r.w, r.h],
                         uv: *uv,
@@ -1101,11 +1110,11 @@ impl Gpu {
                         pad: 0.0,
                     });
                 }
-                Item::Mask { r, .. } => push(&mut data, &mut batches, None, Instance {
+                Item::Mask { r, .. } => push(&mut data, &mut batches, clip, None, Instance {
                     pos: [r.x, r.y], size: [r.w, r.h], uv: [0.0, 0.0, 1.0, 1.0],
                     color: [0.0; 4], mode: 8.0, p0: 0.0, p1: 0.0, pad: 0.0,
                 }),
-                Item::Triangle { r, color, left, radius } => push(&mut data, &mut batches, None, Instance {
+                Item::Triangle { r, color, left, radius } => push(&mut data, &mut batches, clip, None, Instance {
                     pos: [r.x, r.y],
                     size: [r.w, r.h],
                     uv: [0.0; 4],
@@ -1115,7 +1124,7 @@ impl Gpu {
                     p1: if *left { 1.0 } else { 0.0 },
                     pad: 0.0,
                 }),
-                Item::Logo { r, alpha } => push(&mut data, &mut batches, None, Instance {
+                Item::Logo { r, alpha } => push(&mut data, &mut batches, clip, None, Instance {
                     pos: [r.x, r.y],
                     size: [r.w, r.h],
                     uv: self.logo_uv,
@@ -1125,7 +1134,7 @@ impl Gpu {
                     p1: 0.0,
                     pad: 0.0,
                 }),
-                Item::Plate { r, alpha } => push(&mut data, &mut batches, None, Instance {
+                Item::Plate { r, alpha } => push(&mut data, &mut batches, clip, None, Instance {
                     pos: [r.x, r.y],
                     size: [r.w, r.h],
                     uv: [0.0, 0.0, 1.0, 1.0],
@@ -1139,7 +1148,7 @@ impl Gpu {
                 // shader.wgsl): mode 11 computes its own varying uv, so
                 // the interpolated one is of no use to it.
                 Item::LogoFloor { r, alpha, persp, tilt, src_h } => {
-                    push(&mut data, &mut batches, None, Instance {
+                    push(&mut data, &mut batches, clip, None, Instance {
                         pos: [r.x, r.y],
                         size: [r.w, r.h],
                         uv: self.logo_uv,
@@ -1162,7 +1171,7 @@ impl Gpu {
                     // whose texel is as wide as the blur.
                     let texel = mark.w / ((u1 - u0) * self.logo_w);
                     let level = (blur / texel).max(1.0).log2();
-                    push(&mut data, &mut batches, None, Instance {
+                    push(&mut data, &mut batches, clip, None, Instance {
                         pos: [mark.x - e, mark.y + dy - e],
                         size: [mark.w + e * 2.0, mark.h + e * 2.0],
                         uv: [u0 - du, v0 - dv, u1 + du, v1 + dv],
@@ -1173,7 +1182,7 @@ impl Gpu {
                         pad: 0.0,
                     })
                 }
-                Item::Vignette { r, color } => push(&mut data, &mut batches, None, Instance {
+                Item::Vignette { r, color } => push(&mut data, &mut batches, clip, None, Instance {
                     pos: [r.x, r.y],
                     size: [r.w, r.h],
                     uv: [0.0; 4],
@@ -1183,7 +1192,7 @@ impl Gpu {
                     p1: 0.0,
                     pad: 0.0,
                 }),
-                Item::Scanlines { r, color } => push(&mut data, &mut batches, None, Instance {
+                Item::Scanlines { r, color } => push(&mut data, &mut batches, clip, None, Instance {
                     pos: [r.x, r.y],
                     size: [r.w, r.h],
                     uv: [0.0; 4],
@@ -1194,7 +1203,8 @@ impl Gpu {
                     pad: 0.0,
                 }),
                 Item::Text(t) => {
-                    let laid = self.text.layout(&t.text, t.px * scale, t.tracking * scale);
+                    let fitted = t.max_width.map(|w| self.text.fit(&t.text, t.px * scale, t.tracking * scale, w * scale));
+                    let laid = self.text.layout(fitted.as_deref().unwrap_or(&t.text), t.px * scale, t.tracking * scale);
                     let (tw, th) = (laid.w / scale, laid.h / scale);
                     // The anchor names an edge; the run is measured, so
                     // centring is exact rather than estimated.
@@ -1217,14 +1227,14 @@ impl Gpu {
                         if bg.shadow[3] > 0.0 {
                             let mut sh = chip;
                             sh.y += bg.shadow_dy;
-                            push(&mut data, &mut batches, None, rect_inst(&RectItem {
+                            push(&mut data, &mut batches, clip, None, rect_inst(&RectItem {
                                 r: sh,
                                 color: bg.shadow,
                                 radius: bg.radius,
                                 ..Default::default()
                             }));
                         }
-                        push(&mut data, &mut batches, None, rect_inst(&RectItem {
+                        push(&mut data, &mut batches, clip, None, rect_inst(&RectItem {
                             r: chip,
                             color: bg.color,
                             radius: bg.radius,
@@ -1232,7 +1242,7 @@ impl Gpu {
                         }));
                     }
                     for q in &laid.quads {
-                        push(&mut data, &mut batches, None, Instance {
+                        push(&mut data, &mut batches, clip, None, Instance {
                             pos: [x0 + q.x / scale, y0 + q.y / scale],
                             size: [q.w / scale, q.h / scale],
                             uv: q.uv,
@@ -1346,12 +1356,34 @@ impl Gpu {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_vertex_buffer(0, self.instances.slice(..));
-            for (key, range) in &batches {
+            for (key, clip, range) in &batches {
+                let [x, y, w, h] = clip.unwrap_or([0, 0, self.config.width, self.config.height]);
+                if w == 0 || h == 0 { continue; }
+                pass.set_scissor_rect(x, y, w, h);
                 pass.set_bind_group(0, &self.pair_bgs[key], &[]);
                 pass.draw(0..6, range.clone());
             }
         }
         self.queue.submit([encoder.finish()]);
         self.queue.present(surface_tex);
+    }
+}
+
+/// Clamp scissors to the physical surface, including off-screen/empty logical rects.
+fn scissor(r: RectPx, scale: f32, width: u32, height: u32) -> [u32; 4] {
+    let x = (r.x * scale).floor().clamp(0.0, width as f32) as u32;
+    let y = (r.y * scale).floor().clamp(0.0, height as f32) as u32;
+    let right = ((r.x + r.w.max(0.0)) * scale).ceil().clamp(x as f32, width as f32) as u32;
+    let bottom = ((r.y + r.h.max(0.0)) * scale).ceil().clamp(y as f32, height as f32) as u32;
+    [x, y, right - x, bottom - y]
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::*;
+    #[test]
+    fn scissors_stay_inside_the_surface() {
+        assert_eq!(scissor(RectPx { x: -5.0, y: 20.0, w: 50.0, h: 100.0 }, 2.0, 100, 100), [0, 40, 90, 60]);
+        assert_eq!(scissor(RectPx { x: 80.0, y: 0.0, w: 50.0, h: 20.0 }, 2.0, 100, 100), [100, 0, 0, 40]);
     }
 }

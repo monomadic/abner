@@ -14,6 +14,9 @@ pollster = "1"
 bytemuck = { version = "1", features = ["derive"] }
 ab_glyph = "0.2"
 serde_json = "1"
+# The config file (src/config.rs): abner.default.toml overlaid by a user file.
+serde = { version = "1", features = ["derive"] }
+toml = "1.1"
 # The launch window draws the wordmark from assets/logo/logo-01.png, which the
 # renderer uploads as a texture — unlike the Dock icon (decoded by AppKit, see
 # main.rs) it needs an RGBA buffer in-process, and nothing else can produce one.

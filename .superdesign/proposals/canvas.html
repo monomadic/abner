@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Abner — Video workspace concept</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://code.iconify.design/iconify-icon/1.0.7/iconify-icon.min.js"></script>
+<style>
+
+  
+  :root {
+    --bg-frame: #050506;
+    --accent: #1580de;
+    --accent-edge: rgba(21, 128, 222, 0.28);
+    --text-main: #f0f0f2;
+    --text-off: rgba(200, 200, 210, 0.85);
+    --detail: rgba(210, 210, 220, 0.95);
+    --dim-path: rgba(150, 150, 160, 0.75);
+    --detail-bg: rgba(0, 0, 0, 0.82);
+    --row-bg-on: rgba(0, 0, 0, 0.90);
+    --row-bg-off: rgba(0, 0, 0, 0.82);
+    --rule-off: rgba(255, 255, 255, 0.14);
+    --status-bg-ab: #050506;
+    --key-surface: #0b0d11;
+    --key-hairline: rgba(255, 255, 255, 0.018);
+    --key-highlight: rgba(255, 255, 255, 0.07);
+    --key-shadow: rgba(0, 0, 0, 0.55);
+    --key-ink: rgba(244, 245, 247, 0.9);
+    --pill-bg: rgba(4, 4, 6, 0.62);
+    --border-color: rgba(255, 255, 255, 0.07);
+  }
+
+  body {
+    margin: 0;
+    padding: 0;
+    background-color: var(--bg-frame);
+    color: var(--text-main);
+    font-family: ui-monospace, Menlo, monospace;
+    overflow: hidden;
+    user-select: none;
+  }
+
+  .traffic-lights {
+    position: absolute;
+    top: 14px;
+    left: 16px;
+    display: flex;
+    gap: 8px;
+    z-index: 50;
+  }
+  .tl-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+  }
+  .tl-red { background-color: #ff5f56; }
+  .tl-yellow { background-color: #ffbd2e; }
+  .tl-green { background-color: #27c93f; }
+
+  .tool-btn {
+    transition: all 0.2s;
+  }
+  .tool-btn.active {
+    color: var(--accent);
+    background: rgba(21, 128, 222, 0.1);
+  }
+  :root {
+    --canvas-ground: #1d1b1b;
+    --mode-surface-selected: #1a1a1a;
+    --mode-ink-selected: #d1d1d1;
+    --clip-1: #61b5ee;
+    --clip-2: #e6ac69;
+    --clip-3: #b89ae8;
+  }
+  button:focus-visible,.source-item:focus-visible {outline:1px solid var(--accent);outline-offset:3px}
+  #canvas-stage {background:var(--canvas-ground)}
+  .source-list {padding:12px 10px;display:flex;flex-direction:column;gap:6px}
+  .source-item {display:flex;align-items:flex-start;gap:10px;padding:12px 10px;border-left:2px solid transparent;border-radius:0 7px 7px 0;cursor:pointer;background:transparent;transition:background .15s}
+  .source-item:hover {background:#101010}
+  .source-item.active {background:#151515;border-left-color:var(--clip-color)}
+  .source-number {display:grid;place-items:center;width:22px;height:24px;flex:none;border-radius:5px;color:var(--clip-color);border:1px solid color-mix(in srgb,var(--clip-color) 28%,transparent);background:color-mix(in srgb,var(--clip-color) 12%,transparent);font-size:11px;font-weight:500;font-variant-numeric:tabular-nums}
+  .source-copy {flex:1;min-width:0}
+  .source-filename {overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#d1d1d1;font-size:11px;line-height:16px}
+  .source-specs {display:flex;flex-wrap:wrap;column-gap:10px;row-gap:3px;margin-top:8px;font-size:10px;color:#919191;line-height:14px}
+  .source-duration {display:flex;align-items:center;gap:10px;margin-top:4px;font-size:10px;line-height:14px;color:#6f6f6f;font-variant-numeric:tabular-nums}
+  .source-format {font-size:9px;letter-spacing:.6px;color:#626262}
+  #tool-context {gap:4px;padding:0 12px;overflow-x:auto;white-space:nowrap}
+  .context-control {flex:none;min-height:27px;padding:5px 12px;border:0;border-radius:6px;background:transparent;color:#848484;font-size:11px;line-height:17px;font-family:inherit;transition:color .15s,background .15s}
+  .context-control:hover {color:#c8c8c8;background:#111}
+  .context-control.selected {background:var(--mode-surface-selected);color:var(--mode-ink-selected);border:0;border-radius:7px}
+  .context-label {font-size:11px;color:var(--text-off)}
+  #canvas-source {background:color-mix(in srgb,var(--focused-color) 16%,#101010);color:var(--focused-color);border:1px solid color-mix(in srgb,var(--focused-color) 35%,transparent);box-shadow:none;opacity:1}
+  @media(max-width:900px) {
+    #source-rail {width:210px!important}
+    .source-list {padding:10px 6px}
+    .source-item {padding:10px 7px;gap:8px}
+    .source-specs {column-gap:8px}
+    #tool-context {padding:0 8px;gap:3px}
+    .context-control {padding:5px 9px;font-size:10px}
+  }
+</style>
+</head>
+<body>
+  <div class="relative w-full h-screen overflow-hidden bg-[var(--bg-frame)] flex flex-col" id="main-container">
+    
+    <!-- Top OS Bar (Traffic Lights) -->
+    <div class="w-full h-[38px] flex-none flex items-center relative border-b border-[var(--border-color)]">
+      <div class="traffic-lights">
+        <div class="tl-dot tl-red"></div>
+        <div class="tl-dot tl-yellow"></div>
+        <div class="tl-dot tl-green"></div>
+      </div>
+      
+      <!-- Global Toolbar -->
+      <div class="ml-[100px] flex items-center gap-1">
+        <button id="tool-compare" class="tool-btn active px-3 py-1 rounded text-[11px] text-[var(--accent)] bg-[rgba(21,128,222,0.1)]">COMPARE</button>
+        <button id="tool-mask" class="tool-btn px-3 py-1 rounded text-[11px] text-[var(--text-off)] hover:bg-[rgba(255,255,255,0.05)]">MASK</button>
+        <button id="tool-crop" class="tool-btn px-3 py-1 rounded text-[11px] text-[var(--text-off)] hover:bg-[rgba(255,255,255,0.05)]">CROP</button>
+      </div>
+      
+      <!-- Concept Label -->
+      <div class="absolute right-4 text-[10px] text-[var(--dim-path)] border border-[var(--border-color)] px-2 py-0.5 rounded tracking-wider">
+        PROTOTYPE
+      </div>
+    </div>
+
+    <!-- Main Workspace Area -->
+    <div class="flex-1 flex overflow-hidden min-h-0">
+      
+      <!-- Left Rail: Sources & Inspector -->
+      <div id="source-rail" class="w-[280px] flex-none border-r border-[var(--border-color)] flex flex-col bg-[rgba(0,0,0,0.2)]">
+        <!-- Numbered media rows; metadata identifies the clips without a heading. -->
+<div class="source-list flex-1 overflow-y-auto"><div class="source-item active" style="--clip-color:#61b5ee" data-number="1" role="button" tabindex="0" aria-label="Select clip 1" aria-keyshortcuts="1" aria-pressed="true">
+      <span class="source-number" aria-hidden="true">1</span>
+      <div class="source-copy">
+        <div class="source-filename" title="amona_re [DccFm9MDYa4_1].mp4">amona_re [DccFm9MDYa4_1].mp4</div>
+        <div class="source-specs"><span>720 × 720</span><span>30 fps</span><span>H.264</span></div>
+        <div class="source-duration">00:07.833<span class="source-format">MP4</span></div>
+      </div>
+    </div><div class="source-item" style="--clip-color:#e6ac69" data-number="2" role="button" tabindex="0" aria-label="Select clip 2" aria-keyshortcuts="2" aria-pressed="false">
+      <span class="source-number" aria-hidden="true">2</span>
+      <div class="source-copy">
+        <div class="source-filename" title="amona_re [DccFm9MDYa4_2].mp4">amona_re [DccFm9MDYa4_2].mp4</div>
+        <div class="source-specs"><span>720 × 720</span><span>30 fps</span><span>H.264</span></div>
+        <div class="source-duration">00:16.267<span class="source-format">MP4</span></div>
+      </div>
+    </div><div class="source-item" style="--clip-color:#b89ae8" data-number="3" role="button" tabindex="0" aria-label="Select clip 3" aria-keyshortcuts="3" aria-pressed="false">
+      <span class="source-number" aria-hidden="true">3</span>
+      <div class="source-copy">
+        <div class="source-filename" title="amona_re [DccFm9MDYa4_3].mp4">amona_re [DccFm9MDYa4_3].mp4</div>
+        <div class="source-specs"><span>720 × 720</span><span>30 fps</span><span>H.264</span></div>
+        <div class="source-duration">00:14.467<span class="source-format">MP4</span></div>
+      </div>
+    </div></div>
+
+        <!-- Inspector (Focused Source) -->
+        <div class="flex-none p-4 border-t border-[var(--border-color)]">
+          <div class="text-[10px] text-[var(--dim-path)] tracking-wider mb-3"><span id="inspector-name">INSPECTOR: 1</span></div>
+          <div class="flex flex-col gap-2">
+            <div class="flex justify-between text-[11px]">
+              <span class="text-[var(--text-off)]">Format</span>
+              <span class="text-[var(--detail)]">h264 yuv420p</span>
+            </div>
+            <div class="flex justify-between text-[11px]">
+              <span class="text-[var(--text-off)]">Resolution</span>
+              <span class="text-[var(--detail)]">720×720</span>
+            </div>
+            <div class="flex justify-between text-[11px]">
+              <span class="text-[var(--text-off)]">Framerate</span>
+              <span class="text-[var(--detail)]">30.000 fps</span>
+            </div>
+            <div class="flex justify-between text-[11px]">
+              <span class="text-[var(--text-off)]">Bitrate</span>
+              <span class="text-[var(--detail)]"><span id="source-rate">1.56 Mb/s</span></span>
+            </div>
+            <div class="flex justify-between text-[11px]">
+              <span class="text-[var(--text-off)]">Size</span>
+              <span class="text-[var(--detail)]"><span id="source-size">1.5 MiB</span></span>
+            </div>
+            <div class="mt-2 pt-2 border-t border-[var(--border-color)]">
+              <div class="text-[10px] text-[var(--dim-path)] truncate" title="/Users/nom/Movies/amona_re [DccFm9MDYa4_1].mp4">
+                /Users/nom/Movies/...
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Central Canvas & Contextual Settings -->
+      <div class="flex-1 flex flex-col relative min-h-0 min-w-0">
+        
+        <!-- Context belongs to the current operation; no redundant heading. -->
+        
+
+        <!-- Video Canvas -->
+        <div id="canvas-stage" class="flex-1 relative flex items-center justify-center p-4 min-h-0 overflow-hidden">
+          <div class="relative w-full h-full flex items-center justify-center">
+            <!-- CSS Cropped Screenshot -->
+            <div id="video-still" style="height:min(540px,calc(100vh - 208px));max-width:100%;aspect-ratio:1;flex:none" class="relative overflow-hidden border border-[rgba(255,255,255,0.05)] shadow-2xl bg-black rounded">
+               <img src="https://vgbujcuwptvheqijyjbe.supabase.co/storage/v1/object/public/hmac-uploads/projects/75c88099-f958-43d3-8150-064a8d4841b9/reference-assets/9f60e6ced04671f44e12ab28dbce1de43b76266f331c1a30f235f90f2647f820/codex-clipboard-9b4f1f4a-493b-4354-b7bc-c1b8c915dc6d.png" class="absolute max-w-none" style="width:160%;height:107.4%;top:-3%;left:-30%;pointer-events:none;" alt="Video Canvas">
+               
+               <div id="mask-sample" style="display:none;position:absolute;inset:0;background:linear-gradient(125deg,transparent 40%,#1580de55 41%,#1580de55 62%,transparent 63%)"></div><div id="crop-sample" style="display:none;position:absolute;inset:20%;border:1px solid white;box-shadow:0 0 0 500px #0008"></div><!-- Clean A badge overlay -->
+               <div id="canvas-source" class="absolute top-4 left-4 w-6 h-6 rounded bg-[var(--accent)] text-[var(--bg-frame)] flex items-center justify-center text-[12px] font-medium shadow-md opacity-90">
+                 A
+               </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Persistent Transport -->
+        <div id="tool-context" class="h-[40px] flex-none border-b border-[var(--border-color)] flex items-center px-4" role="group" aria-label="Comparison modes"></div><div class="h-[60px] flex-none px-6 flex flex-col justify-center border-t border-[var(--border-color)] bg-[rgba(0,0,0,0.4)]">
+          <div class="flex items-center gap-4 mb-2">
+            <!-- Controls -->
+            <div class="flex items-center gap-3">
+              <button class="text-[var(--text-off)] hover:text-white">
+                <iconify-icon icon="lucide:skip-back" class="text-[14px]"></iconify-icon>
+              </button>
+              <button id="preview-play" aria-label="Play simulation" class="w-8 h-8 rounded-full bg-[var(--accent)] flex items-center justify-center text-black hover:bg-blue-400">
+                <iconify-icon icon="lucide:play" class="text-[14px] ml-0.5"></iconify-icon>
+              </button>
+              <button class="text-[var(--text-off)] hover:text-white">
+                <iconify-icon icon="lucide:skip-forward" class="text-[14px]"></iconify-icon>
+              </button>
+            </div>
+            <!-- Seekbar -->
+            <input aria-label="Scrub preview" id="preview-seek" type="range" min="0" max="234" value="102" style="flex:1;min-width:40px;height:3px;accent-color:var(--accent)">
+            <!-- Readouts -->
+            <div class="flex items-center gap-4 text-[11px]">
+              <span class="text-[var(--text-main)] w-[72px] whitespace-nowrap text-right" id="preview-time">00:03.400</span>
+              <span class="text-[var(--text-off)] w-[82px] whitespace-nowrap">/ 00:07.833</span>
+              <span class="text-[var(--dim-path)] border-l border-[var(--border-color)] pl-4"><span id="preview-frame">frame 102</span> · 1.00×</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Status / Hint Footer -->
+    <div class="h-[28px] flex-none w-full bg-[var(--bg-frame)] border-t border-[var(--border-color)] flex items-center justify-between px-4 z-50">
+      <div class="flex items-center gap-3">
+        <div class="text-[10px] text-[var(--accent)] tracking-widest font-medium" id="footer-mode">COMPARE</div>
+        <div class="w-px h-3 bg-[var(--border-color)]"></div>
+        <div class="text-[10px] text-[var(--text-off)]"><span id="mode-status">Clip 1 · fit · reference still</span></div>
+      </div>
+      
+      <div class="flex items-center gap-4">
+        <div class="flex items-center gap-1.5">
+          <span class="text-[10px] text-[var(--dim-path)]">clip</span>
+          <span class="text-[10px] text-[var(--text-off)] font-medium bg-[rgba(255,255,255,0.08)] px-1.5 rounded">1-3</span>
+        </div>
+        <div class="flex items-center gap-1.5">
+          <span class="text-[10px] text-[var(--dim-path)]">play</span>
+          <span class="text-[10px] text-[var(--text-off)] font-medium bg-[rgba(255,255,255,0.08)] px-1.5 rounded">space</span>
+        </div>
+        <div class="flex items-center gap-1.5">
+          <span class="text-[10px] text-[var(--dim-path)]">step</span>
+          <span class="text-[10px] text-[var(--text-off)] font-medium bg-[rgba(255,255,255,0.08)] px-1.5 rounded">&lt; &gt;</span>
+        </div>
+        <div class="flex items-center gap-1.5">
+          <span class="text-[10px] text-[var(--dim-path)]">speed</span>
+          <span class="text-[10px] text-[var(--text-off)] font-medium bg-[rgba(255,255,255,0.08)] px-1.5 rounded">[ ]</span>
+        </div>
+      </div>
+    </div>
+
+  </div>
+<script>
+const el=id=>document.getElementById(id);let focused='1',mode='Compare';
+function status(){el('mode-status').textContent='Clip '+focused+' · fit · reference still';}
+function setTool(name){mode=name;document.querySelectorAll('.tool-btn').forEach(b=>{b.classList.toggle('active',b.textContent.trim().toLowerCase()===name.toLowerCase());b.style.color=b.classList.contains('active')?'var(--accent)':'var(--text-off)';b.style.background=b.classList.contains('active')?'#0b1926':'transparent'});el('footer-mode').textContent=name.toUpperCase();el('mask-sample').style.display=name==='Mask'?'block':'none';el('crop-sample').style.display=name==='Crop'?'block':'none';const context=el('tool-context');if(name==='Compare'){context.innerHTML=['Single','Side by side','Difference','Wipe','Checker','Blend'].map((s,i)=>'<button class="context-control '+(i?'':'selected')+'">'+s+'</button>').join('');context.querySelectorAll('button').forEach(b=>b.onclick=()=>{context.querySelectorAll('button').forEach(x=>x.classList.toggle('selected',x===b));el('mode-status').textContent=b.textContent+' layout selected · still-image concept';});}else if(name==='Mask'){context.innerHTML='<span class="context-label">Brush</span><input aria-label="Brush size" type="range" min="1" max="128" value="32" style="width:100px;accent-color:#1580de"><span class="context-label" id="brush-size">32 px</span><button class="context-control">Save mask</button>';context.querySelector('input').oninput=e=>el('brush-size').textContent=e.target.value+' px';context.querySelector('button').onclick=()=>el('mode-status').textContent='Concept only · native app saves the mask';}else{context.innerHTML='<span class="context-label">Crop 432 × 432</span><button class="context-control">Save still + mask</button><button class="context-control">Export ProRes</button>';context.querySelectorAll('button').forEach(b=>b.onclick=()=>el('mode-status').textContent='Concept only · '+b.textContent+' runs in the native app');}status();}
+document.querySelectorAll('.tool-btn').forEach(b=>b.onclick=()=>setTool(b.textContent.trim()[0]+b.textContent.trim().slice(1).toLowerCase()));
+document.querySelectorAll('.source-item').forEach((row,i)=>{row.tabIndex=0;row.setAttribute('role','button');row.setAttribute('aria-label','Select clip '+String(i+1));const choose=()=>{focused=String(i+1);document.querySelectorAll('.source-item').forEach(r=>{r.classList.toggle('active',r===row);r.setAttribute('aria-pressed',String(r===row));});document.documentElement.style.setProperty('--focused-color',row.style.getPropertyValue('--clip-color'));el('tool-context').setAttribute('aria-label',mode+' controls');el('inspector-name').textContent='INSPECTOR: '+focused;el('canvas-source').textContent=focused;el('source-rate').textContent=['1.56 Mb/s','1.15 Mb/s','1.17 Mb/s'][i];el('source-size').textContent=['1.5 MiB','2.2 MiB','2.0 MiB'][i];status();};row.onclick=choose;row.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();choose();}};});
+el('preview-play').onclick=()=>{el('mode-status').textContent='Still-image concept · playback runs in the native app';};el('preview-seek').oninput=e=>{const f=+e.target.value;el('preview-frame').textContent='frame '+f;el('preview-time').textContent='00:'+String(Math.floor(f/30)).padStart(2,'0')+'.'+String(Math.round(f%30/30*1000)).padStart(3,'0');};document.addEventListener('keydown',e=>{if(e.metaKey||e.ctrlKey||e.altKey||/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName))return;if(/^[1-9]$/.test(e.key)){const row=document.querySelector('.source-item[data-number="'+e.key+'"]');if(row){e.preventDefault();row.click();}}});setTool('Compare');document.querySelector('.source-item').click();
+</script>
+</body></html>

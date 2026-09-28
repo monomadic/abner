@@ -1,3 +1,6 @@
+# Player and launch layout
+Source: src/app.rs. Single native window; immediate-mode quads and text.
+```rust
 //! App state and per-frame logic: the master clock, view modes, input,
 //! and the UI overlay.
 //!
@@ -31,6 +34,16 @@ pub enum Mode {
 }
 
 impl Mode {
+    fn name(self) -> &'static str {
+        match self {
+            Mode::Overlay => "overlay",
+            Mode::SideBySide => "side-by-side",
+            Mode::Delta => "delta",
+            Mode::Split => "split",
+            Mode::Checker => "checker",
+            Mode::Blend => "blend",
+        }
+    }
     const ALL: [Mode; 6] =
         [Mode::Overlay, Mode::SideBySide, Mode::Delta, Mode::Split, Mode::Checker, Mode::Blend];
     /// Next (or previous) view in `V`'s cycle.
@@ -88,7 +101,6 @@ pub struct Video {
 pub struct App {
     pub videos: Vec<Video>,
     active: usize,
-    source_scroll: usize,
     masks: Vec<Option<Mask>>,
     mask_mode: bool,
     brush_diameter: f32,
@@ -108,9 +120,6 @@ pub struct App {
     /// What the pointer grabbed, and where inside it (image px), so the
     /// marquee doesn't jump to the cursor on the first move.
     crop_drag: Option<(CropGrab, (f32, f32))>,
-    /// Index into `ASPECTS` (`A` cycles): the marquee's locked ratio, 0 for
-    /// free. A tool setting, so it outlives hiding the marquee.
-    aspect: usize,
     /// Master clock, seconds of content time.
     t: f64,
     playing: bool,
@@ -125,20 +134,20 @@ pub struct App {
     center: (f32, f32),
     /// Playback rate multiplier (`[`/`]`, Backspace resets).
     speed: f64,
-    /// Seconds per ← / → (config `playback.seek_step`).
-    seek_step: f64,
     show_ui: bool,
     /// Delta amplification.
     gain: f32,
     blend: f32,
     checker_px: f32,
-    /// Seconds left on the small clip-number flash (shown after Enter
+    /// Seconds left on the big active-letter flash (shown after Enter
     /// when the UI is hidden — switchblade's skip-bar-flash pattern).
     badge_flash: f32,
     fullscreen: bool,
     cursor: (f32, f32),
     /// Last pointer position while a drag-pan is held.
     drag: Option<(f32, f32)>,
+    /// Seconds of pointer stillness — drives the transport's reveal.
+    since_pointer: f32,
     /// Dragging the seek bar (pins the transport open).
     scrubbing: bool,
     vp: (f32, f32),
@@ -190,13 +199,13 @@ impl Mode {
 }
 
 impl App {
-    pub fn new(videos: Vec<Video>, cfg: &crate::config::Config) -> Self {
+    pub fn new(videos: Vec<Video>, mode: Mode) -> Self {
         let fps = Self::fps_of(&videos);
         let wrap = Self::wrap_of(&videos);
         Self {
             masks: (0..videos.len()).map(|_| None).collect(),
             mask_mode: false,
-            brush_diameter: cfg.mask.brush_size,
+            brush_diameter: 64.0,
             painting: false,
             stroke_last: None,
             cursor_inside: false,
@@ -205,26 +214,24 @@ impl App {
             crop_export: None,
             crop: None,
             crop_drag: None,
-            aspect: 0,
             videos,
             active: 0,
-            source_scroll: 0,
             t: 0.0,
-            playing: !cfg.playback.start_paused,
+            playing: true,
             started: false,
-            mode: cfg.playback.view,
+            mode,
             zoom: 1.0,
             center: (0.5, 0.5),
             speed: 1.0,
-            seek_step: cfg.playback.seek_step,
             show_ui: true,
-            gain: cfg.compare.delta_gain,
-            blend: cfg.compare.blend,
-            checker_px: cfg.compare.checker_size,
+            gain: 4.0,
+            blend: 0.5,
+            checker_px: 48.0,
             badge_flash: 0.0,
             fullscreen: false,
             cursor: (0.0, 0.0),
             drag: None,
+            since_pointer: 0.0,
             scrubbing: false,
             vp: (1280.0, 800.0),
             fps,
@@ -288,27 +295,9 @@ impl App {
         }
     }
 
-    /// The whole frame, or the largest rect of the locked ratio in it.
     fn full_crop(&self) -> Crop {
         let mask = self.masks[self.active].as_ref().unwrap();
-        let full = Crop::full(mask.width, mask.height);
-        match ASPECTS[self.aspect].1 {
-            Some(r) => full.with_aspect(r, mask.width, mask.height),
-            None => full,
-        }
-    }
-
-    /// Step the ratio preset and reshape the marquee to it (free leaves the
-    /// rect where it is, just unlocked).
-    fn cycle_aspect(&mut self, step: isize) {
-        let n = ASPECTS.len() as isize;
-        self.aspect = (self.aspect as isize + step).rem_euclid(n) as usize;
-        let mask = self.masks[self.active].as_ref().unwrap();
-        if let (Some(c), Some(r)) = (self.crop, ASPECTS[self.aspect].1) {
-            self.crop = Some(c.with_aspect(r, mask.width, mask.height));
-        }
-        self.crop_drag = None;
-        self.mask_status.clear();
+        Crop::full(mask.width, mask.height)
     }
 
     /// Pointer position in the active video's image pixels — the mask's
@@ -358,15 +347,12 @@ impl App {
         let (px, py) = self.image_point(x, y);
         self.crop = Some(match grab {
             CropGrab::Move => c.moved_to(px - ox, py - oy, w, h),
-            CropGrab::Corner(corner) => match ASPECTS[self.aspect].1 {
-                Some(r) => c.with_corner_locked(corner, px - ox, py - oy, r, w, h),
-                None => c.with_corner(corner, px - ox, py - oy, w, h),
-            },
+            CropGrab::Corner(corner) => c.with_corner(corner, px - ox, py - oy, w, h),
         });
         self.mask_status.clear();
     }
 
-    /// The mask uses exactly the canvas video transform. The workspace shell,
+    /// The mask uses exactly the full-window video transform. The status line,
     /// the traffic-light strip and the letterbox are not paint targets; leaving
     /// them breaks stroke continuity.
     pub fn brush_cursor_visible(&self) -> bool {
@@ -378,7 +364,7 @@ impl App {
         let r = self.content_rect(self.active);
         let (x, y) = self.cursor;
         x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h
-            && contains(self.workspace().canvas, x, y)
+            && x >= 0.0 && x < self.vp.0 && y >= self.top_inset() && y < self.vp.1 - STATUS_H
     }
 
     fn paint_at_cursor(&mut self) {
@@ -461,14 +447,12 @@ impl App {
     fn build_mask_layer(&self, items: &mut Vec<Item>) {
         let mask = self.masks[self.active].as_ref().unwrap();
         let r = self.content_rect(self.active);
-        // Crop mode shows the footage itself: no red/blue mask tint, just
-        // the dimming outside the marquee. The mask is still there (and
-        // still exported with `S`), only not drawn.
+        items.push(Item::Mask { r, id: mask.id, revision: mask.revision,
+            width: mask.width, height: mask.height, pixels: mask.pixels.clone() });
+        // The old top strip is gone — mask state lives in the bottom status
+        // line now, which is drawn after this layer and so stays undimmed.
         if let Some(c) = self.crop {
             self.build_crop_layer(items, c);
-        } else {
-            items.push(Item::Mask { r, id: mask.id, revision: mask.revision,
-                width: mask.width, height: mask.height, pixels: mask.pixels.clone() });
         }
         if self.brush_cursor_visible() {
             let diameter = self.brush_diameter * r.w / mask.width as f32;
@@ -599,6 +583,12 @@ impl App {
         Some(Upload { idx: 0, w: b.player.w, h: b.player.h, buf })
     }
 
+    /// Top margin for HUD rows that would otherwise sit under the
+    /// floating traffic lights — see `TITLEBAR_H`.
+    fn top_inset(&self) -> f32 {
+        if self.fullscreen { 0.0 } else { TITLEBAR_H }
+    }
+
     /// Something to show. One clip (a single drop, or `abner one.mp4`)
     /// is enough: it lands in slot A and plays; the compare modes just
     /// have nothing to compare against until a second one arrives.
@@ -661,6 +651,7 @@ impl App {
         self.speed = 1.0;
         self.zoom = 1.0;
         self.center = (0.5, 0.5);
+        self.since_pointer = 0.0;
         self.drag = None;
         self.scrubbing = false;
         self.drag_hover = false;
@@ -810,10 +801,6 @@ impl App {
             }
             return;
         }
-        if !self.mask_mode && matches!(k, Key::Char('c' | 'C')) {
-            self.activate(Action::Tool(2));
-            return;
-        }
         if self.mask_mode {
             match k {
                 Key::Char(']' | '+' | '=') => { self.resize_brush(1.25); return; }
@@ -821,8 +808,6 @@ impl App {
                 Key::Char('c' | 'C') => { self.toggle_crop(); return; }
                 Key::Char('s' | 'S') => { self.save_mask(); return; }
                 Key::Char('e' | 'E') if self.crop.is_some() => { self.export_crop(); return; }
-                Key::Char('a') if self.crop.is_some() => { self.cycle_aspect(1); return; }
-                Key::Char('A') if self.crop.is_some() => { self.cycle_aspect(-1); return; }
                 Key::Escape => { self.mask_mode = false; self.leave_mask_mode(); return; }
                 _ => {}
             }
@@ -831,9 +816,9 @@ impl App {
         match k {
             Key::Enter => self.select((self.active + 1) % self.videos.len()),
             Key::Space => self.playing = !self.playing,
-            Key::Tab => { self.mouse_up(); self.show_ui = !self.show_ui; },
-            Key::Left => self.seek_by(-self.seek_step),
-            Key::Right => self.seek_by(self.seek_step),
+            Key::Tab => self.show_ui = !self.show_ui,
+            Key::Left => self.seek_by(-1.0),
+            Key::Right => self.seek_by(1.0),
             Key::Escape => {
                 if self.fullscreen {
                     self.fullscreen = false;
@@ -876,9 +861,6 @@ impl App {
     /// Show clip `idx` (Enter's flip, or its number key directly).
     fn select(&mut self, idx: usize) {
         self.active = idx;
-        let capacity = self.source_capacity();
-        if idx < self.source_first() { self.source_scroll = idx; }
-        else if idx >= self.source_first() + capacity { self.source_scroll = idx + 1 - capacity; }
         self.badge_flash = 1.2;
         self.mouse_up();
         if self.mask_mode {
@@ -892,11 +874,6 @@ impl App {
 
     pub fn cursor_moved(&mut self, x: f32, y: f32) {
         self.cursor_inside = true;
-        if self.scrubbing {
-            self.scrub_to(x);
-            self.cursor = (x, y);
-            return;
-        }
         if self.mask_mode {
             self.cursor = (x, y);
             if self.crop_drag.is_some() {
@@ -904,6 +881,13 @@ impl App {
             } else if self.painting {
                 self.paint_at_cursor();
             }
+            return;
+        }
+        // Any motion re-reveals the transport.
+        self.since_pointer = 0.0;
+        if self.scrubbing {
+            self.scrub_to(x);
+            self.cursor = (x, y);
             return;
         }
         if let Some((lx, ly)) = self.drag
@@ -919,40 +903,45 @@ impl App {
     }
 
     pub fn mouse_down(&mut self, x: f32, y: f32) {
-        if !self.ready() { return; }
-        self.cursor = (x, y);
-        self.cursor_inside = true;
-        if self.show_ui {
-            if let Some(control) = self.controls().into_iter().find(|c| contains(c.r, x, y)) {
-                self.activate(control.action);
+        if self.mask_mode {
+            self.cursor = (x, y);
+            self.cursor_inside = true;
+            self.stroke_last = None;
+            if self.crop.is_some() {
+                self.crop_grab(x, y);
                 return;
             }
-            if contains(self.workspace().list, x, y) {
-                let first = self.source_first();
-                for idx in first..(first + self.source_capacity()).min(self.videos.len()) {
-                    if contains(self.source_row(idx), x, y) { self.select(idx); break; }
-                }
+            self.painting = self.brush_cursor_visible();
+            if self.painting { self.paint_at_cursor(); }
+            return;
+        }
+        self.since_pointer = 0.0;
+        // While the transport is up, its controls take the press: the
+        // buttons act, the seek band scrubs. Anything else pans.
+        if self.show_ui && self.ready() && self.transport_alpha() > 0.5 {
+            let hit = |r: RectPx| x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+            if hit(self.btn_prev()) {
+                self.step(-1);
                 return;
             }
-            if contains(self.btn_prev(), x, y) { self.step(-1); return; }
-            if contains(self.btn_play(), x, y) { self.playing = !self.playing; return; }
-            if contains(self.btn_next(), x, y) { self.step(1); return; }
+            if hit(self.btn_play()) {
+                self.playing = !self.playing;
+                return;
+            }
+            if hit(self.btn_next()) {
+                self.step(1);
+                return;
+            }
             let s = self.seek_rect(self.vp);
-            if contains(RectPx { x: s.x - 6.0, y: s.y - SEEK_GRAB, w: s.w + 12.0, h: s.h + 2.0 * SEEK_GRAB }, x, y) {
+            if y >= s.y - SEEK_GRAB && y <= s.y + s.h + SEEK_GRAB && x >= s.x - 6.0
+                && x <= s.x + s.w + 6.0
+            {
                 self.scrubbing = true;
                 self.scrub_to(x);
                 return;
             }
         }
-        if !contains(self.workspace().canvas, x, y) { return; }
-        if self.mask_mode {
-            self.stroke_last = None;
-            if self.crop.is_some() { self.crop_grab(x, y); return; }
-            self.painting = self.brush_cursor_visible();
-            if self.painting { self.paint_at_cursor(); }
-        } else {
-            self.drag = Some((x, y));
-        }
+        self.drag = Some((x, y));
     }
 
     pub fn mouse_up(&mut self) {
@@ -985,14 +974,6 @@ impl App {
 
     pub fn scroll(&mut self, dx: f32, dy: f32) {
         self.stroke_last = None;
-        if !self.ready() { return; }
-        if self.show_ui && contains(self.workspace().list, self.cursor.0, self.cursor.1) {
-            let first = self.source_first();
-            self.source_scroll = if dy < 0.0 { (first + 1).min(self.videos.len().saturating_sub(self.source_capacity())) }
-                else if dy > 0.0 { first.saturating_sub(1) } else { first };
-            return;
-        }
-        if !contains(self.workspace().canvas, self.cursor.0, self.cursor.1) { return; }
         if self.zoom > 1.001 {
             let base = self.gesture_base(self.cursor.0, self.cursor.1);
             self.center.0 -= dx / (base.w * self.zoom);
@@ -1006,7 +987,9 @@ impl App {
     /// center. Positive delta = fingers spreading = zoom in.
     pub fn pinch(&mut self, delta: f32) {
         self.stroke_last = None;
-        if !self.ready() || !contains(self.workspace().canvas, self.cursor.0, self.cursor.1) { return; }
+        if !self.ready() {
+            return;
+        }
         let (cx, cy) = self.cursor;
         let base = self.gesture_base(cx, cy);
         let old = self.zoom;
@@ -1054,32 +1037,25 @@ impl App {
     }
 
     /// The base fit rect a pointer gesture at (x, y) is anchored to: the
-    /// hovered cell in side-by-side, the active video's canvas fit
+    /// hovered cell in side-by-side, the active video's full-window fit
     /// otherwise.
-    fn video_cell(&self, idx: usize) -> RectPx {
-        let mut cell = self.workspace().canvas;
-        if self.shown_mode() == Mode::SideBySide && !self.mask_mode {
-            cell.w /= self.videos.len().max(1) as f32;
-            cell.x += idx as f32 * cell.w;
-        }
-        cell
-    }
-
     fn gesture_base(&self, x: f32, _y: f32) -> RectPx {
-        let idx = if self.shown_mode() == Mode::SideBySide && !self.mask_mode {
-            let c = self.workspace().canvas;
-            (((x - c.x).max(0.0) / (c.w / self.videos.len() as f32).max(1.0)) as usize).min(self.videos.len() - 1)
-        } else { self.active };
-        self.base_rect(idx)
-    }
-
-    fn base_rect(&self, idx: usize) -> RectPx {
-        let dims = (self.videos[idx].info.width, self.videos[idx].info.height);
-        Self::fit_rect(dims, inset_rect(self.video_cell(idx), if self.show_ui { 24.0 } else { 0.0 }))
+        let n = self.videos.len();
+        if self.mode == Mode::SideBySide && !self.mask_mode {
+            let cw = (self.vp.0 / n as f32).max(1.0);
+            let i = ((x / cw) as usize).min(n - 1);
+            let dims = (self.videos[i].info.width, self.videos[i].info.height);
+            Self::fit_rect(dims, RectPx { x: i as f32 * cw, y: 0.0, w: cw, h: self.vp.1 })
+        } else {
+            let dims = (self.videos[self.active].info.width, self.videos[self.active].info.height);
+            Self::fit_rect(dims, RectPx { x: 0.0, y: 0.0, w: self.vp.0, h: self.vp.1 })
+        }
     }
 
     fn content_rect(&self, idx: usize) -> RectPx {
-        Self::zoomed(self.base_rect(idx), self.zoom, self.center)
+        let dims = (self.videos[idx].info.width, self.videos[idx].info.height);
+        let base = Self::fit_rect(dims, RectPx { x: 0.0, y: 0.0, w: self.vp.0, h: self.vp.1 });
+        Self::zoomed(base, self.zoom, self.center)
     }
 
     pub fn tick(&mut self, dt: f32, vp: (f32, f32), _scale: f32) -> FrameDesc {
@@ -1123,6 +1099,7 @@ impl App {
         let n = self.videos.len();
         let full_uv = [0.0, 0.0, 1.0, 1.0];
 
+        self.since_pointer += dt;
         if self.playing && self.started {
             self.t += dt as f64 * self.speed;
             if self.wrap.is_finite() && self.t >= self.wrap - 0.05 {
@@ -1176,9 +1153,6 @@ impl App {
         let a = self.active;
         let b = (self.active + 1) % n;
         let mode = if self.mask_mode { Mode::Overlay } else { self.shown_mode() };
-        let canvas = self.workspace().canvas;
-        if self.show_ui { items.push(Item::Rect(RectItem::new(canvas, CANVAS_BG))); }
-        items.push(Item::Clip(Some(canvas)));
         match mode {
             Mode::Overlay => items.push(Item::Video {
                 a,
@@ -1190,13 +1164,13 @@ impl App {
                 p1: 0.0,
             }),
             Mode::SideBySide => {
+                let cw = vp.0 / n as f32;
                 for i in 0..n {
-                    let cell = self.video_cell(i);
-                    items.push(Item::Clip(Some(cell)));
+                    let cell = RectPx { x: i as f32 * cw, y: 0.0, w: cw, h: vp.1 };
                     let dims = (self.videos[i].info.width, self.videos[i].info.height);
                     // Every cell shares the zoom/center, so panning one
                     // pans them all to the same content position.
-                    let base = Self::fit_rect(dims, inset_rect(cell, if self.show_ui { 24.0 } else { 0.0 }));
+                    let base = Self::fit_rect(dims, cell);
                     items.push(Item::Video {
                         a: i,
                         b: i,
@@ -1224,26 +1198,80 @@ impl App {
             }
         }
 
-        items.push(Item::Clip(Some(canvas)));
-        if self.mask_mode { self.build_mask_layer(&mut items); }
-        items.push(Item::Clip(None));
-        if self.show_ui || self.badge_flash > 0.0 {
-            for i in 0..if mode == Mode::SideBySide { n } else { 1 } {
-                let idx = if mode == Mode::SideBySide { i } else { a };
-                let cell = if mode == Mode::SideBySide { self.video_cell(idx) } else { self.workspace().canvas };
-                let image = self.content_rect(idx);
-                items.push(Item::Clip(Some(cell)));
-                number_badge(&mut items, RectPx { x: image.x.max(cell.x) + 14.0, y: image.y.max(cell.y) + 14.0, w: 24.0, h: 24.0 }, idx);
-                items.push(Item::Clip(None));
+        // Big letter badge: hugs the left edge for A, right for B (a >2
+        // set interpolates across). Always on with the UI up, a brief
+        // flash after Enter when it's hidden.
+        let badge_alpha = if self.show_ui { 1.0 } else { (self.badge_flash / 0.4).min(1.0) };
+        if badge_alpha > 0.0 && !self.mask_mode {
+            // The design sizes the badge against the frame (130px on a
+            // 506px-tall mock); keep that proportion so it stays the
+            // dominant graphic at any window size.
+            let big = (vp.1 * 0.257).clamp(72.0, 240.0);
+            let push_letter = |items: &mut Vec<Item>, idx: usize, px: f32, on: bool| {
+                let f = if n > 1 { idx as f32 / (n - 1) as f32 } else { 0.0 };
+                let margin = 26.0;
+                let mut c = if on { ACCENT } else { INACTIVE };
+                c[3] *= badge_alpha * 0.92;
+                let align = if f < 0.5 { Align::Left } else { Align::Right };
+                let x = margin + f * (vp.0 - 2.0 * margin);
+                let letter = ((b'A' + idx as u8) as char).to_string();
+                // Soft drop shadow so the badge holds against bright
+                // footage (the design's text-shadow).
+                items.push(Item::Text(TextItem {
+                    align,
+                    valign: VAlign::Middle,
+                    ..TextItem::new(
+                        x + px * 0.02,
+                        vp.1 / 2.0 + px * 0.03,
+                        px,
+                        [0.0, 0.0, 0.0, 0.45 * badge_alpha],
+                        letter.clone(),
+                    )
+                }));
+                items.push(Item::Text(TextItem {
+                    align,
+                    valign: VAlign::Middle,
+                    ..TextItem::new(x, vp.1 / 2.0, px, c, letter)
+                }));
+            };
+            match mode {
+                Mode::Overlay => push_letter(&mut items, a, big, true),
+                // Comparing a pair: both letters, active in the accent.
+                Mode::Delta | Mode::Split | Mode::Checker | Mode::Blend => {
+                    push_letter(&mut items, a, big * 0.74, true);
+                    push_letter(&mut items, b, big * 0.74, false);
+                }
+                // One label per cell, sitting over its own video.
+                Mode::SideBySide => {
+                    let cw = vp.0 / n as f32;
+                    for i in 0..n {
+                        let mut c = if i == a { ACCENT } else { INACTIVE };
+                        c[3] *= badge_alpha;
+                        items.push(Item::Text(TextItem {
+                            valign: VAlign::Middle,
+                            ..TextItem::new(
+                                i as f32 * cw + 20.0,
+                                vp.1 / 2.0,
+                                big * 0.42,
+                                c,
+                                ((b'A' + i as u8) as char).to_string(),
+                            )
+                        }));
+                    }
+                }
             }
         }
-        if self.show_ui {
+
+        if self.mask_mode {
+            self.build_mask_layer(&mut items);
+            self.build_status_line(&mut items, vp);
+        } else if self.show_ui {
             self.build_hud(&mut items, vp);
             self.build_status_line(&mut items, vp);
         }
 
         let animating =
-            self.playing || self.badge_flash > 0.0 || !self.started;
+            self.playing || self.badge_flash > 0.0 || !self.started || self.hud_fading();
         FrameDesc {
             clear: FRAME_BG,
             uploads,
@@ -1258,251 +1286,516 @@ impl App {
         }
     }
 
-    /// Shared layout for drawing and hit testing; the image transform is always
-    /// relative to this canvas, including in mask/crop and side-by-side modes.
-    fn workspace(&self) -> Workspace {
-        Workspace::new(self.vp, self.show_ui, self.fullscreen)
+    /// True while the transport is mid-fade (keeps the loop hot just
+    /// long enough for the reveal to finish).
+    fn hud_fading(&self) -> bool {
+        let a = self.transport_alpha();
+        a > 0.001 && a < 0.999
     }
 
-    fn source_capacity(&self) -> usize {
-        (self.workspace().list.h / SOURCE_H).floor().max(1.0) as usize
-    }
-
-    fn source_first(&self) -> usize {
-        self.source_scroll.min(self.videos.len().saturating_sub(self.source_capacity()))
-    }
-
-    fn source_row(&self, index: usize) -> RectPx {
-        let l = self.workspace();
-        RectPx { x: 10.0, y: l.list.y + (index - self.source_first()) as f32 * SOURCE_H,
-            w: l.rail - 20.0, h: SOURCE_H - 6.0 }
-    }
-
-    fn controls(&self) -> Vec<Control> {
-        let l = self.workspace();
-        let mut out = Vec::new();
-        let tool = if !self.mask_mode { 0 } else if self.crop.is_none() { 1 } else { 2 };
-        let mut x = if self.fullscreen { 16.0 } else { 100.0 };
-        for (i, (label, w)) in [("COMPARE", 76.0), ("MASK", 56.0), ("CROP", 56.0)].into_iter().enumerate() {
-            out.push(Control::new(RectPx { x, y: 6.0, w, h: 26.0 }, label, tool == i, Action::Tool(i)));
-            x += w + 4.0;
+    /// The transport is hover-revealed (per the design): pointer motion
+    /// brings it up, then it fades out after a spell of stillness.
+    /// Scrubbing pins it open.
+    fn transport_alpha(&self) -> f32 {
+        if self.scrubbing {
+            return 1.0;
         }
-        x = l.rail + 12.0;
-        let y = HEADER_H + 6.0;
-        if !self.mask_mode {
-            for (mode, label, w) in [
-                (Mode::Overlay, "Single", 62.0), (Mode::SideBySide, "Side by side", 102.0),
-                (Mode::Delta, "Difference", 96.0), (Mode::Split, "Wipe", 58.0),
-                (Mode::Checker, "Checker", 74.0), (Mode::Blend, "Blend", 64.0),
-            ] {
-                out.push(Control::new(RectPx { x, y, w, h: 27.0 }, label, self.mode == mode, Action::View(mode)));
-                x += w + 4.0;
-            }
-            if matches!(self.mode, Mode::Delta | Mode::Checker | Mode::Blend) && x + 144.0 < self.vp.0 {
-                for (label, up) in [("−", false), ("+", true)] {
-                    out.push(Control::new(RectPx { x, y, w: 28.0, h: 27.0 }, label, false, Action::Param(up)));
-                    x += 32.0;
-                }
-            }
-        } else if self.crop.is_some() {
-            x += 142.0;
-            for (label, w, action) in [("Save still + mask", 138.0, Action::Save), ("Export ProRes", 122.0, Action::Export)] {
-                out.push(Control::new(RectPx { x, y, w, h: 27.0 }, label, false, action));
-                x += w + 8.0;
-            }
+        let over = self.since_pointer - TRANSPORT_HOLD_S;
+        if over <= 0.0 {
+            1.0
         } else {
-            x += 118.0;
-            for (label, w, action) in [("−", 28.0, Action::Brush(false)), ("+", 28.0, Action::Brush(true)), ("Save mask", 100.0, Action::Save)] {
-                out.push(Control::new(RectPx { x, y, w, h: 27.0 }, label, false, action));
-                x += w + 8.0;
-            }
-        }
-        out
-    }
-
-    fn activate(&mut self, action: Action) {
-        self.mouse_up();
-        match action {
-            Action::Tool(0) => {
-                if self.mask_mode { self.mask_mode = false; self.leave_mask_mode(); }
-            }
-            Action::Tool(tool) => {
-                if !self.mask_mode { self.key(Key::Char('m')); }
-                if (tool == 2) != self.crop.is_some() { self.toggle_crop(); }
-            }
-            Action::View(mode) => self.mode = mode,
-            Action::Brush(up) => self.resize_brush(if up { 1.25 } else { 0.8 }),
-            Action::Save => self.save_mask(),
-            Action::Export => self.export_crop(),
-            Action::Param(up) => self.adjust_param(up),
+            (1.0 - over / TRANSPORT_FADE_S).clamp(0.0, 1.0)
         }
     }
 
-    /// Persistent transport; these rectangles also own mouse hit testing.
+    /// Bottom transport strip geometry, shared by the draw and the
+    /// seek-bar hit test so they can't drift.
+    fn transport_rect(&self, vp: (f32, f32)) -> RectPx {
+        RectPx { x: 0.0, y: vp.1 - TRANSPORT_H, w: vp.0, h: TRANSPORT_H }
+    }
+
+    /// Transport button hit/draw rects — shared by the draw and the
+    /// click handler so a button can't move out from under its target.
     fn btn_prev(&self) -> RectPx {
-        let r = self.workspace().transport;
-        RectPx { x: r.x + 18.0, y: r.y + 14.0, w: 26.0, h: 32.0 }
+        let bar = self.transport_rect(self.vp);
+        RectPx { x: 22.0, y: bar.y + 13.0, w: 26.0, h: 32.0 }
     }
     fn btn_play(&self) -> RectPx {
-        let r = self.btn_prev();
-        RectPx { x: r.x + 34.0, w: 32.0, ..r }
+        let bar = self.transport_rect(self.vp);
+        RectPx { x: 22.0 + 26.0 + 8.0, y: bar.y + 13.0, w: 32.0, h: 32.0 }
     }
     fn btn_next(&self) -> RectPx {
-        let r = self.btn_play();
-        RectPx { x: r.x + 40.0, w: 26.0, ..r }
-    }
-    fn seek_rect(&self, _vp: (f32, f32)) -> RectPx {
-        let r = self.workspace().transport;
-        let x = self.btn_next().x + 40.0;
-        let reserve = if r.w >= 720.0 { 300.0 } else { 186.0 };
-        RectPx { x, y: r.y + 28.0, w: (r.w - (x - r.x) - reserve).max(32.0), h: 4.0 }
+        let bar = self.transport_rect(self.vp);
+        RectPx { x: 22.0 + 26.0 + 8.0 + 32.0 + 8.0, y: bar.y + 13.0, w: 26.0, h: 32.0 }
     }
 
-    fn build_hud(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
-        let l = self.workspace();
-        let panel = WORKSPACE_PANEL;
-        // Opaque shell surfaces keep zoomed footage out of the interface.
-        for r in [RectPx { x: 0.0, y: 0.0, w: vp.0, h: HEADER_H },
-            RectPx { x: 0.0, y: HEADER_H, w: l.rail, h: vp.1 - HEADER_H - STATUS_H },
-            RectPx { x: l.rail, y: HEADER_H, w: vp.0 - l.rail, h: CONTEXT_H }, l.transport] {
-            items.push(Item::Rect(RectItem::new(r, panel)));
+    /// The seek bar's drawn track (the clickable band is taller).
+    fn seek_rect(&self, vp: (f32, f32)) -> RectPx {
+        let bar = self.transport_rect(vp);
+        let x0 = self.btn_next().x + self.btn_next().w + 13.0;
+        let x1 = (vp.0 - 22.0 - STATUS_RESERVE).max(x0 + 40.0);
+        RectPx { x: x0, y: bar.y + 13.0 + 16.0 - 2.5, w: x1 - x0, h: 5.0 }
+    }
+
+    /// The 2a HUD: corner brackets, centre A|B toggle, top-left info
+    /// block, and the hover-revealed transport (circular buttons,
+    /// rounded seek bar, keycap row).
+    fn build_hud(&mut self, items: &mut Vec<Item>, vp: (f32, f32)) {
+        let (w, h) = vp;
+        let a = self.active;
+        let n = self.videos.len();
+
+        // ---- corner brackets framing the active stream ----
+        let (inset, arm, t) = (16.0, 26.0, 2.0);
+        let top = inset + self.top_inset();
+        for (hx, hy, vx, vy) in [
+            (inset, top, inset, top),
+            (w - inset - arm, top, w - inset - t, top),
+            (inset, h - inset - t, inset, h - inset - arm),
+            (w - inset - arm, h - inset - t, w - inset - t, h - inset - arm),
+        ] {
+            items.push(Item::Rect(RectItem::new(
+                RectPx { x: hx, y: hy, w: arm, h: t },
+                ACCENT,
+            )));
+            items.push(Item::Rect(RectItem::new(
+                RectPx { x: vx, y: vy, w: t, h: arm },
+                ACCENT,
+            )));
         }
-        for r in [RectPx { x: 0.0, y: HEADER_H - 1.0, w: vp.0, h: 1.0 },
-            RectPx { x: l.rail - 1.0, y: HEADER_H, w: 1.0, h: vp.1 - HEADER_H - STATUS_H },
-            RectPx { x: l.rail, y: l.canvas.y - 1.0, w: l.canvas.w, h: 1.0 },
-            RectPx { x: l.rail, y: l.transport.y, w: l.canvas.w, h: 1.0 }] {
-            items.push(Item::Rect(RectItem::new(r, WORKSPACE_RULE)));
-        }
-        for control in self.controls() {
-            let hovered = contains(control.r, self.cursor.0, self.cursor.1) && self.cursor_inside;
-            let tool = matches!(control.action, Action::Tool(_));
-            let disabled = matches!(control.action, Action::Save) && self.mask_save.is_some()
-                || matches!(control.action, Action::Export) && self.crop_export.is_some();
-            if control.selected || hovered {
-                items.push(Item::Rect(RectItem { radius: if control.selected { 7.0 } else { 6.0 },
-                    ..RectItem::new(control.r, if tool && control.selected { TOOL_BG } else { CONTROL_BG }) }));
+
+        // ---- centre A|B toggle ----
+        // Sits IN the titlebar strip, level with the traffic lights (the
+        // strip is otherwise empty past them); fake fullscreen has no strip.
+        let (seg_w, seg_h, seg_gap, pill_pad) = (38.0, 18.0, 2.0, 3.0);
+        let pill_w = n as f32 * seg_w + (n as f32 - 1.0) * seg_gap + pill_pad * 2.0;
+        let pill = RectPx {
+            x: (w - pill_w) / 2.0,
+            y: if self.fullscreen { 10.0 } else { (TITLEBAR_H - seg_h - pill_pad * 2.0) / 2.0 },
+            w: pill_w,
+            h: seg_h + pill_pad * 2.0,
+        };
+        items.push(Item::Rect(RectItem {
+            radius: 7.0,
+            border_w: 1.0,
+            border_color: ACCENT_EDGE,
+            ..RectItem::new(pill, PILL_BG)
+        }));
+        for i in 0..n {
+            let sx = pill.x + pill_pad + i as f32 * (seg_w + seg_gap);
+            let on = i == a;
+            if on {
+                items.push(Item::Rect(RectItem {
+                    radius: 4.5,
+                    ..RectItem::new(
+                        RectPx { x: sx, y: pill.y + pill_pad, w: seg_w, h: seg_h },
+                        ACCENT,
+                    )
+                }));
             }
-            let color = if disabled { WORKSPACE_MUTED } else if tool && control.selected { ACCENT }
-                else if control.selected || hovered { WORKSPACE_TEXT } else { WORKSPACE_DIM };
-            ui_label(items, control.r.x + control.r.w / 2.0, control.r.y + control.r.h / 2.0,
-                11.0, color, &control.label, Align::Center, control.r.w - 8.0);
+            items.push(Item::Text(TextItem {
+                align: Align::Center,
+                valign: VAlign::Middle,
+                ..TextItem::new(
+                    sx + seg_w / 2.0,
+                    pill.y + pill.h / 2.0,
+                    11.0,
+                    if on { FRAME_INK } else { SEG_OFF },
+                    ((b'A' + i as u8) as char).to_string(),
+                )
+            }));
         }
-        if self.mask_mode {
-            let label = if let Some(c) = self.crop {
-                let m = self.masks[self.active].as_ref().unwrap();
-                let (_, _, w, h) = c.pixels(m.width, m.height);
-                format!("Crop {w} × {h}")
-            } else { format!("Brush {:.0} px", self.brush_diameter) };
-            ui_label(items, l.rail + 20.0, HEADER_H + CONTEXT_H / 2.0, 11.0, WORKSPACE_TEXT, label, Align::Left, 126.0);
-        } else if vp.0 - l.rail > 760.0 {
-            let parameter = match self.mode {
-                Mode::Delta => format!("gain {:.1}×", self.gain),
-                Mode::Blend => format!("{:.0}%", self.blend * 100.0),
-                Mode::Checker => format!("{:.0} px", self.checker_px),
-                _ => String::new(),
+
+        // ---- top-left info block ----
+        let mut y = 22.0 + self.top_inset();
+        for (i, v) in self.videos.iter().enumerate() {
+            let on = i == a;
+            let name = ellipsize(
+                &v.info
+                    .path
+                    .file_name()
+                    .map(|f| f.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                34,
+            );
+            let name_len = name.chars().count();
+            // Title row: dark strip with a coloured left rule.
+            let row_h = 19.0;
+            let row_w = INFO_W;
+            items.push(Item::Rect(RectItem::new(
+                RectPx { x: 22.0, y, w: row_w, h: row_h },
+                if on { ROW_BG_ON } else { ROW_BG_OFF },
+            )));
+            items.push(Item::Rect(RectItem::new(
+                RectPx { x: 22.0, y, w: 2.0, h: row_h },
+                if on { ACCENT } else { RULE_OFF },
+            )));
+            let letter_c = if on { ACCENT } else { INACTIVE };
+            items.push(Item::Text(TextItem {
+                valign: VAlign::Middle,
+                ..TextItem::new(
+                    30.0,
+                    y + row_h / 2.0,
+                    11.0,
+                    letter_c,
+                    ((b'A' + i as u8) as char).to_string(),
+                )
+            }));
+            items.push(Item::Text(TextItem {
+                valign: VAlign::Middle,
+                ..TextItem::new(
+                    44.0,
+                    y + row_h / 2.0,
+                    12.0,
+                    if on { TEXT } else { TEXT_OFF },
+                    name,
+                )
+            }));
+            if on {
+                // Sits inline after the filename (monospace step), so it
+                // reads as part of the title rather than floating right.
+                let after = 44.0 + name_len as f32 * 12.0 * MONO_ADV + 10.0;
+                items.push(Item::Text(TextItem {
+                    valign: VAlign::Middle,
+                    tracking: 1.2,
+                    ..TextItem::new(
+                        after.min(22.0 + row_w - 60.0),
+                        y + row_h / 2.0,
+                        9.0,
+                        ACCENT,
+                        "● SHOWN",
+                    )
+                }));
+            }
+            y += row_h + 2.0;
+
+            // Detail lines ride their own faint strips: the design's dark
+            // mock stays legible bare, but real footage can be bright
+            // anywhere, and this is where you read the numbers.
+            let detail = |items: &mut Vec<Item>, y: f32, col: [f32; 4], s: String| {
+                items.push(Item::Rect(RectItem::new(
+                    RectPx { x: 22.0, y: y - 2.0, w: INFO_W, h: 15.0 },
+                    DETAIL_BG,
+                )));
+                items.push(Item::Text(TextItem::new(30.0, y, 10.5, col, ellipsize(&s, INFO_CH))));
             };
-            ui_label(items, vp.0 - 16.0, HEADER_H + CONTEXT_H / 2.0, 11.0, WORKSPACE_DIM, parameter, Align::Right, 90.0);
+
+            let failed = v.player.failed();
+            if failed {
+                detail(items, y, ERR, "DECODE FAILED".into());
+                y += 21.0;
+            } else {
+                let br = v
+                    .info
+                    .bit_rate
+                    .map(|b| format!("{:.2} Mb/s", b as f64 / 1e6))
+                    .unwrap_or_else(|| "? Mb/s".into());
+                detail(
+                    items,
+                    y,
+                    DETAIL,
+                    format!(
+                        "{}×{}  {:.3} fps  {} {}",
+                        v.info.width, v.info.height, v.info.fps, v.info.codec, v.info.pix_fmt
+                    ),
+                );
+                y += 15.0;
+                detail(
+                    items,
+                    y,
+                    DIM,
+                    format!(
+                        "{}  {}  {}",
+                        br,
+                        fmt_size(v.info.file_size),
+                        fmt_time(v.info.duration)
+                    ),
+                );
+                y += 15.0;
+                // Path last, truncated from the LEFT — the leaf directory
+                // is what tells two encodes apart.
+                let dir = v
+                    .info
+                    .path
+                    .parent()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                detail(items, y, DIM_PATH, ellipsize_left(&dir, INFO_CH));
+                y += 17.0;
+            }
+            y += 4.0;
         }
 
-        // A scrollable numbered list; filenames are measured/ellipsized by the font renderer.
-        items.push(Item::Clip(Some(l.list)));
-        let first = self.source_first();
-        for i in first..(first + self.source_capacity()).min(self.videos.len()) {
-            let v = &self.videos[i];
-            let r = self.source_row(i);
-            let color = clip_color(i);
-            if i == self.active || contains(r, self.cursor.0, self.cursor.1) && self.cursor_inside {
-                items.push(Item::Rect(RectItem { radius: 7.0, ..RectItem::new(r, SOURCE_BG) }));
-            }
-            if i == self.active {
-                items.push(Item::Rect(RectItem::new(RectPx { w: 2.0, ..r }, color)));
-            }
-            number_badge(items, RectPx { x: r.x + 10.0, y: r.y + 12.0, w: 22.0, h: 24.0 }, i);
-            let x = r.x + 42.0;
-            let width = r.w - 50.0;
-            ui_label(items, x, r.y + 18.0, 11.0, WORKSPACE_TEXT, name_of(&v.info.path), Align::Left, width);
-            ui_label(items, x, r.y + 39.0, 10.0, WORKSPACE_DIM,
-                format!("{}×{}  {:.3} fps", v.info.width, v.info.height, v.info.fps), Align::Left, width);
-            ui_label(items, x, r.y + 56.0, 10.0, if v.player.failed() { ERR } else { WORKSPACE_MUTED },
-                if v.player.failed() { "DECODE FAILED".into() } else {
-                    format!("{}  {}", v.info.codec.to_uppercase(), fmt_time(v.info.duration))
-                }, Align::Left, width);
+        // ---- transport (hover-revealed) ----
+        let alpha = self.transport_alpha();
+        if alpha <= 0.001 {
+            return;
         }
-        items.push(Item::Clip(None));
-        if self.videos.len() > self.source_capacity() {
-            ui_label(items, l.rail - 14.0, l.list.y + l.list.h - 6.0, 9.0, WORKSPACE_MUTED,
-                format!("{}–{} / {} · scroll", first + 1, (first + self.source_capacity()).min(self.videos.len()), self.videos.len()), Align::Right, l.rail - 28.0);
-        }
-        if l.inspector.h > 0.0 {
-            let v = &self.videos[self.active];
-            items.push(Item::Rect(RectItem::new(RectPx { h: 1.0, ..l.inspector }, WORKSPACE_RULE)));
-            ui_label(items, 16.0, l.inspector.y + 24.0, 10.0, WORKSPACE_MUTED,
-                format!("INSPECTOR: {}", self.active + 1), Align::Left, l.rail - 32.0);
-            for (i, (key, value)) in [
-                ("Format", format!("{} {}", v.info.codec, v.info.pix_fmt)),
-                ("Resolution", format!("{}×{}", v.info.width, v.info.height)),
-                ("Framerate", format!("{:.3} fps", v.info.fps)),
-                ("Bitrate", v.info.bit_rate.map(|b| format!("{:.2} Mb/s", b as f64 / 1e6)).unwrap_or_else(|| "—".into())),
-                ("Size", fmt_size(v.info.file_size)),
-            ].into_iter().enumerate() {
-                let y = l.inspector.y + 52.0 + i as f32 * 23.0;
-                ui_label(items, 16.0, y, 11.0, WORKSPACE_DIM, key, Align::Left, 78.0);
-                ui_label(items, l.rail - 16.0, y, 11.0, WORKSPACE_TEXT, value, Align::Right, l.rail - 110.0);
-            }
-            let dir = v.info.path.parent().unwrap_or_else(|| std::path::Path::new(""));
-            ui_label(items, 16.0, l.inspector.y + 190.0, 10.0, WORKSPACE_MUTED, dir.to_string_lossy(), Align::Left, l.rail - 32.0);
-        }
-        self.build_transport(items);
-    }
+        let fade = |mut c: [f32; 4]| {
+            c[3] *= alpha;
+            c
+        };
+        let bar = self.transport_rect(vp);
+        // The scrim reaches well above the controls so its weak upper
+        // end lands on empty frame, not on the seek bar.
+        items.push(Item::Rect(RectItem {
+            fade_up: true,
+            ..RectItem::new(
+                RectPx { y: bar.y - SCRIM_LEAD, h: bar.h + SCRIM_LEAD, ..bar },
+                fade(SCRIM),
+            )
+        }));
+        items.push(Item::Rect(RectItem::new(
+            RectPx { x: bar.x, y: bar.y, w: bar.w, h: 1.0 },
+            fade(TRANSPORT_RULE),
+        )));
 
-    fn build_transport(&self, items: &mut Vec<Item>) {
-        let l = self.workspace();
+        let cy = bar.y + 13.0 + 16.0;
+        // Prev / play-pause / next — the middle one on an accent disc.
+        // All drawn as geometry (`Item::Triangle` + rects): the system mono
+        // fonts lack ⏮/⏸/⏭, and a font's ▶ is placed by its metrics, not
+        // its ink, so it never lands in the middle of the disc.
         let prev = self.btn_prev();
-        let play = self.btn_play();
         let next = self.btn_next();
-        for (r, left) in [(prev, true), (next, false)] {
-            let cx = r.x + r.w / 2.0;
-            items.push(Item::Triangle { r: RectPx { x: cx - 4.0, y: r.y + 11.0, w: 8.0, h: 10.0 }, color: WORKSPACE_DIM, left, radius: 0.5 });
-            items.push(Item::Rect(RectItem::new(RectPx { x: cx + if left { -7.0 } else { 6.0 }, y: r.y + 11.0, w: 1.0, h: 10.0 }, WORKSPACE_DIM)));
+        let disc = self.btn_play();
+        let tri = |items: &mut Vec<Item>, r: RectPx, left: bool, c: [f32; 4]| {
+            items.push(Item::Triangle { r, color: c, left, radius: 1.0 });
+        };
+        // Skip glyphs: two small triangles nose to tail, centred.
+        let (sw, sh) = (7.0, 9.0);
+        for (b, left) in [(prev, true), (next, false)] {
+            let x0 = b.x + b.w / 2.0 - sw;
+            for i in 0..2 {
+                tri(items, RectPx { x: x0 + i as f32 * sw, y: cy - sh / 2.0, w: sw, h: sh },
+                    left, fade(GLYPH));
+            }
         }
-        items.push(Item::Rect(RectItem { radius: 16.0, ..RectItem::new(play, ACCENT) }));
+        items.push(Item::Rect(RectItem {
+            radius: disc.w / 2.0,
+            ..RectItem::new(disc, fade(ACCENT))
+        }));
+        let dcx = disc.x + disc.w / 2.0;
         if self.playing {
-            for x in [play.x + 11.0, play.x + 18.0] {
-                items.push(Item::Rect(RectItem::new(RectPx { x, y: play.y + 10.0, w: 3.0, h: 12.0 }, FRAME_INK)));
+            for dx in [-4.5, 1.5] {
+                items.push(Item::Rect(RectItem {
+                    radius: 1.0,
+                    ..RectItem::new(
+                        RectPx { x: dcx + dx, y: cy - 6.0, w: 3.0, h: 12.0 },
+                        fade(FRAME_INK),
+                    )
+                }));
             }
         } else {
-            items.push(Item::Triangle { r: RectPx { x: play.x + 12.0, y: play.y + 10.0, w: 10.0, h: 12.0 }, color: FRAME_INK, left: false, radius: 1.0 });
+            // Same 12px height as the pause bars (plus the rounding), and
+            // nudged right of the box centre toward the centroid — a
+            // box-centred triangle reads as sitting left in a circle.
+            let (tw, th) = (PLAY_W, PLAY_H);
+            tri(items, RectPx { x: dcx - tw * 0.42, y: cy - th / 2.0, w: tw, h: th },
+                false, fade(FRAME_INK));
         }
-        let seek = self.seek_rect(self.vp);
-        items.push(Item::Rect(RectItem { radius: 2.0, ..RectItem::new(seek, TRACK) }));
-        let fraction = if self.wrap.is_finite() && self.wrap > 0.0 { (self.t / self.wrap).clamp(0.0, 1.0) as f32 } else { 0.0 };
-        items.push(Item::Rect(RectItem { radius: 2.0, ..RectItem::new(RectPx { w: seek.w * fraction, ..seek }, ACCENT) }));
-        items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(RectPx { x: seek.x + seek.w * fraction - 6.0, y: seek.y - 4.0, w: 12.0, h: 12.0 }, ACCENT) }));
-        let cy = l.transport.y + 30.0;
-        ui_label(items, seek.x + seek.w + 18.0, cy, 11.0, WORKSPACE_TEXT,
-            format!("{} / {}", fmt_time(self.t), if self.wrap.is_finite() { fmt_time(self.wrap) } else { "?".into() }), Align::Left, 166.0);
-        if l.transport.w >= 720.0 {
-            ui_label(items, self.vp.0 - 18.0, cy, 10.0, WORKSPACE_DIM,
-                format!("frame {} · {:.2}×", (self.t * self.fps).round() as i64, self.speed), Align::Right, 120.0);
+
+        // Seek bar: track, accent fill to the playhead, white knob.
+        let seek = self.seek_rect(vp);
+        let frac = if self.wrap.is_finite() && self.wrap > 0.0 {
+            (self.t / self.wrap).clamp(0.0, 1.0) as f32
+        } else {
+            0.0
+        };
+        items.push(Item::Rect(RectItem {
+            radius: 3.0,
+            ..RectItem::new(seek, fade(TRACK))
+        }));
+        if frac > 0.0 {
+            items.push(Item::Rect(RectItem {
+                radius: 3.0,
+                ..RectItem::new(RectPx { w: seek.w * frac, ..seek }, fade(ACCENT))
+            }));
         }
+        items.push(Item::Rect(RectItem {
+            radius: 6.5,
+            ..RectItem::new(
+                RectPx {
+                    x: seek.x + seek.w * frac - 6.5,
+                    y: seek.y + seek.h / 2.0 - 6.5,
+                    w: 13.0,
+                    h: 13.0,
+                },
+                fade(KNOB),
+            )
+        }));
+
+        // Status readout, right-aligned inside the reserved strip.
+        let mode = self.shown_mode();
+        let extra = match mode {
+            Mode::Delta => format!("  gain ×{:.1}", self.gain),
+            Mode::Blend => format!("  blend {:.0}%", self.blend * 100.0),
+            Mode::Checker => format!("  checker {:.0}px", self.checker_px),
+            _ => String::new(),
+        };
+        let speed = if (self.speed - 1.0).abs() > 1e-3 {
+            format!(" · {:.2}×", self.speed)
+        } else {
+            String::new()
+        };
+        let zoom = if self.zoom > 1.001 {
+            format!("{:.1}×", self.zoom)
+        } else {
+            "fit".to_string()
+        };
+        let mut sx = w - 22.0;
+        for (txt, col) in [
+            (zoom, fade(DIM)),
+            (
+                format!(
+                    "· frame {}{} ·",
+                    (self.t * self.fps).round() as i64,
+                    speed
+                ),
+                fade(DIM),
+            ),
+            (
+                format!(
+                    "/ {}",
+                    if self.wrap.is_finite() { fmt_time(self.wrap) } else { "?".into() }
+                ),
+                fade(TIME_OFF),
+            ),
+            (fmt_time(self.t), fade(TEXT)),
+            (format!("{}{}", mode.name(), extra), fade(ACCENT)),
+        ] {
+            items.push(Item::Text(TextItem {
+                align: Align::Right,
+                valign: VAlign::Middle,
+                ..TextItem::new(sx, cy, 11.0, col, txt.clone())
+            }));
+            // Right-to-left walk; monospace so a per-char step is exact.
+            sx -= txt.chars().count() as f32 * 11.0 * MONO_ADV + 8.0;
+        }
+
     }
 
+    /// The bottom status line, vim/helix style: a fixed-width chip naming
+    /// the input mode on the left, that mode's keys beside it, mode status
+    /// on the right. The bar is tinted by mode (dark blue A/B, dark red
+    /// mask) so the mode reads before the chip does. Unlike the transport
+    /// above it, it never fades — it is how you tell which keys are live —
+    /// and only Tab (A/B) hides it.
     fn build_status_line(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
-        let y = vp.1 - STATUS_H;
-        items.push(Item::Rect(RectItem::new(RectPx { x: 0.0, y, w: vp.0, h: STATUS_H }, WORKSPACE_PANEL)));
-        items.push(Item::Rect(RectItem::new(RectPx { x: 0.0, y, w: vp.0, h: 1.0 }, WORKSPACE_RULE)));
-        let mode = if !self.mask_mode { "COMPARE" } else if self.crop.is_some() { "CROP" } else { "MASK" };
-        ui_label(items, 16.0, y + STATUS_H / 2.0, 10.0, if self.mask_mode { MASK_RED } else { ACCENT }, mode, Align::Left, 70.0);
-        let status = if !self.mask_status.is_empty() && self.mask_mode { self.mask_status.clone() }
-            else { format!("Clip {} · {}", self.active + 1, if self.zoom <= 1.001 { "fit".into() } else { format!("{:.1}×", self.zoom) }) };
-        let hint = if self.mask_mode { if self.crop.is_some() {
-                format!("a {}   drag move / resize   s save   e export", ASPECTS[self.aspect].0)
-            } else { "drag paint   [ ] brush   s save".into() } }
-            else { "1–9 clip   space play   < > step   [ ] speed".into() };
-        let hint_width = if vp.0 >= 1000.0 { 440.0 } else { 0.0 };
-        ui_label(items, 98.0, y + STATUS_H / 2.0, 10.0, WORKSPACE_DIM, status, Align::Left, vp.0 - 118.0 - hint_width);
-        if hint_width > 0.0 {
-            ui_label(items, vp.0 - 16.0, y + STATUS_H / 2.0, 10.0, WORKSPACE_MUTED, hint, Align::Right, hint_width);
+        let bar = RectPx { x: 0.0, y: vp.1 - STATUS_H, w: vp.0, h: STATUS_H };
+        let cy = bar.y + bar.h / 2.0;
+        let (bg, chip, name) = if self.mask_mode {
+            // The marquee is a sub-mode of mask: same tint, its own name,
+            // because its keys are not the painting ones.
+            (STATUS_BG_MASK, MASK_RED, if self.crop.is_some() { "CROP" } else { "MASK" })
+        } else {
+            (STATUS_BG_AB, ACCENT, "A/B TEST")
+        };
+        items.push(Item::Rect(RectItem::new(bar, bg)));
+        items.push(Item::Rect(RectItem::new(
+            RectPx { x: 0.0, y: bar.y, w: MODE_W, h: bar.h },
+            chip,
+        )));
+        items.push(Item::Text(TextItem {
+            align: Align::Center,
+            valign: VAlign::Middle,
+            tracking: 1.5,
+            ..TextItem::new(MODE_W / 2.0, cy, 11.0, TEXT, name)
+        }));
+
+        let clips = match self.videos.len() {
+            1 => "1".to_string(),
+            n => format!("1-{}", n.min(9)),
+        };
+        let keys: &[(&str, &str)] = if self.mask_mode {
+            // The marquee owns the pointer while it is up, so the brush keys
+            // would be lying about what a drag does.
+            if self.crop.is_some() {
+                &[
+                    ("drag", "move / resize"),
+                    ("c", "hide"),
+                    ("s", "save"),
+                    ("e", "export crop"),
+                    (&clips, "clip"),
+                    ("m", "exit"),
+                ]
+            } else {
+                &[
+                    ("drag", "paint"),
+                    ("+ -", "brush"),
+                    ("c", "crop"),
+                    ("s", "save"),
+                    (&clips, "clip"),
+                    ("m", "exit"),
+                    ("enter", "next clip"),
+                ]
+            }
+        } else {
+            &[
+                (&clips, "clip"),
+                ("space", "play"),
+                ("< >", "frame-step"),
+                ("[ ]", "speed"),
+                ("v", "view"),
+                ("m", "mask"),
+                ("tab", "info"),
+                ("f", "fullscreen"),
+                ("enter", "flip"),
+            ]
+        };
+
+        // Right-hand status first, so the keycaps stop short of it.
+        let status = if self.mask_mode {
+            let v = &self.videos[self.active];
+            let name = v.info.path.file_name().unwrap_or_default().to_string_lossy();
+            // With the marquee up the crop's size is the thing to watch —
+            // the mask and the video under it both export at exactly it.
+            let (middle, hint) = match self.crop {
+                Some(c) => {
+                    let mask = self.masks[self.active].as_ref().unwrap();
+                    let (_, _, w, h) = c.pixels(mask.width, mask.height);
+                    (format!("crop {w}×{h}"), "S writes the crop and the video under it · E exports it as ProRes")
+                }
+                None => (
+                    format!("brush {:.0}px", self.brush_diameter),
+                    "blue → white · red → black",
+                ),
+            };
+            let tail = if self.mask_status.is_empty() { hint } else { &self.mask_status };
+            format!(
+                "{} {} · {} · {}",
+                (b'A' + self.active as u8) as char,
+                ellipsize(&name, 28),
+                middle,
+                tail
+            )
+        } else {
+            String::new()
+        };
+        let status_w = status.chars().count() as f32 * 11.0 * MONO_ADV;
+        let limit = vp.0 - 16.0 - if status_w > 0.0 { status_w + 24.0 } else { 0.0 };
+        if !status.is_empty() {
+            items.push(Item::Text(TextItem {
+                align: Align::Right,
+                valign: VAlign::Middle,
+                ..TextItem::new(vp.0 - 16.0, cy, 11.0, LABEL, status)
+            }));
+        }
+
+        // Caps and their key+drop sit centred in the bar together.
+        let cap_y = bar.y + (bar.h - CAP_H - CAP_DROP) / 2.0;
+        let mut kx = MODE_W + 14.0;
+        for &(cap, label) in keys {
+            let cap_w = cap_width(cap);
+            let step = cap_w + 8.0 + label.chars().count() as f32 * KEY_LABEL_PX * MONO_ADV;
+            if kx + step > limit {
+                break;
+            }
+            keycap(items, kx, cap_y, cap);
+            items.push(Item::Text(TextItem {
+                valign: VAlign::Middle,
+                ..TextItem::new(kx + cap_w + 8.0, cap_y + CAP_H / 2.0, KEY_LABEL_PX, TEXT, label)
+            }));
+            kx += step + 20.0;
         }
     }
 
@@ -1677,77 +1970,6 @@ impl App {
     }
 }
 
-#[derive(Clone, Copy)]
-struct Workspace {
-    rail: f32,
-    canvas: RectPx,
-    list: RectPx,
-    inspector: RectPx,
-    transport: RectPx,
-}
-impl Workspace {
-    fn new(vp: (f32, f32), visible: bool, _fullscreen: bool) -> Self {
-        let (w, h) = vp;
-        let rail = if !visible { 0.0 } else if w < 900.0 { 210.0_f32.min(w * 0.3) } else { 280.0 };
-        let header = if visible { HEADER_H + CONTEXT_H } else { 0.0 };
-        let bottom = if visible { TRANSPORT_H + STATUS_H } else { 0.0 };
-        let canvas = RectPx { x: rail, y: header, w: (w - rail).max(1.0), h: (h - header - bottom).max(1.0) };
-        let inspector_h = if visible && h >= 600.0 { 216.0 } else { 0.0 };
-        let inspector = RectPx { x: 0.0, y: h - STATUS_H - inspector_h, w: rail, h: inspector_h };
-        Self {
-            rail, canvas, inspector,
-            list: RectPx { x: 0.0, y: HEADER_H + 12.0, w: rail, h: (inspector.y - HEADER_H - 24.0).max(SOURCE_H) },
-            transport: RectPx { x: rail, y: h - STATUS_H - TRANSPORT_H, w: w - rail, h: TRANSPORT_H },
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum Action { Tool(usize), View(Mode), Brush(bool), Save, Export, Param(bool) }
-struct Control { r: RectPx, label: String, selected: bool, action: Action }
-impl Control {
-    fn new(r: RectPx, label: &str, selected: bool, action: Action) -> Self {
-        Self { r, label: label.into(), selected, action }
-    }
-}
-fn contains(r: RectPx, x: f32, y: f32) -> bool {
-    x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h
-}
-fn inset_rect(r: RectPx, pad: f32) -> RectPx {
-    let pad = pad.min((r.w - 1.0).max(0.0) / 2.0).min((r.h - 1.0).max(0.0) / 2.0);
-    RectPx { x: r.x + pad, y: r.y + pad, w: r.w - pad * 2.0, h: r.h - pad * 2.0 }
-}
-fn ui_label(items: &mut Vec<Item>, x: f32, y: f32, px: f32, color: [f32; 4], text: impl Into<String>, align: Align, width: f32) {
-    items.push(Item::Text(TextItem { align, valign: VAlign::Middle, max_width: Some(width.max(0.0)),
-        ..TextItem::new(x, y, px, color, text) }));
-}
-fn hex_color(rgb: u32) -> [f32; 4] {
-    [((rgb >> 16) & 255) as f32 / 255.0, ((rgb >> 8) & 255) as f32 / 255.0, (rgb & 255) as f32 / 255.0, 1.0]
-}
-fn clip_color(index: usize) -> [f32; 4] {
-    const COLORS: [u32; 9] = [0x61b5ee, 0xe6ac69, 0xb89ae8, 0x6dc7aa, 0xe88891, 0xc9c970, 0x70c8d2, 0xdb9bc6, 0xa4b9d4];
-    hex_color(COLORS[index % COLORS.len()])
-}
-fn number_badge(items: &mut Vec<Item>, r: RectPx, index: usize) {
-    let color = clip_color(index);
-    let bg = [color[0] * 0.17 + 0.04, color[1] * 0.17 + 0.04, color[2] * 0.17 + 0.04, 1.0];
-    items.push(Item::Rect(RectItem { radius: 5.0, border_w: 1.0,
-        border_color: [color[0], color[1], color[2], 0.12], ..RectItem::new(r, bg) }));
-    ui_label(items, r.x + r.w / 2.0, r.y + r.h / 2.0, 11.0, color, (index + 1).to_string(), Align::Center, r.w - 4.0);
-}
-const HEADER_H: f32 = 38.0;
-const CONTEXT_H: f32 = 40.0;
-const SOURCE_H: f32 = 80.0;
-const WORKSPACE_PANEL: [f32; 4] = [0.0196, 0.0196, 0.0235, 1.0];
-const CANVAS_BG: [f32; 4] = [29.0 / 255.0, 27.0 / 255.0, 27.0 / 255.0, 1.0];
-const WORKSPACE_TEXT: [f32; 4] = [209.0 / 255.0, 209.0 / 255.0, 209.0 / 255.0, 1.0];
-const WORKSPACE_DIM: [f32; 4] = [0.57, 0.57, 0.57, 1.0];
-const WORKSPACE_MUTED: [f32; 4] = [0.43, 0.43, 0.43, 1.0];
-const WORKSPACE_RULE: [f32; 4] = [0.09, 0.09, 0.09, 1.0];
-const CONTROL_BG: [f32; 4] = [26.0 / 255.0, 26.0 / 255.0, 26.0 / 255.0, 1.0];
-const SOURCE_BG: [f32; 4] = [0.082, 0.082, 0.082, 1.0];
-const TOOL_BG: [f32; 4] = [0.043, 0.098, 0.149, 1.0];
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1755,101 +1977,6 @@ mod tests {
     use std::path::PathBuf;
     use std::process::Command;
     use std::time::{Duration, Instant};
-
-    fn pointer_down(app: &mut App, x: f32, y: f32) {
-        let r = app.content_rect(app.active);
-        let v = &app.videos[app.active];
-        app.mouse_down(r.x + x * r.w / v.info.width as f32, r.y + y * r.h / v.info.height as f32);
-    }
-    fn pointer_move(app: &mut App, x: f32, y: f32) {
-        let r = app.content_rect(app.active);
-        let v = &app.videos[app.active];
-        app.cursor_moved(r.x + x * r.w / v.info.width as f32, r.y + y * r.h / v.info.height as f32);
-    }
-
-    #[test]
-    fn workspace_controls_select_tools_and_never_paint_the_shell() {
-        let Some(clip) = test_clip() else { return };
-        let mut app = mk_app(&clip, 3);
-        let click = |app: &mut App, action: fn(Action) -> bool| {
-            let r = app.controls().into_iter().find(|c| action(c.action)).unwrap().r;
-            app.mouse_down(r.x + r.w / 2.0, r.y + r.h / 2.0);
-            app.mouse_up();
-        };
-        click(&mut app, |a| matches!(a, Action::View(Mode::Blend)));
-        assert_eq!(app.mode, Mode::Blend);
-        click(&mut app, |a| matches!(a, Action::Tool(2)));
-        assert!(app.mask_mode && app.crop.is_some() && !app.playing);
-        let crop = app.crop;
-        // A zoomed crop can extend underneath the shell, but the shell owns input.
-        app.zoom = 4.0;
-        app.mouse_down(120.0, app.workspace().inspector.y + 30.0);
-        app.cursor_moved(130.0, app.workspace().inspector.y + 40.0);
-        app.mouse_up();
-        assert_eq!(app.crop, crop);
-        click(&mut app, |a| matches!(a, Action::Tool(1)));
-        assert!(app.mask_mode && app.crop.is_none());
-        let r = app.source_row(1);
-        app.mouse_down(r.x + 60.0, r.y + 25.0);
-        app.mouse_up();
-        assert_eq!(app.active, 1);
-        assert_eq!(app.masks[1].as_ref().unwrap().revision, 0);
-        app.mouse_down(300.0, HEADER_H + 20.0);
-        app.cursor_moved(350.0, HEADER_H + 20.0);
-        app.mouse_up();
-        assert_eq!(app.masks[1].as_ref().unwrap().revision, 0);
-        let brush = app.brush_diameter;
-        click(&mut app, |a| matches!(a, Action::Brush(true)));
-        assert!(app.brush_diameter > brush);
-        click(&mut app, |a| matches!(a, Action::Tool(0)));
-        assert!(!app.mask_mode);
-        assert!(app.videos.iter().all(|v| v.last_frame.is_none()));
-        assert_eq!(app.mode, Mode::Blend);
-    }
-
-    #[test]
-    fn workspace_geometry_and_scroll_keep_every_clip_reachable() {
-        let Some(clip) = test_clip() else { return };
-        let mut app = mk_app(&clip, 9);
-        for vp in [(720.0, 480.0), (900.0, 520.0), (1280.0, 800.0)] {
-            app.vp = vp;
-            let l = app.workspace();
-            assert_eq!(l.canvas.x, l.rail);
-            assert_eq!(l.canvas.y + l.canvas.h, l.transport.y);
-            for c in app.controls() {
-                assert!(c.r.x + c.r.w <= vp.0, "control overflow at {vp:?}: {}", c.label);
-            }
-            app.key(Key::Char('9'));
-            assert_eq!(app.active, 8);
-            assert!(app.source_first() <= 8 && app.source_first() + app.source_capacity() > 8);
-            let r = app.source_row(8);
-            assert!(r.y + r.h <= l.list.y + l.list.h);
-            app.cursor_moved(20.0, l.list.y + 12.0);
-            app.scroll(0.0, 40.0);
-            assert!(app.source_first() < 8);
-        }
-        app.key(Key::Tab);
-        let c = app.workspace().canvas;
-        assert_eq!((c.x, c.y, c.w, c.h), (0.0, 0.0, 1280.0, 800.0));
-    }
-
-    #[test]
-    fn side_by_side_zoom_anchors_inside_the_correct_workspace_cell() {
-        let Some(clip) = test_clip() else { return };
-        let mut app = mk_app(&clip, 3);
-        app.mode = Mode::SideBySide;
-        let r = app.content_rect(1);
-        let pointer = (r.x + r.w * 0.6, r.y + r.h * 0.4);
-        app.cursor_moved(pointer.0, pointer.1);
-        app.pinch(0.5);
-        let zoomed = app.content_rect(1);
-        assert!(((pointer.0 - zoomed.x) / zoomed.w - 0.6).abs() < 0.001);
-        assert!(((pointer.1 - zoomed.y) / zoomed.h - 0.4).abs() < 0.001);
-        let old = app.zoom;
-        app.cursor_moved(80.0, HEADER_H + 80.0);
-        app.pinch(0.5);
-        assert_eq!(app.zoom, old, "pinching the source list must not zoom the image");
-    }
 
     #[test]
     fn number_keys_pick_clips_and_v_cycles_views() {
@@ -1881,9 +2008,9 @@ mod tests {
         app.mouse_down(640.0, 790.0); // bottom letterbox
         app.mouse_up();
         assert_eq!(app.masks[0].as_ref().unwrap().revision, 0);
-        // Map image pixels through the workspace canvas.
-        pointer_down(&mut app, 160.0, 90.0);
-        pointer_move(&mut app, 200.0, 90.0);
+        // In a 1280x800 viewport the 320x180 video is 1280x720 at y=40.
+        app.mouse_down(640.0, 400.0);
+        app.cursor_moved(800.0, 400.0);
         app.mouse_up();
         let mask = app.masks[0].as_ref().unwrap();
         assert_eq!(mask.pixels[90 * 320 + 160], 255);
@@ -1891,10 +2018,10 @@ mod tests {
         assert_eq!(mask.pixels[90 * 320 + 200], 255);
         assert_eq!(mask.pixels[70 * 320 + 180], 0);
         // Pinch in mask mode must use the full-window fit, not the SBS cell.
-        pointer_move(&mut app, 160.0, 90.0);
+        app.cursor_moved(640.0, 400.0);
         app.pinch(1.0);
         assert_eq!(app.center, (0.5, 0.5));
-        pointer_down(&mut app, 160.0, 110.0);
+        app.mouse_down(640.0, 560.0);
         app.mouse_up();
         assert_eq!(app.masks[0].as_ref().unwrap().pixels[110 * 320 + 160], 255);
         // The status line is not a paint target (zoomed, video covers it).
@@ -1908,7 +2035,7 @@ mod tests {
         assert!((app.brush_diameter - 8.0).abs() < 0.01);
         app.key(Key::Enter);
         assert!(app.masks[1].as_ref().unwrap().pixels.iter().all(|p| *p == 0));
-        pointer_down(&mut app, 160.0, 90.0);
+        app.mouse_down(640.0, 400.0);
         app.cursor_left();
         assert!(!app.painting);
         assert!(!app.brush_cursor_visible());
@@ -1947,27 +2074,28 @@ mod tests {
             tick_until(&mut app, Duration::from_secs(10), |a| a.videos[0].last_frame.is_some()),
             "mask mode never captured a frame to crop"
         );
-        // The crop and video share the workspace image transform.
+        // A 320x180 clip in a 1280x800 viewport draws 1280x720 at y=40, so
+        // image (ix, iy) is screen (4·ix, 40 + 4·iy).
         app.key(Key::Char('c'));
         assert_eq!(app.crop, Some(Crop { x: 0.0, y: 0.0, w: 320.0, h: 180.0 }));
         assert!(!app.brush_cursor_visible(), "the marquee owns the pointer");
 
         // Drag the SE handle in to a quarter frame.
-        pointer_down(&mut app, 320.0, 180.0);
-        pointer_move(&mut app, 160.0, 90.0);
+        app.mouse_down(1280.0, 760.0);
+        app.cursor_moved(640.0, 400.0);
         app.mouse_up();
         assert_eq!(app.crop, Some(Crop { x: 0.0, y: 0.0, w: 160.0, h: 90.0 }));
 
         // Drag the body far past the corner: it keeps its size and stops
         // at the edge rather than leaving the image.
-        pointer_down(&mut app, 80.0, 45.0);
+        app.mouse_down(320.0, 220.0);
         app.cursor_moved(4000.0, 4000.0);
         app.mouse_up();
         assert_eq!(app.crop, Some(Crop { x: 160.0, y: 90.0, w: 160.0, h: 90.0 }));
 
         // A press inside paints nothing while the marquee is up.
-        pointer_down(&mut app, 250.0, 140.0);
-        pointer_move(&mut app, 275.0, 145.0);
+        app.mouse_down(1000.0, 600.0);
+        app.cursor_moved(1100.0, 620.0);
         app.mouse_up();
         assert_eq!(app.masks[0].as_ref().unwrap().revision, 0);
 
@@ -1997,7 +2125,7 @@ mod tests {
         // full size, since the crop is gone with it.
         app.key(Key::Char('c'));
         assert_eq!(app.crop, None);
-        pointer_down(&mut app, 160.0, 90.0);
+        app.mouse_down(640.0, 400.0);
         app.mouse_up();
         assert!(app.masks[0].as_ref().unwrap().revision > 0);
         // [ and ] size the brush.
@@ -2009,36 +2137,6 @@ mod tests {
         // Leaving mask mode lets the retained frames go.
         app.key(Key::Char('m'));
         assert!(app.videos.iter().all(|v| v.last_frame.is_none()));
-    }
-
-    /// `A` steps the ratio presets: the marquee reshapes about its centre,
-    /// a corner drag keeps the ratio, and Shift-A walks back to free.
-    #[test]
-    fn crop_aspect_presets_reshape_and_lock_the_marquee() {
-        let Some(clip) = test_clip() else { return };
-        let mut app = mk_app(&clip, 1);
-        app.start_crop(None);
-        // 320x180 → 1:1 lands on the largest centred square.
-        for _ in 0..4 { app.key(Key::Char('a')); }
-        assert_eq!(ASPECTS[app.aspect].0, "ratio 1:1");
-        assert_eq!(app.crop, Some(Crop { x: 70.0, y: 0.0, w: 180.0, h: 180.0 }));
-        // Drag the SE handle (screen 4·250, 40 + 4·180) in: stays square.
-        pointer_down(&mut app, 250.0, 180.0);
-        pointer_move(&mut app, 175.0, 115.0);
-        app.mouse_up();
-        let c = app.crop.unwrap();
-        assert!((c.w - c.h).abs() < 1e-3 && c.w < 180.0, "{c:?}");
-        // Every preset snaps to its largest fit — no ratchet from the drag.
-        app.key(Key::Char('a'));
-        assert_eq!(ASPECTS[app.aspect].0, "ratio 2.39:1");
-        let wide = app.crop.unwrap();
-        assert!((wide.w - 320.0).abs() < 1e-3 && (wide.w / wide.h - 2.39).abs() < 1e-3, "{wide:?}");
-        // On to free: the rect stays, the lock goes; Shift-A walks back.
-        app.key(Key::Char('a'));
-        assert_eq!(app.aspect, 0);
-        assert_eq!(app.crop, Some(wide));
-        app.key(Key::Char('A'));
-        assert_eq!(ASPECTS[app.aspect].0, "ratio 2.39:1");
     }
 
     /// `E` with the marquee up re-encodes the whole clip, cut to it, as
@@ -2105,7 +2203,7 @@ mod tests {
     }
 
     fn mk_app(clip: &PathBuf, n: usize) -> App {
-        App::new((0..n).map(|_| mk_video(clip)).collect(), &crate::config::Config::default())
+        App::new((0..n).map(|_| mk_video(clip)).collect(), Mode::Overlay)
     }
 
     /// Tick until a condition holds (real decode runs behind this).
@@ -2375,25 +2473,61 @@ mod tests {
 /// clears only ~4:1 against the HUD's black, which is under the bar for
 /// 10–11px mono. Side by side with the mark it still reads as the same
 /// blue; illegible status text would not.
-/// The crop marquee's ratio presets, `A` to step through: (the keycap's
-/// label, w/h). Image pixels are taken as square, like everywhere else.
-const ASPECTS: [(&str, Option<f32>); 6] = [
-    ("ratio free", None),
-    ("ratio 16:9", Some(16.0 / 9.0)),
-    ("ratio 9:16", Some(9.0 / 16.0)),
-    ("ratio 4:3", Some(4.0 / 3.0)),
-    ("ratio 1:1", Some(1.0)),
-    ("ratio 2.39:1", Some(2.39)),
-];
-
 const ACCENT: [f32; 4] = [0.082, 0.502, 0.871, 1.0];
+/// Hairlines and pill outlines drawn in the accent, well under full.
+const ACCENT_EDGE: [f32; 4] = [0.082, 0.502, 0.871, 0.28];
 /// Frame background / ink on the accent (#050506). Opaque: the window
 /// no longer lets the desktop through.
 const FRAME_BG: [f32; 4] = [0.0196, 0.0196, 0.0235, 1.0];
 const FRAME_INK: [f32; 4] = [0.0196, 0.0196, 0.0235, 1.0];
+const TEXT: [f32; 4] = [0.941, 0.941, 0.949, 1.0];
+const TEXT_OFF: [f32; 4] = [0.784, 0.784, 0.824, 0.85];
+const DETAIL: [f32; 4] = [0.824, 0.824, 0.863, 0.95];
+const DIM_PATH: [f32; 4] = [0.588, 0.588, 0.627, 0.75];
+const DETAIL_BG: [f32; 4] = [0.0, 0.0, 0.0, 0.82];
+const DIM: [f32; 4] = [0.588, 0.588, 0.627, 0.9];
+const LABEL: [f32; 4] = [0.784, 0.784, 0.804, 0.85];
+const INACTIVE: [f32; 4] = [0.706, 0.706, 0.745, 0.9];
+const SEG_OFF: [f32; 4] = [0.902, 0.902, 0.922, 0.8];
+const TIME_OFF: [f32; 4] = [0.471, 0.471, 0.510, 0.85];
+const GLYPH: [f32; 4] = [0.824, 0.824, 0.843, 0.85];
 const ERR: [f32; 4] = [1.0, 0.35, 0.3, 1.0];
+const PILL_BG: [f32; 4] = [0.016, 0.016, 0.024, 0.62];
+// Panel alphas run high on purpose: see the scrim note in shader.wgsl —
+// linear-space blending means 0.6 alpha barely dims bright footage.
+const ROW_BG_ON: [f32; 4] = [0.0, 0.0, 0.0, 0.90];
+const ROW_BG_OFF: [f32; 4] = [0.0, 0.0, 0.0, 0.82];
+const RULE_OFF: [f32; 4] = [1.0, 1.0, 1.0, 0.14];
+const SCRIM: [f32; 4] = [0.016, 0.016, 0.024, 0.97];
 const TRACK: [f32; 4] = [1.0, 1.0, 1.0, 0.14];
+const KNOB: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+/// Status line, tinted by mode and only just see-through: dark blue in
+/// A/B (#0b1d3a), dark red in mask (#3a0b10). Mask's chip takes the
+/// logo's lower bar (#e71b24), as A/B's takes the upper.
+const STATUS_BG_AB: [f32; 4] = [0.043, 0.114, 0.227, 0.93];
+const STATUS_BG_MASK: [f32; 4] = [0.227, 0.043, 0.063, 0.93];
 const MASK_RED: [f32; 4] = [0.906, 0.106, 0.141, 1.0];
+/// The hairline over the transport: faint grey, not the accent.
+const TRANSPORT_RULE: [f32; 4] = [1.0, 1.0, 1.0, 0.07];
+/// Keycaps — switchblade's design system (`switchblade.toml` [theme] and
+/// [theme.keycap], the inline 22px cap): surface, hairline, highlight,
+/// shadow and ink are its tokens verbatim.
+const KEY_SURFACE: [f32; 4] = [0.043, 0.051, 0.067, 1.0];
+/// Fainter than switchblade's 0.11 hairline token: the outline should barely
+/// register; the face, highlight and drop shadow carry the cap.
+/// Blending is linear-space, so even 0.05 white lands as a clearly grey edge.
+const KEY_HAIRLINE: [f32; 4] = [1.0, 1.0, 1.0, 0.018];
+const KEY_HIGHLIGHT: [f32; 4] = [1.0, 1.0, 1.0, 0.07];
+const KEY_SHADOW: [f32; 4] = [0.0, 0.0, 0.0, 0.55];
+const KEY_INK: [f32; 4] = [0.957, 0.961, 0.969, 0.9];
+const CAP_H: f32 = 22.0;
+const CAP_R: f32 = 5.0;
+const CAP_FONT: f32 = 13.5;
+const CAP_PAD_EM: f32 = 0.58;
+const CAP_DROP: f32 = 3.0;
+/// The word beside each cap: full ink, a touch larger than the old dim
+/// label, so what a key DOES reads as easily as the key.
+const KEY_LABEL_PX: f32 = 12.0;
 
 // Launch window — the design system's `Splash` surface.
 const LAUNCH_BG: [f32; 4] = [0.027, 0.027, 0.035, 1.0];
@@ -2459,7 +2593,7 @@ const FORMATS: &str = "MP4 · MOV · MKV · Y4M";
 // Crop marquee. The dimmer runs high for the reason the HUD's panels do
 // (see shader.wgsl): linear-space blending means a modest alpha barely
 // touches bright footage, and this one has to read as "not exported".
-const CROP_DIM: [f32; 4] = [0.0, 0.0, 0.0, 0.95];
+const CROP_DIM: [f32; 4] = [0.0, 0.0, 0.0, 0.72];
 const CROP_LINE: [f32; 4] = [1.0, 1.0, 1.0, 0.95];
 const CROP_INK: [f32; 4] = [0.0, 0.0, 0.0, 0.75];
 const CROP_LINE_W: f32 = 1.5;
@@ -2469,13 +2603,29 @@ const CROP_HANDLE: f32 = 9.0;
 /// Half-size of a corner's grab square — a little wider than it is drawn.
 const CROP_GRAB: f32 = 11.0;
 
+/// Info block width, and how many monospace chars fit inside it.
+const INFO_W: f32 = 430.0;
+const INFO_CH: usize = ((INFO_W - 16.0) / (10.5 * MONO_ADV)) as usize;
 
 /// Transport strip: 13px pad + 32px controls + 11px gap + the status line.
-const TRANSPORT_H: f32 = 60.0;
-/// Persistent footer for tool, selection, zoom, export results and shortcut hints.
-const STATUS_H: f32 = 28.0;
+const TRANSPORT_H: f32 = 56.0 + STATUS_H;
+/// Bottom status line (mode chip + keycaps), and its mode chip's fixed
+/// width — constant across modes, like helix's, so the keys never shift.
+const STATUS_H: f32 = 34.0;
+const MODE_W: f32 = 92.0;
+/// The play triangle, matched to the 12px pause bars it swaps with.
+const PLAY_W: f32 = 11.5;
+const PLAY_H: f32 = 13.0;
+/// Extra scrim drawn above the strip so the gradient's transparent end
+/// falls on bare frame rather than on the controls.
+const SCRIM_LEAD: f32 = 54.0;
+/// Width reserved right of the seek bar for the status readout.
+const STATUS_RESERVE: f32 = 330.0;
 /// Extra grab margin above/below the 5px seek track.
 const SEEK_GRAB: f32 = 9.0;
+/// Pointer stillness before the transport starts fading, and the fade.
+const TRANSPORT_HOLD_S: f32 = 2.6;
+const TRANSPORT_FADE_S: f32 = 0.45;
 /// Advance width of the monospace UI font, in em — used only to step
 /// between right-aligned status segments and keycap chips, never to
 /// place a glyph (the renderer measures those exactly).
@@ -2484,11 +2634,68 @@ const MONO_ADV: f32 = 0.60;
 /// Logical height of a standard macOS titlebar. The window has no visible
 /// bar (`set_titlebar_glass` makes it transparent and runs the content
 /// under it), but the traffic-light buttons still float in that strip, so
-/// launch content clears them. The loaded workspace uses HEADER_H instead.
+/// the top HUD row is pushed below them — everything else goes edge to
+/// edge. Zero in fake fullscreen: that window is borderless, buttons and
+/// all.
 const TITLEBAR_H: f32 = 28.0;
 
+/// Width of a keycap for `label` — switchblade's rule: `pad_em` of air
+/// each side of a monospace run, floored at the cap height so a single
+/// glyph stays square.
+fn cap_width(label: &str) -> f32 {
+    (CAP_FONT * CAP_PAD_EM * 2.0 + CAP_FONT * MONO_ADV * label.chars().count() as f32).max(CAP_H)
+}
+
+/// One keycap, top-left at `(x, y)`: switchblade's design-system cap
+/// (`theme.rs::keycap`, inline size) — a hard drop shadow, a near-black
+/// face with a hairline outline, and an inset top highlight held off the
+/// corners. That highlight is the whole difference between "a dark
+/// rectangle" and "a key".
+fn keycap(items: &mut Vec<Item>, x: f32, y: f32, label: &str) {
+    let (w, h, r) = (cap_width(label), CAP_H, CAP_R);
+    items.push(Item::Rect(RectItem {
+        radius: r,
+        ..RectItem::new(RectPx { x, y: y + CAP_DROP, w, h }, KEY_SHADOW)
+    }));
+    items.push(Item::Rect(RectItem {
+        radius: r,
+        border_w: 1.0,
+        border_color: KEY_HAIRLINE,
+        ..RectItem::new(RectPx { x, y, w, h }, KEY_SURFACE)
+    }));
+    let inset = r * 0.55;
+    items.push(Item::Rect(RectItem {
+        radius: 0.5,
+        ..RectItem::new(RectPx { x: x + inset, y: y + 1.0, w: (w - inset * 2.0).max(0.0), h: 1.0 },
+            KEY_HIGHLIGHT)
+    }));
+    items.push(Item::Text(TextItem {
+        align: Align::Center,
+        valign: VAlign::Middle,
+        ..TextItem::new(x + w / 2.0, y + h / 2.0, CAP_FONT, KEY_INK, label)
+    }));
+}
+
+/// Clip a run to `max` characters, marking the cut with an ellipsis.
 fn name_of(path: &std::path::Path) -> String {
     path.file_name().unwrap_or_default().to_string_lossy().into_owned()
+}
+
+fn ellipsize(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    s.chars().take(max.saturating_sub(1)).collect::<String>() + "…"
+}
+
+/// Same, but keeps the TAIL (for paths, where the leaf matters).
+fn ellipsize_left(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    let skip = n - max.saturating_sub(1);
+    "…".to_string() + &s.chars().skip(skip).collect::<String>()
 }
 
 fn fmt_time(t: f64) -> String {
@@ -2506,3 +2713,5 @@ fn fmt_size(b: u64) -> String {
         format!("{:.1} MiB", b / MIB)
     }
 }
+
+```
