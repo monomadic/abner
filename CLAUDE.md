@@ -1,7 +1,7 @@
 # abner — agent notes
 
 A/B video comparison player: N videos decoded in frame-locked sync, flipped/diffed
-on screen. Deliberately slim — one crate, six modules, no config file, no cache.
+on screen. Deliberately slim — one crate, a handful of modules, one config file, no cache.
 Sibling project: `~/src/switchblade` (the graphics learnings came from there; its
 CLAUDE.md documents the deeper media/render rationale).
 
@@ -76,9 +76,23 @@ from one to the other, keeping its number.
   reader wedged in libav I/O on a dead mount (`dropped_player_interrupts_a_reader_blocked_in_libav_io`);
   a failed seek FAILS the player rather than continuing from wherever it was, because a
   silently unsynced stream is the one thing this product must never show.
+- `src/config.rs` — `abner.default.toml` (repo root, `include_str!`'d, so the bundle
+  needs no file on disk) is the COMPLETE key set; a user file is an overlay, deep-merged
+  table by table, then the result is deserialized with `deny_unknown_fields` and
+  range-checked against the same bounds as `App`'s live clamps. Only the FIRST existing
+  file is read: `--config <path>` (must exist), `./abner.toml`,
+  `~/.config/abner/abner.toml`, `~/.config/abner.toml`. Any error exits 2 before the
+  window opens, naming the file and dotted key. A new setting = a key in the default
+  file + a field in the struct (the `default_is_complete_and_valid` test catches a
+  mismatch); CLI flags (`--view`) override the config.
 - `src/probe.rs` — one ffprobe per input at startup, synchronous on the main thread
   before any window exists, so it runs under a hard deadline (`run_deadlined`): a child
   stuck on a dead volume otherwise looks exactly like a crash.
+- `src/recent.rs` — the launch window's recent files: `~/.config/abner/recent`
+  (written by main.rs on every load, never by `App` — tests must not touch it) and the
+  per-file thumbnail workers (probe + one `ffmpeg` frame, no cache). `App::RecentRow`
+  owns the tiles, the atlas-cell bookkeeping and hit testing; the renderer's `thumbs`
+  atlas (binding 8, mode 14) holds the frames. See HISTORY 2026-09-30.
 - `src/app.rs` — master clock, modes, input, UI overlay. **Zoom** is photo-style: one
   shared `(zoom, center)` where `center` is the content point (0..1) held mid-view —
   every video applies it to its own fit rect, so pan/zoom position stays synced across
@@ -127,7 +141,10 @@ from one to the other, keeping its number.
   `CROP_DIM` 0.95 — linear blending, so lower reads grey). `A`/Shift-A step the ratio
   presets (`ASPECTS`: free, 16:9, 9:16, 4:3, 1:1, 2.39:1); a preset snaps to its largest
   fit about the marquee's centre (keeping the size ratchets smaller), and corner drags
-  keep the ratio (`Crop::with_corner_locked`).
+  keep the ratio (`Crop::with_corner_locked`). The marquee carries the Figma design's
+  three readouts (`build_crop_labels`): `WxH - ratio` in the middle, the image-pixel
+  corners `x, y` / `x+w, y+h` pinned inside the top-left and bottom-right, on flat chips
+  the renderer measures (`TextBg`, `VAlign::Bottom`); small marquees drop them.
   That second file is why `Video::last_frame` exists: the GPU's copy can't be read back,
   so mask mode keeps one RGBA frame per video (cheap — it's paused, so the copy happens
   on entry and on seeks, and entering mask mode re-seeks to re-deliver the frame already
@@ -212,6 +229,13 @@ from one to the other, keeping its number.
   use the geometric block (◀ ▶ ●) or draw the shape from rects.
 
 ## Design source
+
+**Every screen is in Figma**: [Abner — Screens](https://www.figma.com/design/a5aV8WGfzSy9nWBea6Oqyb)
+(launch + drag-over, Single, Side by side, Difference, Mask, Crop, and the component
+board), rebuilt as editable layers from this code on 2026-09-28. **[FIGMA.md](FIGMA.md)
+is the design ↔ code contract** — read it before implementing from Figma: tokens are
+`app.rs` consts mirrored as Figma variables (alphas differ — linear vs sRGB blending),
+components are `build_*` functions, and MCP-generated React/CSS is a spec, never code.
 
 The loaded workspace implements the approved Superdesign draft
 `https://p.superdesign.dev/draft/2e39910e-e4b1-4236-bc2f-c1e0d5ce6f0c`

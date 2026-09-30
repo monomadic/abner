@@ -14,6 +14,25 @@ abner                            # launch window — drag clips onto it
 `--view` takes `overlay`, `sbs`, `delta`, `split`, `checker` or `blend`, so every
 mode is reachable from the command line.
 
+## Configuration
+
+[`abner.default.toml`](abner.default.toml) lists every setting with its default
+(window size, starting view, start paused, seek step, delta gain, blend, checker
+size, brush size) and is built into the binary. To change something, create a
+TOML file with just those keys, in the same tables:
+
+```toml
+[playback]
+view = "delta"
+seek_step = 5.0
+```
+
+abner reads the first of these that exists — `--config <file>` (or
+`--config=<file>`), `./abner.toml`, `~/.config/abner/abner.toml`,
+`~/.config/abner.toml` — and lays it over the defaults. An unknown key, wrong type
+or out-of-range value stops startup with the file and key in the error.
+Command-line flags such as `--view` win over the config.
+
 ## Drag and drop
 
 Run `abner` with no arguments and drag clips onto the launch window. One file fills

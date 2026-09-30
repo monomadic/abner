@@ -3,6 +3,36 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-09-30 — recent files on the launch window
+
+The Splash floor carries the last four clips opened, as the Design canvas "abner —
+Splash, recent files" draws them: 132×74 rounded (8px) 16:9 thumbnails 64px apart,
+a white hairline bevel lit from the top, the container (from the extension) and
+`HH:MM:SS` duration on corner chips, `W×H` and fps underneath, under a `RECENT` /
+`⌘1–n` header. Click or ⌘1–4 opens a tile through the drop path (so it is recorded
+again and moves to the front); with clips up ⌘-digit stays the bare digit. Hover
+turns the bevel brand blue and shows a pointer.
+
+`src/recent.rs`: `~/.config/abner/recent`, one absolute (not canonical — no disk
+access, no `/tmp` vs `/private/tmp` doubles) path per line, 12 kept, written
+atomically by the RUNNER on every load (CLI or drop), never by `App`, so tests can't
+touch it. No cache, per the project rule: each launch window re-probes up to 8
+candidates and pulls one 320×180 cover-cropped frame at 10% in with an `ffmpeg` child
+per file, on worker threads under the probe's deadline; a missing or unreadable file
+drops out and the next candidate fills its place, pending tiles hold their slot as
+an empty well. Thumbnails live in one 1280×180 atlas bound at slot 8 of every group
+(keyless, like the plate), drawn by shader mode 14 with mode 0's rounded-box SDF;
+`App` tracks which path each cell holds, so a cell uploads only when it changes.
+Only the plate layout gets the row (it needs the floor between horizon and foot).
+
+## 2026-09-28 — config file
+
+`abner.default.toml` (compiled in) holds every setting; the first of `--config`,
+`./abner.toml`, `~/.config/abner/abner.toml`, `~/.config/abner.toml` overlays it
+by deep table merge. Strict: unknown keys, bad types and out-of-range values refuse
+startup with the file and dotted key. Covers window size, starting view, start
+paused, seek step, delta gain, blend, checker size and brush size (`src/config.rs`).
+
 ## 2026-09-28 — native comparison and editing workspace
 
 Implemented the approved Superdesign workspace in the native renderer: left-aligned

@@ -27,6 +27,7 @@ dependencies = [
  "bytemuck",
  "cc",
  "env_logger",
+ "fastmkv",
  "log",
  "objc2 0.5.2",
  "objc2-app-kit",
@@ -658,6 +659,10 @@ dependencies = [
  "libc",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "fastmkv"
+version = "0.1.0"
 
 [[package]]
 name = "fdeflate"

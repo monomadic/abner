@@ -81,6 +81,29 @@ pub enum Corner {
     Se,
 }
 
+/// The four side handles, at the midpoints of the marquee's edges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Edge {
+    N,
+    E,
+    S,
+    W,
+}
+
+impl Edge {
+    /// This edge's midpoint on `c` — where the handle is drawn and grabbed.
+    pub fn of(self, c: Crop) -> (f32, f32) {
+        let (x1, y1) = (c.x + c.w, c.y + c.h);
+        let (mx, my) = (c.x + c.w * 0.5, c.y + c.h * 0.5);
+        match self {
+            Edge::N => (mx, c.y),
+            Edge::E => (x1, my),
+            Edge::S => (mx, y1),
+            Edge::W => (c.x, my),
+        }
+    }
+}
+
 impl Corner {
     /// This corner's point on `c` — where the handle is drawn and grabbed.
     pub fn of(self, c: Crop) -> (f32, f32) {
@@ -141,6 +164,69 @@ impl Crop {
         let (w, h) = if fw / fh > ratio { (fh * ratio, fh) } else { (fw, fw / ratio) };
         let (cx, cy) = (self.x + self.w * 0.5, self.y + self.h * 0.5);
         Self { w, h, ..self }.moved_to(cx - w * 0.5, cy - h * 0.5, width, height)
+    }
+
+    /// Drag one side to (x, y), only the axis it owns; the opposite side is
+    /// the anchor. Clamped to the image, `MIN_CROP` stops it collapsing.
+    pub fn with_edge(self, edge: Edge, x: f32, y: f32, width: u32, height: u32) -> Self {
+        let (fw, fh) = (width as f32, height as f32);
+        let mut c = self;
+        match edge {
+            Edge::W | Edge::E => {
+                let ax = if edge == Edge::W { self.x + self.w } else { self.x };
+                let x = x.clamp(0.0, fw);
+                let (x0, x1) = (ax.min(x), ax.max(x));
+                c.x = x0.min((fw - MIN_CROP).max(0.0));
+                c.w = (x1 - x0).max(MIN_CROP).min(fw);
+            }
+            Edge::N | Edge::S => {
+                let ay = if edge == Edge::N { self.y + self.h } else { self.y };
+                let y = y.clamp(0.0, fh);
+                let (y0, y1) = (ay.min(y), ay.max(y));
+                c.y = y0.min((fh - MIN_CROP).max(0.0));
+                c.h = (y1 - y0).max(MIN_CROP).min(fh);
+            }
+        }
+        c
+    }
+
+    /// `with_edge` with the ratio locked: the dragged side sets the size on
+    /// its axis, the other axis follows the ratio about the marquee's
+    /// centre, and both stop where the image runs out.
+    pub fn with_edge_locked(
+        self,
+        edge: Edge,
+        x: f32,
+        y: f32,
+        ratio: f32,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        let (fw, fh) = (width as f32, height as f32);
+        let (cx, cy) = (self.x + self.w * 0.5, self.y + self.h * 0.5);
+        let horizontal = matches!(edge, Edge::W | Edge::E);
+        let (w, h) = if horizontal {
+            let ax = if edge == Edge::W { self.x + self.w } else { self.x };
+            let room = if edge == Edge::W { ax } else { fw - ax };
+            let w = (x.clamp(0.0, fw) - ax).abs().max(MIN_CROP * ratio.max(1.0)).min(room);
+            let w = w.min(fh * ratio);
+            (w, w / ratio)
+        } else {
+            let ay = if edge == Edge::N { self.y + self.h } else { self.y };
+            let room = if edge == Edge::N { ay } else { fh - ay };
+            let h = (y.clamp(0.0, fh) - ay).abs().max(MIN_CROP * ratio.max(1.0).recip()).min(room);
+            let h = h.min(fw / ratio);
+            (h * ratio, h)
+        };
+        // The dragged side stays where the pointer put it; the other axis
+        // recentres on the old centre.
+        let (nx, ny) = match edge {
+            Edge::W => (self.x + self.w - w, cy - h * 0.5),
+            Edge::E => (self.x, cy - h * 0.5),
+            Edge::N => (cx - w * 0.5, self.y + self.h - h),
+            Edge::S => (cx - w * 0.5, self.y),
+        };
+        Self { x: nx, y: ny, w, h }.moved_to(nx, ny, width, height)
     }
 
     /// `with_corner` with the ratio locked: the corner follows whichever
@@ -433,5 +519,15 @@ mod tests {
         assert!(save(&path, 17, 11, &[0]).is_err());
         assert!(std::fs::metadata(&path).unwrap().len() > 0);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn edges_resize_one_axis_and_locked_edges_follow_the_ratio() {
+        let c = Crop { x: 8.0, y: 4.0, w: 16.0, h: 8.0 };
+        assert_eq!(c.with_edge(Edge::E, 30.0, 999.0, 32, 16), Crop { w: 22.0, ..c });
+        assert_eq!(c.with_edge(Edge::N, 999.0, 0.0, 32, 16), Crop { y: 0.0, h: 12.0, ..c });
+        let l = c.with_edge_locked(Edge::E, 32.0, 0.0, 2.0, 32, 16);
+        assert_eq!((l.x, l.w, l.h), (8.0, 24.0, 12.0));
+        assert!(l.y >= 0.0 && l.y + l.h <= 16.0);
     }
 }

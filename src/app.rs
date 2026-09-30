@@ -10,10 +10,12 @@
 use std::time::Instant;
 
 use crate::player::Player;
-use crate::mask::{self, Corner, Crop, Mask};
+use crate::mask::{self, Corner, Crop, Edge, Mask};
 use crate::probe::VideoInfo;
+use crate::recent;
 use crate::render::{
-    Align, FrameDesc, Item, RectItem, RectPx, TextItem, Upload, VAlign, VideoMode,
+    Align, FrameDesc, Item, RectItem, RectPx, TextBg, TextItem, ThumbUpload, Upload, VAlign,
+    VideoMode,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +54,9 @@ pub enum Key {
     Backspace,
     /// ⌘W: close the focused clip.
     Close,
+    /// ⌘ plus a digit: on the launch window, open that recent file; with
+    /// clips up it is the bare digit (pick that clip), as it always was.
+    CmdDigit(char),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -61,6 +66,9 @@ pub enum Cmd {
     /// The clip list changed shape outside a drop (⌘W): the runner
     /// re-syncs the GPU's per-slot textures and the window title.
     VideosChanged,
+    /// Open the launch window's nth recent tile (a click or ⌘1–4). The
+    /// runner loads it through the drop path, so it is recorded again.
+    OpenRecent(usize),
 }
 
 /// What a press on the crop marquee took hold of.
@@ -70,6 +78,26 @@ enum CropGrab {
     Move,
     /// One of the white squares: drag it, opposite corner anchored.
     Corner(Corner),
+    /// One of the side squares: drag it along its axis, opposite side anchored.
+    Edge(Edge),
+}
+
+/// The pointer shape the crop marquee wants under the cursor; main.rs maps it
+/// to the window's cursor icon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CropCursor {
+    /// The dimmed area outside the marquee.
+    Crosshair,
+    Grab,
+    Grabbing,
+    /// ↖↘ (top-left / bottom-right corners).
+    NwseResize,
+    /// ↗↙ (top-right / bottom-left corners).
+    NeswResize,
+    NsResize,
+    EwResize,
+    /// Over a recent tile on the launch window: it opens on click.
+    Pointer,
 }
 
 pub struct Video {
@@ -108,6 +136,8 @@ pub struct App {
     /// What the pointer grabbed, and where inside it (image px), so the
     /// marquee doesn't jump to the cursor on the first move.
     crop_drag: Option<(CropGrab, (f32, f32))>,
+    /// When and where the last marquee press landed, for double-click.
+    last_click: Option<(std::time::Instant, (f32, f32))>,
     /// Index into `ASPECTS` (`A` cycles): the marquee's locked ratio, 0 for
     /// free. A tool setting, so it outlives hiding the marquee.
     aspect: usize,
@@ -165,7 +195,121 @@ pub struct App {
     /// The window is occluded: the backdrop's clock stops, so nothing
     /// drains its queue and backpressure parks the decoder.
     hidden: bool,
+    /// The launch window's recent row (`recent.rs`).
+    recent: RecentRow,
     cmds: Vec<Cmd>,
+}
+
+/// One recent file on its way to (or on) the launch window.
+struct RecentTile {
+    path: std::path::PathBuf,
+    /// Filled in by the thumbnail worker, with the frame.
+    info: Option<VideoInfo>,
+    rgba: Option<Vec<u8>>,
+    /// The worker gave up (moved, deleted, unreadable): the tile drops out.
+    failed: bool,
+}
+
+/// The recent row: candidates in recency order, the thumbnail workers
+/// still out, and what the GPU's atlas cells currently hold. More
+/// candidates than tiles are probed, so a file that has gone away is
+/// replaced by the next one instead of leaving a hole.
+#[derive(Default)]
+struct RecentRow {
+    /// The list as last read (`set_recent`); `stale` until the launch
+    /// window picks it up.
+    paths: Vec<std::path::PathBuf>,
+    stale: bool,
+    tiles: Vec<RecentTile>,
+    workers: Vec<std::sync::mpsc::Receiver<recent::ThumbResult>>,
+    /// Which tile's frame each atlas cell holds, so a cell is uploaded
+    /// only when what it shows changes.
+    atlas: [Option<std::path::PathBuf>; recent::SHOWN],
+    /// Tile rects from the last launch frame, for hit testing — indexed
+    /// like `shown()`.
+    hits: Vec<RectPx>,
+    hover: Option<usize>,
+}
+
+impl RecentRow {
+    /// How many candidates get probed for the four tiles.
+    const PROBED: usize = recent::SHOWN * 2;
+
+    /// Indices into `tiles` of what the row shows: the first `SHOWN` that
+    /// haven't failed. A pending one keeps its place (as an empty well),
+    /// so tiles don't reshuffle as workers finish in their own order.
+    fn shown(&self) -> Vec<usize> {
+        self.tiles.iter().enumerate().filter(|(_, t)| !t.failed).map(|(i, _)| i).take(recent::SHOWN).collect()
+    }
+
+    fn pending(&self) -> bool {
+        !self.workers.is_empty()
+    }
+
+    /// Pick up a new list: keep tiles already probed, spawn workers for
+    /// the rest.
+    fn refresh(&mut self) {
+        self.stale = false;
+        let mut old = std::mem::take(&mut self.tiles);
+        let mut fresh = Vec::new();
+        for p in self.paths.iter().take(Self::PROBED) {
+            match old.iter().position(|t| &t.path == p) {
+                Some(i) => self.tiles.push(old.swap_remove(i)),
+                None => {
+                    fresh.push(p.clone());
+                    self.tiles.push(RecentTile { path: p.clone(), info: None, rgba: None, failed: false });
+                }
+            }
+        }
+        if !fresh.is_empty() {
+            self.workers.push(recent::spawn_thumbs(&fresh));
+        }
+        self.hover = None;
+    }
+
+    /// Take whatever the workers finished.
+    fn drain(&mut self) {
+        let mut done = Vec::new();
+        self.workers.retain(|rx| loop {
+            match rx.try_recv() {
+                Ok(r) => done.push(r),
+                Err(std::sync::mpsc::TryRecvError::Empty) => break true,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break false,
+            }
+        });
+        for (path, result) in done {
+            let Some(t) = self.tiles.iter_mut().find(|t| t.path == path) else { continue };
+            match result {
+                Ok(th) => {
+                    t.info = Some(th.info);
+                    t.rgba = Some(th.rgba);
+                }
+                Err(e) => {
+                    log::info!("recent {}: {e}", path.display());
+                    t.failed = true;
+                }
+            }
+        }
+    }
+
+    /// Uploads for every atlas cell whose tile changed since it was last
+    /// filled.
+    fn uploads(&mut self) -> Vec<ThumbUpload> {
+        let mut out = Vec::new();
+        for (slot, i) in self.shown().into_iter().enumerate() {
+            let t = &self.tiles[i];
+            let Some(rgba) = &t.rgba else { continue };
+            if self.atlas[slot].as_ref() != Some(&t.path) {
+                out.push(ThumbUpload { slot, buf: rgba.clone() });
+                self.atlas[slot] = Some(t.path.clone());
+            }
+        }
+        out
+    }
+
+    fn hit(&self, x: f32, y: f32) -> Option<usize> {
+        self.hits.iter().position(|r| contains(*r, x, y))
+    }
 }
 
 /// The launch window's moving floor: a decoder of its own and a clock of
@@ -208,6 +352,7 @@ impl App {
             crop_export: None,
             crop: None,
             crop_drag: None,
+            last_click: None,
             aspect: 0,
             videos,
             active: 0,
@@ -239,6 +384,7 @@ impl App {
             backdrop_src: None,
             backdrop: None,
             hidden: false,
+            recent: RecentRow::default(),
             cmds: Vec::new(),
         }
     }
@@ -331,28 +477,73 @@ impl App {
         RectPx { x: r.x + c.x * sx, y: r.y + c.y * sy, w: c.w * sx, h: c.h * sy }
     }
 
-    /// Take hold of the marquee: a white square if the press is on one,
-    /// otherwise the body. A press outside it grabs nothing (the dimmed
-    /// area isn't part of the export, so there is nothing to do there).
-    fn crop_grab(&mut self, x: f32, y: f32) {
-        let Some(c) = self.crop else { return };
+    /// What is under the pointer on the marquee: a white square (corners
+    /// win over side squares), otherwise the body, else nothing (the dimmed
+    /// area isn't part of the export).
+    fn crop_hit(&self, x: f32, y: f32) -> Option<CropGrab> {
+        let c = self.crop?;
         let s = self.crop_rect(c);
-        let point = self.image_point(x, y);
-        for (corner, sx, sy) in [
-            (Corner::Nw, s.x, s.y),
-            (Corner::Ne, s.x + s.w, s.y),
-            (Corner::Sw, s.x, s.y + s.h),
-            (Corner::Se, s.x + s.w, s.y + s.h),
-        ] {
+        for corner in [Corner::Nw, Corner::Ne, Corner::Sw, Corner::Se] {
+            let (hx, hy) = corner.of(c);
+            let (sx, sy) = self.crop_screen(s, c, hx, hy);
             if (x - sx).abs() <= CROP_GRAB && (y - sy).abs() <= CROP_GRAB {
-                let (hx, hy) = corner.of(c);
-                self.crop_drag = Some((CropGrab::Corner(corner), (point.0 - hx, point.1 - hy)));
-                return;
+                return Some(CropGrab::Corner(corner));
             }
         }
-        if c.contains(point.0, point.1) {
-            self.crop_drag = Some((CropGrab::Move, (point.0 - c.x, point.1 - c.y)));
+        for edge in [Edge::N, Edge::E, Edge::S, Edge::W] {
+            let (hx, hy) = edge.of(c);
+            let (sx, sy) = self.crop_screen(s, c, hx, hy);
+            if (x - sx).abs() <= CROP_GRAB && (y - sy).abs() <= CROP_GRAB {
+                return Some(CropGrab::Edge(edge));
+            }
         }
+        let point = self.image_point(x, y);
+        c.contains(point.0, point.1).then_some(CropGrab::Move)
+    }
+
+    /// An image-pixel point on the marquee, in screen px.
+    fn crop_screen(&self, s: RectPx, c: Crop, hx: f32, hy: f32) -> (f32, f32) {
+        (s.x + (hx - c.x) / c.w * s.w, s.y + (hy - c.y) / c.h * s.h)
+    }
+
+    /// Take hold of whatever `crop_hit` finds under the press.
+    fn crop_grab(&mut self, x: f32, y: f32) {
+        let (Some(c), Some(hit)) = (self.crop, self.crop_hit(x, y)) else { return };
+        let point = self.image_point(x, y);
+        let (hx, hy) = match hit {
+            CropGrab::Move => (c.x, c.y),
+            CropGrab::Corner(corner) => corner.of(c),
+            CropGrab::Edge(edge) => edge.of(c),
+        };
+        self.crop_drag = Some((hit, (point.0 - hx, point.1 - hy)));
+    }
+
+    /// The cursor the marquee wants, or None when the pointer is not on the
+    /// canvas with the marquee up (the shell keeps the default arrow).
+    pub fn crop_cursor(&self) -> Option<CropCursor> {
+        if !self.ready() {
+            return (self.cursor_inside && self.recent.hover.is_some()).then_some(CropCursor::Pointer);
+        }
+        if !self.mask_mode || self.crop.is_none() || !self.cursor_inside || !self.ready() {
+            return None;
+        }
+        let grab = match self.crop_drag {
+            Some((grab, _)) => Some(grab),
+            None => {
+                let (x, y) = self.cursor;
+                if !contains(self.workspace().canvas, x, y) { return None; }
+                self.crop_hit(x, y)
+            }
+        };
+        Some(match grab {
+            None => CropCursor::Crosshair,
+            Some(CropGrab::Move) if self.crop_drag.is_some() => CropCursor::Grabbing,
+            Some(CropGrab::Move) => CropCursor::Grab,
+            Some(CropGrab::Corner(Corner::Nw | Corner::Se)) => CropCursor::NwseResize,
+            Some(CropGrab::Corner(Corner::Ne | Corner::Sw)) => CropCursor::NeswResize,
+            Some(CropGrab::Edge(Edge::N | Edge::S)) => CropCursor::NsResize,
+            Some(CropGrab::Edge(Edge::E | Edge::W)) => CropCursor::EwResize,
+        })
     }
 
     fn crop_drag_to(&mut self, x: f32, y: f32) {
@@ -365,6 +556,10 @@ impl App {
             CropGrab::Corner(corner) => match ASPECTS[self.aspect].1 {
                 Some(r) => c.with_corner_locked(corner, px - ox, py - oy, r, w, h),
                 None => c.with_corner(corner, px - ox, py - oy, w, h),
+            },
+            CropGrab::Edge(edge) => match ASPECTS[self.aspect].1 {
+                Some(r) => c.with_edge_locked(edge, px - ox, py - oy, r, w, h),
+                None => c.with_edge(edge, px - ox, py - oy, w, h),
             },
         });
         self.mask_status.clear();
@@ -497,8 +692,10 @@ impl App {
     fn build_crop_layer(&self, items: &mut Vec<Item>, c: Crop) {
         let r = self.crop_rect(c);
         let (vw, vh) = self.vp;
-        let (x1, y1) = ((r.x + r.w).clamp(0.0, vw), (r.y + r.h).clamp(0.0, vh));
-        let (x0, y0) = (r.x.clamp(0.0, vw), r.y.clamp(0.0, vh));
+        // Whole pixels, so the four dim rects butt exactly: fractional edges
+        // are anti-aliased and the footage shows through the seam as a line.
+        let (x1, y1) = ((r.x + r.w).round().clamp(0.0, vw), (r.y + r.h).round().clamp(0.0, vh));
+        let (x0, y0) = (r.x.round().clamp(0.0, vw), r.y.round().clamp(0.0, vh));
         for dim in [
             RectPx { x: 0.0, y: 0.0, w: vw, h: y0 },
             RectPx { x: 0.0, y: y1, w: vw, h: vh - y1 },
@@ -507,6 +704,20 @@ impl App {
         ] {
             if dim.w > 0.0 && dim.h > 0.0 {
                 items.push(Item::Rect(RectItem::new(dim, CROP_DIM)));
+            }
+        }
+        // Guides: each side's line carries on across the canvas.
+        let cv = self.workspace().canvas;
+        for y in [r.y, r.y + r.h] {
+            if y >= cv.y && y <= cv.y + cv.h {
+                items.push(Item::Rect(RectItem::new(
+                    RectPx { x: cv.x, y: y - 0.5, w: cv.w, h: 1.0 }, CROP_GUIDE)));
+            }
+        }
+        for x in [r.x, r.x + r.w] {
+            if x >= cv.x && x <= cv.x + cv.w {
+                items.push(Item::Rect(RectItem::new(
+                    RectPx { x: x - 0.5, y: cv.y, w: 1.0, h: cv.h }, CROP_GUIDE)));
             }
         }
         let mut edge = |x: f32, y: f32, run: f32, horizontal: bool| {
@@ -537,15 +748,50 @@ impl App {
         edge(r.x, r.y + r.h - half, r.w, true);
         edge(r.x - half, r.y, r.h, false);
         edge(r.x + r.w - half, r.y, r.h, false);
-        for (hx, hy) in
-            [(r.x, r.y), (r.x + r.w, r.y), (r.x, r.y + r.h), (r.x + r.w, r.y + r.h)]
-        {
+        self.build_crop_labels(items, c, r);
+        let (mx, my) = (r.x + r.w * 0.5, r.y + r.h * 0.5);
+        for (hx, hy) in [
+            (r.x, r.y), (r.x + r.w, r.y), (r.x, r.y + r.h), (r.x + r.w, r.y + r.h),
+            (mx, r.y), (r.x + r.w, my), (mx, r.y + r.h), (r.x, my),
+        ] {
             for (size, color) in [(CROP_HANDLE + 2.0, CROP_INK), (CROP_HANDLE, CROP_LINE)] {
                 items.push(Item::Rect(RectItem::new(
                     RectPx { x: hx - size * 0.5, y: hy - size * 0.5, w: size, h: size },
                     color,
                 )));
             }
+        }
+    }
+
+    /// The marquee's readouts (the Figma Crop marquee): its size and ratio
+    /// in the middle, and the image-pixel coordinates of its top-left and
+    /// bottom-right corners pinned inside those corners, each on a flat
+    /// chip. The renderer measures every run and sizes its chip, so the
+    /// corner labels anchor on the corner itself. A marquee too small to
+    /// hold them drops the corners first, then the middle, rather than
+    /// letting the labels pile up over the handles.
+    fn build_crop_labels(&self, items: &mut Vec<Item>, c: Crop, r: RectPx) {
+        let mask = self.masks[self.active].as_ref().unwrap();
+        let (x, y, w, h) = c.pixels(mask.width, mask.height);
+        let chip = |tx: f32, ty: f32, align: Align, valign: VAlign, text: String| {
+            Item::Text(TextItem {
+                align,
+                valign,
+                bg: Some(TextBg { pad_x: CROP_CHIP_PAD.0, pad_y: CROP_CHIP_PAD.1, ..TextBg::new(CROP_CHIP) }),
+                ..TextItem::new(tx, ty, 10.0, WORKSPACE_TEXT, text)
+            })
+        };
+        let (px, py) = CROP_CHIP_PAD;
+        if r.w >= CROP_LABELS_MIN.0 && r.h >= CROP_LABELS_MIN.1 {
+            items.push(chip(r.x + px, r.y + py, Align::Left, VAlign::Top, format!("{x}, {y}")));
+            items.push(chip(r.x + r.w - px, r.y + r.h - py, Align::Right, VAlign::Bottom,
+                format!("{}, {}", x + w, y + h)));
+        }
+        if r.w >= CROP_LABEL_MIN.0 && r.h >= CROP_LABEL_MIN.1 {
+            let (name, locked) = ASPECTS[self.aspect];
+            let ratio = ratio_label(w, h, locked.map(|_| name));
+            items.push(chip(r.x + r.w / 2.0, r.y + r.h / 2.0, Align::Center, VAlign::Middle,
+                format!("{w}x{h} - {ratio}")));
         }
     }
 
@@ -557,6 +803,25 @@ impl App {
     pub fn set_plate(&mut self, size: (f32, f32), horizon: f32) {
         self.plate_size = size;
         self.plate_horizon = horizon;
+    }
+
+    /// The recent-files list (`recent::load`), most recent first. The
+    /// launch window re-reads it the next time it draws.
+    pub fn set_recent(&mut self, paths: Vec<std::path::PathBuf>) {
+        self.recent.paths = paths;
+        self.recent.stale = true;
+    }
+
+    /// The file behind the launch window's nth recent tile.
+    pub fn recent_path(&self, n: usize) -> Option<std::path::PathBuf> {
+        let i = *self.recent.shown().get(n)?;
+        Some(self.recent.tiles[i].path.clone())
+    }
+
+    fn open_recent(&mut self, n: usize) {
+        if n < self.recent.shown().len() {
+            self.cmds.push(Cmd::OpenRecent(n));
+        }
     }
 
     /// The video the launch window plays as its floor (probed by main).
@@ -780,7 +1045,17 @@ impl App {
         }
     }
 
-    pub fn key(&mut self, k: Key) {
+    pub fn key(&mut self, mut k: Key) {
+        if let Key::CmdDigit(c) = k {
+            if self.ready() {
+                k = Key::Char(c);
+            } else {
+                if let Some(d) = c.to_digit(10).filter(|d| *d >= 1) {
+                    self.open_recent(d as usize - 1);
+                }
+                return;
+            }
+        }
         // Launch state (no clips): only global keys are live.
         if !self.ready() {
             match k {
@@ -858,7 +1133,7 @@ impl App {
                 }
             }
             Key::Backspace => self.speed = 1.0,
-            Key::Close => {} // handled above
+            Key::Close | Key::CmdDigit(_) => {} // handled above
             Key::Char('V') => self.mode = self.mode.cycle(-1),
             Key::Char(c @ '1'..='9') => {
                 let idx = c as usize - '1' as usize;
@@ -907,6 +1182,11 @@ impl App {
 
     pub fn cursor_moved(&mut self, x: f32, y: f32) {
         self.cursor_inside = true;
+        if !self.ready() {
+            self.cursor = (x, y);
+            self.recent.hover = self.recent.hit(x, y);
+            return;
+        }
         if self.scrubbing {
             self.scrub_to(x);
             self.cursor = (x, y);
@@ -934,7 +1214,12 @@ impl App {
     }
 
     pub fn mouse_down(&mut self, x: f32, y: f32) {
-        if !self.ready() { return; }
+        if !self.ready() {
+            // The launch window: a recent tile opens its file; anywhere
+            // else is just the drop target.
+            if let Some(n) = self.recent.hit(x, y) { self.open_recent(n); }
+            return;
+        }
         self.cursor = (x, y);
         self.cursor_inside = true;
         if self.show_ui {
@@ -962,7 +1247,23 @@ impl App {
         if !contains(self.workspace().canvas, x, y) { return; }
         if self.mask_mode {
             self.stroke_last = None;
-            if self.crop.is_some() { self.crop_grab(x, y); return; }
+            if self.crop.is_some() {
+                // Double-click inside the marquee: back out to the whole frame.
+                let now = std::time::Instant::now();
+                let double = self.last_click.is_some_and(|(t, (lx, ly))| {
+                    now - t < DOUBLE_CLICK && (x - lx).abs() < 4.0 && (y - ly).abs() < 4.0
+                });
+                self.last_click = Some((now, (x, y)));
+                if double && matches!(self.crop_hit(x, y), Some(CropGrab::Move)) {
+                    self.crop = Some(self.full_crop());
+                    self.crop_drag = None;
+                    self.last_click = None;
+                    self.mask_status.clear();
+                    return;
+                }
+                self.crop_grab(x, y);
+                return;
+            }
             self.painting = self.brush_cursor_visible();
             if self.painting { self.paint_at_cursor(); }
         } else {
@@ -1123,12 +1424,23 @@ impl App {
         // Nothing loaded — paint the launch window and stop.
         if !self.ready() {
             let plate = self.tick_backdrop(dt);
+            if self.recent.stale {
+                self.recent.refresh();
+            }
+            self.recent.drain();
             let mut desc = self.launch_frame(vp);
+            desc.thumbs = self.recent.uploads();
             // The floor moves at the clip's own rate: wake for its next
             // frame instead of running the loop hot at the display's.
             if let Some(b) = &self.backdrop_src {
                 desc.redraw_at =
                     Some(Instant::now() + std::time::Duration::from_secs_f64(1.0 / b.fps.max(1.0)));
+            }
+            // Thumbnail workers still out: look again soon even without a
+            // moving floor to pace the loop.
+            if self.recent.pending() {
+                let soon = Instant::now() + std::time::Duration::from_millis(100);
+                desc.redraw_at = Some(desc.redraw_at.map_or(soon, |t| t.min(soon)));
             }
             desc.plate = plate;
             return desc;
@@ -1263,6 +1575,7 @@ impl App {
             clear: FRAME_BG,
             uploads,
             plate: None,
+            thumbs: Vec::new(),
             items,
             animating,
             redraw_at: if animating {
@@ -1530,7 +1843,7 @@ impl App {
     /// for now — one clip already plays, so there is no half-filled pair
     /// to explain.) No video items, so it renders with zero streams
     /// loaded.
-    fn launch_frame(&self, vp: (f32, f32)) -> FrameDesc {
+    fn launch_frame(&mut self, vp: (f32, f32)) -> FrameDesc {
         let (w, h) = vp;
         let mut items: Vec<Item> = Vec::new();
 
@@ -1658,6 +1971,12 @@ impl App {
         } else {
             top + lh + gap
         };
+        // The recent row lies on the floor between the mark and the
+        // foot; only the plate has the room for it.
+        self.recent.hits.clear();
+        if splash {
+            self.push_recent_row(&mut items, w, horizon + RECENT_CLEAR, foot - RECENT_CLEAR);
+        }
         items.push(Item::Rect(RectItem {
             fade_x: true,
             ..RectItem::new(RectPx { x: w / 2.0 - 150.0, y: foot, w: 300.0, h: rule_h }, RULE)
@@ -1685,9 +2004,104 @@ impl App {
             clear: LAUNCH_BG,
             uploads: Vec::new(),
             plate: None,
+            thumbs: Vec::new(),
             items,
             animating: false,
             redraw_at: None,
+        }
+    }
+}
+
+impl App {
+    /// The launch window's recent files: a header (`RECENT`, `⌘1–n`) and
+    /// one tile per file — a rounded, bevelled thumbnail with the
+    /// container at its top-left and the running time at its
+    /// bottom-right, and the frame size and rate underneath. Centred in
+    /// the band `top..bottom`; left out when the band is too short or
+    /// there is nothing to show. Records each tile's rect for hit testing.
+    fn push_recent_row(&mut self, items: &mut Vec<Item>, w: f32, top: f32, bottom: f32) {
+        let shown = self.recent.shown();
+        let n = shown.len();
+        let row_h = RECENT_HEAD + RECENT_STEP + TILE_H + RECENT_STEP + RECENT_META;
+        if n == 0 || bottom - top < row_h {
+            return;
+        }
+        let row_w = n as f32 * TILE_W + (n as f32 - 1.0) * TILE_GAP;
+        if row_w > w - LOCKUP_CLEAR * 2.0 {
+            return;
+        }
+        let x0 = (w - row_w) / 2.0;
+        let y0 = top + ((bottom - top) - row_h) / 2.0;
+
+        let head = TextItem {
+            valign: VAlign::Middle,
+            tracking: 10.0 * 0.09,
+            ..TextItem::new(x0, y0 + RECENT_HEAD / 2.0, 10.0, INK_MUTED, "RECENT")
+        };
+        items.push(Item::Text(head));
+        let keys = if n == 1 { "⌘1".to_string() } else { format!("⌘1–{n}") };
+        items.push(Item::Text(TextItem {
+            align: Align::Right,
+            valign: VAlign::Middle,
+            ..TextItem::new(x0 + row_w, y0 + RECENT_HEAD / 2.0, 10.0, INK_FAINT, keys)
+        }));
+
+        let ty = y0 + RECENT_HEAD + RECENT_STEP;
+        let chip = TextBg { radius: 4.0, pad_x: 4.0, pad_y: 1.0, ..TextBg::new(CHIP_BG) };
+        for (slot, &i) in shown.iter().enumerate() {
+            let t = &self.recent.tiles[i];
+            let r = RectPx { x: x0 + slot as f32 * (TILE_W + TILE_GAP), y: ty, w: TILE_W, h: TILE_H };
+            let hot = self.recent.hover == Some(slot);
+            // The recessed well first; the frame sits in it one px in, so
+            // the bevel's hairline runs round the picture, not over it.
+            items.push(Item::Rect(RectItem { radius: TILE_R, ..RectItem::new(r, WELL) }));
+            if t.rgba.is_some() {
+                let inner = RectPx { x: r.x + 1.0, y: r.y + 1.0, w: r.w - 2.0, h: r.h - 2.0 };
+                items.push(Item::Thumb { r: inner, slot, radius: TILE_R - 1.0, alpha: 1.0 });
+            }
+            // The bevel: a faint white outline all round, and a brighter
+            // one that is strongest along the top edge and gone by the
+            // bottom — lit from above, as the moulded controls are.
+            items.push(Item::Rect(RectItem {
+                radius: TILE_R,
+                border_w: 1.0,
+                border_color: if hot { BRAND_BLUE } else { BEVEL },
+                ..RectItem::new(r, [0.0; 4])
+            }));
+            items.push(Item::Rect(RectItem {
+                radius: TILE_R,
+                border_w: 1.0,
+                border_color: BEVEL_LIT,
+                fade_down: true,
+                ..RectItem::new(r, [0.0; 4])
+            }));
+            if let Some(info) = &t.info {
+                items.push(Item::Text(TextItem {
+                    bg: Some(chip),
+                    ..TextItem::new(r.x + 9.0, r.y + 6.0, 10.0, CHIP_INK, recent::container(&t.path))
+                }));
+                if info.duration > 0.0 {
+                    items.push(Item::Text(TextItem {
+                        align: Align::Right,
+                        valign: VAlign::Bottom,
+                        bg: Some(chip),
+                        ..TextItem::new(r.x + r.w - 9.0, r.y + r.h - 6.0, 10.0, CHIP_INK, recent::fmt_duration(info.duration))
+                    }));
+                }
+                let my = r.y + r.h + RECENT_STEP + RECENT_META / 2.0;
+                items.push(Item::Text(TextItem {
+                    valign: VAlign::Middle,
+                    max_width: Some(TILE_W / 2.0),
+                    ..TextItem::new(r.x, my, 11.0, INK_MUTED, format!("{}×{}", info.width, info.height))
+                }));
+                items.push(Item::Text(TextItem {
+                    align: Align::Right,
+                    valign: VAlign::Middle,
+                    max_width: Some(TILE_W / 2.0),
+                    ..TextItem::new(r.x + r.w, my, 11.0, INK_MUTED, format!("{} fps", recent::fmt_fps(info.fps)))
+                }));
+            }
+            self.recent.hits.push(r);
         }
     }
 }
@@ -2024,6 +2438,16 @@ mod tests {
         // Leaving mask mode lets the retained frames go.
         app.key(Key::Char('m'));
         assert!(app.videos.iter().all(|v| v.last_frame.is_none()));
+    }
+
+    /// The marquee's middle label: a locked preset by name, a free rect by
+    /// its reduced ratio while readable, else as n.nn:1.
+    #[test]
+    fn crop_ratio_label_names_presets_and_reduces_free_rects() {
+        assert_eq!(ratio_label(640, 360, None), "16:9");
+        assert_eq!(ratio_label(1080, 1080, None), "1:1");
+        assert_eq!(ratio_label(3148, 2160, None), "1.46:1");
+        assert_eq!(ratio_label(1918, 1080, Some("ratio 16:9")), "16:9");
     }
 
     /// `A` steps the ratio presets: the marquee reshapes about its centre,
@@ -2470,6 +2894,30 @@ const LAMP: [f32; 4] = [0.086, 0.851, 0.494, 1.0];
 const LAMP_GLOW: [f32; 4] = [0.086, 0.851, 0.494, 0.07];
 /// What the launch window says it opens.
 const FORMATS: &str = "MP4 · MOV · MKV · Y4M";
+/// The recent row (the Splash design's recent files): 16:9 tiles on the
+/// 4px grid, spaced well apart, `radius-8`.
+const TILE_W: f32 = 132.0;
+const TILE_H: f32 = 74.0;
+const TILE_GAP: f32 = 64.0;
+const TILE_R: f32 = 8.0;
+/// Header line, the step between the row's lines, the metadata line.
+const RECENT_HEAD: f32 = 14.0;
+const RECENT_STEP: f32 = 8.0;
+const RECENT_META: f32 = 16.0;
+/// Floor kept clear above the row (under the horizon) and below it
+/// (over the foot).
+const RECENT_CLEAR: f32 = 16.0;
+/// The tile's recessed ground (the brand's `well`, #04050a).
+const WELL: [f32; 4] = [0.016, 0.020, 0.039, 1.0];
+/// The bevel: white hairlines. The design's sRGB alphas (0.16 all round,
+/// 0.34 on top) are run lower here because blending is linear-space.
+const BEVEL: [f32; 4] = [1.0, 1.0, 1.0, 0.09];
+const BEVEL_LIT: [f32; 4] = [1.0, 1.0, 1.0, 0.20];
+/// The corner chips: `void` at 0.85 under `ink` (#e8edf2).
+const CHIP_BG: [f32; 4] = [0.016, 0.020, 0.039, 0.85];
+const CHIP_INK: [f32; 4] = [0.910, 0.929, 0.949, 1.0];
+/// The brand's `ink-faint` (#7a8694): the key hint beside the header.
+const INK_FAINT: [f32; 4] = [0.478, 0.525, 0.580, 1.0];
 
 // Crop marquee. The dimmer runs high for the reason the HUD's panels do
 // (see shader.wgsl): linear-space blending means a modest alpha barely
@@ -2483,6 +2931,18 @@ const CROP_GAP: f32 = 5.0;
 const CROP_HANDLE: f32 = 9.0;
 /// Half-size of a corner's grab square — a little wider than it is drawn.
 const CROP_GRAB: f32 = 11.0;
+/// The marquee's label chips (Figma: white @0.12, flat, 10px #d1d1d1). The
+/// alpha is the linear-space equivalent of the design's sRGB 0.12 — at 0.12
+/// here a white wash reads several times brighter than in the mock.
+const CROP_CHIP: [f32; 4] = [0.0, 0.0, 0.0, 0.8];
+/// The guide lines running out of each marquee side across the canvas.
+const CROP_GUIDE: [f32; 4] = [1.0, 1.0, 1.0, 0.22];
+const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(350);
+const CROP_CHIP_PAD: (f32, f32) = (10.0, 3.0);
+/// Screen size the marquee needs before the corner coordinates show, and
+/// before the size/ratio label in the middle does.
+const CROP_LABELS_MIN: (f32, f32) = (180.0, 72.0);
+const CROP_LABEL_MIN: (f32, f32) = (130.0, 24.0);
 
 
 /// Transport strip: 13px pad + 32px controls + 11px gap + the status line.
@@ -2501,6 +2961,19 @@ const MONO_ADV: f32 = 0.60;
 /// under it), but the traffic-light buttons still float in that strip, so
 /// launch content clears them. The loaded workspace uses HEADER_H instead.
 const TITLEBAR_H: f32 = 28.0;
+
+/// The ratio a crop is shown with: a locked preset by its own name, a free
+/// rect as its reduced ratio while that stays readable (640×360 → 16:9),
+/// otherwise as `n.nn:1`.
+fn ratio_label(w: u32, h: u32, preset: Option<&str>) -> String {
+    if let Some(name) = preset {
+        return name.trim_start_matches("ratio ").to_string();
+    }
+    let gcd = |mut a: u32, mut b: u32| { while b != 0 { (a, b) = (b, a % b); } a.max(1) };
+    let g = gcd(w, h);
+    let (rw, rh) = (w / g, h / g);
+    if rw <= 32 && rh <= 32 { format!("{rw}:{rh}") } else { format!("{:.2}:1", w as f32 / h.max(1) as f32) }
+}
 
 fn name_of(path: &std::path::Path) -> String {
     path.file_name().unwrap_or_default().to_string_lossy().into_owned()

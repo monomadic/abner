@@ -13,6 +13,7 @@ mod mask;
 mod open;
 mod player;
 mod probe;
+mod recent;
 mod render;
 mod schedule;
 mod text;
@@ -26,7 +27,7 @@ use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey};
-use winit::window::{Window, WindowId};
+use winit::window::{CursorIcon, Window, WindowId};
 
 use app::{App, Cmd, Key, Video};
 use player::Player;
@@ -164,7 +165,11 @@ fn main() -> anyhow::Result<()> {
 
     let title = title_for(&videos);
 
+    // Clips named on the command line count as opened, like a drop.
+    recent::record(videos.iter().map(|v| v.info.path.as_path()));
+
     let mut app = App::new(videos, &config);
+    app.set_recent(recent::load());
     if let Some(path) = backdrop_path() {
         match probe::probe(&path) {
             Ok(info) => app.set_backdrop(info),
@@ -322,6 +327,8 @@ impl Runner {
             videos.len(),
             if replace { "replace" } else { "add" }
         );
+        recent::record(videos.iter().map(|v| v.info.path.as_path()));
+        self.app.set_recent(recent::load());
         self.app.add_videos(videos, replace);
         self.sync_videos();
     }
@@ -333,6 +340,15 @@ impl Runner {
                 Cmd::ToggleFullscreen => {
                     if let Some(w) = &self.window {
                         toggle_fast_fullscreen(w);
+                    }
+                }
+                Cmd::OpenRecent(n) => {
+                    if let Some(path) = self.app.recent_path(n) {
+                        self.files_dropped(vec![path], false);
+                        self.animating = true;
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
                     }
                 }
                 Cmd::VideosChanged => {
@@ -578,6 +594,13 @@ impl ApplicationHandler for Runner {
                     {
                         Some(Key::Close)
                     }
+                    // ⌘1–9: a recent file on the launch window, the bare
+                    // digit (pick a clip) once clips are up.
+                    WinitKey::Character(s)
+                        if self.mods.super_key() && s.chars().next().is_some_and(|c| c.is_ascii_digit()) =>
+                    {
+                        s.chars().next().map(Key::CmdDigit)
+                    }
                     WinitKey::Named(NamedKey::ArrowLeft) => Some(Key::Left),
                     WinitKey::Named(NamedKey::ArrowRight) => Some(Key::Right),
                     WinitKey::Named(NamedKey::Enter) => Some(Key::Enter),
@@ -640,6 +663,17 @@ impl ApplicationHandler for Runner {
                 let vp = (size.width as f32 / scale, size.height as f32 / scale);
                 let desc = self.app.tick(dt, vp, scale);
                 window.set_cursor_visible(!self.app.brush_cursor_visible());
+                window.set_cursor(match self.app.crop_cursor() {
+                    Some(app::CropCursor::Crosshair) => CursorIcon::Crosshair,
+                    Some(app::CropCursor::Grab) => CursorIcon::Grab,
+                    Some(app::CropCursor::Grabbing) => CursorIcon::Grabbing,
+                    Some(app::CropCursor::NwseResize) => CursorIcon::NwseResize,
+                    Some(app::CropCursor::NeswResize) => CursorIcon::NeswResize,
+                    Some(app::CropCursor::NsResize) => CursorIcon::NsResize,
+                    Some(app::CropCursor::EwResize) => CursorIcon::EwResize,
+                    Some(app::CropCursor::Pointer) => CursorIcon::Pointer,
+                    None => CursorIcon::Default,
+                });
                 gpu.render(&desc, vp);
                 self.animating = desc.animating;
                 self.redraw_at = desc.redraw_at;

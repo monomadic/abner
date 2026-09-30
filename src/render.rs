@@ -11,6 +11,7 @@ use std::time::Instant;
 use winit::window::Window;
 
 use crate::text::{ATLAS, TextCtx};
+use crate::recent::{self, THUMB_H, THUMB_W};
 
 const MIP_LEVELS: u32 = 4;
 
@@ -167,6 +168,13 @@ pub enum VideoMode {
     Blend = 5,
 }
 
+/// A recent file's thumbnail for atlas cell `slot`: `recent::THUMB_W ×
+/// recent::THUMB_H` RGBA, already cover-cropped to 16:9.
+pub struct ThumbUpload {
+    pub slot: usize,
+    pub buf: Vec<u8>,
+}
+
 /// One decoded frame to upload into video texture `idx` this frame.
 pub struct Upload {
     pub idx: usize,
@@ -237,6 +245,9 @@ pub enum VAlign {
     Top,
     /// `y` is the line box's vertical centre.
     Middle,
+    /// `y` is the bottom of the line box — what pins a label into a
+    /// bottom corner without the app guessing the line height.
+    Bottom,
 }
 
 /// Chip drawn behind a text run. Sized from the run's real measured
@@ -253,7 +264,6 @@ pub struct TextBg {
 }
 
 impl TextBg {
-    #[allow(dead_code)] // no chip-backed text right now (keycaps are drawn as shapes)
     pub fn new(color: [f32; 4]) -> Self {
         Self {
             color,
@@ -342,6 +352,9 @@ pub enum Item {
     /// One-logical-px lines in `color` every 3px down `r` — the brand's
     /// `scanline` overlay.
     Scanlines { r: RectPx, color: [f32; 4] },
+    /// A recent file's thumbnail from atlas cell `slot`, clipped to a
+    /// rounded rect of `radius` — the launch window's recent row.
+    Thumb { r: RectPx, slot: usize, radius: f32, alpha: f32 },
     Mask { r: RectPx, id: u64, revision: u64, width: u32, height: u32, pixels: Arc<Vec<u8>> },
     /// A triangle filling `r`, pointing right (or left): transport glyphs
     /// drawn as geometry, so they centre on their shape — a font's ▶ sits
@@ -356,6 +369,8 @@ pub struct FrameDesc {
     /// A new frame of the launch backdrop video, for the plate texture
     /// (`idx` unused). The plate is resized to fit the first one.
     pub plate: Option<Upload>,
+    /// Recent-file thumbnails that finished since the last frame.
+    pub thumbs: Vec<ThumbUpload>,
     pub items: Vec<Item>,
     pub animating: bool,
     pub redraw_at: Option<Instant>,
@@ -417,6 +432,10 @@ pub struct Gpu {
     /// The launch plate: one texture for the life of the process, bound
     /// in every group like the wordmark, so mode 10 needs no batch key.
     plate: VideoTex,
+    /// The recent row's thumbnails, one `THUMB_W × THUMB_H` cell per
+    /// tile side by side — bound in every group like the plate, so mode 14
+    /// needs no batch key.
+    thumbs: VideoTex,
     mask_tex: wgpu::Texture,
     mask_view: wgpu::TextureView,
     mask_version: Option<(u64, u64)>,
@@ -550,6 +569,7 @@ impl Gpu {
                 tex_entry(5),
                 tex_entry(6),
                 tex_entry(7),
+                tex_entry(8),
             ],
         });
 
@@ -689,6 +709,14 @@ impl Gpu {
             wgpu::Extent3d { width: plate_w, height: plate_h, depth_or_array_layers: 1 },
         );
 
+        let thumbs = Self::make_video_tex(
+            &device,
+            &blit_bgl,
+            &sampler,
+            THUMB_W * recent::SHOWN as u32,
+            THUMB_H,
+        );
+
         let glyph_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("glyphs"),
             size: wgpu::Extent3d { width: ATLAS, height: ATLAS, depth_or_array_layers: 1 },
@@ -723,6 +751,7 @@ impl Gpu {
             // Mips are blitted on the first frame, like a video upload.
             logo: VideoTex { dirty: true, ..logo },
             plate: VideoTex { dirty: true, ..plate },
+            thumbs,
             mask_tex,
             mask_view,
             mask_version: None,
@@ -894,6 +923,10 @@ impl Gpu {
                         binding: 7,
                         resource: wgpu::BindingResource::TextureView(&self.plate.view),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: wgpu::BindingResource::TextureView(&self.thumbs.view),
+                    },
                 ],
             });
             self.pair_bgs.insert(key, bg);
@@ -995,6 +1028,30 @@ impl Gpu {
         self.plate.dirty = true;
     }
 
+    /// A finished thumbnail into its cell of the recent row's atlas.
+    fn upload_thumb(&mut self, up: &ThumbUpload) {
+        if up.slot >= recent::SHOWN || up.buf.len() != (THUMB_W * THUMB_H * 4) as usize {
+            log::warn!("bad thumbnail upload: slot {} {}B", up.slot, up.buf.len());
+            return;
+        }
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.thumbs.tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: up.slot as u32 * THUMB_W, y: 0, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &up.buf,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(THUMB_W * 4),
+                rows_per_image: Some(THUMB_H),
+            },
+            wgpu::Extent3d { width: THUMB_W, height: THUMB_H, depth_or_array_layers: 1 },
+        );
+        self.thumbs.dirty = true;
+    }
+
     /// Upload one rect of the CPU glyph atlas. The source slice starts at
     /// the rect's first byte with the atlas width as its row pitch, so no
     /// copy-out is needed.
@@ -1023,6 +1080,9 @@ impl Gpu {
         }
         if let Some(up) = &desc.plate {
             self.upload_plate(up);
+        }
+        for up in &desc.thumbs {
+            self.upload_thumb(up);
         }
         for item in &desc.items {
             if let Item::Mask { id, revision, width, height, pixels, .. } = item {
@@ -1202,6 +1262,23 @@ impl Gpu {
                     p1: 0.0,
                     pad: 0.0,
                 }),
+                Item::Thumb { r, slot, radius, alpha } => {
+                    // Half a texel in from the cell's edges, so the
+                    // neighbouring cell never bleeds in through filtering.
+                    let n = recent::SHOWN as f32;
+                    let (hu, hv) = (0.5 / (THUMB_W as f32 * n), 0.5 / THUMB_H as f32);
+                    let u0 = *slot as f32 / n;
+                    push(&mut data, &mut batches, clip, None, Instance {
+                        pos: [r.x, r.y],
+                        size: [r.w, r.h],
+                        uv: [u0 + hu, hv, u0 + 1.0 / n - hu, 1.0 - hv],
+                        color: [0.0, 0.0, 0.0, *alpha],
+                        mode: 14.0,
+                        p0: *radius,
+                        p1: 0.0,
+                        pad: 0.0,
+                    })
+                }
                 Item::Text(t) => {
                     let fitted = t.max_width.map(|w| self.text.fit(&t.text, t.px * scale, t.tracking * scale, w * scale));
                     let laid = self.text.layout(fitted.as_deref().unwrap_or(&t.text), t.px * scale, t.tracking * scale);
@@ -1216,6 +1293,7 @@ impl Gpu {
                     let y0 = match t.valign {
                         VAlign::Top => t.y,
                         VAlign::Middle => t.y - th / 2.0,
+                        VAlign::Bottom => t.y - th,
                     };
                     if let Some(bg) = &t.bg {
                         let chip = RectPx {
@@ -1311,6 +1389,7 @@ impl Gpu {
             .iter_mut()
             .chain(std::iter::once(&mut self.logo))
             .chain(std::iter::once(&mut self.plate))
+            .chain(std::iter::once(&mut self.thumbs))
         {
             if !v.dirty {
                 continue;

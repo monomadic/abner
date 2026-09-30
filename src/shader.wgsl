@@ -21,6 +21,8 @@ struct U {
 // The launch plate — bound in every group for the same reason as the
 // wordmark, so modes 10 and 11 need no batch key either.
 @group(0) @binding(7) var tex_p: texture_2d<f32>;
+// The launch window's recent-file thumbnails, one cell per tile.
+@group(0) @binding(8) var tex_t: texture_2d<f32>;
 
 struct In {
     @location(0) pos: vec2<f32>,
@@ -126,6 +128,7 @@ fn ui_color(c: vec4<f32>) -> vec4<f32> {
 //    p1 floor tilt, pad the standing mark's height, uv slot = its ink box)
 // 12 the wordmark's silhouette as a soft shadow (p0 = mip level)
 // 13 launch overlays: p0 0 radial vignette in color, 1 scanlines in color
+// 14 recent-file thumbnail (tex_t * color.a), clipped to a p0-radius rounded box
 
 @fragment
 fn fs_main(in: Out) -> @location(0) vec4<f32> {
@@ -135,6 +138,7 @@ fn fs_main(in: Out) -> @location(0) vec4<f32> {
     let g = textureSample(tex_g, samp, in.uv).r;
     let l = textureSample(tex_l, samp, in.uv);
     let pl = textureSample(tex_p, samp, in.uv);
+    let th = textureSample(tex_t, samp, in.uv);
     switch in.mode {
         case 0u: {
             let half = in.size * 0.5;
@@ -355,6 +359,15 @@ fn fs_main(in: Out) -> @location(0) vec4<f32> {
             }
             let lit = fract(in.local.y / 3.0) < 1.0 / 3.0;
             return vec4<f32>(c.rgb, select(0.0, c.a, lit));
+        }
+        case 14u: {
+            // Already decoded by the sample (sRGB texture). The rounded
+            // clip is mode 0's SDF, so its corners match the frame and
+            // border rects drawn over it exactly.
+            let half = in.size * 0.5;
+            let r = clamp(in.p0, 0.0, min(half.x, half.y));
+            let d = sd_round_box(in.local - half, half, r);
+            return vec4<f32>(th.rgb, th.a * in.color.a * cov(d));
         }
         default: {
             return in.color;
