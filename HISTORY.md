@@ -3,6 +3,49 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-09-06 — `--with-cli-tools` bundles the CLIs' dylibs too
+
+`--with-cli-tools` copied `ffmpeg`/`ffprobe` off PATH into `Contents/MacOS` and stopped
+there. The dylib walk at the bottom of `packaging/build-app.sh` seeded only from the main
+binary, so the copied CLIs kept the absolute `/opt/homebrew/opt/ffmpeg/lib/...`
+`LC_LOAD_DYLIB` entries they were built with — they ran fine on the build machine and
+would not launch at all on a machine without Homebrew, which is the one case the flag
+exists for. The bug was invisible locally because Homebrew was always there to answer.
+
+The ffmpeg 8 pin made it worse rather than exposing it: the app links 8.x
+(`libavcodec.62`, via rsmpeg's `ffmpeg8` feature) while Homebrew's plain `ffmpeg` formula
+is now 9.x, so `command -v ffprobe` resolves to a CLI needing a dylib set the bundle had
+no reason to already contain. Nothing was shared to accidentally cover it.
+
+**Fix.** Record the CLIs actually copied in (`CLI_TOOLS`, newline-delimited — same bash
+3.2 reason as `SEEN`; macOS has no `declare -A`), then run `bundle_deps_of` over each one
+and add the same `@executable_path/../Frameworks` rpath the main binary gets — they sit
+in `Contents/MacOS` beside it, so it reaches. Both walks run before the Frameworks
+`@loader_path/.` pass and well before codesigning, which is the ordering that matters:
+ad-hoc signing has to come after the last `install_name_tool` edit or the signature is
+stale and the binary refuses to launch on Apple Silicon. The codesign step now iterates
+`CLI_TOOLS` rather than re-deriving the pair, which also removes a `set -e` trap — with
+only one of the two tools on PATH, `[ -e "$tool" ] && codesign ...` left the loop
+returning 1 and aborted the build.
+
+Verified `env -i DYLD_PRINT_LIBRARIES=1 .../Contents/MacOS/ffprobe`: all seven libav*/libsw*
+load from `Contents/Frameworks`, and no `/opt/homebrew` or `/usr/local` path survives in
+any binary or dylib in the bundle.
+
+**Tradeoff, deliberately left as it is.** Frameworks now carries both SONAME sets —
+`libavcodec.62` for the app and `.63` for the CLI. They cannot collide (different
+filenames) and the shared third-party deps (x264, x265, dav1d, opus, SvtAv1Enc, vpx,
+openssl) dedupe to one copy each, so the cost is ~16 MB on a ~65 MB bundle. The
+alternative is sourcing the CLIs from the `ffmpeg@8` keg to match what the app links:
+16 MB smaller, and `ffprobe` would then be the exact library version the in-process
+decoder uses, which is the more defensible position for a tool whose product is
+exactness — probe and decode disagreeing about a stream is precisely the class of bug
+this codebase refuses everywhere else. It was not taken because it means hardcoding a
+keg path (`/opt/homebrew/opt/ffmpeg@8/bin`, wrong on Intel's `/usr/local`) or adding a
+lookup, and it silently drifts the day `Cargo.toml` moves to `ffmpeg9`. Worth revisiting
+if the bundle is ever shipped to anyone, or if a probe/decode disagreement is ever
+observed.
+
 ## 2026-09-05 — 18. app icon conforms to the macOS 26 icon guideline
 
 The Dock drew the app icon shrunk inside a lighter rounded plate, visibly smaller than

@@ -14,10 +14,10 @@
 #   2. assembles the standard Contents/{MacOS,Resources,Frameworks} layout
 #   3. renders assets/app-icon.png to Resources/AppIcon.icns
 #   4. writes Info.plist (version + git hash baked in)
-#   5. copies every non-system dylib the binary (transitively) links
-#      against into Contents/Frameworks and rewrites LC_LOAD_DYLIB entries
-#      to @rpath, so the bundle carries its own ffmpeg instead of pointing
-#      at wherever it happened to be built
+#   5. copies every non-system dylib the binary — and each --with-cli-tools
+#      CLI — transitively links against into Contents/Frameworks, rewriting
+#      LC_LOAD_DYLIB entries to @rpath, so the bundle carries its own ffmpeg
+#      instead of pointing at wherever it happened to be built
 #   6. ad-hoc codesigns the whole bundle (required on Apple Silicon —
 #      install_name_tool invalidates any prior signature)
 #
@@ -115,6 +115,11 @@ exec "$DIR/abner-bin" "$@"
 LAUNCHER
 chmod +x "$MACOS/$BIN_NAME"
 
+# Names of the CLIs actually copied in, newline-delimited (same bash 3.2
+# reason as SEEN below): the dylib walk further down has to seed from
+# these too, or they keep the absolute Homebrew load paths they were
+# built with — useless on the Homebrew-less machine this flag exists for.
+CLI_TOOLS=$'\n'
 if [ "$WITH_CLI_TOOLS" = 1 ]; then
   echo "==> bundling ffmpeg/ffprobe CLIs"
   for tool in ffmpeg ffprobe; do
@@ -125,6 +130,7 @@ if [ "$WITH_CLI_TOOLS" = 1 ]; then
     fi
     cp "$src" "$MACOS/$tool"
     chmod +w "$MACOS/$tool"
+    CLI_TOOLS="${CLI_TOOLS}${tool}"$'\n'
   done
 fi
 
@@ -217,6 +223,22 @@ bundle_deps_of() {
 
 bundle_deps_of "$MACOS/$BIN_NAME-bin"
 install_name_tool -add_rpath "@executable_path/../Frameworks" "$MACOS/$BIN_NAME-bin"
+
+# The --with-cli-tools copies need the identical treatment: they were
+# taken off PATH with /opt/homebrew/... baked into their LC_LOAD_DYLIBs,
+# and they live in Contents/MacOS beside the main binary, so the same
+# @executable_path rpath reaches Frameworks. Note they usually need a
+# DIFFERENT ffmpeg than the app: abner links 8.x (libavcodec.62) while
+# Homebrew's plain `ffmpeg` formula is 9.x (libavcodec.63), so both
+# SONAME sets land in Frameworks. They don't collide — different
+# filenames — and the shared third-party deps (x264, dav1d, opus, ...)
+# resolve to the same Cellar paths, so SEEN dedupes them to one copy.
+while IFS= read -r tool; do
+  [ -z "$tool" ] && continue
+  bundle_deps_of "$MACOS/$tool"
+  install_name_tool -add_rpath "@executable_path/../Frameworks" "$MACOS/$tool"
+done <<< "$CLI_TOOLS"
+
 for dylib in "$FRAMEWORKS"/*.dylib; do
   [ -e "$dylib" ] || continue
   install_name_tool -add_rpath "@loader_path/." "$dylib" 2>/dev/null || true
@@ -232,9 +254,12 @@ for dylib in "$FRAMEWORKS"/*.dylib; do
   [ -e "$dylib" ] || continue
   codesign --force --sign "$SIGN_IDENTITY" "$dylib"
 done
-[ "$WITH_CLI_TOOLS" = 1 ] && for tool in "$MACOS/ffmpeg" "$MACOS/ffprobe"; do
-  [ -e "$tool" ] && codesign --force --sign "$SIGN_IDENTITY" "$tool"
-done
+# Must come after the install_name_tool pass above, not with the copy —
+# rewriting load commands invalidates the signature Homebrew shipped.
+while IFS= read -r tool; do
+  [ -z "$tool" ] && continue
+  codesign --force --sign "$SIGN_IDENTITY" "$MACOS/$tool"
+done <<< "$CLI_TOOLS"
 codesign --force --sign "$SIGN_IDENTITY" "$MACOS/$BIN_NAME-bin"
 codesign --force --sign "$SIGN_IDENTITY" "$MACOS/$BIN_NAME"
 codesign --force --deep --sign "$SIGN_IDENTITY" "$APP"
@@ -242,6 +267,11 @@ codesign --force --deep --sign "$SIGN_IDENTITY" "$APP"
 echo "==> verifying"
 codesign --verify --deep --strict "$APP"
 otool -L "$MACOS/$BIN_NAME-bin" | sed 's/^/    /'
+while IFS= read -r tool; do
+  [ -z "$tool" ] && continue
+  echo "  $tool:"
+  otool -L "$MACOS/$tool" | sed 's/^/    /'
+done <<< "$CLI_TOOLS"
 
 echo
 echo "built: $APP"
