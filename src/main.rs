@@ -81,6 +81,7 @@ keys:
   F            fullscreen (borderless, same Space)
   Tab          toggle workspace controls
   Cmd-W        close the focused clip (on the empty window: quit)
+  Cmd-Delete   close the focused clip
   Q            quit
   Esc          leave fullscreen, else quit
 ";
@@ -619,6 +620,14 @@ impl ApplicationHandler for Runner {
                     // Other ⌘-chords still fall through as their bare key.
                     WinitKey::Character(s)
                         if self.mods.super_key() && s.eq_ignore_ascii_case("w") =>
+                    {
+                        Some(Key::Close)
+                    }
+                    // ⌘⌫ does the same (Finder's "move to trash" chord), but
+                    // only with clips up: on the empty window ⌘W quits, and
+                    // a delete chord shouldn't.
+                    WinitKey::Named(NamedKey::Backspace)
+                        if self.mods.super_key() && self.app.ready() =>
                     {
                         Some(Key::Close)
                     }

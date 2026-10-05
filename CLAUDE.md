@@ -113,7 +113,7 @@ from one to the other, keeping its number.
   the runner re-sync textures + title. Last clip closed = launch window; ⌘W there quits.
   The **workspace** (`Workspace`, `controls`, `build_hud`) shares geometry between
   drawing and pointer hit testing: a numbered source rail, focused inspector,
-  Compare/Mask/Crop toolbar, contextual controls, canvas, persistent transport and
+  Input/Mask/Crop toolbar, contextual controls, canvas, persistent transport and
   status line. The rail is 280px (210 below 900px wide), the inspector hides below
   600px high, and the minimum window is 720×480. `Tab` hides the whole shell.
   `base_rect` fits within the canvas (or an individual side-by-side cell); every

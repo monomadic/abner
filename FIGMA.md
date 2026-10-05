@@ -90,7 +90,7 @@ by hand.
 | **Source row** | the rail loop in `build_hud` (`source_row()`, `SOURCE_H`) |
 | **Inspector row** | the inspector loop in `build_hud` (rows 23px apart) |
 | **Transport** (`Playing=Yes/No`) | `build_transport`, `btn_prev/btn_play/btn_next/seek_rect` |
-| **Status bar** (`Mode=Compare/Mask/Crop`) | `build_status_line` |
+| **Status bar** (`Mode=Input/Mask/Crop`) | `build_status_line` |
 | **Crop marquee** | `build_crop_layer` + `build_crop_labels` (size/ratio chip, corner-coordinate chips; `CROP_*` consts) |
 | **Traffic lights** | *not drawn by abner* — macOS draws them; shown for layout only |
 
