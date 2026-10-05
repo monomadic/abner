@@ -3193,8 +3193,6 @@ impl App {
         }
         let px = x_of(self.t);
         let head = hex_color(CUT_HEAD);
-        line(items, px - 3.0, tl.y + 1.0, tl.h - 1.0, 6.0, [0.247, 0.976, 0.988, 0.06]);
-        line(items, px - 1.5, tl.y + 14.0, tl.h - 14.0, 3.0, [0.0, 0.0, 0.0, 0.5]);
         line(items, px - 0.5, tl.y + 1.0, tl.h - 1.0, 1.0, head);
         // The pin: a short tab with a point, three grooves to take hold of.
         items.push(Item::Rect(RectItem { radius: 2.0, ..RectItem::new(RectPx { x: px - 9.0, y: tl.y, w: 18.0, h: 9.0 }, head) }));
