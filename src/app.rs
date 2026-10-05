@@ -1629,7 +1629,7 @@ impl App {
         let mut out = Vec::new();
         let tool = if !self.mask_mode { 0 } else if self.crop.is_none() { 1 } else { 2 };
         let mut x = if self.fullscreen { 16.0 } else { 100.0 };
-        for (i, (label, w)) in [("COMPARE", 76.0), ("MASK", 56.0), ("CROP", 56.0)].into_iter().enumerate() {
+        for (i, (label, w)) in [("INPUT", 62.0), ("MASK", 56.0), ("CROP", 56.0)].into_iter().enumerate() {
             out.push(Control::new(RectPx { x, y: 6.0, w, h: 26.0 }, label, tool == i, Action::Tool(i)));
             x += w + 4.0;
         }
@@ -1837,7 +1837,7 @@ impl App {
         let y = vp.1 - STATUS_H;
         items.push(Item::Rect(RectItem::new(RectPx { x: 0.0, y, w: vp.0, h: STATUS_H }, WORKSPACE_PANEL)));
         items.push(Item::Rect(RectItem::new(RectPx { x: 0.0, y, w: vp.0, h: 1.0 }, WORKSPACE_RULE)));
-        let mode = if !self.mask_mode { "COMPARE" } else if self.crop.is_some() { "CROP" } else { "MASK" };
+        let mode = if !self.mask_mode { "INPUT" } else if self.crop.is_some() { "CROP" } else { "MASK" };
         ui_label(items, 16.0, y + STATUS_H / 2.0, 10.0, if self.mask_mode { MASK_RED } else { ACCENT }, mode, Align::Left, 70.0);
         let status = if !self.mask_status.is_empty() && self.mask_mode { self.mask_status.clone() }
             else { format!("Clip {} · {}", self.active + 1, if self.zoom <= 1.001 { "fit".into() } else { format!("{:.1}×", self.zoom) }) };
@@ -1871,6 +1871,7 @@ impl App {
             return FrameDesc {
                 clear: LAUNCH_BG,
                 uploads: Vec::new(),
+                thumbs: Vec::new(),
                 plate: None,
                 items: vec![Item::Logo {
                     r: RectPx { x: (w - lw) / 2.0, y: (h - lh) / 2.0, w: lw, h: lh },
