@@ -3122,8 +3122,11 @@ impl App {
         };
         let column = RectPx { x: v.x, y: tl.y + 1.0, w: v.w, h: tl.h - 1.0 };
 
+        // Once the audio read has finished with nothing to show there is no
+        // audio: no sound lane, no icon, no empty blue bar — the ground shows.
+        let no_audio = cut.wave.is_empty() && !cut.reading_wave();
         let gutter = mix(CUT_TL, 0xffffff, 0.42);
-        for (lane, icon) in [(lanes.chapters, Icon::Flag), (Some(v), Icon::Film), (lanes.audio, Icon::Speaker),
+        for (lane, icon) in [(lanes.chapters, Icon::Flag), (Some(v), Icon::Film), (lanes.audio.filter(|_| !no_audio), Icon::Speaker),
             (Some(lanes.subs), Icon::Caption), (Some(lanes.keys), Icon::Ticks)] {
             if let Some(r) = lane { draw_icon(items, icon, tl.x + 30.0, r.y + r.h / 2.0, gutter); }
         }
@@ -3159,6 +3162,9 @@ impl App {
 
         // ---- video and audio: one clip per piece ----
         let segments = cut.segments();
+        // The picked picture clip's rect: its outline is drawn last, outside the
+        // lane's scissor, so the lane's edge can't clip it.
+        let mut picked: Option<RectPx> = None;
         let dashes = |items: &mut Vec<Item>, r: RectPx| {
             let color = mix(CUT_TL, 0xffffff, 0.3);
             let mut x = r.x;
@@ -3185,6 +3191,7 @@ impl App {
         };
         for (lane, audio) in [(Some(v), false), (lanes.audio, true)] {
             let Some(row) = lane else { continue };
+            if audio && no_audio { continue; }
             for (i, g) in segments.iter().enumerate().filter(|(_, g)| g.end > a && g.start < b) {
                 let r = RectPx { x: x_of(g.start) + 1.0, y: row.y, w: (x_of(g.end) - x_of(g.start) - 2.0).max(1.0), h: row.h };
                 if g.cut {
@@ -3199,8 +3206,7 @@ impl App {
                         ..RectItem::new(r, [0.0; 4]) }));
                     // The picked clip: a 3px white outline, outside the rounded edge.
                     if self.cut_pick.is_some_and(|(a, b)| (a - g.start).abs() < 1e-3 && (b - g.end).abs() < 1e-3) {
-                        let o = RectPx { x: r.x - 3.0, y: r.y - 3.0, w: r.w + 6.0, h: r.h + 6.0 };
-                        items.push(Item::Rect(RectItem { radius: 10.0, border_w: 3.0, border_color: hex_color(0xffffff), ..RectItem::new(o, [0.0; 4]) }));
+                        picked = Some(r);
                     }
                     // Keyframes: a hairline through the picture, a short bright
                     // foot at the bottom edge, and the two the selection snapped
@@ -3330,6 +3336,11 @@ impl App {
             bg: Some(TextBg { radius: 5.0, pad_x: 7.0, pad_y: 3.0, ..TextBg::new([0.02, 0.02, 0.024, 0.97]) }),
             ..TextItem::new(if right { px - 21.0 } else { px + 21.0 }, tl.y + 9.0, 10.5, hex_color(CUT_INK), chip) }));
         items.push(Item::Clip(None));
+        if let Some(r) = picked {
+            // 2px, white, hugging the clip's rounded edge from outside.
+            let o = RectPx { x: r.x - 2.0, y: r.y - 2.0, w: r.w + 4.0, h: r.h + 4.0 };
+            items.push(Item::Rect(RectItem { radius: 9.0, border_w: 2.0, border_color: hex_color(0xffffff), ..RectItem::new(o, [0.0; 4]) }));
+        }
     }
 }
 
