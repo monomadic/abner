@@ -3,6 +3,13 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-06 — toolbar tabs renamed and reordered
+
+`INPUT` → `SOURCES`, `CUT` → `TIMELINE`, shown as SOURCES · TIMELINE · CROP · MASK (the
+status line's mode word follows). Only the labels and their order moved: `Action::Tool`
+indices are unchanged (0 sources, 1 mask, 2 crop, 3 timeline), so nothing keyed on them
+did. The code still says "cut mode" and "input mode" internally.
+
 ## 2026-10-06 — Cut mode: `+` adds a chapter, and the export writes them
 
 A `+` beside the list / thumbnails toggle starts a chapter at the playhead ("Chapter N",

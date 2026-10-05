@@ -1739,7 +1739,8 @@ impl App {
         let mut out = Vec::new();
         let tool = if self.cut_mode { 3 } else if !self.mask_mode { 0 } else if self.crop.is_none() { 1 } else { 2 };
         let mut x = if self.fullscreen { 16.0 } else { 100.0 };
-        for (i, (label, w)) in [("INPUT", 62.0), ("MASK", 56.0), ("CROP", 56.0), ("CUT", 48.0)].into_iter().enumerate() {
+        // Shown in this order; the number is the tool (`Action::Tool`).
+        for (label, w, i) in [("SOURCES", 76.0, 0), ("TIMELINE", 78.0, 3), ("CROP", 56.0, 2), ("MASK", 56.0, 1)] {
             out.push(Control::new(RectPx { x, y: 6.0, w, h: 26.0 }, label, tool == i, Action::Tool(i)));
             x += w + 4.0;
         }
@@ -1962,7 +1963,7 @@ impl App {
         items.push(Item::Rect(RectItem::new(RectPx { x: 0.0, y, w: vp.0, h: 1.0 }, WORKSPACE_RULE)));
         if self.cut_mode {
             let cut = self.cut.as_ref().unwrap();
-            ui_label(items, 16.0, y + STATUS_H / 2.0, 10.0, ACCENT, "CUT", Align::Left, 70.0);
+            ui_label(items, 16.0, y + STATUS_H / 2.0, 10.0, ACCENT, "TIMELINE", Align::Left, 76.0);
             let status = if !cut.status.is_empty() { cut.status.clone() } else if cut.scanning() { "Scanning keyframes…".into() } else {
                 format!("{} · {} cut · snap to {}", name_of(&cut.path), cut.cuts().len(),
                     if cut.snap == Snap::Keyframe { "keyframes, stream copy" } else { "frames, re-encode" })
@@ -1975,7 +1976,7 @@ impl App {
             }
             return;
         }
-        let mode = if !self.mask_mode { "INPUT" } else if self.crop.is_some() { "CROP" } else { "MASK" };
+        let mode = if !self.mask_mode { "SOURCES" } else if self.crop.is_some() { "CROP" } else { "MASK" };
         ui_label(items, 16.0, y + STATUS_H / 2.0, 10.0, if self.mask_mode { MASK_RED } else { ACCENT }, mode, Align::Left, 70.0);
         let status = if !self.mask_status.is_empty() && self.mask_mode { self.mask_status.clone() }
             else { format!("Clip {} · {}", self.active + 1, if self.zoom <= 1.001 { "fit".into() } else { format!("{:.1}×", self.zoom) }) };
