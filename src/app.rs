@@ -3161,10 +3161,16 @@ impl App {
                 let lit = current == Some(i);
                 let (bg, fg, stem) = if lit { (hex_color(CUT_AMBER), hex_color(CUT_AMBER_INK), hex_color(CUT_AMBER)) }
                     else { (mix(CUT_TL, 0xffffff, 0.16), hex_color(CUT_INK), mix(CUT_TL, 0xffffff, 0.35)) };
-                items.push(Item::Text(TextItem { valign: VAlign::Middle,
-                    bg: Some(TextBg { radius: 5.0, pad_x: 6.0, pad_y: 3.0, ..TextBg::new(bg) }),
-                    ..TextItem::new(x + 6.0, r.y + 9.0, 10.5, fg, (i + 1).to_string()) }));
-                line(items, x, r.y + 18.0, 6.0, 1.0, stem);
+                // The board's flag: 18px tall, square on the left where the stem
+                // is, a pill on the right — a 3px / 9px corner pair, which is a
+                // pill with its left end squared off by a second, narrow rect.
+                let label = (i + 1).to_string();
+                let w = (label.chars().count() as f32 * 10.5 * MONO_ADV + 12.0).max(20.0).round();
+                let flag = RectPx { x, y: r.y, w, h: 18.0 };
+                items.push(Item::Rect(RectItem { radius: 9.0, ..RectItem::new(flag, bg) }));
+                items.push(Item::Rect(RectItem { radius: 3.0, ..RectItem::new(RectPx { w: 12.0, ..flag }, bg) }));
+                ui_label(items, x + w / 2.0 + 1.0, flag.y + flag.h / 2.0, 10.5, fg, label, Align::Center, w);
+                line(items, x, flag.y + flag.h, 6.0, 1.0, stem);
             }
         }
 
