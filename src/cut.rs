@@ -69,6 +69,24 @@ pub struct Cue {
 struct Scan {
     keys: Vec<f64>,
     chapters: Vec<Chapter>,
+    facts: Facts,
+}
+
+/// What the file's streams say about themselves, for the inspector's
+/// Streams tab and the chip strip over the chapter list. Rows are
+/// `(key, value)` pairs already formatted the way the panel shows them.
+#[derive(Debug, Clone, Default)]
+pub struct Facts {
+    /// `H.264 · High 5.1`, or empty until the scan lands.
+    pub video_title: String,
+    pub video: Vec<(&'static str, String)>,
+    /// `AAC LC`; empty when the file has no audio.
+    pub audio_title: String,
+    pub audio: Vec<(&'static str, String)>,
+    /// `SRT`, `MOV text`; empty when the file has no subtitle stream.
+    pub subs_title: String,
+    /// The short strip: `H.264`, `2160p`, `23.976`, `AAC 2ch`, `SRT`.
+    pub chips: Vec<String>,
 }
 
 pub struct Cut {
@@ -78,6 +96,7 @@ pub struct Cut {
     /// scan lands (`scanning`), and snapping is the identity until then.
     pub keys: Vec<f64>,
     pub chapters: Vec<Chapter>,
+    pub facts: Facts,
     pub cues: Vec<Cue>,
     /// One peak (0–255) per `1 / WAVE_HZ` seconds of the first audio stream.
     pub wave: Vec<u8>,
@@ -113,6 +132,7 @@ impl Cut {
             duration,
             keys: Vec::new(),
             chapters: Vec::new(),
+            facts: Facts::default(),
             cues: Vec::new(),
             wave: Vec::new(),
             in_req: None,
@@ -180,6 +200,7 @@ impl Cut {
         match take(&mut self.scan) {
             Some(Some(Ok(scan))) => {
                 self.chapters = scan.chapters;
+                self.facts = scan.facts;
                 self.set_keys(scan.keys);
             }
             Some(Some(Err(e))) => {
@@ -495,6 +516,15 @@ impl Cut {
     }
 
     /// The keyframes inside `[a, b]`.
+    /// Keyframe count, median and longest GOP in seconds, once the scan
+    /// has landed.
+    pub fn gop_stats(&self) -> Option<(usize, f64, f64)> {
+        if self.keys.len() < 2 { return None; }
+        let mut gaps: Vec<f64> = self.keys.windows(2).map(|w| w[1] - w[0]).collect();
+        gaps.sort_by(f64::total_cmp);
+        Some((self.keys.len(), gaps[gaps.len() / 2], gaps[gaps.len() - 1]))
+    }
+
     pub fn keys_in(&self, a: f64, b: f64) -> &[f64] {
         let lo = self.keys.partition_point(|k| *k < a);
         let hi = self.keys.partition_point(|k| *k <= b);
@@ -640,7 +670,95 @@ fn scan(path: &Path) -> anyhow::Result<Scan> {
             chapters.push(Chapter { start, title });
         }
     }
-    Ok(Scan { keys, chapters })
+    let facts = Command::new("ffprobe")
+        .args(["-v", "error", "-show_format", "-show_streams", "-of", "json"])
+        .arg(path)
+        .stdin(Stdio::null())
+        .output()
+        .ok()
+        .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok())
+        .map(|v| parse_facts(&v))
+        .unwrap_or_default();
+    Ok(Scan { keys, chapters, facts })
+}
+
+fn codec_name(raw: &str) -> String {
+    match raw {
+        "h264" => "H.264".into(),
+        "hevc" => "H.265".into(),
+        "prores" => "ProRes".into(),
+        "av1" => "AV1".into(),
+        "vp9" => "VP9".into(),
+        "aac" => "AAC".into(),
+        "mp3" => "MP3".into(),
+        "opus" => "Opus".into(),
+        "subrip" => "SRT".into(),
+        "mov_text" => "MOV text".into(),
+        "ass" => "ASS".into(),
+        other => other.to_uppercase(),
+    }
+}
+
+/// ffprobe's `-show_streams -show_format` JSON as the inspector's rows.
+pub fn parse_facts(v: &serde_json::Value) -> Facts {
+    let streams = v["streams"].as_array().cloned().unwrap_or_default();
+    let first = |kind: &str| streams.iter().find(|s| s["codec_type"].as_str() == Some(kind));
+    let num = |s: &serde_json::Value, k: &str| s[k].as_str().and_then(|x| x.parse::<f64>().ok()).or_else(|| s[k].as_f64());
+    let rate = |s: &serde_json::Value| {
+        let r = s["avg_frame_rate"].as_str().unwrap_or("0/1");
+        let (n, d) = r.split_once('/').unwrap_or((r, "1"));
+        match (n.parse::<f64>(), d.parse::<f64>()) { (Ok(n), Ok(d)) if d > 0.0 && n > 0.0 => Some(n / d), _ => None }
+    };
+    let mbps = |b: f64| if b >= 1e6 { format!("{:.1} Mb/s", b / 1e6) } else { format!("{:.0} kb/s", b / 1e3) };
+    let mut f = Facts::default();
+    if let Some(s) = first("video") {
+        let codec = codec_name(s["codec_name"].as_str().unwrap_or("?"));
+        let level = s["level"].as_i64().filter(|l| *l > 0).map(|l| if l >= 10 && l % 10 != 0 || l >= 10 { format!("{}.{}", l / 10, l % 10) } else { l.to_string() });
+        let profile = s["profile"].as_str().map(|p| p.to_string());
+        f.video_title = [Some(codec.clone()), profile, level].into_iter().flatten().collect::<Vec<_>>().join(" · ").replacen(" · ", " · ", 1);
+        let (w, h) = (num(s, "width").unwrap_or(0.0) as u32, num(s, "height").unwrap_or(0.0) as u32);
+        let fps = rate(s);
+        let pix = s["pix_fmt"].as_str().unwrap_or("");
+        let depth = if pix.contains("12") { 12 } else if pix.contains("10") { 10 } else { 8 };
+        let chroma = if pix.contains("444") { "4:4:4" } else if pix.contains("422") { "4:2:2" } else { "4:2:0" };
+        f.video.push(("Size", format!("{w} × {h}")));
+        if let Some(fps) = fps { f.video.push(("Rate", format!("{fps:.3} fps"))); }
+        f.video.push(("Depth", format!("{depth}-bit · {chroma}")));
+        let matrix = s["color_space"].as_str().filter(|c| *c != "unknown").map(|c| c.to_uppercase());
+        let range = s["color_range"].as_str().map(|r| r.to_string());
+        if matrix.is_some() || range.is_some() {
+            f.video.push(("Colour", [matrix, range].into_iter().flatten().collect::<Vec<_>>().join(" · ")));
+        }
+        if let Some(b) = num(s, "bit_rate").or_else(|| num(&v["format"], "bit_rate")) {
+            f.video.push(("Bitrate", mbps(b)));
+        }
+        f.chips.push(codec);
+        if h > 0 { f.chips.push(format!("{h}p")); }
+        if let Some(fps) = fps { f.chips.push(trim_rate(fps)); }
+    }
+    if let Some(s) = first("audio") {
+        let codec = codec_name(s["codec_name"].as_str().unwrap_or("?"));
+        f.audio_title = [Some(codec.clone()), s["profile"].as_str().map(|p| p.to_string())].into_iter().flatten().collect::<Vec<_>>().join(" ");
+        let ch = num(s, "channels").unwrap_or(0.0) as u32;
+        let layout = s["channel_layout"].as_str().unwrap_or("");
+        f.audio.push(("Channels", if layout.is_empty() { ch.to_string() } else { format!("{ch} · {layout}") }));
+        let hz = num(s, "sample_rate").unwrap_or(0.0);
+        let mut rate_row = format!("{} kHz", (hz / 100.0).round() / 10.0);
+        if let Some(b) = num(s, "bit_rate") { rate_row = format!("{rate_row} · {}", mbps(b)); }
+        f.audio.push(("Rate", rate_row));
+        f.chips.push(format!("{codec} {ch}ch"));
+    }
+    if let Some(s) = first("subtitle") {
+        f.subs_title = codec_name(s["codec_name"].as_str().unwrap_or("?"));
+        f.chips.push(f.subs_title.clone());
+    }
+    f
+}
+
+/// 23.976 stays 23.976; 25.000 is just 25.
+fn trim_rate(fps: f64) -> String {
+    let s = format!("{fps:.3}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 /// The first subtitle stream as cues. A clip with none (or with bitmap
@@ -978,5 +1096,41 @@ mod tests {
                 .filter(|e| e.file_name().to_string_lossy().contains(".tmp")).count();
             assert_eq!(leftovers, 0, "temporaries are cleaned up");
         }
+    }
+
+    #[test]
+    fn stream_facts_read_from_ffprobe_json() {
+        let v: serde_json::Value = serde_json::from_str(r#"{
+          "streams": [
+            {"codec_type":"video","codec_name":"h264","profile":"High","level":51,"width":3840,"height":2160,
+             "avg_frame_rate":"24000/1001","pix_fmt":"yuv420p","color_space":"bt709","color_range":"tv","bit_rate":"48200000"},
+            {"codec_type":"audio","codec_name":"aac","profile":"LC","channels":2,"channel_layout":"stereo","sample_rate":"48000","bit_rate":"320000"},
+            {"codec_type":"subtitle","codec_name":"subrip"}
+          ], "format": {"bit_rate":"50000000"}}"#).unwrap();
+        let f = parse_facts(&v);
+        assert_eq!(f.video_title, "H.264 · High · 5.1");
+        assert_eq!(f.video[0], ("Size", "3840 × 2160".to_string()));
+        assert_eq!(f.video[1], ("Rate", "23.976 fps".to_string()));
+        assert_eq!(f.video[2], ("Depth", "8-bit · 4:2:0".to_string()));
+        assert_eq!(f.video[3], ("Colour", "BT709 · tv".to_string()));
+        assert_eq!(f.video[4], ("Bitrate", "48.2 Mb/s".to_string()));
+        assert_eq!(f.audio_title, "AAC LC");
+        assert_eq!(f.audio[1], ("Rate", "48 kHz · 320 kb/s".to_string()));
+        assert_eq!(f.subs_title, "SRT");
+        assert_eq!(f.chips, vec!["H.264", "2160p", "23.976", "AAC 2ch", "SRT"]);
+        // A file with no audio or subtitles leaves those blank.
+        let v: serde_json::Value = serde_json::from_str(r#"{"streams":[{"codec_type":"video","codec_name":"hevc","width":1920,"height":1080,"avg_frame_rate":"25/1","pix_fmt":"yuv420p10le"}]}"#).unwrap();
+        let f = parse_facts(&v);
+        assert_eq!(f.chips, vec!["H.265", "1080p", "25"]);
+        assert!(f.audio_title.is_empty() && f.subs_title.is_empty());
+        assert_eq!(f.video[2].1, "10-bit · 4:2:0");
+    }
+
+    #[test]
+    fn gop_stats_name_the_median_and_the_longest() {
+        let mut c = Cut::new(Path::new("x.mp4"), 30.0);
+        assert!(c.gop_stats().is_none());
+        c.set_keys(vec![0.0, 2.0, 4.0, 10.0, 12.0]);
+        assert_eq!(c.gop_stats(), Some((5, 2.0, 6.0)));
     }
 }

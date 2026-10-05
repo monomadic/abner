@@ -3,6 +3,31 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-06 — cut mode: the chosen inspector, a thinner playhead
+
+The right-hand panel is the "Cut inspector (chosen)" board: the Selection block is gone
+(the context row and the timeline's in/out ghosts already say it), and Segments became
+chapters. Two icon tabs on top — chapters and streams. **Chapters**: a chip strip of the
+stream facts (`H.264 · 2160p · 23.976 · AAC 2ch · SRT`), a count, a list / thumbnails
+toggle, and one row (or card) per chapter, the one under the playhead in the highlight
+yellow with a dot for whether it lands on a keyframe (green) or not (coral); a click seeks
+there. **Streams**: video, audio, subtitle and keyframe sections (count, median and
+longest GOP). The footer carries the result (`01:41:42  −6:30  0 re-enc`), or the file's
+duration, size and container on the Streams tab. The snapping warning stays, as a coral
+note above the footer: it is information the design's panel had no room for.
+
+The facts come from one more `ffprobe -show_format -show_streams` in the scan worker
+(`cut::parse_facts`, unit-tested on a JSON sample), so entering the mode still never
+blocks. A removed clip is now selected by clicking its ghost on the timeline (X restores
+it) — that used to be a Segments row.
+
+The playhead is 1px (was 2) with a shorter pin (9px tab + 7px point, was 14 + 10) and a
+softer glow, as the board's last edit has it.
+
+Not built: the thumbnails view draws the film ground, not frames (nothing extracts a frame
+per chapter yet); no `+` to add a chapter (the model reads chapters from the file and the
+export does not write them).
+
 ## 2026-10-05 — cut mode's scrub panel rebuilt to the board's variation A
 
 The Cut board changed after it was first built: the transport row and the six

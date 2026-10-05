@@ -162,6 +162,9 @@ pub struct App {
     /// it is dropped when the clip list changes.
     cut: Option<Cut>,
     cut_mode: bool,
+    /// The inspector's tab (0 chapters, 1 streams) and its chapter view.
+    cut_tab: usize,
+    cut_thumbs: bool,
     /// What a press on the timeline took hold of.
     cut_drag: Option<CutDrag>,
     /// The clock at the last tick, so the view pages after the playhead
@@ -387,6 +390,8 @@ impl App {
             cut: None,
             cut_mode: false,
             cut_drag: None,
+            cut_tab: 0,
+            cut_thumbs: false,
             cut_last_t: f64::NAN,
             cut_boot: Vec::new(),
             videos,
@@ -2276,6 +2281,22 @@ struct CutLanes {
     keys: RectPx,
 }
 
+/// The inspector's rectangles: see `App::cut_side`.
+struct CutSide {
+    tabs: RectPx,
+    tab: [RectPx; 2],
+    chips_y: f32,
+    count_y: f32,
+    toggle: RectPx,
+    list_btn: RectPx,
+    grid_btn: RectPx,
+    footer_y: f32,
+    warning: Vec<String>,
+    warning_y: f32,
+    warning_h: f32,
+    body: RectPx,
+}
+
 /// Cut mode: the timeline edit of one clip (`cut.rs` is the model). This is
 /// the "Cut" board of the Abner Timeline Edit design — same shell as
 /// Input, with the source rail traded for an inspector on the right and
@@ -2527,6 +2548,12 @@ impl App {
                 if let Some(cut) = &mut self.cut { cut.begin_trim(); }
                 self.playing = false;
                 self.cut_drag = Some(CutDrag::Edge(edge));
+            } else if let Some(seg) = self.cut_ghost_at(x, y) {
+                // A removed clip is a selection: X restores it.
+                let cut = self.cut.as_mut().unwrap();
+                cut.in_req = Some(seg.start);
+                cut.out_req = Some(seg.end);
+                cut.status.clear();
             } else if x >= self.cut_lanes().video.x - 4.0 {
                 self.cut_drag = Some(CutDrag::Scrub);
                 self.cut_drag_to(x);
@@ -2534,18 +2561,31 @@ impl App {
             return true;
         }
         if contains(l.side, x, y) {
-            if let Some((_, seg)) = self.cut_segment_rows().into_iter().find(|(r, _)| contains(*r, x, y)) {
-                // A row is a selection: X then cuts it, or restores it.
-                let cut = self.cut.as_mut().unwrap();
-                cut.in_req = Some(seg.start);
-                cut.out_req = Some(seg.end);
-                cut.status.clear();
+            let side = self.cut_side();
+            if let Some(i) = side.tab.iter().position(|r| contains(*r, x, y)) {
+                self.cut_tab = i;
+            } else if self.cut_tab == 0 && contains(side.list_btn, x, y) {
+                self.cut_thumbs = false;
+            } else if self.cut_tab == 0 && contains(side.grid_btn, x, y) {
+                self.cut_thumbs = true;
+            } else if let Some((_, idx)) = self.cut_chapter_rows().into_iter().find(|(r, _)| contains(*r, x, y)) {
+                // A chapter is a place: go there.
+                let start = self.cut.as_ref().unwrap().chapters[idx].start;
                 let end = if self.wrap.is_finite() { (self.wrap - 0.05).max(0.0) } else { f64::MAX };
-                self.seek_all(seg.start.min(end), true);
+                self.seek_all(start.min(end), true);
             }
             return true;
         }
         false
+    }
+
+    /// The removed clip under the pointer on the picture or sound row.
+    fn cut_ghost_at(&self, x: f32, y: f32) -> Option<crate::cut::Segment> {
+        let lanes = self.cut_lanes();
+        let rows = [Some(lanes.video), lanes.audio].into_iter().flatten();
+        if !rows.into_iter().any(|r| y >= r.y && y < r.y + r.h) { return None; }
+        let at = self.cut_time_at(x);
+        self.cut.as_ref()?.segments().into_iter().find(|g| g.cut && at >= g.start && at < g.end)
     }
 
     fn cut_drag_to(&mut self, x: f32) {
@@ -2573,36 +2613,54 @@ impl App {
         }
     }
 
-    /// Where the inspector's blocks sit: (warning lines, warning top,
-    /// segments top, result top).
-    fn cut_side(&self) -> (Vec<String>, f32, f32, f32) {
+    /// The inspector's geometry, shared by drawing and hit testing: icon
+    /// tabs, the chip strip, the count row with the list / thumbnails
+    /// toggle, the body, and a footer holding the result.
+    fn cut_side(&self) -> CutSide {
         let s = self.workspace().side;
-        let cut = self.cut.as_ref().unwrap();
-        let rows = if cut.snap == Snap::Keyframe { 4.0 } else { 2.0 };
-        let mut y = s.y + 16.0 + 20.0 + rows * 22.0;
-        let warning = cut.warning().map(|w| wrap_text(&w, 38)).unwrap_or_default();
-        let warning_y = y + 6.0;
-        if !warning.is_empty() {
-            y = warning_y + 20.0 + warning.len() as f32 * 15.0;
-        }
-        (warning, warning_y, y + 18.0, s.y + s.h - 100.0)
+        let (x0, w) = (s.x + 16.0, s.w - 32.0);
+        let tabs = RectPx { x: x0, y: s.y + 16.0, w, h: 32.0 };
+        let half = (w - 4.0) / 2.0;
+        let tab = [0, 1].map(|i| RectPx { x: x0 + 2.0 + i as f32 * half, y: tabs.y + 2.0, w: half, h: 28.0 });
+        let chips_y = tabs.y + tabs.h + 14.0;
+        let count_y = if self.cut_tab == 0 { chips_y + 34.0 } else { tabs.y + tabs.h + 12.0 };
+        let toggle = RectPx { x: x0 + w - 56.0, y: count_y, w: 56.0, h: 24.0 };
+        let list_btn = RectPx { x: toggle.x + 2.0, y: toggle.y + 2.0, w: 26.0, h: 20.0 };
+        let grid_btn = RectPx { x: toggle.x + 28.0, ..list_btn };
+        let footer_y = s.y + s.h - 56.0;
+        let warning = self.cut.as_ref().and_then(|c| c.warning()).map(|w| wrap_text(&w, 38)).unwrap_or_default();
+        let warning_h = if warning.is_empty() { 0.0 } else { 16.0 + warning.len() as f32 * 15.0 };
+        let warning_y = footer_y - 10.0 - warning_h;
+        let body_top = if self.cut_tab == 0 { count_y + 24.0 + 10.0 } else { tabs.y + tabs.h + 16.0 };
+        let body_bottom = if warning.is_empty() { footer_y - 10.0 } else { warning_y - 8.0 };
+        CutSide { tabs, tab, chips_y, count_y, toggle, list_btn, grid_btn, footer_y, warning, warning_y, warning_h,
+            body: RectPx { x: x0, y: body_top, w, h: (body_bottom - body_top).max(0.0) } }
     }
 
-    /// The segment rows on screen. More segments than fit: the window
-    /// follows the one under the playhead.
-    fn cut_segment_rows(&self) -> Vec<(RectPx, crate::cut::Segment)> {
-        let s = self.workspace().side;
+    /// The chapter rows (or thumbnail cards) on screen, with their chapter
+    /// index. More chapters than fit: the page follows the playhead.
+    fn cut_chapter_rows(&self) -> Vec<(RectPx, usize)> {
         let Some(cut) = &self.cut else { return Vec::new() };
-        if s.w <= 0.0 { return Vec::new(); }
-        let (_, _, top, bottom) = self.cut_side();
-        let (top, bottom) = (top + 20.0, bottom - 14.0);
-        let fit = (((bottom - top + 6.0) / 50.0).floor().max(0.0)) as usize;
-        let segments = cut.segments();
-        let current = segments.iter().position(|g| self.t < g.end).unwrap_or(segments.len().saturating_sub(1));
-        let first = current.saturating_sub(fit / 2).min(segments.len().saturating_sub(fit));
-        segments.into_iter().skip(first).take(fit).enumerate()
-            .map(|(i, g)| (RectPx { x: s.x + 16.0, y: top + i as f32 * 50.0, w: s.w - 32.0, h: 44.0 }, g))
-            .collect()
+        let side = self.cut_side();
+        if self.workspace().side.w <= 0.0 || self.cut_tab != 0 || cut.chapters.is_empty() { return Vec::new(); }
+        let body = side.body;
+        let n = cut.chapters.len();
+        let current = cut.chapters.iter().rposition(|c| c.start <= self.t + 1e-6).unwrap_or(0);
+        if self.cut_thumbs {
+            let (cw, ch) = ((body.w - 8.0) / 2.0, 104.0);
+            let rows = (((body.h + 8.0) / (ch + 8.0)).floor().max(0.0)) as usize;
+            let fit = rows * 2;
+            let first = (current.saturating_sub(fit / 2).min(n.saturating_sub(fit)) / 2) * 2;
+            (first..n.min(first + fit)).enumerate()
+                .map(|(i, idx)| (RectPx { x: body.x + (i % 2) as f32 * (cw + 8.0), y: body.y + (i / 2) as f32 * (ch + 8.0), w: cw, h: ch }, idx))
+                .collect()
+        } else {
+            let fit = (((body.h + 6.0) / 52.0).floor().max(0.0)) as usize;
+            let first = current.saturating_sub(fit / 2).min(n.saturating_sub(fit));
+            (first..n.min(first + fit)).enumerate()
+                .map(|(i, idx)| (RectPx { x: body.x, y: body.y + i as f32 * 52.0, w: body.w, h: 46.0 }, idx))
+                .collect()
+        }
     }
 
     /// What the frame under the playhead is, on the footage: keyframe or
@@ -2782,79 +2840,166 @@ impl App {
         let s = self.workspace().side;
         if s.w <= 0.0 { return; }
         let cut = self.cut.as_ref().unwrap();
-        let (x0, x1) = (s.x + 16.0, s.x + s.w - 16.0);
+        let g = self.cut_side();
+        let (x0, x1) = (g.body.x, g.body.x + g.body.w);
         let dim = mix(CUT_BG, 0xffffff, 0.5);
+        let faint = mix(CUT_BG, 0xffffff, 0.42);
         let ink = hex_color(CUT_INK);
         let green = hex_color(CUT_GREEN_INK);
+        let chip_bg = mix(CUT_BG, 0xffffff, 0.07);
         items.push(Item::Clip(Some(s)));
-        let kv = |items: &mut Vec<Item>, y: f32, key: &str, value: String, color: [f32; 4]| {
-            ui_label(items, x0, y, 11.5, dim, key, Align::Left, 150.0);
-            ui_label(items, x1, y, 11.5, color, value, Align::Right, 150.0);
-        };
-        let tc = |t: Option<f64>| t.map(|t| fmt_tc(t, self.fps)).unwrap_or_else(|| "—".into());
 
-        caps_label(items, x0, s.y + 16.0 + 5.0, "SELECTION");
-        let mut y = s.y + 16.0 + 20.0 + 11.0;
-        if cut.snap == Snap::Keyframe {
-            for (key, value, color) in [
-                ("In · you asked", tc(cut.in_req), ink), ("In · snapped ◀", tc(cut.in_snapped()), green),
-                ("Out · you asked", tc(cut.out_req), ink), ("Out · snapped ▶", tc(cut.out_snapped()), green),
-            ] {
-                kv(items, y, key, value, color);
-                y += 22.0;
+        // ---- the icon tabs: chapters, streams ----
+        items.push(Item::Rect(RectItem { radius: 9.0, ..RectItem::new(g.tabs, mix(CUT_BG, 0xffffff, 0.05)) }));
+        for (i, (r, icon)) in g.tab.iter().zip([Icon::Flag, Icon::Film]).enumerate() {
+            let on = self.cut_tab == i;
+            let hovered = self.cursor_inside && contains(*r, self.cursor.0, self.cursor.1);
+            if on { items.push(Item::Rect(RectItem { radius: 7.0, ..RectItem::new(*r, hex_color(CUT_TOOL_ON)) })); }
+            draw_icon(items, icon, r.x + r.w / 2.0, r.y + r.h / 2.0, if on { ACCENT } else if hovered { ink } else { dim });
+        }
+
+        // A chip: text on a rounded ground, left edge at `x`. Returns the next x.
+        let chip = |items: &mut Vec<Item>, x: f32, y: f32, text: &str, bg: [f32; 4], fg: [f32; 4]| -> f32 {
+            items.push(Item::Text(TextItem { valign: VAlign::Middle,
+                bg: Some(TextBg { radius: 5.0, pad_x: 7.0, pad_y: 5.0, ..TextBg::new(bg) }),
+                ..TextItem::new(x + 7.0, y, 10.0, fg, text) }));
+            x + text.chars().count() as f32 * 10.0 * MONO_ADV + 14.0 + 6.0
+        };
+        let kv = |items: &mut Vec<Item>, y: f32, key: &str, value: String, color: [f32; 4]| {
+            ui_label(items, x0, y, 11.5, dim, key, Align::Left, 110.0);
+            ui_label(items, x1, y, 11.5, color, value, Align::Right, 170.0);
+        };
+
+        if self.cut_tab == 0 {
+            // ---- chapters ----
+            let facts_chips: Vec<String> = if cut.facts.chips.is_empty() {
+                let v = &self.videos[self.active].info;
+                vec![v.codec.to_uppercase(), format!("{}p", v.height), format!("{:.3}", v.fps).trim_end_matches('0').trim_end_matches('.').to_string()]
+            } else { cut.facts.chips.clone() };
+            let mut x = x0;
+            let mut y = g.chips_y + 10.0;
+            for (i, text) in facts_chips.iter().enumerate() {
+                let w = text.chars().count() as f32 * 10.0 * MONO_ADV + 20.0;
+                if x + w > x1 { x = x0; y += 26.0; }
+                x = if i == 0 { chip(items, x, y, text, mix(CUT_BG, CUT_IN, 0.16), hex_color(0x6ab8f7)) }
+                    else { chip(items, x, y, text, chip_bg, mix(CUT_BG, 0xffffff, 0.75)) };
+            }
+            let cy = g.count_y + 12.0;
+            ui_label(items, x0, cy, 11.0, dim, cut.chapters.len().to_string(), Align::Left, 40.0);
+            items.push(Item::Rect(RectItem { radius: 7.0, ..RectItem::new(g.toggle, mix(CUT_BG, 0xffffff, 0.05)) }));
+            for (r, icon, on) in [(g.list_btn, Icon::List, !self.cut_thumbs), (g.grid_btn, Icon::Grid, self.cut_thumbs)] {
+                if on { items.push(Item::Rect(RectItem { radius: 5.0, ..RectItem::new(r, hex_color(CUT_TOOL_ON)) })); }
+                draw_icon(items, icon, r.x + r.w / 2.0, r.y + r.h / 2.0, if on { ACCENT } else { dim });
+            }
+            let current = cut.chapters.iter().rposition(|c| c.start <= self.t + 1e-6);
+            if cut.chapters.is_empty() {
+                let msg = if cut.scanning() { "reading chapters …" } else { "no chapters in this file" };
+                ui_label(items, x0 + g.body.w / 2.0, g.body.y + 20.0, 11.0, faint, msg, Align::Center, g.body.w);
+            }
+            for (r, idx) in self.cut_chapter_rows() {
+                let c = &cut.chapters[idx];
+                let end = cut.chapters.get(idx + 1).map_or(cut.duration, |n| n.start);
+                let on = current == Some(idx);
+                let hovered = self.cursor_inside && contains(r, self.cursor.0, self.cursor.1);
+                let snap_dot = if cut.on_key(c.start, 1.0 / self.fps.max(1.0)) { hex_color(CUT_GREEN) } else { hex_color(CUT_CORAL) };
+                let number = format!("{:02}", idx + 1);
+                let (num_bg, num_fg) = if on { (hex_color(CUT_AMBER), hex_color(CUT_AMBER_INK)) } else { (mix(CUT_BG, 0xffffff, 0.08), mix(CUT_BG, 0xffffff, 0.6)) };
+                let ground = if on { mix(CUT_BG, CUT_AMBER, 0.12) } else if hovered { mix(CUT_BG, 0xffffff, 0.07) } else { hex_color(CUT_LANE) };
+                if self.cut_thumbs {
+                    items.push(Item::Rect(RectItem { radius: 9.0, border_w: if on { 1.0 } else { 0.0 }, border_color: hex_color(CUT_AMBER), ..RectItem::new(r, ground) }));
+                    // No frame to show yet: the film ground the picture clip uses.
+                    let pic = RectPx { x: r.x + 5.0, y: r.y + 5.0, w: r.w - 10.0, h: 62.0 };
+                    items.push(Item::Rect(RectItem { radius: 5.0, ..RectItem::new(pic, hex_color(CUT_FILM)) }));
+                    items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(RectPx { x: pic.x + 4.0, y: pic.y + 4.0, w: 20.0, h: 18.0 }, if on { num_bg } else { [0.0, 0.0, 0.0, 0.6] }) }));
+                    ui_label(items, pic.x + 14.0, pic.y + 13.0, 9.5, if on { num_fg } else { mix(CUT_BG, 0xffffff, 0.8) }, number, Align::Center, 20.0);
+                    items.push(Item::Rect(RectItem { radius: 3.5, ..RectItem::new(RectPx { x: pic.x + pic.w - 12.0, y: pic.y + 5.0, w: 7.0, h: 7.0 }, snap_dot) }));
+                    ui_label(items, r.x + 8.0, r.y + 80.0, 12.0, mix(CUT_BG, 0xffffff, 0.88), c.title.as_str(), Align::Left, r.w - 16.0);
+                    ui_label(items, r.x + 8.0, r.y + 95.0, 10.0, faint, format!("{} · {}", fmt_hms(c.start), fmt_span(end - c.start)), Align::Left, r.w - 16.0);
+                } else {
+                    items.push(Item::Rect(RectItem { radius: 8.0, border_w: if on { 1.0 } else { 0.0 }, border_color: hex_color(CUT_AMBER), ..RectItem::new(r, ground) }));
+                    let num = RectPx { x: r.x + 10.0, y: r.y + (r.h - 22.0) / 2.0, w: 22.0, h: 22.0 };
+                    items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(num, num_bg) }));
+                    ui_label(items, num.x + 11.0, num.y + 11.0, 10.5, num_fg, number, Align::Center, 22.0);
+                    ui_label(items, r.x + 42.0, r.y + 16.0, 12.0, mix(CUT_BG, 0xffffff, 0.88), c.title.as_str(), Align::Left, r.w - 42.0 - 28.0);
+                    ui_label(items, r.x + 42.0, r.y + 32.0, 10.0, faint, format!("{} · {}", fmt_hms(c.start), fmt_span(end - c.start)), Align::Left, r.w - 42.0 - 28.0);
+                    items.push(Item::Rect(RectItem { radius: 3.5, ..RectItem::new(RectPx { x: r.x + r.w - 17.0, y: r.y + r.h / 2.0 - 3.5, w: 7.0, h: 7.0 }, snap_dot) }));
+                }
             }
         } else {
-            for (key, value) in [("In", tc(cut.in_req)), ("Out", tc(cut.out_req))] {
-                kv(items, y, key, value, ink);
-                y += 22.0;
+            // ---- streams ----
+            let section = |items: &mut Vec<Item>, y: &mut f32, icon: Icon, title: &str, rows: Vec<(String, String, [f32; 4])>| {
+                draw_icon(items, icon, x0 + 8.0, *y + 8.0, dim);
+                caps_label(items, x0 + 24.0, *y + 8.0, title);
+                *y += 24.0;
+                for (k, v, color) in rows {
+                    kv(items, *y + 11.0, &k, v, color);
+                    *y += 22.0;
+                }
+                *y += 14.0;
+            };
+            let mut y = g.body.y;
+            let facts = &cut.facts;
+            let rows = |r: &Vec<(&'static str, String)>| r.iter().map(|(k, v)| (k.to_string(), v.clone(), ink)).collect::<Vec<_>>();
+            let v = &self.videos[self.active].info;
+            let video_title = if facts.video_title.is_empty() { v.codec.to_uppercase() } else { facts.video_title.to_uppercase().replace("·", "·") };
+            let video_rows = if facts.video.is_empty() {
+                vec![("Size".into(), format!("{} × {}", v.width, v.height), ink), ("Rate".into(), format!("{:.3} fps", v.fps), ink)]
+            } else { rows(&facts.video) };
+            section(items, &mut y, Icon::Film, &video_title, video_rows);
+            if !facts.audio_title.is_empty() {
+                section(items, &mut y, Icon::Speaker, &facts.audio_title.to_uppercase(), rows(&facts.audio));
+            }
+            if !facts.subs_title.is_empty() || !cut.cues.is_empty() {
+                let title = if facts.subs_title.is_empty() { "SUBTITLES".to_string() } else { facts.subs_title.to_uppercase() };
+                section(items, &mut y, Icon::Caption, &title, vec![("Cues".into(), cut.cues.len().to_string(), ink)]);
+            }
+            if let Some((count, median, longest)) = cut.gop_stats() {
+                let long = longest > median * 2.0 + 0.5;
+                section(items, &mut y, Icon::Ticks, "KEYFRAMES", vec![
+                    ("Count".into(), format!("{count}"), ink),
+                    ("GOP".into(), format!("{median:.1} s · max {longest:.1} s"), if long { hex_color(CUT_CORAL_INK) } else { ink }),
+                ]);
+            } else if cut.scanning() {
+                section(items, &mut y, Icon::Ticks, "KEYFRAMES", vec![("Count".into(), "reading …".into(), faint)]);
             }
         }
-        let (warning, warning_y, segments_y, result_y) = self.cut_side();
-        if !warning.is_empty() {
-            let r = RectPx { x: x0, y: warning_y, w: x1 - x0, h: 16.0 + warning.len() as f32 * 15.0 };
+
+        // ---- the snapping warning, when there is one ----
+        if !g.warning.is_empty() {
+            let r = RectPx { x: x0, y: g.warning_y, w: x1 - x0, h: g.warning_h };
             items.push(Item::Rect(RectItem { radius: 8.0, border_w: 1.0, border_color: mix(CUT_BG, CUT_CORAL, 0.28),
                 ..RectItem::new(r, mix(CUT_BG, CUT_CORAL, 0.10)) }));
-            for (i, line) in warning.iter().enumerate() {
+            for (i, line) in g.warning.iter().enumerate() {
                 ui_label(items, r.x + 12.0, r.y + 15.0 + i as f32 * 15.0, 10.0, hex_color(CUT_CORAL_INK), line.as_str(), Align::Left, r.w - 24.0);
             }
         }
 
-        let segments = cut.segments();
-        caps_label(items, x0, segments_y + 5.0, "SEGMENTS");
-        ui_label(items, x1, segments_y + 5.0, 10.5, mix(CUT_BG, 0xffffff, 0.45), segments.len().to_string(), Align::Right, 60.0);
-        let selection = cut.selection();
-        for (r, g) in self.cut_segment_rows() {
-            let selected = selection.is_some_and(|(a, b)| (a - g.start).abs() < 1e-3 && (b - g.end).abs() < 1e-3);
-            let here = self.t >= g.start - 1e-6 && self.t < g.end;
-            let hovered = contains(r, self.cursor.0, self.cursor.1) && self.cursor_inside;
-            items.push(Item::Rect(RectItem { radius: 9.0, border_w: if selected { 1.0 } else { 0.0 },
-                border_color: mix(CUT_BG, 0xffffff, 0.28),
-                ..RectItem::new(r, if selected || hovered { mix(CUT_BG, 0xffffff, 0.07) } else { hex_color(CUT_LANE) }) }));
-            if here {
-                items.push(Item::Rect(RectItem { radius: 1.0, ..RectItem::new(RectPx { x: r.x, y: r.y + 10.0, w: 2.0, h: r.h - 20.0 }, hex_color(CUT_HEAD)) }));
-            }
-            let name = format!("{} {}", if g.cut { "Cut" } else { "Keep" }, g.number);
-            let color = if g.cut && !selected { mix(CUT_BG, 0xffffff, 0.4) } else if g.cut { ink } else { mix(CUT_BG, 0xffffff, 0.86) };
-            ui_label(items, r.x + 12.0, r.y + 15.0, 12.0, color, name, Align::Left, 90.0);
-            if g.cut {
-                ui_label(items, r.x + 12.0 + 6.0 * 12.0 * MONO_ADV + 8.0, r.y + 15.0, 9.5, hex_color(CUT_CORAL_INK), "removed", Align::Left, 60.0);
-            }
-            ui_label(items, r.x + 12.0, r.y + 31.0, 10.0, mix(CUT_BG, 0xffffff, 0.42),
-                format!("{} → {}", fmt_hms(g.start), fmt_hms(g.end)), Align::Left, r.w - 80.0);
-            ui_label(items, r.x + r.w - 12.0, r.y + r.h / 2.0, 11.0, mix(CUT_BG, 0xffffff, 0.45), fmt_span(g.end - g.start), Align::Right, 64.0);
-        }
-
-        caps_label(items, x0, result_y + 5.0, "RESULT");
+        // ---- footer: what the export will be ----
+        items.push(Item::Rect(RectItem::new(RectPx { x: x0, y: g.footer_y, w: x1 - x0, h: 1.0 }, mix(CUT_BG, 0xffffff, 0.07))));
+        let cy = g.footer_y + 28.0;
         let kept = cut.kept();
         let removed = cut.duration - kept;
-        let size = self.videos[self.active].info.file_size as f64 * kept / cut.duration.max(0.1);
         let frame_mode = cut.snap == Snap::Frame;
-        for (i, (key, value, color)) in [
-            ("Duration", if removed > 1e-3 { format!("{}  −{}", fmt_hms(kept), fmt_span(removed)) } else { fmt_hms(kept) }, ink),
-            ("Size", format!("≈ {}", fmt_size(size as u64)), ink),
-            ("Re-encoded frames", if frame_mode { "all".into() } else { "0".into() }, if frame_mode { hex_color(CUT_CORAL_INK) } else { green }),
-        ].into_iter().enumerate() {
-            kv(items, result_y + 31.0 + i as f32 * 22.0, key, value, color);
+        let right_chip = |items: &mut Vec<Item>, right: f32, text: &str, bg: [f32; 4], fg: [f32; 4]| -> f32 {
+            let w = text.chars().count() as f32 * 10.0 * MONO_ADV + 14.0;
+            items.push(Item::Text(TextItem { align: Align::Right, valign: VAlign::Middle,
+                bg: Some(TextBg { radius: 5.0, pad_x: 7.0, pad_y: 5.0, ..TextBg::new(bg) }),
+                ..TextItem::new(right - 7.0, cy, 10.0, fg, text) }));
+            right - w - 6.0
+        };
+        if self.cut_tab == 0 {
+            ui_label(items, x0, cy, 15.0, ink, fmt_hms(kept), Align::Left, 110.0);
+            let (re_text, re_bg, re_fg) = if frame_mode { ("all re-enc", mix(CUT_BG, CUT_CORAL, 0.14), hex_color(CUT_CORAL_INK)) }
+                else { ("0 re-enc", mix(CUT_BG, CUT_GREEN, 0.14), green) };
+            let r = right_chip(items, x1, re_text, re_bg, re_fg);
+            if removed > 1e-3 {
+                right_chip(items, r, &format!("−{}", fmt_span(removed)), chip_bg, mix(CUT_BG, 0xffffff, 0.75));
+            }
+        } else {
+            ui_label(items, x0, cy, 15.0, ink, fmt_hms(cut.duration), Align::Left, 110.0);
+            let ext = cut.path.extension().map(|e| e.to_string_lossy().to_uppercase()).unwrap_or_default();
+            let r = right_chip(items, x1, &ext, chip_bg, mix(CUT_BG, 0xffffff, 0.75));
+            right_chip(items, r, &fmt_size(self.videos[self.active].info.file_size), chip_bg, mix(CUT_BG, 0xffffff, 0.75));
         }
         items.push(Item::Clip(None));
     }
@@ -3048,14 +3193,14 @@ impl App {
         }
         let px = x_of(self.t);
         let head = hex_color(CUT_HEAD);
-        line(items, px - 4.0, tl.y + 1.0, tl.h - 1.0, 8.0, [0.247, 0.976, 0.988, 0.07]);
-        line(items, px - 2.0, tl.y + 20.0, tl.h - 20.0, 4.0, [0.0, 0.0, 0.0, 0.5]);
-        line(items, px - 1.0, tl.y + 1.0, tl.h - 1.0, 2.0, head);
-        // The pin: a tab with a point, three grooves to take hold of.
-        items.push(Item::Rect(RectItem { radius: 2.0, ..RectItem::new(RectPx { x: px - 9.0, y: tl.y, w: 18.0, h: 14.0 }, head) }));
-        items.push(Item::TriangleDown { r: RectPx { x: px - 9.0, y: tl.y + 12.0, w: 18.0, h: 10.0 }, color: head, radius: 0.5 });
+        line(items, px - 3.0, tl.y + 1.0, tl.h - 1.0, 6.0, [0.247, 0.976, 0.988, 0.06]);
+        line(items, px - 1.5, tl.y + 14.0, tl.h - 14.0, 3.0, [0.0, 0.0, 0.0, 0.5]);
+        line(items, px - 0.5, tl.y + 1.0, tl.h - 1.0, 1.0, head);
+        // The pin: a short tab with a point, three grooves to take hold of.
+        items.push(Item::Rect(RectItem { radius: 2.0, ..RectItem::new(RectPx { x: px - 9.0, y: tl.y, w: 18.0, h: 9.0 }, head) }));
+        items.push(Item::TriangleDown { r: RectPx { x: px - 9.0, y: tl.y + 7.0, w: 18.0, h: 7.0 }, color: head, radius: 0.5 });
         for x in [px - 3.5, px - 0.5, px + 2.5] {
-            line(items, x, tl.y + 3.0, if x == px - 0.5 { 9.0 } else { 7.0 }, 1.4, mix(CUT_HEAD, CUT_TL, 0.55));
+            line(items, x, tl.y + 2.0, if x == px - 0.5 { 6.0 } else { 4.5 }, 1.2, mix(CUT_HEAD, CUT_TL, 0.55));
         }
         let tc = fmt_tc(self.t, self.fps);
         let chip = if cut.duration >= 3600.0 { tc.as_str() } else { &tc[3..] };
@@ -3070,7 +3215,7 @@ impl App {
 /// The scrub panel's pictograms. The renderer draws rects and triangles,
 /// not paths, so each is built from those on a 16px box about its centre.
 #[derive(Clone, Copy)]
-enum Icon { In, Out, Split, Trash, Magnet, Flag, Film, Speaker, Caption, Ticks }
+enum Icon { In, Out, Split, Trash, Magnet, Flag, Film, Speaker, Caption, Ticks, List, Grid }
 
 fn draw_icon(items: &mut Vec<Item>, icon: Icon, cx: f32, cy: f32, color: [f32; 4]) {
     let bar = |items: &mut Vec<Item>, x: f32, y: f32, w: f32, h: f32| {
@@ -3146,6 +3291,14 @@ fn draw_icon(items: &mut Vec<Item>, icon: Icon, cx: f32, cy: f32, color: [f32; 4
                 bar(items, -8.0 + i as f32 * 3.6, -h / 2.0, 1.5, h);
             }
         }
+        Icon::List => {
+            for y in [-5.5, -0.75, 4.0] { bar(items, -7.0, y, 14.0, 1.5); }
+        }
+        Icon::Grid => {
+            for (x, y) in [(-6.5, -6.5), (0.5, -6.5), (-6.5, 0.5), (0.5, 0.5)] {
+                items.push(Item::Rect(RectItem { radius: 1.0, border_w: 1.3, border_color: color, ..RectItem::new(RectPx { x: cx + x, y: cy + y, w: 6.0, h: 6.0 }, [0.0; 4]) }));
+            }
+        }
     }
 }
 
@@ -3193,6 +3346,8 @@ const CUT_PAD: f32 = 16.0;
 const CUT_GRIP: f32 = 5.0;
 // The Timeline Edit design's tokens, sRGB hex (its oklch values converted).
 const CUT_BG: u32 = 0x0e0f10;
+/// The lit tab / toggle ground: the app's TOOL_BG.
+const CUT_TOOL_ON: u32 = 0x0b1926;
 const CUT_TL: u32 = 0x0b0c0d;
 /// The inspector's segment rows.
 const CUT_LANE: u32 = 0x151719;
@@ -3762,6 +3917,74 @@ mod tests {
     /// focused clip, I/O snap to the scanned keyframes, X removes the
     /// range, playback jumps over it, ⌘Z restores it, and the shell's
     /// rectangles never overlap the canvas.
+    /// The inspector: icon tabs, the list / thumbnail toggle, chapter rows
+    /// that seek, and a removed clip that selects itself for X to restore.
+    #[test]
+    fn cut_inspector_tabs_toggle_chapters_seek_and_ghosts_select() {
+        let Some(base) = test_clip() else { return };
+        let dir = std::env::temp_dir().join("abner_app_test");
+        let clip = dir.join("chapters.mp4");
+        if !clip.exists() {
+            let meta = dir.join("chapters.ffmeta");
+            std::fs::write(&meta, ";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=1500\ntitle=One\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=1500\nEND=4000\ntitle=Two\n").unwrap();
+            let ok = Command::new("ffmpeg")
+                .args(["-y", "-v", "error", "-i"]).arg(&base).arg("-i").arg(&meta)
+                .args(["-map_metadata", "1", "-c", "copy"]).arg(&clip).status().map(|s| s.success()).unwrap_or(false);
+            assert!(ok, "failed to generate the chaptered clip");
+        }
+        let mut app = mk_app(&clip, 1);
+        assert!(tick_until(&mut app, Duration::from_secs(5), |a| a.started));
+        app.key(Key::Char('t'));
+        assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.cut.as_ref().is_some_and(|c| !c.scanning())));
+        app.key(Key::Space);
+        assert_eq!(app.cut.as_ref().unwrap().chapters.len(), 2);
+        assert!(!app.cut.as_ref().unwrap().facts.chips.is_empty(), "the stream chips never arrived");
+
+        // Chapter rows seek to their chapter.
+        assert_eq!(app.cut_tab, 0);
+        let rows = app.cut_chapter_rows();
+        assert_eq!(rows.len(), 2);
+        let r = rows[1].0;
+        app.mouse_down(r.x + 20.0, r.y + 10.0);
+        app.mouse_up();
+        assert!((app.t - 1.5).abs() < 0.1, "chapter two starts at 1.5 s, t = {}", app.t);
+
+        // The toggle swaps the list for thumbnail cards (two columns).
+        let side = app.cut_side();
+        app.mouse_down(side.grid_btn.x + 4.0, side.grid_btn.y + 4.0);
+        app.mouse_up();
+        assert!(app.cut_thumbs);
+        let cards = app.cut_chapter_rows();
+        assert_eq!(cards.len(), 2);
+        assert!(cards[0].0.y == cards[1].0.y && cards[1].0.x > cards[0].0.x, "cards sit side by side");
+        app.mouse_down(side.list_btn.x + 4.0, side.list_btn.y + 4.0);
+        app.mouse_up();
+        assert!(!app.cut_thumbs);
+
+        // The streams tab replaces the chapter rows.
+        let side = app.cut_side();
+        app.mouse_down(side.tab[1].x + 4.0, side.tab[1].y + 4.0);
+        app.mouse_up();
+        assert_eq!(app.cut_tab, 1);
+        assert!(app.cut_chapter_rows().is_empty());
+        let side = app.cut_side();
+        app.mouse_down(side.tab[0].x + 4.0, side.tab[0].y + 4.0);
+        app.mouse_up();
+        assert_eq!(app.cut_tab, 0);
+
+        // A removed clip selects itself on a click, ready for X to restore it.
+        app.seek_all(1.4, true);
+        app.key(Key::Char('i'));
+        app.seek_all(1.7, true);
+        app.key(Key::Char('o'));
+        app.key(Key::Char('x'));
+        assert!(app.cut.as_ref().unwrap().selection().is_none());
+        let v = app.cut_lanes().video;
+        app.mouse_down(v.x + v.w * 0.375, v.y + 10.0);
+        app.mouse_up();
+        assert_eq!(app.cut.as_ref().unwrap().selection(), Some((1.0, 2.0)));
+    }
+
     #[test]
     fn cut_mode_snaps_cuts_skips_and_undoes() {
         let Some(clip) = test_clip() else { return };
