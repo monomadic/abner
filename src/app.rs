@@ -4088,7 +4088,7 @@ mod tests {
         app.mouse_up();
         assert!(app.cut_thumbs);
         let cards = app.cut_chapter_rows();
-        assert_eq!(cards.len(), 2);
+        assert_eq!(cards.len(), 3);
         assert!(cards[0].0.y == cards[1].0.y && cards[1].0.x > cards[0].0.x, "cards sit side by side");
         app.mouse_down(side.list_btn.x + 4.0, side.list_btn.y + 4.0);
         app.mouse_up();
