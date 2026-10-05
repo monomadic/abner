@@ -1739,10 +1739,12 @@ impl App {
         let mut out = Vec::new();
         let tool = if self.cut_mode { 3 } else if !self.mask_mode { 0 } else if self.crop.is_none() { 1 } else { 2 };
         let mut x = if self.fullscreen { 16.0 } else { 100.0 };
-        // Shown in this order; the number is the tool (`Action::Tool`).
-        for (label, w, i) in [("SOURCES", 76.0, 0), ("TIMELINE", 78.0, 3), ("CROP", 56.0, 2), ("MASK", 56.0, 1)] {
-            out.push(Control::new(RectPx { x, y: 6.0, w, h: 26.0 }, label, tool == i, Action::Tool(i)));
-            x += w + 4.0;
+        // Shown in this order; the number is the tool (`Action::Tool`). Each tab
+        // is its label plus 11px either side, 2px apart, inside the pill.
+        for (label, i) in [("SOURCES", 0), ("TIMELINE", 3), ("CROP", 2), ("MASK", 1)] {
+            let w = (label.chars().count() as f32 * TAB_PX * MONO_ADV + 22.0).round();
+            out.push(Control::new(RectPx { x, y: 7.0, w, h: 24.0 }, label, tool == i, Action::Tool(i)));
+            x += w + 2.0;
         }
         if self.cut_mode {
             self.cut_controls(&mut out, x);
