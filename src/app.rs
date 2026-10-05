@@ -162,6 +162,9 @@ pub struct App {
     /// it is dropped when the clip list changes.
     cut: Option<Cut>,
     cut_mode: bool,
+    /// A lone clip opens on the timeline (main.rs turns this on; tests leave
+    /// it off so Sources stays the layout they exercise).
+    cut_default: bool,
     /// The inspector's tab (0 chapters, 1 streams) and its chapter view.
     cut_tab: usize,
     cut_thumbs: bool,
@@ -391,6 +394,7 @@ impl App {
             aspect: 0,
             cut: None,
             cut_mode: false,
+            cut_default: false,
             cut_drag: None,
             cut_tab: 0,
             cut_thumbs: false,
@@ -942,6 +946,19 @@ impl App {
     /// Something to show. One clip (a single drop, or `abner one.mp4`)
     /// is enough: it lands in slot A and plays; the compare modes just
     /// have nothing to compare against until a second one arrives.
+    /// Open a lone clip on the timeline — at launch, and for each drop that
+    /// leaves exactly one clip loaded. Two or more clips stay in Sources.
+    pub fn set_cut_default(&mut self, on: bool) {
+        self.cut_default = on;
+        self.settle_cut_default();
+    }
+
+    fn settle_cut_default(&mut self) {
+        if self.cut_default && self.videos.len() == 1 && !self.cut_mode {
+            self.set_cut_mode(true);
+        }
+    }
+
     pub fn ready(&self) -> bool {
         !self.videos.is_empty()
     }
@@ -1006,6 +1023,7 @@ impl App {
         self.drag = None;
         self.scrubbing = false;
         self.drag_hover = false;
+        self.settle_cut_default();
     }
 
     /// Drop the focused clip (⌘W). The survivors shift down a slot, and
@@ -4200,6 +4218,24 @@ mod tests {
 
     /// U undoes like ⌘Z, and the wheel over the timeline zooms about the pointer
     /// (up in, down out) while a sideways swipe pans.
+    /// A lone clip opens on the timeline; a second one drops back to Sources.
+    #[test]
+    fn a_lone_clip_opens_in_timeline_mode() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        assert!(!app.cut_mode, "tests start in Sources");
+        app.set_cut_default(true);
+        assert!(app.cut_mode, "one file should open on the timeline");
+        app.add_videos(vec![mk_video(&clip)], false);
+        assert!(!app.cut_mode, "two files compare in Sources");
+        // Replacing with a single file goes back to the timeline.
+        app.add_videos(vec![mk_video(&clip)], true);
+        assert!(app.cut_mode);
+        // --mask style: the mask tool takes it back.
+        app.key(Key::Char('m'));
+        assert!(app.mask_mode && !app.cut_mode);
+    }
+
     #[test]
     fn cut_mode_u_undoes_and_the_wheel_zooms_the_track() {
         let Some(clip) = test_clip() else { return };

@@ -215,6 +215,9 @@ fn main() -> anyhow::Result<()> {
         occluded: false,
         focused: true,
     };
+    // One file opens on the timeline; --mask / --crop below take it back to
+    // their own tool, and two or more files stay in Sources.
+    runner.app.set_cut_default(true);
     if mask_mode { runner.app.key(Key::Char('m')); }
     if let Some(ranges) = cut { runner.app.start_cut(ranges); }
     if let Some(rect) = crop { runner.app.start_crop(rect); }

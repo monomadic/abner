@@ -3,6 +3,15 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-06 — a lone file opens on the timeline
+
+Launch with one file, drop one on an empty window, or open one from Finder / recents, and
+Abner opens in TIMELINE mode; two or more files stay in SOURCES (the compare view).
+`App::set_cut_default(true)` (main.rs) turns it on and `settle_cut_default` runs at launch
+and after every drop (replacing with one file counts); `--mask` and `--crop` still take
+their own tool, and tests leave the flag off so Sources stays what they exercise. A file
+with no duration stays in Sources (the timeline needs one).
+
 ## 2026-10-06 — toolbar tabs renamed and reordered
 
 `INPUT` → `SOURCES`, `CUT` → `TIMELINE`, shown as SOURCES · TIMELINE · CROP · MASK (the
