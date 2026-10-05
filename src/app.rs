@@ -2296,6 +2296,7 @@ struct CutSide {
     chips_y: f32,
     count_y: f32,
     toggle: RectPx,
+    add_btn: RectPx,
     list_btn: RectPx,
     grid_btn: RectPx,
     footer_y: f32,
@@ -2611,6 +2612,15 @@ impl App {
             let side = self.cut_side();
             if let Some(i) = side.tab.iter().position(|r| contains(*r, x, y)) {
                 self.cut_tab = i;
+            } else if self.cut_tab == 0 && contains(side.add_btn, x, y) {
+                // A chapter starts here: the playhead.
+                let t = self.t;
+                if let Some(cut) = self.cut.as_mut() {
+                    cut.status = match cut.add_chapter(t) {
+                        Some(n) => format!("Chapter {n} added at {}", fmt_hms(t)),
+                        None => "A chapter already starts here".into(),
+                    };
+                }
             } else if self.cut_tab == 0 && contains(side.list_btn, x, y) {
                 self.cut_thumbs = false;
             } else if self.cut_tab == 0 && contains(side.grid_btn, x, y) {
@@ -2672,6 +2682,7 @@ impl App {
         let chips_y = tabs.y + tabs.h + 14.0;
         let count_y = if self.cut_tab == 0 { chips_y + 34.0 } else { tabs.y + tabs.h + 12.0 };
         let toggle = RectPx { x: x0 + w - 56.0, y: count_y, w: 56.0, h: 24.0 };
+        let add_btn = RectPx { x: toggle.x - 8.0 - 26.0, y: toggle.y + 1.0, w: 26.0, h: 22.0 };
         let list_btn = RectPx { x: toggle.x + 2.0, y: toggle.y + 2.0, w: 26.0, h: 20.0 };
         let grid_btn = RectPx { x: toggle.x + 28.0, ..list_btn };
         let footer_y = s.y + s.h - 56.0;
@@ -2680,7 +2691,7 @@ impl App {
         let warning_y = footer_y - 10.0 - warning_h;
         let body_top = if self.cut_tab == 0 { count_y + 24.0 + 10.0 } else { tabs.y + tabs.h + 16.0 };
         let body_bottom = if warning.is_empty() { footer_y - 10.0 } else { warning_y - 8.0 };
-        CutSide { tabs, tab, chips_y, count_y, toggle, list_btn, grid_btn, footer_y, warning, warning_y, warning_h,
+        CutSide { tabs, tab, chips_y, count_y, toggle, add_btn, list_btn, grid_btn, footer_y, warning, warning_y, warning_h,
             body: RectPx { x: x0, y: body_top, w, h: (body_bottom - body_top).max(0.0) } }
     }
 
@@ -2936,6 +2947,12 @@ impl App {
             }
             let cy = g.count_y + 12.0;
             ui_label(items, x0, cy, 11.0, dim, cut.chapters.len().to_string(), Align::Left, 40.0);
+            let plus_hot = self.cursor_inside && contains(g.add_btn, self.cursor.0, self.cursor.1);
+            items.push(Item::Rect(RectItem { radius: 7.0, ..RectItem::new(g.add_btn, mix(CUT_BG, 0xffffff, if plus_hot { 0.12 } else { 0.07 })) }));
+            let (px, py) = (g.add_btn.x + g.add_btn.w / 2.0, g.add_btn.y + g.add_btn.h / 2.0);
+            let plus = if plus_hot { ink } else { dim };
+            items.push(Item::Rect(RectItem::new(RectPx { x: px - 5.0, y: py - 0.75, w: 10.0, h: 1.5 }, plus)));
+            items.push(Item::Rect(RectItem::new(RectPx { x: px - 0.75, y: py - 5.0, w: 1.5, h: 10.0 }, plus)));
             items.push(Item::Rect(RectItem { radius: 7.0, ..RectItem::new(g.toggle, mix(CUT_BG, 0xffffff, 0.05)) }));
             for (r, icon, on) in [(g.list_btn, Icon::List, !self.cut_thumbs), (g.grid_btn, Icon::Grid, self.cut_thumbs)] {
                 if on { items.push(Item::Rect(RectItem { radius: 5.0, ..RectItem::new(r, hex_color(CUT_TOOL_ON)) })); }
@@ -4053,6 +4070,17 @@ mod tests {
         press(&mut app, CutAction::Keyframe(-1));
         assert!(app.t < 0.05, "previous keyframe, t = {}", app.t);
         assert!(!app.playing);
+
+        // `+` starts a chapter at the playhead; a second press there is refused.
+        app.seek_all(3.0, true);
+        let side = app.cut_side();
+        app.mouse_down(side.add_btn.x + 4.0, side.add_btn.y + 4.0);
+        app.mouse_up();
+        assert_eq!(app.cut.as_ref().unwrap().chapters.len(), 3);
+        assert_eq!(app.cut.as_ref().unwrap().chapters[2].start, 3.0);
+        app.mouse_down(side.add_btn.x + 4.0, side.add_btn.y + 4.0);
+        app.mouse_up();
+        assert_eq!(app.cut.as_ref().unwrap().chapters.len(), 3, "no second chapter on the same spot");
 
         // The toggle swaps the list for thumbnail cards (two columns).
         let side = app.cut_side();

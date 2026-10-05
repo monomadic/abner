@@ -3,6 +3,15 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-06 — Cut mode: `+` adds a chapter, and the export writes them
+
+A `+` beside the list / thumbnails toggle starts a chapter at the playhead ("Chapter N",
+refused within half a second of an existing one). The export now carries chapters:
+`cut::output_chapters` moves each by what was cut before it and drops those whose start
+is inside a cut, and an ffmetadata input (`-map_chapters 1`, `-map_metadata 0` so the
+file's own tags survive) writes them for both the stream-copy and the re-encode paths.
+Adding a chapter alone is enough to export. No rename or delete yet, and no undo for them.
+
 ## 2026-10-06 — Cut mode: U undoes, the wheel zooms the track, a backgrounded app idles
 
 `U` is undo as well as ⌘Z. Over the timeline, scrolling up zooms in and down zooms out

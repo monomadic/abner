@@ -96,6 +96,9 @@ pub struct Cut {
     /// scan lands (`scanning`), and snapping is the identity until then.
     pub keys: Vec<f64>,
     pub chapters: Vec<Chapter>,
+    /// Chapters were added here, so an export has something to write even
+    /// with nothing cut.
+    pub chapters_edited: bool,
     pub facts: Facts,
     pub cues: Vec<Cue>,
     /// One peak (0–255) per `1 / WAVE_HZ` seconds of the first audio stream.
@@ -132,6 +135,7 @@ impl Cut {
             duration,
             keys: Vec::new(),
             chapters: Vec::new(),
+            chapters_edited: false,
             facts: Facts::default(),
             cues: Vec::new(),
             wave: Vec::new(),
@@ -279,6 +283,21 @@ impl Cut {
                 [.., last] => Some(*last),
             }
         }
+    }
+
+    /// Start a chapter at `t`. Refused within half a second of one that is
+    /// already there. Returns its (1-based) number.
+    pub fn add_chapter(&mut self, t: f64) -> Option<usize> {
+        let t = t.clamp(0.0, self.duration);
+        if self.chapters.iter().any(|c| (c.start - t).abs() < 0.5) {
+            return None;
+        }
+        let at = self.chapters.partition_point(|c| c.start < t);
+        let mut n = self.chapters.len() + 1;
+        while self.chapters.iter().any(|c| c.title == format!("Chapter {n}")) { n += 1; }
+        self.chapters.insert(at, Chapter { start: t, title: format!("Chapter {n}") });
+        self.chapters_edited = true;
+        Some(at + 1)
     }
 
     pub fn on_key(&self, t: f64, frame: f64) -> bool {
@@ -636,11 +655,12 @@ impl Cut {
             return;
         }
         let keeps = self.keeps();
-        if self.edit.cuts.is_empty() || keeps.is_empty() {
-            self.status = "Nothing to export: cut something first".into();
+        if (self.edit.cuts.is_empty() && !self.chapters_edited) || keeps.is_empty() {
+            self.status = "Nothing to export: cut something or add a chapter first".into();
             return;
         }
         let (source, dest, snap) = (self.path.clone(), self.output_path(), self.snap);
+        let chapters = self.chapters.clone();
         let name = dest.file_name().unwrap_or_default().to_string_lossy().into_owned();
         self.status = format!("Exporting {name}…");
         let (tx, rx) = channel();
@@ -648,7 +668,7 @@ impl Cut {
         std::thread::spawn(move || {
             let how = if snap == Snap::Keyframe { "stream copy" } else { "re-encoded" };
             let _ = tx.send(
-                export(&source, &dest, &keeps, snap)
+                export(&source, &dest, &keeps, snap, &chapters)
                     .map(|()| format!("{name} ({} segments, {how})", keeps.len()))
                     .map_err(|e| e.to_string()),
             );
@@ -891,13 +911,45 @@ fn read_wave(path: &Path, cancel: &AtomicBool, tx: &std::sync::mpsc::Sender<Vec<
 /// on a keyframe. `Snap::Frame` selects the frames inside the ranges and
 /// re-encodes (H.264 CRF 16 + AAC), since a range that starts between
 /// keyframes has nothing to copy its first frames from.
-pub fn export(source: &Path, dest: &Path, keeps: &[(f64, f64)], snap: Snap) -> anyhow::Result<()> {
+/// The chapters an export carries, on the OUTPUT's clock: a chapter that
+/// starts inside a kept range moves up by what was cut before it; one that
+/// starts inside a cut is dropped. Each runs to the next start (the last to
+/// the end of the output). `(start, end, title)`.
+pub fn output_chapters(chapters: &[Chapter], keeps: &[(f64, f64)]) -> Vec<(f64, f64, String)> {
+    let mut before = 0.0;
+    let mut starts: Vec<(f64, String)> = Vec::new();
+    for &(a, b) in keeps {
+        for c in chapters.iter().filter(|c| c.start >= a - EPS && c.start < b - EPS) {
+            starts.push((before + (c.start - a), c.title.clone()));
+        }
+        before += b - a;
+    }
+    // A cut can swallow a chapter's start while its body survives: that
+    // body becomes the start of its kept remainder, titled as it was.
+    let total = before;
+    starts.iter().enumerate()
+        .map(|(i, (s, t))| (*s, starts.get(i + 1).map_or(total, |n| n.0), t.clone()))
+        .collect()
+}
+
+fn ffmetadata(chapters: &[(f64, f64, String)]) -> String {
+    let mut text = String::from(";FFMETADATA1\n");
+    for (a, b, title) in chapters {
+        let title = title.replace('\\', "\\\\").replace('=', "\\=").replace(';', "\\;").replace('#', "\\#").replace('\n', " ");
+        text.push_str(&format!("[CHAPTER]\nTIMEBASE=1/1000\nSTART={}\nEND={}\ntitle={title}\n", (a * 1000.0).round() as i64, (b * 1000.0).round() as i64));
+    }
+    text
+}
+
+pub fn export(source: &Path, dest: &Path, keeps: &[(f64, f64)], snap: Snap, chapters: &[Chapter]) -> anyhow::Result<()> {
     use anyhow::Context;
     let nonce = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let ext = dest.extension().unwrap_or_default().to_string_lossy().into_owned();
     let tag = format!("{}.{nonce}.tmp", std::process::id());
     let temporary = dest.with_extension(format!("{tag}.{ext}"));
     let list = dest.with_extension(format!("{tag}.txt"));
+    let meta = dest.with_extension(format!("{tag}.ffmeta"));
+    let carried = output_chapters(chapters, keeps);
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-nostdin", "-y", "-v", "error"]);
     match snap {
@@ -910,11 +962,21 @@ pub fn export(source: &Path, dest: &Path, keeps: &[(f64, f64)], snap: Snap) -> a
             }
             std::fs::write(&list, text).context("writing the segment list")?;
             cmd.args(["-f", "concat", "-safe", "0", "-i"]).arg(&list);
+            if !carried.is_empty() {
+                std::fs::write(&meta, ffmetadata(&carried)).context("writing the chapter list")?;
+                cmd.arg("-i").arg(&meta);
+            }
             cmd.args(["-map", "0:v:0", "-map", "0:a?", "-c", "copy", "-avoid_negative_ts", "make_zero"]);
+            if !carried.is_empty() { cmd.args(["-map_metadata", "0", "-map_chapters", "1"]); }
         }
         Snap::Frame => {
             let expr = keeps.iter().map(|(a, b)| format!("gte(t,{a:.6})*lt(t,{b:.6})")).collect::<Vec<_>>().join("+");
             cmd.arg("-i").arg(source);
+            if !carried.is_empty() {
+                std::fs::write(&meta, ffmetadata(&carried)).context("writing the chapter list")?;
+                cmd.arg("-i").arg(&meta);
+                cmd.args(["-map_metadata", "0", "-map_chapters", "1"]);
+            }
             cmd.args(["-map", "0:v:0", "-map", "0:a?"]);
             cmd.args(["-vf", &format!("select='{expr}',setpts=N/FRAME_RATE/TB")]);
             cmd.args(["-af", &format!("aselect='{expr}',asetpts=N/SR/TB")]);
@@ -924,6 +986,7 @@ pub fn export(source: &Path, dest: &Path, keeps: &[(f64, f64)], snap: Snap) -> a
     }
     let out = cmd.arg(&temporary).stdin(Stdio::null()).output().context("running ffmpeg (is ffmpeg installed?)");
     let _ = std::fs::remove_file(&list);
+    let _ = std::fs::remove_file(&meta);
     let out = out?;
     if !out.status.success() {
         let _ = std::fs::remove_file(&temporary);
@@ -1124,7 +1187,7 @@ mod tests {
         for (snap, name) in [(Snap::Keyframe, "copy.mp4"), (Snap::Frame, "encode.mp4")] {
             let dest = dir.join(name);
             let _ = std::fs::remove_file(&dest);
-            export(&clip, &dest, &cut.keeps(), snap).expect("export");
+            export(&clip, &dest, &cut.keeps(), snap, &cut.chapters).expect("export");
             let d = probe_duration(&dest);
             assert!((d - 4.0).abs() < 0.15, "{name}: {d} s, wanted 4");
             let leftovers = std::fs::read_dir(&dir).unwrap().filter_map(Result::ok)
@@ -1179,5 +1242,23 @@ mod tests {
         // Just past a chapter's start, back goes to the one before it.
         assert_eq!(c.chapter_step(20.5, -1), Some(0.0));
         assert_eq!(c.chapter_step(0.0, -1), None);
+    }
+
+    #[test]
+    fn added_chapters_sort_refuse_near_duplicates_and_move_with_the_cuts() {
+        let mut c = Cut::new(Path::new("x.mp4"), 60.0);
+        assert_eq!(c.add_chapter(30.0), Some(1));
+        assert_eq!(c.add_chapter(10.0), Some(1), "inserted in time order");
+        assert_eq!(c.add_chapter(10.3), None, "within half a second of one that exists");
+        assert!(c.chapters_edited);
+        assert_eq!(c.chapters.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(), ["Chapter 2", "Chapter 1"]);
+        // Cut 20–40: the chapter at 30 is inside it and goes; 10 stays put.
+        let keeps = [(0.0, 20.0), (40.0, 60.0)];
+        c.add_chapter(50.0);
+        let out = output_chapters(&c.chapters, &keeps);
+        assert_eq!(out.iter().map(|o| (o.0, o.1)).collect::<Vec<_>>(), [(10.0, 30.0), (30.0, 40.0)]);
+        // 50 s in the source is 30 s out (20 s were cut before it).
+        let meta = ffmetadata(&out);
+        assert!(meta.starts_with(";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=10000\nEND=30000\ntitle=Chapter 2"));
     }
 }
