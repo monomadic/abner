@@ -3252,8 +3252,11 @@ impl App {
         }
         let px = x_of(self.t);
         let head = hex_color(CUT_HEAD);
-        // Half a logical pixel: one physical pixel on a retina display.
-        line(items, px - 0.25, tl.y + 14.0, tl.h - 14.0, 0.5, [0.0, 0.0, 0.0, 0.7]);
+        // One white pixel, with a pixel of translucent black either side so it
+        // holds against pale and dark footage alike.
+        line(items, px - 1.5, tl.y + 1.0, tl.h - 1.0, 1.0, [0.0, 0.0, 0.0, 0.4]);
+        line(items, px + 0.5, tl.y + 1.0, tl.h - 1.0, 1.0, [0.0, 0.0, 0.0, 0.4]);
+        line(items, px - 0.5, tl.y + 1.0, tl.h - 1.0, 1.0, head);
         // The pin: a short tab with a point, three grooves to take hold of.
         items.push(Item::Rect(RectItem { radius: 2.0, ..RectItem::new(RectPx { x: px - 9.0, y: tl.y, w: 18.0, h: 9.0 }, head) }));
         items.push(Item::TriangleDown { r: RectPx { x: px - 9.0, y: tl.y + 7.0, w: 18.0, h: 7.0 }, color: head, radius: 0.5 });
