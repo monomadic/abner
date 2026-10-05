@@ -1388,7 +1388,7 @@ impl App {
     pub fn scroll(&mut self, dx: f32, dy: f32) {
         self.stroke_last = None;
         if !self.ready() { return; }
-        if self.cut_mode && self.show_ui && contains(self.workspace().timeline, self.cursor.0, self.cursor.1) {
+        if self.cut_mode && self.show_ui && self.cut_over_panel() {
             let lane = self.cut_lanes().video;
             if dy.abs() > dx.abs() {
                 // Up and down zoom about the pointer: scrolling up dives in
@@ -1421,7 +1421,7 @@ impl App {
     /// center. Positive delta = fingers spreading = zoom in.
     pub fn pinch(&mut self, delta: f32) {
         self.stroke_last = None;
-        if self.ready() && self.cut_mode && self.show_ui && contains(self.workspace().timeline, self.cursor.0, self.cursor.1) {
+        if self.ready() && self.cut_mode && self.show_ui && self.cut_over_panel() {
             let lane = self.cut_lanes().video;
             let anchor = (self.cursor.0 - lane.x).clamp(0.0, lane.w);
             // Exponential, a touch quicker than the video's: spreading two fingers
@@ -2658,6 +2658,14 @@ impl App {
             return true;
         }
         false
+    }
+
+    /// The pointer is anywhere on the scrub panel — toolbar, ruler, gutter,
+    /// lanes, the gaps between them — not just over a clip. Wheel and pinch
+    /// zoom the track from all of it.
+    fn cut_over_panel(&self) -> bool {
+        let l = self.workspace();
+        self.cursor_inside && (contains(l.timeline, self.cursor.0, self.cursor.1) || contains(l.transport, self.cursor.0, self.cursor.1))
     }
 
     /// The kept picture clip under the pointer.
@@ -4211,6 +4219,14 @@ mod tests {
         assert!(zoomed > before, "scrolling up should zoom in: {before} -> {zoomed}");
         app.scroll(0.0, 20.0);
         assert!(app.cut.as_ref().unwrap().pps < zoomed, "scrolling down should zoom back out");
+        // Anywhere on the panel counts: the ruler, the gutter, the toolbar.
+        let l = app.cut_lanes();
+        for (x, y) in [(l.ruler.x + 40.0, l.ruler.y + 4.0), (l.video.x - 30.0, l.video.y + 10.0), (app.workspace().transport.x + 300.0, app.workspace().transport.y + 25.0)] {
+            app.cursor_moved(x, y);
+            let before = app.cut.as_ref().unwrap().pps;
+            app.scroll(0.0, -20.0);
+            assert!(app.cut.as_ref().unwrap().pps > before, "no zoom at ({x}, {y})");
+        }
     }
 
     #[test]
