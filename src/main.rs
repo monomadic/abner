@@ -213,6 +213,7 @@ fn main() -> anyhow::Result<()> {
         animating: true,
         redraw_at: None,
         occluded: false,
+        focused: true,
     };
     if mask_mode { runner.app.key(Key::Char('m')); }
     if let Some(ranges) = cut { runner.app.start_cut(ranges); }
@@ -307,6 +308,10 @@ struct Runner {
     animating: bool,
     redraw_at: Option<Instant>,
     occluded: bool,
+    /// The window is the key window. Backgrounded, the clock is held and the
+    /// loop idles like a paused one: a Poll loop that is presenting 4K
+    /// frames answers the OS slowly when it is cmd-tabbed back to.
+    focused: bool,
 }
 
 impl Runner {
@@ -687,8 +692,16 @@ impl ApplicationHandler for Runner {
                 self.app.cursor_left();
                 self.animating = true;
             }
-            WindowEvent::Focused(false) => {
-                self.app.cursor_left();
+            WindowEvent::Focused(focused) => {
+                self.focused = focused;
+                if focused {
+                    // Back in front: one frame now, at full rate from here.
+                    self.last_frame = Instant::now();
+                    self.animating = true;
+                    if let Some(w) = &self.window { w.request_redraw(); }
+                } else {
+                    self.app.cursor_left();
+                }
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
                 let (x, y) = self.cursor;
@@ -699,7 +712,7 @@ impl ApplicationHandler for Runner {
             }
             WindowEvent::RedrawRequested => {
                 let now = Instant::now();
-                let dt = (now - self.last_frame).as_secs_f32().min(0.05);
+                let dt = if self.focused { (now - self.last_frame).as_secs_f32().min(0.05) } else { 0.0 };
                 self.last_frame = now;
                 let (Some(window), Some(gpu)) = (&self.window, &mut self.gpu) else {
                     return;
@@ -783,7 +796,7 @@ impl ApplicationHandler for Runner {
         let Some(w) = &self.window else { return };
         match schedule::next_frame(
             self.animating,
-            self.occluded,
+            self.occluded || !self.focused,
             self.redraw_at,
             self.last_frame,
             Instant::now(),

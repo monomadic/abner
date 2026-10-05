@@ -1386,11 +1386,16 @@ impl App {
         self.stroke_last = None;
         if !self.ready() { return; }
         if self.cut_mode && self.show_ui && contains(self.workspace().timeline, self.cursor.0, self.cursor.1) {
-            // Fingers move the content: right = earlier. A wheel has no
-            // horizontal axis, so its vertical one pans too.
-            let d = if dx.abs() >= dy.abs() { dx } else { dy };
-            let width = self.cut_lanes().video.w;
-            if let Some(cut) = &mut self.cut { cut.pan(-(d as f64) / cut.pps.max(1e-6), width); }
+            let lane = self.cut_lanes().video;
+            if dy.abs() > dx.abs() {
+                // Up and down zoom about the pointer: scrolling up dives in
+                // (the content under the pointer stays put), down backs out.
+                let anchor = (self.cursor.0 - lane.x).clamp(0.0, lane.w);
+                if let Some(cut) = &mut self.cut { cut.zoom((-(dy as f64) * 0.012).exp(), anchor, lane.w); }
+            } else {
+                // Sideways: fingers move the content, right = earlier.
+                if let Some(cut) = &mut self.cut { cut.pan(-(dx as f64) / cut.pps.max(1e-6), lane.w); }
+            }
             return;
         }
         if self.show_ui && contains(self.workspace().list, self.cursor.0, self.cursor.1) {
@@ -1963,7 +1968,7 @@ impl App {
             ui_label(items, 98.0, y + STATUS_H / 2.0, 10.0, WORKSPACE_DIM, status, Align::Left, vp.0 - 118.0 - hint_width);
             if hint_width > 0.0 {
                 ui_label(items, vp.0 - 16.0, y + STATUS_H / 2.0, 10.0, WORKSPACE_MUTED,
-                    "i in   o out   s split   x cut   k snap   e export   esc back", Align::Right, hint_width);
+                    "i in   o out   s split   x cut   u undo   k snap   e export   esc back", Align::Right, hint_width);
             }
             return;
         }
@@ -2369,7 +2374,7 @@ impl App {
             Key::Char('s' | 'S') => CutAction::Split,
             Key::Char('x' | 'X') => CutAction::Apply,
             Key::Char('e' | 'E') => CutAction::Export,
-            Key::Undo => CutAction::Undo,
+            Key::Undo | Key::Char('u' | 'U') => CutAction::Undo,
             Key::Char('k' | 'K') => {
                 let snap = self.cut.as_ref().map(|c| c.snap);
                 CutAction::Snap(if snap == Some(Snap::Keyframe) { Snap::Frame } else { Snap::Keyframe })
@@ -4083,6 +4088,35 @@ mod tests {
         app.mouse_down(v.x + v.w * 0.375, v.y + 10.0);
         app.mouse_up();
         assert_eq!(app.cut.as_ref().unwrap().selection(), Some((1.0, 2.0)));
+    }
+
+    /// U undoes like ⌘Z, and the wheel over the timeline zooms about the pointer
+    /// (up in, down out) while a sideways swipe pans.
+    #[test]
+    fn cut_mode_u_undoes_and_the_wheel_zooms_the_track() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        assert!(tick_until(&mut app, Duration::from_secs(5), |a| a.started));
+        app.key(Key::Char('t'));
+        assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.cut.as_ref().is_some_and(|c| !c.scanning())));
+        app.key(Key::Space);
+        app.seek_all(1.4, true);
+        app.key(Key::Char('i'));
+        app.seek_all(1.7, true);
+        app.key(Key::Char('o'));
+        app.key(Key::Char('x'));
+        assert_eq!(app.cut.as_ref().unwrap().cuts().len(), 1);
+        app.key(Key::Char('u'));
+        assert!(app.cut.as_ref().unwrap().cuts().is_empty(), "U should undo the cut");
+
+        let v = app.cut_lanes().video;
+        app.cursor_moved(v.x + v.w * 0.5, v.y + 10.0);
+        let before = app.cut.as_ref().unwrap().pps;
+        app.scroll(0.0, -20.0);
+        let zoomed = app.cut.as_ref().unwrap().pps;
+        assert!(zoomed > before, "scrolling up should zoom in: {before} -> {zoomed}");
+        app.scroll(0.0, 20.0);
+        assert!(app.cut.as_ref().unwrap().pps < zoomed, "scrolling down should zoom back out");
     }
 
     #[test]

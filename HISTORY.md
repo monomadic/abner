@@ -3,6 +3,19 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-06 — Cut mode: U undoes, the wheel zooms the track, a backgrounded app idles
+
+`U` is undo as well as ⌘Z. Over the timeline, scrolling up zooms in and down zooms out
+about the pointer (exponential, `cut.zoom`), a sideways swipe pans, pinch still zooms.
+
+Cmd-tabbing back to a PLAYING clip was slow while a paused one was instant. The
+difference is the loop: playing runs the Poll cadence, presenting 4K frames as fast as the
+display allows, and the OS's activation work waits behind it. A backgrounded window
+(`Focused(false)`) now schedules like an occluded one — idle ticks, no Poll — and its
+clock is held (`dt = 0`), so playback pauses where it was instead of running on unseen;
+focusing again restarts the clock and redraws at once. Not measured: this was found by
+reading the loop, not by profiling, because the capture tooling here sees a black screen.
+
 ## 2026-10-06 — cut mode: the chosen inspector, a thinner playhead
 
 The right-hand panel is the "Cut inspector (chosen)" board: the Selection block is gone
