@@ -169,7 +169,7 @@ pub struct App {
     cut_tab: usize,
     cut_thumbs: bool,
     /// The picture clip last clicked, by its (start, end): drawn outlined.
-    cut_pick: Option<(f64, f64)>,
+    cut_pick: Option<(f64, f64, bool)>,
     /// What a press on the timeline took hold of.
     cut_drag: Option<CutDrag>,
     /// The clock at the last tick, so the view pages after the playhead
@@ -2632,9 +2632,9 @@ impl App {
                 if let Some(cut) = &mut self.cut { cut.begin_trim(); }
                 self.playing = false;
                 self.cut_drag = Some(CutDrag::Edge(edge));
-            } else if let Some(seg) = self.cut_clip_at(x, y) {
-                // A picture clip: pick it (outlined), and still take the playhead there.
-                self.cut_pick = Some((seg.start, seg.end));
+            } else if let Some((seg, audio)) = self.cut_clip_at(x, y) {
+                // A picture or sound clip: pick it (outlined), and still take the playhead there.
+                self.cut_pick = Some((seg.start, seg.end, audio));
                 self.cut_drag = Some(CutDrag::Scrub);
                 self.cut_drag_to(x);
             } else if let Some(seg) = self.cut_ghost_at(x, y) {
@@ -2688,11 +2688,19 @@ impl App {
     }
 
     /// The kept picture clip under the pointer.
-    fn cut_clip_at(&self, x: f32, y: f32) -> Option<crate::cut::Segment> {
-        let v = self.cut_lanes().video;
-        if y < v.y || y >= v.y + v.h || x < v.x || x >= v.x + v.w { return None; }
+    fn cut_clip_at(&self, x: f32, y: f32) -> Option<(crate::cut::Segment, bool)> {
+        let lanes = self.cut_lanes();
+        let cut = self.cut.as_ref()?;
+        // No sound lane is drawn once the audio read found nothing.
+        let sound = lanes.audio.filter(|_| !(cut.wave.is_empty() && !cut.reading_wave()));
+        let audio = match (y, sound) {
+            (y, _) if y >= lanes.video.y && y < lanes.video.y + lanes.video.h => false,
+            (y, Some(a)) if y >= a.y && y < a.y + a.h => true,
+            _ => return None,
+        };
+        if x < lanes.video.x || x >= lanes.video.x + lanes.video.w { return None; }
         let at = self.cut_time_at(x);
-        self.cut.as_ref()?.segments().into_iter().find(|g| !g.cut && at >= g.start && at < g.end)
+        cut.segments().into_iter().find(|g| !g.cut && at >= g.start && at < g.end).map(|g| (g, audio))
     }
 
     /// The removed clip under the pointer on the picture or sound row.
@@ -3234,13 +3242,16 @@ impl App {
                 } else if audio {
                     items.push(Item::Rect(RectItem { radius: 7.0, border_w: 1.0, border_color: mix(CUT_TL, 0x1580de, 0.6),
                         ..RectItem::new(r, hex_color(if i % 2 == 1 { CUT_SOUND_ALT } else { CUT_SOUND })) }));
+                    if self.cut_pick.is_some_and(|(a, b, snd)| snd && (a - g.start).abs() < 1e-3 && (b - g.end).abs() < 1e-3) {
+                        picked = Some(r);
+                    }
                 } else {
                     // The film ground: the board's 135° stripes (#2a2d30 / #202326, 14px).
                     items.push(Item::Hatch { r, a: hex_color(0x2a2d30), b: hex_color(0x202326), radius: 7.0, period: 14.0 });
                     items.push(Item::Rect(RectItem { radius: 7.0, border_w: 1.0, border_color: mix(CUT_TL, 0xffffff, 0.2),
                         ..RectItem::new(r, [0.0; 4]) }));
                     // The picked clip: a 3px white outline, outside the rounded edge.
-                    if self.cut_pick.is_some_and(|(a, b)| (a - g.start).abs() < 1e-3 && (b - g.end).abs() < 1e-3) {
+                    if self.cut_pick.is_some_and(|(a, b, snd)| !snd && (a - g.start).abs() < 1e-3 && (b - g.end).abs() < 1e-3) {
                         picked = Some(r);
                     }
                     // Keyframes: a hairline through the picture, a short bright
@@ -4194,7 +4205,7 @@ mod tests {
         let v = app.cut_lanes().video;
         app.mouse_down(v.x + v.w * 0.1, v.y + 10.0);
         app.mouse_up();
-        assert_eq!(app.cut_pick, Some((0.0, 4.0)));
+        assert_eq!(app.cut_pick, Some((0.0, 4.0, false)));
         let r = app.cut_lanes().ruler;
         app.mouse_down(v.x + v.w * 0.1, r.y + 4.0);
         app.mouse_up();
@@ -4236,6 +4247,35 @@ mod tests {
         // --mask style: the mask tool takes it back.
         app.key(Key::Char('m'));
         assert!(app.mask_mode && !app.cut_mode);
+    }
+
+    /// A sound clip is picked (and outlined) like a picture clip, in its own row.
+    #[test]
+    fn a_sound_clip_can_be_picked_too() {
+        let Some(_) = test_clip() else { return };
+        let dir = std::env::temp_dir().join("abner_app_test");
+        let clip = dir.join("with_audio.mp4");
+        if !clip.exists() {
+            let ok = Command::new("ffmpeg")
+                .args(["-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=duration=4:size=320x180:rate=30"])
+                .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=4"])
+                .args(["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-g", "30", "-c:a", "aac"])
+                .arg(&clip).status().map(|s| s.success()).unwrap_or(false);
+            assert!(ok, "failed to generate the clip with audio");
+        }
+        let mut app = mk_app(&clip, 1);
+        assert!(tick_until(&mut app, Duration::from_secs(5), |a| a.started));
+        app.key(Key::Char('t'));
+        assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.cut.as_ref().is_some_and(|c| !c.scanning() && !c.reading_wave() && !c.wave.is_empty())));
+        app.key(Key::Space);
+        let l = app.cut_lanes();
+        let (v, a) = (l.video, l.audio.expect("a sound lane"));
+        app.mouse_down(v.x + v.w * 0.4, a.y + a.h / 2.0);
+        app.mouse_up();
+        assert_eq!(app.cut_pick, Some((0.0, 4.0, true)), "the sound clip is picked");
+        app.mouse_down(v.x + v.w * 0.4, v.y + v.h / 2.0);
+        app.mouse_up();
+        assert_eq!(app.cut_pick, Some((0.0, 4.0, false)), "and the picture clip replaces it");
     }
 
     #[test]
