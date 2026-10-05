@@ -2004,7 +2004,7 @@ impl App {
                 items: vec![Item::Logo {
                     r: RectPx { x: (w - lw) / 2.0, y: (h - lh) / 2.0, w: lw, h: lh },
                     alpha: 1.0,
-                }],
+                }, build_label(w, h)],
                 animating: false,
                 redraw_at: None,
             };
@@ -2115,6 +2115,7 @@ impl App {
             ..RectItem::new(RectPx { x: lamp_x, y: sy - 3.5, w: 7.0, h: 7.0 }, LAMP)
         }));
         items.push(Item::Text(label));
+        items.push(build_label(w, h));
 
         // The foot: a hairline, the one instruction, and the accepted
         // formats between a blue and a red tick. A drag over the window
@@ -3193,7 +3194,8 @@ impl App {
         }
         let px = x_of(self.t);
         let head = hex_color(CUT_HEAD);
-        line(items, px - 0.5, tl.y + 14.0, tl.h - 14.0, 1.0, [0.0, 0.0, 0.0, 0.55]);
+        // Half a logical pixel: one physical pixel on a retina display.
+        line(items, px - 0.25, tl.y + 14.0, tl.h - 14.0, 0.5, [0.0, 0.0, 0.0, 0.7]);
         // The pin: a short tab with a point, three grooves to take hold of.
         items.push(Item::Rect(RectItem { radius: 2.0, ..RectItem::new(RectPx { x: px - 9.0, y: tl.y, w: 18.0, h: 9.0 }, head) }));
         items.push(Item::TriangleDown { r: RectPx { x: px - 9.0, y: tl.y + 7.0, w: 18.0, h: 7.0 }, color: head, radius: 0.5 });
@@ -4333,6 +4335,19 @@ const BEVEL_LIT: [f32; 4] = [1.0, 1.0, 1.0, 0.20];
 const CHIP_BG: [f32; 4] = [0.016, 0.020, 0.039, 0.85];
 const CHIP_INK: [f32; 4] = [0.910, 0.929, 0.949, 1.0];
 /// The brand's `ink-faint` (#7a8694): the key hint beside the header.
+/// Version, git hash (`+dirty` with uncommitted edits) and build time, stamped by
+/// build.rs. The launch window prints it so a screenshot says which build it is.
+const BUILD: &str = env!("ABNER_BUILD");
+
+fn build_label(w: f32, h: f32) -> Item {
+    Item::Text(TextItem {
+        align: Align::Right,
+        valign: VAlign::Middle,
+        tracking: 0.4,
+        ..TextItem::new(w - 16.0, h - 14.0, 9.5, INK_FAINT, format!("build {BUILD}"))
+    })
+}
+
 const INK_FAINT: [f32; 4] = [0.478, 0.525, 0.580, 1.0];
 
 // Crop marquee. The dimmer runs high for the reason the HUD's panels do
