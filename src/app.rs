@@ -1822,6 +1822,15 @@ impl App {
         RectPx { x, y: r.y + 28.0, w: (r.w - (x - r.x) - reserve).max(32.0), h: 4.0 }
     }
 
+    /// The tabs sit in one recessed housing — the design's segmented control:
+    /// a soft dark pill, the lit tab a navy chip inside it.
+    fn build_tool_housing(&self, items: &mut Vec<Item>) {
+        let tabs: Vec<RectPx> = self.controls().into_iter().filter(|c| matches!(c.action, Action::Tool(_))).map(|c| c.r).collect();
+        let (Some(first), Some(last)) = (tabs.first(), tabs.last()) else { return };
+        let housing = RectPx { x: first.x - 3.0, y: first.y - 3.0, w: last.x + last.w - first.x + 6.0, h: first.h + 6.0 };
+        items.push(Item::Rect(RectItem { radius: 10.0, ..RectItem::new(housing, [0.068, 0.068, 0.072, 1.0]) }));
+    }
+
     fn build_hud(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
         let l = self.workspace();
         let panel = WORKSPACE_PANEL;
@@ -1837,6 +1846,7 @@ impl App {
             RectPx { x: l.rail, y: l.transport.y, w: l.canvas.w, h: 1.0 }] {
             items.push(Item::Rect(RectItem::new(r, WORKSPACE_RULE)));
         }
+        self.build_tool_housing(items);
         for control in self.controls() {
             let hovered = contains(control.r, self.cursor.0, self.cursor.1) && self.cursor_inside;
             let tool = matches!(control.action, Action::Tool(_));
@@ -1849,7 +1859,7 @@ impl App {
             let color = if disabled { WORKSPACE_MUTED } else if tool && control.selected { ACCENT }
                 else if control.selected || hovered { WORKSPACE_TEXT } else { WORKSPACE_DIM };
             ui_label(items, control.r.x + control.r.w / 2.0, control.r.y + control.r.h / 2.0,
-                11.0, color, &control.label, Align::Center, control.r.w - 8.0);
+                if tool { TAB_PX } else { 11.0 }, color, &control.label, Align::Center, control.r.w - 8.0);
         }
         if self.mask_mode {
             let label = if let Some(c) = self.crop {
@@ -2830,6 +2840,7 @@ impl App {
 
         self.build_cut_inspector(items);
         self.build_cut_timeline(items);
+        self.build_tool_housing(items);
         for control in &controls {
             self.draw_cut_control(items, control);
         }
@@ -2855,7 +2866,7 @@ impl App {
                 items.push(Item::Rect(RectItem { radius: 7.0, ..RectItem::new(r, if control.selected { TOOL_BG } else { CONTROL_BG }) }));
             }
             let color = if control.selected { ACCENT } else if hovered { WORKSPACE_TEXT } else { WORKSPACE_DIM };
-            ui_label(items, cx, cy, 11.0, color, &control.label, Align::Center, r.w - 8.0);
+            ui_label(items, cx, cy, if matches!(control.action, Action::Tool(_)) { TAB_PX } else { 11.0 }, color, &control.label, Align::Center, r.w - 8.0);
             return;
         };
         let soft = mix(CUT_BG, 0xffffff, 0.72);
@@ -3585,6 +3596,8 @@ fn number_badge(items: &mut Vec<Item>, r: RectPx, index: usize) {
     ui_label(items, r.x + r.w / 2.0, r.y + r.h / 2.0, 11.0, color, (index + 1).to_string(), Align::Center, r.w - 4.0);
 }
 const HEADER_H: f32 = 38.0;
+/// The header tabs' type size.
+const TAB_PX: f32 = 12.0;
 const CONTEXT_H: f32 = 40.0;
 const SOURCE_H: f32 = 80.0;
 const WORKSPACE_PANEL: [f32; 4] = [0.0196, 0.0196, 0.0235, 1.0];
