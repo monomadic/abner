@@ -3,6 +3,63 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-05 — cut mode's scrub panel rebuilt to the board's variation A
+
+The Cut board changed after it was first built: the transport row and the six
+labelled lanes gave way to one scrub panel, "clips on tracks" (variation A of the new
+board 1b). Rebuilt to it; the model, the export, the header and the inspector stand.
+
+- **Toolbar** (50px): play, timecode, then icon buttons — set in (blue), set out
+  (red), split, cut selection, snap to keyframes — a snap lamp and a zoom slider
+  (log scale between "whole clip" and 600 px/s; − / + step it). The buttons carry no
+  words, so the hovered one names itself and its key.
+- **Rows** (222px, 56px icon gutter): a time ruler, numbered chapter flags, video and
+  audio as one rounded CLIP per kept piece with a grip at each end, a dashed ghost
+  per cut, subtitle cues as thin bars, keyframe ticks (the two the selection snapped
+  to stand tall). Short windows drop the chapter and audio rows. The overview lane,
+  the legend and the long-GOP bracket are gone with the old board.
+- **Grips work**: dragging a clip's edge resizes the cut beside it, slides a split, or
+  trims a new cut in from the clip's own start/end — nearest keyframe, one undo step
+  per drag, never across a neighbour (`Cut::move_edge`). The canvas follows the edge.
+- **Razor**: over the clips the pointer shows where `S` will split (snapped), and `S`
+  splits there; elsewhere it still splits at the playhead.
+- In/out are a blue and a red bar with a tab; the playhead is white with a pin and a
+  timecode chip. The pin's point is `Item::TriangleDown` (shader mode 9, `p1 = 2`).
+- Icons are built from rects and triangles (`draw_icon`) — the renderer has no paths.
+  Chapter titles and cue text, which the board no longer prints, show on hover.
+
+## 2026-10-03 — cut mode (the Timeline Edit design's "Cut" board)
+
+`T` (or the new CUT tab, or `--cut [in,out[,in,out…]]`) puts the focused clip on a
+timeline: the Claude Design canvas "Abner Timeline Edit", board 1. Same shell as
+Compare with the source rail traded for a 300px inspector on the right (Selection,
+Segments, Result) and a lanes panel under the transport (rebuilt 2026-10-05, above).
+
+`src/cut.rs` is the model: removed ranges over SOURCE time (nothing shifts), splits,
+an undo stack, and the snap. `I`/`O` set in/out; with the default keyframe snap the
+in point moves BACK and the out point FORWARD to keyframes, so every kept range starts
+on one and `E` exports `<name>.cut.<ext>` as a stream copy (concat demuxer,
+`inpoint`/`outpoint`). `K` switches to frame snap, which re-encodes (select filters,
+H.264 CRF 16 + AAC) and says so in the header. `X` cuts the selection (or restores
+it when it names an existing cut — click a segment row to select one), `S` splits,
+⌘Z undoes, ← → step a frame, ⇧← ⇧→ a keyframe. Playback jumps over cuts.
+
+Keyframes and chapters come from `ffprobe` (packet flags — nothing decoded), the
+waveform from a streaming `ffmpeg` decode to 20 peaks/s, subtitles from the first
+text stream as SRT; each on its own worker, drained in `tick`.
+
+Departures from the board, on purpose: the warning reads "snapping also cuts N s you
+meant to keep" (the board's "keeps … you meant to cut" has it backwards for an out
+point that snaps forward); the Keyframes/Subtitles/Chapters tabs are not built, so
+they are not drawn; the video lane has no thumbnails and there is no scene detection
+(so no "detected scene" marker); cut rows are dimmed and tagged, not struck through
+(the renderer has no strike-through and text is never measured app-side). The design's
+translucent whites are baked to opaque colours over their known ground (`mix`) —
+blending here is linear.
+
+Also fixed: `launch_frame`'s logo-only `FrameDesc` was missing `thumbs` (the tree did
+not compile at 9bb5b61).
+
 ## 2026-09-30 — recent files on the launch window
 
 The Splash floor carries the last four clips opened, as the Design canvas "abner —

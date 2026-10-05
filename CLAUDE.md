@@ -150,6 +150,25 @@ from one to the other, keeping its number.
   on entry and on seeks, and entering mask mode re-seeks to re-deliver the frame already
   handed back to the decoder). `--mask a.mp4 b.mp4` reaches this state for targeted
   captures without global keys, and `--crop [x,y,w,h]` reaches the marquee the same way.
+- `src/cut.rs` — cut mode's model (`T`, the CUT tab, `--cut [in,out…]`): ONE clip on a
+  timeline, the "Cut" board of the Claude Design canvas "Abner Timeline Edit". Cuts
+  are ranges removed in SOURCE time (nothing ripples), so the lanes, the player and the
+  export read the same numbers. Keyframe snap is the default and the whole point: in
+  snaps back, out snaps forward, every kept range starts on a keyframe, and the export
+  is a stream copy through the concat demuxer; frame snap (`K`) re-encodes and the
+  header says so. Keyframes/chapters (`ffprobe` packet flags), the waveform (streamed
+  `ffmpeg`, 20 peaks/s) and subtitles each load on a worker and are drained by
+  `Cut::poll` in `tick`. `App` keeps the model across leaving the mode and drops it
+  when the clip list changes. The UI is the second `impl App` block in `app.rs`
+  (`cut_lanes` is the one geometry for drawing AND hit testing; `Workspace` grows
+  `timeline`/`side`, and its `transport` is the 50px scrub toolbar). The panel is the
+  board's variation A, "clips on tracks": one clip per kept piece with working grips
+  (`Cut::move_edge` — nearest keyframe, one undo per drag), a dashed ghost per cut, a
+  razor line under the pointer that is where `S` splits, icon-only tools that name
+  themselves on hover. Icons are rects and triangles (`draw_icon`): there is no path
+  primitive, and `Item::TriangleDown` exists for the playhead's pin. The design's translucent tokens are baked opaque with `mix()`
+  over their known ground — linear blending makes the raw alphas read far too bright.
+  Not built yet: clip thumbnails, scene detection, the other three boards.
 - `src/render.rs` — one wgpu pipeline for everything (rects, video quads, compare
   modes, glyphs, the logo), instanced quads in logical px. Per-video textures carry a blit-filled
   mip chain (4K fit-to-window without shimmer). Bind groups are cached per (A,B) texture

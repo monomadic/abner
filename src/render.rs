@@ -360,6 +360,8 @@ pub enum Item {
     /// drawn as geometry, so they centre on their shape — a font's ▶ sits
     /// wherever its metrics put it, which is never the middle of a disc.
     Triangle { r: RectPx, color: [f32; 4], left: bool, radius: f32 },
+    /// The same triangle pointing down: flat edge along the top of `r`.
+    TriangleDown { r: RectPx, color: [f32; 4], radius: f32 },
 }
 
 /// Everything the renderer needs for one frame.
@@ -1182,6 +1184,16 @@ impl Gpu {
                     mode: 9.0,
                     p0: *radius,
                     p1: if *left { 1.0 } else { 0.0 },
+                    pad: 0.0,
+                }),
+                Item::TriangleDown { r, color, radius } => push(&mut data, &mut batches, clip, None, Instance {
+                    pos: [r.x, r.y],
+                    size: [r.w, r.h],
+                    uv: [0.0; 4],
+                    color: *color,
+                    mode: 9.0,
+                    p0: *radius,
+                    p1: 2.0,
                     pad: 0.0,
                 }),
                 Item::Logo { r, alpha } => push(&mut data, &mut batches, clip, None, Instance {

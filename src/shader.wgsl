@@ -224,9 +224,11 @@ fn fs_main(in: Out) -> @location(0) vec4<f32> {
             // Inset by the radius, then grow back by it: rounded corners
             // without changing the triangle's footprint.
             let r = in.p0;
-            let w = in.size.x; let h = in.size.y;
+            var w = in.size.x; var h = in.size.y;
             var p = in.local;
-            if in.p1 > 0.5 { p.x = w - p.x; }
+            // p1: 0 points right, 1 left, 2 down (the axes swap).
+            if in.p1 > 1.5 { p = p.yx; w = in.size.y; h = in.size.x; }
+            else if in.p1 > 0.5 { p.x = w - p.x; }
             let d = sd_triangle(p, vec2<f32>(r, r * 1.7), vec2<f32>(w - r * 1.2, h * 0.5),
                                 vec2<f32>(r, h - r * 1.7)) - r;
             let c = ui_color(in.color);

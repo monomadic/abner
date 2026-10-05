@@ -120,6 +120,27 @@ For a direct visual check without keyboard automation:
 `abner --mask a.mp4 b.mp4`. The ordinary `--view` selection is restored when leaving
 mask mode.
 
+## Cutting
+
+`T` (or the CUT tab, or `--cut`) opens the focused clip on a timeline: a ruler,
+chapters, the picture and sound as clips, subtitles and keyframes on one time axis.
+
+| Key | |
+|---|---|
+| `I` / `O` | set in / out at the playhead |
+| `X` | cut the selection (or restore it, when it is an existing cut) |
+| `S` | split at the playhead — or under the pointer, where the razor line shows |
+| `K` | snap to keyframes (default) or to frames |
+| `⌘Z` | undo |
+| `←` `→` / `⇧←` `⇧→` | step a frame / a keyframe |
+| `E` | export `<name>.cut.<ext>` beside the source |
+| `Esc` | clear the selection, then leave |
+
+With keyframe snap the in point moves back and the out point forward to keyframes,
+so the export is a lossless stream copy; the inspector says what the snap costs.
+Frame snap is exact and re-encodes (H.264 CRF 16). Playback skips what is cut.
+Drag a clip's edge to trim it. Scroll pans the timeline; pinch or the slider zooms it.
+
 ## The workspace
 
 Compare, Mask and Crop sit beside the window controls. The source rail uses colored

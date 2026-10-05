@@ -9,6 +9,7 @@
 
 mod app;
 mod config;
+mod cut;
 mod mask;
 mod open;
 mod player;
@@ -37,7 +38,7 @@ use text::TextCtx;
 const USAGE: &str = "\
 abner — video comparison and editing workspace
 
-usage: abner [--config <file.toml>] [--no-video-splash] [--mask] [--crop [x,y,w,h]] [--view <overlay|sbs|delta|split|checker|blend>] [<video-a> [<video-b> [more...]]]
+usage: abner [--config <file.toml>] [--no-video-splash] [--mask] [--crop [x,y,w,h]] [--cut [in,out]] [--view <overlay|sbs|delta|split|checker|blend>] [<video-a> [<video-b> [more...]]]
 
 Run with no arguments (or launched from the .app bundle) to open the
 launch window, then drag clips onto it: one drop fills slot 1 and plays
@@ -69,6 +70,13 @@ keys:
   S            save the mask as <name>.mask.png — with a crop up, both it
                and the video under it (<name>.crop.png), cut to the marquee
   E            export the cropped clip as ProRes 422 Proxy
+  T            cut mode: the focused clip on a timeline (--cut opens there;
+               --cut in,out sets the selection, in seconds)
+               I / O set in / out (snapped to keyframes; K toggles frame snap)
+               X cut the selection, S split (under the pointer when it is
+               over the clips), drag a clip's edge to trim, Cmd-Z undo, ← → frame,
+               Shift-← → keyframe, E export <name>.cut.<ext> (stream copy
+               when snapped to keyframes, re-encoded otherwise)
   Z            reset zoom
   F            fullscreen (borderless, same Space)
   Tab          toggle workspace controls
@@ -88,6 +96,7 @@ fn main() -> anyhow::Result<()> {
     let mut mode: Option<app::Mode> = None;
     let mut config_path: Option<PathBuf> = None;
     let mut mask_mode = false;
+    let mut cut: Option<Vec<f64>> = None;
     let mut crop: Option<Option<[f32; 4]>> = None;
     let mut paths: Vec<PathBuf> = Vec::new();
     let mut it = args.iter();
@@ -117,6 +126,12 @@ fn main() -> anyhow::Result<()> {
             // Any arguments already disable the splash, including this flag alone.
         } else if a == "--mask" {
             mask_mode = true;
+        } else if a == "--cut" {
+            // The timeline, optionally with ranges in seconds: every
+            // in,out pair but the last is cut, the last is the selection.
+            cut = Some(it.clone().next().and_then(|v| parse_times(v)).inspect(|_| {
+                it.next();
+            }).unwrap_or_default());
         } else if a == "--crop" {
             // The marquee, optionally at an explicit image-pixel rect.
             // Bare `--crop` starts on the whole frame, as C does.
@@ -199,6 +214,7 @@ fn main() -> anyhow::Result<()> {
         occluded: false,
     };
     if mask_mode { runner.app.key(Key::Char('m')); }
+    if let Some(ranges) = cut { runner.app.start_cut(ranges); }
     if let Some(rect) = crop { runner.app.start_crop(rect); }
     event_loop.run_app(&mut runner)?;
     Ok(())
@@ -208,6 +224,12 @@ fn main() -> anyhow::Result<()> {
 /// ffprobe under a hard deadline (`probe::run_deadlined`), which is what
 /// makes it safe to call straight from the event loop on a drop: a file
 /// on a dead mount fails in bounded time instead of hanging the window.
+/// `in,out[,in,out…]` in seconds, for `--cut`.
+fn parse_times(s: &str) -> Option<Vec<f64>> {
+    let v: Vec<f64> = s.split(',').map(|p| p.trim().parse().ok()).collect::<Option<_>>()?;
+    (v.len() >= 2 && v.len() % 2 == 0 && v.iter().all(|t| t.is_finite() && *t >= 0.0)).then_some(v)
+}
+
 /// `x,y,w,h` in image pixels, for `--crop`.
 fn parse_rect(s: &str) -> Option<[f32; 4]> {
     let mut it = s.split(',').map(|v| v.trim().parse::<f32>());
@@ -607,6 +629,15 @@ impl ApplicationHandler for Runner {
                     {
                         s.chars().next().map(Key::CmdDigit)
                     }
+                    // ⌘Z: cut mode's undo.
+                    WinitKey::Character(s)
+                        if self.mods.super_key() && s.eq_ignore_ascii_case("z") =>
+                    {
+                        Some(Key::Undo)
+                    }
+                    // ⇧ + arrow: cut mode's keyframe step (a plain arrow elsewhere).
+                    WinitKey::Named(NamedKey::ArrowLeft) if self.mods.shift_key() => Some(Key::KeyLeft),
+                    WinitKey::Named(NamedKey::ArrowRight) if self.mods.shift_key() => Some(Key::KeyRight),
                     WinitKey::Named(NamedKey::ArrowLeft) => Some(Key::Left),
                     WinitKey::Named(NamedKey::ArrowRight) => Some(Key::Right),
                     WinitKey::Named(NamedKey::Enter) => Some(Key::Enter),
