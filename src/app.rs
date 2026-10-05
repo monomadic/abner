@@ -2409,9 +2409,29 @@ impl App {
             self.playing = !self.playing;
             return;
         }
+        // The skip buttons move the playhead; they pause, as the arrow keys do.
+        if let CutAction::Step(dir) = action {
+            self.step(dir);
+            return;
+        }
+        if let CutAction::Keyframe(_) | CutAction::Chapter(_) = action {
+            let Some(cut) = self.cut.as_ref() else { return };
+            let to = match action {
+                CutAction::Keyframe(dir) => Some(cut.key_step(t, dir)),
+                CutAction::Chapter(dir) => cut.chapter_step(t, dir),
+                _ => None,
+            };
+            if let Some(to) = to {
+                let end = if self.wrap.is_finite() { (self.wrap - 0.05).max(0.0) } else { f64::MAX };
+                self.playing = false;
+                self.seek_all(to.min(end), true);
+            }
+            return;
+        }
         let Some(cut) = self.cut.as_mut() else { return };
         cut.status.clear();
         match action {
+            CutAction::Step(_) | CutAction::Keyframe(_) | CutAction::Chapter(_) => {}
             CutAction::Play => {}
             CutAction::Zoom(zoom_in) => {
                 let px = ((t - cut.t0) * cut.pps) as f32;
@@ -2469,7 +2489,21 @@ impl App {
             push(RectPx { x: w - 16.0 - 64.0 - 8.0 - 88.0, y: 6.0, w: 88.0, h: 26.0 }, "Undo", false, CutAction::Undo, "⌘Z");
         }
         let cy = bar.y + bar.h / 2.0;
-        push(RectPx { x: bar.x + 20.0, y: cy - 15.0, w: 30.0, h: 30.0 }, if self.playing { "Pause" } else { "Play" }, false, CutAction::Play, "space");
+        // Either side of play, outward to in: a chapter, a keyframe, a frame.
+        let x0 = bar.x + 16.0;
+        for (i, (label, action, hint)) in [
+            ("Previous chapter", CutAction::Chapter(-1), ""), ("Previous keyframe", CutAction::Keyframe(-1), "⇧←"),
+            ("Back one frame", CutAction::Step(-1), "←"),
+        ].into_iter().enumerate() {
+            push(RectPx { x: x0 + i as f32 * 32.0, y: cy - 14.0, w: 28.0, h: 28.0 }, label, false, action, hint);
+        }
+        push(RectPx { x: x0 + 100.0, y: cy - 15.0, w: 30.0, h: 30.0 }, if self.playing { "Pause" } else { "Play" }, false, CutAction::Play, "space");
+        for (i, (label, action, hint)) in [
+            ("Forward one frame", CutAction::Step(1), "→"), ("Next keyframe", CutAction::Keyframe(1), "⇧→"),
+            ("Next chapter", CutAction::Chapter(1), ""),
+        ].into_iter().enumerate() {
+            push(RectPx { x: x0 + 138.0 + i as f32 * 32.0, y: cy - 14.0, w: 28.0, h: 28.0 }, label, false, action, hint);
+        }
         let mut x = self.cut_tools_x();
         let keyframe = cut.snap == Snap::Keyframe;
         for (label, action, hint) in [
@@ -2489,7 +2523,12 @@ impl App {
     /// Where the toolbar's icon buttons start: after the play disc, the
     /// timecode and the separator.
     fn cut_tools_x(&self) -> f32 {
-        self.workspace().transport.x + 64.0 + 11.0 * 20.0 * MONO_ADV + 33.0
+        self.cut_clock_x() + 11.0 * 20.0 * MONO_ADV + 33.0
+    }
+
+    /// The timecode's left edge: past the skip buttons and the play disc.
+    fn cut_clock_x(&self) -> f32 {
+        self.workspace().transport.x + 16.0 + 246.0
     }
 
     /// The zoom slider's track, at the toolbar's right.
@@ -2733,7 +2772,7 @@ impl App {
         let cy = bar.y + bar.h / 2.0;
         let tc = fmt_tc(self.t, self.fps);
         let (clock, frames) = tc.split_at(8);
-        let x = bar.x + 64.0;
+        let x = self.cut_clock_x();
         items.push(Item::Text(TextItem { valign: VAlign::Middle, ..TextItem::new(x, cy, 20.0, hex_color(CUT_INK), clock) }));
         items.push(Item::Text(TextItem { valign: VAlign::Middle,
             ..TextItem::new(x + 8.0 * 20.0 * MONO_ADV, cy, 20.0, mix(CUT_BG, 0xffffff, 0.3), frames) }));
@@ -2826,6 +2865,9 @@ impl App {
                     items.push(Item::Rect(RectItem { radius: 8.0, ..RectItem::new(r, fill) }));
                 }
                 let (icon, color) = match action {
+                    CutAction::Step(d) => (if d < 0 { Icon::StepBack } else { Icon::StepFwd }, soft),
+                    CutAction::Keyframe(d) => (if d < 0 { Icon::KeyBack } else { Icon::KeyFwd }, soft),
+                    CutAction::Chapter(d) => (if d < 0 { Icon::ChapBack } else { Icon::ChapFwd }, soft),
                     CutAction::In => (Icon::In, hex_color(CUT_IN)),
                     CutAction::Out => (Icon::Out, hex_color(CUT_OUT)),
                     CutAction::Split => (Icon::Split, soft),
@@ -3215,7 +3257,7 @@ impl App {
 /// The scrub panel's pictograms. The renderer draws rects and triangles,
 /// not paths, so each is built from those on a 16px box about its centre.
 #[derive(Clone, Copy)]
-enum Icon { In, Out, Split, Trash, Magnet, Flag, Film, Speaker, Caption, Ticks, List, Grid }
+enum Icon { In, Out, Split, Trash, Magnet, Flag, Film, Speaker, Caption, Ticks, List, Grid, StepBack, StepFwd, KeyBack, KeyFwd, ChapBack, ChapFwd }
 
 fn draw_icon(items: &mut Vec<Item>, icon: Icon, cx: f32, cy: f32, color: [f32; 4]) {
     let bar = |items: &mut Vec<Item>, x: f32, y: f32, w: f32, h: f32| {
@@ -3290,6 +3332,27 @@ fn draw_icon(items: &mut Vec<Item>, icon: Icon, cx: f32, cy: f32, color: [f32; 4
             for (i, h) in [6.0, 11.0, 6.0, 11.0, 6.0].into_iter().enumerate() {
                 bar(items, -8.0 + i as f32 * 3.6, -h / 2.0, 1.5, h);
             }
+        }
+        // A frame: one point against a bar. A keyframe: two points. A chapter: a flag.
+        Icon::StepBack | Icon::StepFwd => {
+            let m = if matches!(icon, Icon::StepBack) { -1.0 } else { 1.0 };
+            let at = |x: f32, w: f32| if m > 0.0 { x } else { -x - w };
+            bar(items, at(4.5, 1.5), -5.5, 1.5, 11.0);
+            items.push(Item::Triangle { r: RectPx { x: cx + at(-4.5, 8.0), y: cy - 5.5, w: 8.0, h: 11.0 }, color, left: m < 0.0, radius: 0.5 });
+        }
+        Icon::KeyBack | Icon::KeyFwd => {
+            let m = if matches!(icon, Icon::KeyBack) { -1.0 } else { 1.0 };
+            let at = |x: f32, w: f32| if m > 0.0 { x } else { -x - w };
+            for x in [-7.5, -0.5] {
+                items.push(Item::Triangle { r: RectPx { x: cx + at(x, 7.0), y: cy - 5.5, w: 7.0, h: 11.0 }, color, left: m < 0.0, radius: 0.5 });
+            }
+        }
+        Icon::ChapBack | Icon::ChapFwd => {
+            let m = if matches!(icon, Icon::ChapBack) { -1.0 } else { 1.0 };
+            // A flag on the far side; a point leading toward it.
+            draw_icon(items, Icon::Flag, cx + 3.5 * m, cy, color);
+            let x = if m < 0.0 { cx - 9.5 } else { cx - 6.5 + 1.0 };
+            items.push(Item::Triangle { r: RectPx { x, y: cy - 4.0, w: 5.0, h: 8.0 }, color, left: m < 0.0, radius: 0.5 });
         }
         Icon::List => {
             for y in [-5.5, -0.75, 4.0] { bar(items, -7.0, y, 14.0, 1.5); }
@@ -3422,7 +3485,7 @@ impl Workspace {
 #[derive(Clone, Copy)]
 enum Action { Tool(usize), View(Mode), Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
 #[derive(Clone, Copy, PartialEq)]
-enum CutAction { In, Out, Split, Apply, Undo, Export, Snap(Snap), Play, Zoom(bool) }
+enum CutAction { In, Out, Split, Apply, Undo, Export, Snap(Snap), Play, Zoom(bool), Step(i32), Keyframe(i32), Chapter(i32) }
 /// `hint` is the key cap a cut-mode button carries ("" for none).
 struct Control { r: RectPx, label: String, selected: bool, action: Action, hint: &'static str }
 impl Control {
@@ -3948,6 +4011,24 @@ mod tests {
         app.mouse_down(r.x + 20.0, r.y + 10.0);
         app.mouse_up();
         assert!((app.t - 1.5).abs() < 0.1, "chapter two starts at 1.5 s, t = {}", app.t);
+
+        // The skip buttons either side of play: chapters, keyframes, frames.
+        let press = |app: &mut App, want: CutAction| {
+            let r = app.controls().into_iter().find(|c| matches!(c.action, Action::Cut(a) if a == want)).expect("button").r;
+            app.mouse_down(r.x + r.w / 2.0, r.y + r.h / 2.0);
+            app.mouse_up();
+        };
+        app.seek_all(0.2, true);
+        press(&mut app, CutAction::Chapter(1));
+        assert!((app.t - 1.5).abs() < 0.05, "next chapter, t = {}", app.t);
+        app.seek_all(1.6, true);
+        press(&mut app, CutAction::Chapter(-1));
+        assert!(app.t < 0.05, "just inside chapter two, back goes to chapter one, t = {}", app.t);
+        press(&mut app, CutAction::Keyframe(1));
+        assert!((app.t - 1.0).abs() < 0.05, "next keyframe, t = {}", app.t);
+        press(&mut app, CutAction::Keyframe(-1));
+        assert!(app.t < 0.05, "previous keyframe, t = {}", app.t);
+        assert!(!app.playing);
 
         // The toggle swaps the list for thumbnail cards (two columns).
         let side = app.cut_side();
