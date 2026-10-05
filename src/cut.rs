@@ -170,7 +170,7 @@ impl Cut {
         let p = path.to_path_buf();
         let cancel = cut.cancel.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(read_wave(&p, &cancel));
+            read_wave(&p, &cancel, &tx);
         });
         cut.wave_rx = Some(rx);
         cut
@@ -213,8 +213,17 @@ impl Cut {
         if let Some(Some(cues)) = take(&mut self.cue_rx) {
             self.cues = cues;
         }
-        if let Some(Some(wave)) = take(&mut self.wave_rx) {
-            self.wave = wave;
+        // The waveform arrives in batches, so it fills in left to right while
+        // a long file's audio is still being decoded. The lane says "reading"
+        // only until the worker ends.
+        if let Some(rx) = &self.wave_rx {
+            loop {
+                match rx.try_recv() {
+                    Ok(mut batch) => self.wave.append(&mut batch),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => { self.wave_rx = None; break; }
+                }
+            }
         }
         match take(&mut self.export) {
             Some(Some(Ok(done))) => self.status = format!("Exported {done}"),
@@ -823,7 +832,7 @@ fn parse_srt(text: &str) -> Vec<Cue> {
 
 /// The first audio stream as one peak per `1 / WAVE_HZ` s. Decodes the
 /// whole track (mono, 4 kHz), streaming: memory is the peaks alone.
-fn read_wave(path: &Path, cancel: &AtomicBool) -> Vec<u8> {
+fn read_wave(path: &Path, cancel: &AtomicBool, tx: &std::sync::mpsc::Sender<Vec<u8>>) {
     let child = Command::new("ffmpeg")
         .args(["-nostdin", "-v", "error", "-i"])
         .arg(path)
@@ -832,10 +841,10 @@ fn read_wave(path: &Path, cancel: &AtomicBool) -> Vec<u8> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn();
-    let Ok(mut child) = child else { return Vec::new() };
-    let Some(mut pipe) = child.stdout.take() else { return Vec::new() };
+    let Ok(mut child) = child else { return };
+    let Some(mut pipe) = child.stdout.take() else { return };
     let bucket = WAVE_RATE / WAVE_HZ as usize;
-    let mut peaks = Vec::new();
+    let mut peaks: Vec<u8> = Vec::new();
     let (mut peak, mut count) = (0u16, 0usize);
     let mut buf = [0u8; 1 << 15];
     let mut odd: Option<u8> = None;
@@ -848,6 +857,11 @@ fn read_wave(path: &Path, cancel: &AtomicBool) -> Vec<u8> {
             Ok(0) | Err(_) => break,
             Ok(n) => n,
         };
+        // Ship what has been read so far, ten seconds of peaks at a time.
+        if peaks.len() >= (WAVE_HZ as usize) * 10 && tx.send(std::mem::take(&mut peaks)).is_err() {
+            let _ = child.kill();
+            break;
+        }
         let mut bytes = buf[..n].iter().copied();
         loop {
             let lo = match odd.take() {
@@ -864,7 +878,9 @@ fn read_wave(path: &Path, cancel: &AtomicBool) -> Vec<u8> {
         }
     }
     let _ = child.wait();
-    peaks
+    if !peaks.is_empty() {
+        let _ = tx.send(peaks);
+    }
 }
 
 /// Write `keeps` (source-time ranges) of `source` to `dest`, through a
@@ -1095,7 +1111,10 @@ mod tests {
         assert_eq!(found.keys.len(), 6, "{:?}", found.keys);
         let mut cut = Cut::new(&clip, 6.0);
         cut.set_keys(found.keys);
-        let wave = read_wave(&clip, &AtomicBool::new(false));
+        let (tx, rx) = channel();
+        read_wave(&clip, &AtomicBool::new(false), &tx);
+        drop(tx);
+        let wave: Vec<u8> = rx.iter().flatten().collect();
         assert!((wave.len() as f64 - 6.0 * WAVE_HZ).abs() <= 4.0, "{} peaks", wave.len());
         assert!(wave.iter().any(|p| *p > 8), "a sine is not silence");
         cut.set_in(2.4);

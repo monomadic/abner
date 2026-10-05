@@ -1416,7 +1416,9 @@ impl App {
         if self.ready() && self.cut_mode && self.show_ui && contains(self.workspace().timeline, self.cursor.0, self.cursor.1) {
             let lane = self.cut_lanes().video;
             let anchor = (self.cursor.0 - lane.x).clamp(0.0, lane.w);
-            if let Some(cut) = &mut self.cut { cut.zoom(1.0 + delta as f64, anchor, lane.w); }
+            // Exponential, a touch quicker than the video's: spreading two fingers
+            // over the track dives in about the pointer, pinching closes back out.
+            if let Some(cut) = &mut self.cut { cut.zoom((delta as f64 * 1.8).exp(), anchor, lane.w); }
             return;
         }
         if !self.ready() || !contains(self.workspace().canvas, self.cursor.0, self.cursor.1) { return; }
@@ -3136,13 +3138,27 @@ impl App {
                     items.push(Item::Rect(RectItem { radius: 7.0, border_w: 1.0, border_color: mix(CUT_TL, 0x1580de, 0.6),
                         ..RectItem::new(r, hex_color(if i % 2 == 1 { CUT_SOUND_ALT } else { CUT_SOUND })) }));
                 } else {
+                    // The film ground: the board's 135° stripes (#2a2d30 / #202326, 14px).
+                    items.push(Item::Hatch { r, a: hex_color(0x2a2d30), b: hex_color(0x202326), radius: 7.0, period: 14.0 });
                     items.push(Item::Rect(RectItem { radius: 7.0, border_w: 1.0, border_color: mix(CUT_TL, 0xffffff, 0.2),
-                        ..RectItem::new(r, hex_color(CUT_FILM)) }));
-                    // Frame dividers, as on a strip of film (no thumbnails yet).
-                    let mut x = r.x.max(v.x - 114.0) + 113.0 - (r.x.max(v.x - 114.0) - r.x) % 114.0;
-                    while x < r.x + r.w - 8.0 && x < v.x + v.w {
-                        line(items, x, r.y + 1.0, r.h - 2.0, 2.0, mix(CUT_FILM, 0x000000, 0.55));
-                        x += 114.0;
+                        ..RectItem::new(r, [0.0; 4]) }));
+                    // Keyframes: a hairline through the picture, a short bright
+                    // foot at the bottom edge, and the two the selection snapped
+                    // to drawn tall. Thinned when closer than 6px — never smeared.
+                    let snapped = [cut.in_snapped(), cut.out_snapped()];
+                    let mut last = f32::MIN;
+                    for key in cut.keys_in(g.start, g.end) {
+                        let x = x_of(*key);
+                        if x < r.x + 3.0 || x > r.x + r.w - 3.0 || x < v.x || x > v.x + v.w { continue; }
+                        let tall = cut.snap == Snap::Keyframe && snapped.iter().flatten().any(|t| (t - key).abs() < 1e-3);
+                        if x - last < 6.0 && !tall { continue; }
+                        last = x;
+                        if tall {
+                            line(items, x - 0.5, r.y + 1.0, r.h - 2.0, 1.5, mix(CUT_FILM, CUT_HEAD, 0.85));
+                        } else {
+                            line(items, x, r.y + 1.0, r.h - 2.0, 1.0, mix(CUT_FILM, 0xffffff, 0.12));
+                            line(items, x, r.y + r.h - 7.0, 6.0, 1.0, mix(CUT_FILM, 0xffffff, 0.5));
+                        }
                     }
                 }
                 if audio && !cut.wave.is_empty() {

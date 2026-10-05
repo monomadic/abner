@@ -129,6 +129,7 @@ fn ui_color(c: vec4<f32>) -> vec4<f32> {
 // 12 the wordmark's silhouette as a soft shadow (p0 = mip level)
 // 13 launch overlays: p0 0 radial vignette in color, 1 scanlines in color
 // 14 recent-file thumbnail (tex_t * color.a), clipped to a p0-radius rounded box
+// 15 diagonal hatch in a p0-radius rounded box: color / uv slot alternate every p1/2 px along 135°
 
 @fragment
 fn fs_main(in: Out) -> @location(0) vec4<f32> {
@@ -361,6 +362,18 @@ fn fs_main(in: Out) -> @location(0) vec4<f32> {
             }
             let lit = fract(in.local.y / 3.0) < 1.0 / 3.0;
             return vec4<f32>(c.rgb, select(0.0, c.a, lit));
+        }
+        case 15u: {
+            let half = in.size * 0.5;
+            let r = clamp(in.p0, 0.0, min(half.x, half.y));
+            let d = sd_round_box(in.local - half, half, r);
+            // Distance along the 135° gradient line, then which half-period.
+            let t = (in.local.x + in.local.y) * 0.70710678;
+            let ph = fract(t / max(in.p1, 1.0));
+            let w = fwidth(t) / max(in.p1, 1.0);
+            let k = smoothstep(0.5 - w, 0.5 + w, ph) * (1.0 - smoothstep(1.0 - w, 1.0 + w, ph));
+            let col = ui_color(mix(in.color, in.border, k));
+            return vec4<f32>(col.rgb, col.a * cov(d));
         }
         case 14u: {
             // Already decoded by the sample (sRGB texture). The rounded

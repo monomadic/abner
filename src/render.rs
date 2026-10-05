@@ -362,6 +362,10 @@ pub enum Item {
     Triangle { r: RectPx, color: [f32; 4], left: bool, radius: f32 },
     /// The same triangle pointing down: flat edge along the top of `r`.
     TriangleDown { r: RectPx, color: [f32; 4], radius: f32 },
+    /// A rounded rect filled with 135° diagonal stripes, `period` px of A
+    /// then B per cycle (CSS `repeating-linear-gradient(135deg, A 0 p/2,
+    /// B p/2 p)`): the film ground of a picture clip.
+    Hatch { r: RectPx, a: [f32; 4], b: [f32; 4], radius: f32, period: f32 },
 }
 
 /// Everything the renderer needs for one frame.
@@ -1184,6 +1188,16 @@ impl Gpu {
                     mode: 9.0,
                     p0: *radius,
                     p1: if *left { 1.0 } else { 0.0 },
+                    pad: 0.0,
+                }),
+                Item::Hatch { r, a, b, radius, period } => push(&mut data, &mut batches, clip, None, Instance {
+                    pos: [r.x, r.y],
+                    size: [r.w, r.h],
+                    uv: *b,
+                    color: *a,
+                    mode: 15.0,
+                    p0: *radius,
+                    p1: *period,
                     pad: 0.0,
                 }),
                 Item::TriangleDown { r, color, radius } => push(&mut data, &mut batches, clip, None, Instance {
