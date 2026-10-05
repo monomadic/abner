@@ -165,6 +165,8 @@ pub struct App {
     /// The inspector's tab (0 chapters, 1 streams) and its chapter view.
     cut_tab: usize,
     cut_thumbs: bool,
+    /// The picture clip last clicked, by its (start, end): drawn outlined.
+    cut_pick: Option<(f64, f64)>,
     /// What a press on the timeline took hold of.
     cut_drag: Option<CutDrag>,
     /// The clock at the last tick, so the view pages after the playhead
@@ -392,6 +394,7 @@ impl App {
             cut_drag: None,
             cut_tab: 0,
             cut_thumbs: false,
+            cut_pick: None,
             cut_last_t: f64::NAN,
             cut_boot: Vec::new(),
             videos,
@@ -2392,6 +2395,7 @@ impl App {
                 return true;
             }
             Key::Escape => {
+                if self.cut_pick.take().is_some() { return true; }
                 let cut = self.cut.as_mut().unwrap();
                 if cut.in_req.is_some() || cut.out_req.is_some() {
                     cut.clear_selection();
@@ -2596,6 +2600,11 @@ impl App {
                 if let Some(cut) = &mut self.cut { cut.begin_trim(); }
                 self.playing = false;
                 self.cut_drag = Some(CutDrag::Edge(edge));
+            } else if let Some(seg) = self.cut_clip_at(x, y) {
+                // A picture clip: pick it (outlined), and still take the playhead there.
+                self.cut_pick = Some((seg.start, seg.end));
+                self.cut_drag = Some(CutDrag::Scrub);
+                self.cut_drag_to(x);
             } else if let Some(seg) = self.cut_ghost_at(x, y) {
                 // A removed clip is a selection: X restores it.
                 let cut = self.cut.as_mut().unwrap();
@@ -2603,6 +2612,8 @@ impl App {
                 cut.out_req = Some(seg.end);
                 cut.status.clear();
             } else if x >= self.cut_lanes().video.x - 4.0 {
+                // Anywhere else on the timeline lets go of the pick.
+                self.cut_pick = None;
                 self.cut_drag = Some(CutDrag::Scrub);
                 self.cut_drag_to(x);
             }
@@ -2634,6 +2645,14 @@ impl App {
             return true;
         }
         false
+    }
+
+    /// The kept picture clip under the pointer.
+    fn cut_clip_at(&self, x: f32, y: f32) -> Option<crate::cut::Segment> {
+        let v = self.cut_lanes().video;
+        if y < v.y || y >= v.y + v.h || x < v.x || x >= v.x + v.w { return None; }
+        let at = self.cut_time_at(x);
+        self.cut.as_ref()?.segments().into_iter().find(|g| !g.cut && at >= g.start && at < g.end)
     }
 
     /// The removed clip under the pointer on the picture or sound row.
@@ -3164,6 +3183,11 @@ impl App {
                     items.push(Item::Hatch { r, a: hex_color(0x2a2d30), b: hex_color(0x202326), radius: 7.0, period: 14.0 });
                     items.push(Item::Rect(RectItem { radius: 7.0, border_w: 1.0, border_color: mix(CUT_TL, 0xffffff, 0.2),
                         ..RectItem::new(r, [0.0; 4]) }));
+                    // The picked clip: a 3px white outline, outside the rounded edge.
+                    if self.cut_pick.is_some_and(|(a, b)| (a - g.start).abs() < 1e-3 && (b - g.end).abs() < 1e-3) {
+                        let o = RectPx { x: r.x - 3.0, y: r.y - 3.0, w: r.w + 6.0, h: r.h + 6.0 };
+                        items.push(Item::Rect(RectItem { radius: 10.0, border_w: 3.0, border_color: hex_color(0xffffff), ..RectItem::new(o, [0.0; 4]) }));
+                    }
                     // Keyframes: a hairline through the picture, a short bright
                     // foot at the bottom edge, and the two the selection snapped
                     // to drawn tall. Thinned when closer than 6px — never smeared.
@@ -4105,6 +4129,21 @@ mod tests {
         app.mouse_up();
         assert_eq!(app.cut_tab, 0);
 
+        // A click on a picture clip picks it (the outline); elsewhere lets go; Esc clears.
+        let v = app.cut_lanes().video;
+        app.mouse_down(v.x + v.w * 0.1, v.y + 10.0);
+        app.mouse_up();
+        assert_eq!(app.cut_pick, Some((0.0, 4.0)));
+        let r = app.cut_lanes().ruler;
+        app.mouse_down(v.x + v.w * 0.1, r.y + 4.0);
+        app.mouse_up();
+        assert_eq!(app.cut_pick, None);
+        app.mouse_down(v.x + v.w * 0.1, v.y + 10.0);
+        app.mouse_up();
+        assert!(app.cut_pick.is_some());
+        app.key(Key::Escape);
+        assert!(app.cut_pick.is_none() && app.cut_mode, "Esc lets go of the pick before it leaves Cut mode");
+
         // A removed clip selects itself on a click, ready for X to restore it.
         app.seek_all(1.4, true);
         app.key(Key::Char('i'));
@@ -4196,6 +4235,9 @@ mod tests {
 
         // Leaving and coming back keeps the model; closing the clip drops it.
         app.key(Key::Char('x'));
+        // The click on the lanes picked a clip: the first Esc lets go of it.
+        app.key(Key::Escape);
+        assert!(app.cut_mode && app.cut_pick.is_none());
         app.key(Key::Escape);
         assert!(!app.cut_mode && app.cut.is_some());
         app.key(Key::Close);
