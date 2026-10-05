@@ -2604,7 +2604,8 @@ impl App {
     /// the clips (the razor line shows it), at the playhead otherwise.
     fn cut_razor(&self) -> Option<f64> {
         let (x, y) = self.cursor;
-        if !self.show_ui || !self.cursor_inside || self.cut_drag.is_some() { return None; }
+        // A picked clip is outlined, not hovered: no razor over it.
+        if !self.show_ui || !self.cursor_inside || self.cut_drag.is_some() || self.cut_pick.is_some() { return None; }
         let lanes = self.cut_lanes();
         let v = lanes.video;
         let bottom = lanes.audio.map_or(v.y + v.h, |a| a.y + a.h);
@@ -2941,15 +2942,17 @@ impl App {
                 if let Some(fill) = fill {
                     items.push(Item::Rect(RectItem { radius: 8.0, ..RectItem::new(r, fill) }));
                 }
+                // Every toolbar icon is plain white; only a dead one dims.
+                let white = hex_color(0xffffff);
                 let (icon, color) = match action {
-                    CutAction::Step(d) => (if d < 0 { Icon::StepBack } else { Icon::StepFwd }, soft),
-                    CutAction::Keyframe(d) => (if d < 0 { Icon::KeyBack } else { Icon::KeyFwd }, soft),
-                    CutAction::Chapter(d) => (if d < 0 { Icon::ChapBack } else { Icon::ChapFwd }, soft),
-                    CutAction::In => (Icon::In, hex_color(CUT_IN)),
-                    CutAction::Out => (Icon::Out, hex_color(CUT_OUT)),
-                    CutAction::Split => (Icon::Split, soft),
-                    CutAction::Apply => (Icon::Trash, hex_color(CUT_HOT)),
-                    _ => (Icon::Magnet, if control.selected { ACCENT } else { soft }),
+                    CutAction::Step(d) => (if d < 0 { Icon::StepBack } else { Icon::StepFwd }, white),
+                    CutAction::Keyframe(d) => (if d < 0 { Icon::KeyBack } else { Icon::KeyFwd }, white),
+                    CutAction::Chapter(d) => (if d < 0 { Icon::ChapBack } else { Icon::ChapFwd }, white),
+                    CutAction::In => (Icon::In, white),
+                    CutAction::Out => (Icon::Out, white),
+                    CutAction::Split => (Icon::Split, white),
+                    CutAction::Apply => (Icon::Trash, white),
+                    _ => (Icon::Magnet, white),
                 };
                 draw_icon(items, icon, cx, cy, if dead { mix(CUT_BG, 0xffffff, 0.25) } else { color });
             }
@@ -3544,7 +3547,6 @@ const CUT_WAVE: u32 = 0x5db0f5;
 /// In is blue, out is red; the cut button a lighter red.
 const CUT_IN: u32 = 0x4aa3ee;
 const CUT_OUT: u32 = 0xff6a72;
-const CUT_HOT: u32 = 0xff8a90;
 /// The playhead and the keyframes the selection snapped to.
 const CUT_HEAD: u32 = 0xf2f3f4;
 const CUT_INK: u32 = 0xededec;
