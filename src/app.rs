@@ -209,6 +209,8 @@ pub struct App {
     drag: Option<(f32, f32)>,
     /// Dragging the seek bar (pins the transport open).
     scrubbing: bool,
+    /// Playback was running when a timeline scrub took hold; it resumes on release.
+    scrub_resume: bool,
     vp: (f32, f32),
     fps: f64,
     /// Loop point: shortest stream duration (∞ when unknown).
@@ -357,6 +359,19 @@ impl RecentRow {
 /// seamless loop (`assets/banner/background-02-loop.mp4`), so the wrap is
 /// just an exact seek to 0. It only runs while there are no clips — a
 /// loaded clip drops it, so it never competes with the streams.
+/// The board's chapter flag, shared by the timeline and the inspector list: square
+/// on the left (where the pole is), a pill on the right — a D — with the number
+/// centred in it, black on amber when lit. Returns its width.
+fn chapter_flag(items: &mut Vec<Item>, x: f32, y: f32, h: f32, number: String, lit: bool) -> f32 {
+    let w = (number.chars().count() as f32 * 10.5 * MONO_ADV + 12.0).max(20.0).round();
+    let (bg, fg) = if lit { (hex_color(CUT_AMBER), hex_color(0x000000)) } else { (mix(CUT_TL, 0xffffff, 0.16), hex_color(CUT_INK)) };
+    let flag = RectPx { x, y, w, h };
+    items.push(Item::Rect(RectItem { radius: h / 2.0, ..RectItem::new(flag, bg) }));
+    items.push(Item::Rect(RectItem { radius: 3.0, ..RectItem::new(RectPx { w: 12.0, ..flag }, bg) }));
+    ui_label(items, x + w / 2.0, y + h / 2.0, 10.5, fg, number, Align::Center, w);
+    w
+}
+
 /// One poster in the recent atlas, keyed by its clip's start in ms.
 struct ThumbCell {
     key: i64,
@@ -503,6 +518,7 @@ impl App {
             cursor: (0.0, 0.0),
             drag: None,
             scrubbing: false,
+            scrub_resume: false,
             vp: (1280.0, 800.0),
             fps,
             wrap,
@@ -1456,7 +1472,19 @@ impl App {
         }
     }
 
+    /// A press on the timeline takes the playhead and holds it: the clock
+    /// stops while the button is down, and `mouse_up` lets it run again.
+    fn begin_cut_scrub(&mut self) {
+        self.scrub_resume = self.playing;
+        self.playing = false;
+        self.cut_drag = Some(CutDrag::Scrub);
+    }
+
     pub fn mouse_up(&mut self) {
+        if matches!(self.cut_drag, Some(CutDrag::Scrub)) && self.scrub_resume {
+            self.playing = true;
+        }
+        self.scrub_resume = false;
         self.painting = false;
         self.stroke_last = None;
         self.drag = None;
@@ -2719,7 +2747,7 @@ impl App {
             } else if let Some((seg, audio)) = self.cut_clip_at(x, y) {
                 // A picture or sound clip: pick it (outlined), and still take the playhead there.
                 self.cut_pick = Some((seg.start, seg.end, audio));
-                self.cut_drag = Some(CutDrag::Scrub);
+                self.begin_cut_scrub();
                 self.cut_drag_to(x);
             } else if let Some(seg) = self.cut_ghost_at(x, y) {
                 // A removed clip is a selection: X restores it.
@@ -2730,7 +2758,7 @@ impl App {
             } else if x >= self.cut_lanes().video.x - 4.0 {
                 // Anywhere else on the timeline lets go of the pick.
                 self.cut_pick = None;
-                self.cut_drag = Some(CutDrag::Scrub);
+                self.begin_cut_scrub();
                 self.cut_drag_to(x);
             }
             return true;
@@ -3228,24 +3256,21 @@ impl App {
                 let on = current == Some(idx);
                 let hovered = self.cursor_inside && contains(r, self.cursor.0, self.cursor.1);
                 let snap_dot = if cut.on_key(c.start, 1.0 / self.fps.max(1.0)) { hex_color(CUT_GREEN) } else { hex_color(CUT_CORAL) };
-                let number = format!("{:02}", idx + 1);
-                let (num_bg, num_fg) = if on { (hex_color(CUT_AMBER), hex_color(CUT_AMBER_INK)) } else { (mix(CUT_BG, 0xffffff, 0.08), mix(CUT_BG, 0xffffff, 0.6)) };
-                let ground = if on { mix(CUT_BG, CUT_AMBER, 0.12) } else if hovered { mix(CUT_BG, 0xffffff, 0.07) } else { hex_color(CUT_LANE) };
+                let number = (idx + 1).to_string();
+                                let ground = if on { mix(CUT_BG, CUT_AMBER, 0.12) } else if hovered { mix(CUT_BG, 0xffffff, 0.07) } else { hex_color(CUT_LANE) };
                 if self.cut_thumbs {
                     items.push(Item::Rect(RectItem { radius: 9.0, border_w: if on { 1.0 } else { 0.0 }, border_color: hex_color(CUT_AMBER), ..RectItem::new(r, ground) }));
                     // No frame to show yet: the film ground the picture clip uses.
                     let pic = RectPx { x: r.x + 5.0, y: r.y + 5.0, w: r.w - 10.0, h: 62.0 };
                     items.push(Item::Rect(RectItem { radius: 5.0, ..RectItem::new(pic, hex_color(CUT_FILM)) }));
-                    items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(RectPx { x: pic.x + 4.0, y: pic.y + 4.0, w: 20.0, h: 18.0 }, if on { num_bg } else { [0.0, 0.0, 0.0, 0.6] }) }));
-                    ui_label(items, pic.x + 14.0, pic.y + 13.0, 9.5, if on { num_fg } else { mix(CUT_BG, 0xffffff, 0.8) }, number, Align::Center, 20.0);
+                    chapter_flag(items, pic.x + 4.0, pic.y + 4.0, 18.0, number, on);
                     items.push(Item::Rect(RectItem { radius: 3.5, ..RectItem::new(RectPx { x: pic.x + pic.w - 12.0, y: pic.y + 5.0, w: 7.0, h: 7.0 }, snap_dot) }));
                     ui_label(items, r.x + 8.0, r.y + 80.0, 12.0, mix(CUT_BG, 0xffffff, 0.88), c.title.as_str(), Align::Left, r.w - 16.0);
                     ui_label(items, r.x + 8.0, r.y + 95.0, 10.0, faint, format!("{} · {}", fmt_hms(c.start), fmt_span(end - c.start)), Align::Left, r.w - 16.0);
                 } else {
                     items.push(Item::Rect(RectItem { radius: 8.0, border_w: if on { 1.0 } else { 0.0 }, border_color: hex_color(CUT_AMBER), ..RectItem::new(r, ground) }));
                     let num = RectPx { x: r.x + 10.0, y: r.y + (r.h - 22.0) / 2.0, w: 22.0, h: 22.0 };
-                    items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(num, num_bg) }));
-                    ui_label(items, num.x + 11.0, num.y + 11.0, 10.5, num_fg, number, Align::Center, 22.0);
+                    chapter_flag(items, num.x, num.y, 22.0, number, on);
                     ui_label(items, r.x + 42.0, r.y + 16.0, 12.0, mix(CUT_BG, 0xffffff, 0.88), c.title.as_str(), Align::Left, r.w - 42.0 - 28.0);
                     ui_label(items, r.x + 42.0, r.y + 32.0, 10.0, faint, format!("{} · {}", fmt_hms(c.start), fmt_span(end - c.start)), Align::Left, r.w - 42.0 - 28.0);
                     items.push(Item::Rect(RectItem { radius: 3.5, ..RectItem::new(RectPx { x: r.x + r.w - 17.0, y: r.y + r.h / 2.0 - 3.5, w: 7.0, h: 7.0 }, snap_dot) }));
@@ -3352,7 +3377,7 @@ impl App {
         // audio: no sound lane, no icon, no empty blue bar — the ground shows.
         let no_audio = cut.wave.is_empty() && !cut.reading_wave();
         let gutter = mix(CUT_TL, 0xffffff, 0.42);
-        for (lane, icon) in [(lanes.chapters, Icon::Flag), (Some(v), Icon::Film), (lanes.audio.filter(|_| !no_audio), Icon::Speaker),
+        for (lane, icon) in [(lanes.chapters, Icon::Flag), (Some(v), Icon::Film), (lanes.audio, Icon::Speaker),
             (Some(lanes.subs), Icon::Caption), (Some(lanes.keys), Icon::Ticks)] {
             if let Some(r) = lane { draw_icon(items, icon, tl.x + 30.0, r.y + r.h / 2.0, gutter); }
         }
@@ -3377,20 +3402,14 @@ impl App {
             for (i, c) in cut.chapters.iter().enumerate().filter(|(_, c)| c.start >= a - 40.0 / pps && c.start <= b) {
                 let x = x_of(c.start);
                 let lit = current == Some(i);
-                let (bg, fg, stem) = if lit { (hex_color(CUT_AMBER), hex_color(CUT_AMBER_INK), hex_color(CUT_AMBER)) }
-                    else { (mix(CUT_TL, 0xffffff, 0.16), hex_color(CUT_INK), mix(CUT_TL, 0xffffff, 0.35)) };
+                let stem = if lit { hex_color(CUT_AMBER) } else { mix(CUT_TL, 0xffffff, 0.35) };
                 // The board's flag: 18px tall, square on the left where the stem
                 // is, a pill on the right — a 3px / 9px corner pair, which is a
                 // pill with its left end squared off by a second, narrow rect.
-                let label = (i + 1).to_string();
-                let w = (label.chars().count() as f32 * 10.5 * MONO_ADV + 12.0).max(20.0).round();
-                let flag = RectPx { x, y: r.y, w, h: 18.0 };
-                items.push(Item::Rect(RectItem { radius: 9.0, ..RectItem::new(flag, bg) }));
-                items.push(Item::Rect(RectItem { radius: 3.0, ..RectItem::new(RectPx { w: 12.0, ..flag }, bg) }));
-                ui_label(items, x + w / 2.0 + 1.0, flag.y + flag.h / 2.0, 10.5, fg, label, Align::Center, w);
-                // The stem runs down to the picture clip it marks (the screenshot's flag),
-                // two pixels wide so it reads as the flag's own spine.
-                line(items, x, flag.y + flag.h, (v.y - flag.y - flag.h).max(6.0), 2.0, stem);
+                let flag = RectPx { x, y: r.y, w: 0.0, h: 18.0 };
+                // The pole carries up past the flag and down to the clip it marks.
+                line(items, x, flag.y - 4.0, (v.y - flag.y + 4.0).max(10.0), 2.0, stem);
+                chapter_flag(items, x, flag.y, 18.0, (i + 1).to_string(), lit);
             }
         }
 
@@ -3426,10 +3445,10 @@ impl App {
         };
         for (lane, audio) in [(Some(v), false), (lanes.audio, true)] {
             let Some(row) = lane else { continue };
-            if audio && no_audio { continue; }
             for (i, g) in segments.iter().enumerate().filter(|(_, g)| g.end > a && g.start < b) {
                 let r = RectPx { x: x_of(g.start) + 1.0, y: row.y, w: (x_of(g.end) - x_of(g.start) - 2.0).max(1.0), h: row.h };
-                if g.cut {
+                // No audio: the sound lane stays, as dashes where the clips would be.
+                if g.cut || (audio && no_audio) {
                     dashes(items, r);
                 } else if audio {
                     items.push(Item::Rect(RectItem { radius: 7.0, border_w: 1.0, border_color: mix(CUT_TL, 0x1580de, 0.6),
@@ -3496,7 +3515,7 @@ impl App {
                         x += 3.0;
                     }
                 }
-                if !g.cut { grips(items, r); }
+                if !g.cut && !(audio && no_audio) { grips(items, r); }
             }
             if audio && cut.wave.is_empty() {
                 ui_label(items, row.x + 16.0, row.y + row.h / 2.0, 10.0, mix(CUT_SOUND, 0xffffff, 0.4),
@@ -4525,6 +4544,32 @@ mod tests {
         let cell = fit_cell(&short, cw, ch - 40);
         assert_eq!((cell[0], cell[3]), (0, 255), "padding is opaque black");
         assert_eq!(cell[(21 * cw * 4) as usize], 200, "the picture sits in the middle");
+    }
+
+    #[test]
+    fn holding_the_timeline_pauses_playback_until_release() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        assert!(tick_until(&mut app, Duration::from_secs(5), |a| a.started));
+        app.key(Key::Char('t'));
+        assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.cut.as_ref().is_some_and(|c| !c.scanning())));
+        app.playing = true;
+        let l = app.cut_lanes();
+        app.mouse_down(l.video.x + l.video.w * 0.5, l.ruler.y + 4.0);
+        assert!(!app.playing, "the press holds the playhead");
+        let held = app.t;
+        app.cursor_moved(l.video.x + l.video.w * 0.25, l.ruler.y + 4.0);
+        assert!(app.t < held && !app.playing, "the playhead follows the pointer");
+        let there = app.t;
+        for _ in 0..10 { app.tick(0.05, (1280.0, 800.0), 2.0); }
+        assert!((app.t - there).abs() < 1e-6, "the clock stays put while the button is down");
+        app.mouse_up();
+        assert!(app.playing, "release lets playback continue");
+
+        app.playing = false;
+        app.mouse_down(l.video.x + 40.0, l.ruler.y + 4.0);
+        app.mouse_up();
+        assert!(!app.playing, "a paused clip stays paused");
     }
 
     #[test]
