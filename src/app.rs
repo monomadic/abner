@@ -168,6 +168,8 @@ pub struct App {
     /// The inspector's tab (0 chapters, 1 streams) and its chapter view.
     cut_tab: usize,
     cut_thumbs: bool,
+    /// The start-of-clip thumbnails on the picture lane (posters, and the one under the pointer playing).
+    cut_thumb: CutThumbs,
     /// The picture clip last clicked, by its (start, end): drawn outlined.
     cut_pick: Option<(f64, f64, bool)>,
     /// What a press on the timeline took hold of.
@@ -355,6 +357,85 @@ impl RecentRow {
 /// seamless loop (`assets/banner/background-02-loop.mp4`), so the wrap is
 /// just an exact seek to 0. It only runs while there are no clips — a
 /// loaded clip drops it, so it never competes with the streams.
+/// One poster in the recent atlas, keyed by its clip's start in ms.
+struct ThumbCell {
+    key: i64,
+    rgba: Vec<u8>,
+}
+
+/// The thumbnail under the pointer, playing its clip's range on its own
+/// decoder and clock — independent of the master clock.
+struct ThumbPlay {
+    key: i64,
+    slot: usize,
+    player: Player,
+    start: f64,
+    end: f64,
+    fps: f64,
+    t: f64,
+}
+
+type ThumbMsg = (std::path::PathBuf, i64, Result<Vec<u8>, String>);
+
+/// Cut mode's clip thumbnails. The recent row's atlas is free once a clip is
+/// loaded, so its cells hold the posters; hovering one plays it in place and
+/// leaving restores the poster.
+struct CutThumbs {
+    cells: Vec<ThumbCell>,
+    path: Option<std::path::PathBuf>,
+    pending: Vec<i64>,
+    failed: Vec<i64>,
+    tx: std::sync::mpsc::Sender<ThumbMsg>,
+    rx: std::sync::mpsc::Receiver<ThumbMsg>,
+    play: Option<ThumbPlay>,
+    hover: Option<i64>,
+    uploads: Vec<ThumbUpload>,
+}
+
+impl CutThumbs {
+    fn new() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        Self { cells: Vec::new(), path: None, pending: Vec::new(), failed: Vec::new(), tx, rx, play: None, hover: None, uploads: Vec::new() }
+    }
+
+    fn slot_of(&self, key: i64) -> Option<usize> {
+        self.cells.iter().position(|c| c.key == key)
+    }
+
+    fn reset(&mut self) {
+        self.cells.clear();
+        self.pending.clear();
+        self.failed.clear();
+        self.play = None;
+        self.hover = None;
+    }
+
+    /// Put a slot's poster back after its playback ended.
+    fn restore(&mut self, slot: usize) {
+        if let Some(c) = self.cells.get(slot) {
+            self.uploads.push(ThumbUpload { slot, buf: c.rgba.clone() });
+        }
+    }
+}
+
+/// A decoded `w × h` frame as one atlas cell: centre-cropped when taller than
+/// 16:9, padded black when shorter.
+fn fit_cell(buf: &[u8], w: u32, h: u32) -> Vec<u8> {
+    let (cw, ch) = (recent::THUMB_W as usize, recent::THUMB_H as usize);
+    let (w, h) = (w as usize, h as usize);
+    let mut out = vec![0u8; cw * ch * 4];
+    for px in out.chunks_exact_mut(4) { px[3] = 255; }
+    if w != cw || buf.len() < w * h * 4 { return out; }
+    let shift = (h as isize - ch as isize) / 2;
+    for y in 0..ch {
+        let sy = y as isize + shift;
+        if sy < 0 || sy >= h as isize { continue; }
+        let sy = sy as usize;
+        out[y * cw * 4..(y + 1) * cw * 4].copy_from_slice(&buf[sy * w * 4..(sy * w + cw) * 4]);
+    }
+    out
+}
+
 struct Backdrop {
     player: Player,
     t: f64,
@@ -398,6 +479,7 @@ impl App {
             cut_drag: None,
             cut_tab: 0,
             cut_thumbs: false,
+            cut_thumb: CutThumbs::new(),
             cut_pick: None,
             cut_last_t: f64::NAN,
             cut_boot: Vec::new(),
@@ -1527,6 +1609,7 @@ impl App {
         if self.vp != vp { self.stroke_last = None; }
         self.vp = vp;
         if let Some(cut) = &mut self.cut { cut.poll(); }
+        self.tick_cut_thumbs(dt);
         if !self.cut_boot.is_empty() { self.boot_cut(); }
         for (slot, what, done) in [
             (&mut self.mask_save, "Save", "Saved"),
@@ -1716,12 +1799,12 @@ impl App {
         }
 
         let animating =
-            self.playing || self.badge_flash > 0.0 || !self.started;
+            self.playing || self.badge_flash > 0.0 || !self.started || self.cut_thumb.play.is_some();
         FrameDesc {
             clear: FRAME_BG,
             uploads,
             plate: None,
-            thumbs: Vec::new(),
+            thumbs: std::mem::take(&mut self.cut_thumb.uploads),
             items,
             animating,
             redraw_at: if animating {
@@ -2687,6 +2770,111 @@ impl App {
         self.cursor_inside && (contains(l.timeline, self.cursor.0, self.cursor.1) || contains(l.transport, self.cursor.0, self.cursor.1))
     }
 
+    /// The start-of-clip thumbnails: (key = start in ms, segment, rect). The
+    /// thumbnail sits 12px in from the clip's start (clear of its grip), or
+    /// sticks to the visible left edge while the start is scrolled away.
+    fn cut_thumb_rects(&self) -> Vec<(i64, crate::cut::Segment, RectPx)> {
+        let Some(cut) = self.cut.as_ref().filter(|_| self.cut_mode) else { return Vec::new() };
+        let v = self.cut_lanes().video;
+        let (t0, pps) = (cut.t0, cut.pps.max(1e-6));
+        let x_of = |t: f64| v.x + ((t - t0) * pps) as f32;
+        let h = v.h - 18.0;
+        let w = (h * 16.0 / 9.0).round();
+        cut.segments().into_iter().filter(|g| !g.cut).filter_map(|g| {
+            let (l, r) = (x_of(g.start) + 1.0, x_of(g.end) - 1.0);
+            if r < v.x || l > v.x + v.w || r - l < w + 32.0 { return None; }
+            let x = (l + 12.0).max(v.x + 4.0).min(r - 12.0 - w).round();
+            Some(((g.start * 1000.0).round() as i64, g, RectPx { x, y: v.y + 9.0, w, h }))
+        }).collect()
+    }
+
+    fn cut_thumb_hover(&self, rects: &[(i64, crate::cut::Segment, RectPx)]) -> Option<i64> {
+        if !self.cursor_inside || !self.show_ui || self.cut_drag.is_some() { return None; }
+        rects.iter().find(|(_, _, r)| contains(*r, self.cursor.0, self.cursor.1)).map(|(k, ..)| *k)
+    }
+
+    /// Fetch posters, and play the hovered one.
+    fn tick_cut_thumbs(&mut self, dt: f32) {
+        if !self.cut_mode || self.cut.is_none() || self.videos.is_empty() {
+            self.cut_thumb.play = None;
+            self.cut_thumb.hover = None;
+            return;
+        }
+        let info = self.videos[self.active].info.clone();
+        if self.cut_thumb.path.as_ref() != Some(&info.path) {
+            self.cut_thumb.reset();
+            self.cut_thumb.path = Some(info.path.clone());
+        }
+        let rects = self.cut_thumb_rects();
+        let wanted = |key: i64| rects.iter().any(|r| r.0 == key);
+        while let Ok((path, key, result)) = self.cut_thumb.rx.try_recv() {
+            self.cut_thumb.pending.retain(|k| *k != key);
+            if Some(&path) != self.cut_thumb.path.as_ref() { continue; }
+            let rgba = match result {
+                Ok(rgba) => rgba,
+                Err(e) => { log::info!("cut thumbnail {key}ms: {e}"); self.cut_thumb.failed.push(key); continue; }
+            };
+            let slot = if self.cut_thumb.cells.len() < recent::SHOWN {
+                self.cut_thumb.cells.push(ThumbCell { key, rgba: rgba.clone() });
+                self.cut_thumb.cells.len() - 1
+            } else if let Some(i) = self.cut_thumb.cells.iter().position(|c| !wanted(c.key)) {
+                if self.cut_thumb.play.as_ref().is_some_and(|p| p.slot == i) { self.cut_thumb.play = None; }
+                self.cut_thumb.cells[i] = ThumbCell { key, rgba: rgba.clone() };
+                i
+            } else { continue };
+            self.cut_thumb.uploads.push(ThumbUpload { slot, buf: rgba });
+        }
+        for (key, g, _) in &rects {
+            let cb = &self.cut_thumb;
+            let room = cb.cells.len() + cb.pending.len() < recent::SHOWN || cb.cells.iter().any(|c| !wanted(c.key));
+            if cb.slot_of(*key).is_some() || cb.pending.contains(key) || cb.failed.contains(key) || !room { continue; }
+            self.cut_thumb.pending.push(*key);
+            let (tx, path, at, key) = (self.cut_thumb.tx.clone(), info.path.clone(), g.start, *key);
+            let _ = std::thread::Builder::new().name("cut-thumb".into()).spawn(move || {
+                let result = recent::frame(&path, at).map_err(|e| format!("{e:#}"));
+                let _ = tx.send((path, key, result));
+            });
+        }
+        let hover = self.cut_thumb_hover(&rects);
+        self.cut_thumb.hover = hover;
+        let want = hover.filter(|k| self.cut_thumb.slot_of(*k).is_some());
+        if self.cut_thumb.play.as_ref().map(|p| p.key) != want {
+            if let Some(p) = self.cut_thumb.play.take() { self.cut_thumb.restore(p.slot); }
+            if let (Some(key), true) = (want, !self.hidden) {
+                let g = rects.iter().find(|r| r.0 == key).map(|r| r.1.clone());
+                let slot = self.cut_thumb.slot_of(key);
+                if let (Some(g), Some(slot)) = (g, slot) {
+                    let h = ((recent::THUMB_W as f64 * info.height as f64 / info.width.max(1) as f64).round() as u32).max(2);
+                    if let Some(player) = Player::spawn(&info.path, recent::THUMB_W, h, crate::probe::vt_accel(&info.codec), info.rotation) {
+                        player.seek(g.start, true);
+                        self.cut_thumb.play = Some(ThumbPlay { key, slot, player, start: g.start, end: g.end, fps: info.fps.max(1.0), t: g.start });
+                    }
+                }
+            }
+        }
+        let mut stopped = None;
+        if let Some(p) = &mut self.cut_thumb.play {
+            if p.player.failed() {
+                stopped = Some(p.slot);
+            } else {
+                p.t += dt as f64;
+                if p.t >= p.end - 0.5 / p.fps {
+                    p.player.seek(p.start, true);
+                    p.t = p.start;
+                }
+                if let Some((_, buf)) = p.player.take_upto(p.t + 1e-6) {
+                    let cell = fit_cell(&buf, p.player.w, p.player.h);
+                    p.player.recycle(buf);
+                    self.cut_thumb.uploads.push(ThumbUpload { slot: p.slot, buf: cell });
+                }
+            }
+        }
+        if let Some(slot) = stopped {
+            self.cut_thumb.play = None;
+            self.cut_thumb.restore(slot);
+        }
+    }
+
     /// The kept picture clip under the pointer.
     fn cut_clip_at(&self, x: f32, y: f32) -> Option<(crate::cut::Segment, bool)> {
         let lanes = self.cut_lanes();
@@ -3199,12 +3387,15 @@ impl App {
                 items.push(Item::Rect(RectItem { radius: 9.0, ..RectItem::new(flag, bg) }));
                 items.push(Item::Rect(RectItem { radius: 3.0, ..RectItem::new(RectPx { w: 12.0, ..flag }, bg) }));
                 ui_label(items, x + w / 2.0 + 1.0, flag.y + flag.h / 2.0, 10.5, fg, label, Align::Center, w);
-                line(items, x, flag.y + flag.h, 6.0, 1.0, stem);
+                // The stem runs down to the picture clip it marks (the screenshot's flag),
+                // two pixels wide so it reads as the flag's own spine.
+                line(items, x, flag.y + flag.h, (v.y - flag.y - flag.h).max(6.0), 2.0, stem);
             }
         }
 
         // ---- video and audio: one clip per piece ----
         let segments = cut.segments();
+        let thumbs = self.cut_thumb_rects();
         // The picked picture clip's rect: its outline is drawn last, outside the
         // lane's scissor, so the lane's edge can't clip it.
         let mut picked: Option<RectPx> = None;
@@ -3270,6 +3461,24 @@ impl App {
                         } else {
                             line(items, x, r.y + 1.0, r.h - 2.0, 1.0, mix(CUT_FILM, 0xffffff, 0.12));
                             line(items, x, r.y + r.h - 7.0, 6.0, 1.0, mix(CUT_FILM, 0xffffff, 0.5));
+                        }
+                    }
+                }
+                if !audio && !g.cut {
+                    let key = (g.start * 1000.0).round() as i64;
+                    if let (Some((_, _, tr)), Some(slot)) = (thumbs.iter().find(|t| t.0 == key), self.cut_thumb.slot_of(key)) {
+                        items.push(Item::Thumb { r: *tr, slot, radius: 4.0, alpha: 1.0 });
+                        if self.cut_thumb.hover == Some(key) {
+                            items.push(Item::Rect(RectItem { radius: 4.0, border_w: 1.0, border_color: hex_color(0xffffff),
+                                ..RectItem::new(*tr, [0.0; 4]) }));
+                            if let Some(p) = self.cut_thumb.play.as_ref().filter(|p| p.key == key) {
+                                let frac = (((p.t - p.start) / (p.end - p.start).max(1e-6)) as f32).clamp(0.0, 1.0);
+                                let bar = RectPx { x: tr.x + 1.0, y: tr.y + tr.h - 4.0, w: tr.w - 2.0, h: 3.0 };
+                                items.push(Item::Rect(RectItem::new(bar, [0.0, 0.0, 0.0, 0.55])));
+                                items.push(Item::Rect(RectItem::new(RectPx { w: (bar.w * frac).max(1.0), ..bar }, hex_color(CUT_IN))));
+                            }
+                        } else {
+                            items.push(Item::Rect(RectItem { radius: 4.0, ..RectItem::new(*tr, [0.0, 0.0, 0.0, 0.18]) }));
                         }
                     }
                 }
@@ -3541,8 +3750,9 @@ const CUT_SIDE_W: f32 = 300.0;
 /// The icon gutter left of the rows, and the pad right of them.
 const CUT_GUTTER: f32 = 56.0;
 const CUT_PAD: f32 = 16.0;
-/// How far from a clip's edge a press still takes hold of it.
-const CUT_GRIP: f32 = 5.0;
+/// How far from a clip's edge a press still takes hold of it: the drawn
+/// grip sits 3–7px inside the edge, so this covers it with room to spare.
+const CUT_GRIP: f32 = 12.0;
 // The Timeline Edit design's tokens, sRGB hex (its oklch values converted).
 const CUT_BG: u32 = 0x0e0f10;
 /// The lit tab / toggle ground: the app's TOOL_BG.
@@ -4276,6 +4486,44 @@ mod tests {
         app.mouse_down(v.x + v.w * 0.4, v.y + v.h / 2.0);
         app.mouse_up();
         assert_eq!(app.cut_pick, Some((0.0, 4.0, false)), "and the picture clip replaces it");
+    }
+
+    #[test]
+    fn cut_thumbnail_posters_load_and_the_hovered_one_plays() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        assert!(tick_until(&mut app, Duration::from_secs(5), |a| a.started));
+        app.key(Key::Char('t'));
+        assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.cut.as_ref().is_some_and(|c| !c.scanning())));
+        let rects = app.cut_thumb_rects();
+        assert_eq!(rects.len(), 1, "one kept clip, one thumbnail");
+        let (key, _, r) = rects[0].clone();
+        let v = app.cut_lanes().video;
+        assert!(r.x >= v.x && r.y > v.y && r.y + r.h < v.y + v.h && (r.w / r.h - 16.0 / 9.0).abs() < 0.05);
+        assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.cut_thumb.slot_of(key).is_some()), "the poster arrives");
+        assert!(app.cut_thumb.play.is_none(), "nothing plays until the pointer is on it");
+
+        app.cursor_moved(r.x + r.w / 2.0, r.y + r.h / 2.0);
+        assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.cut_thumb.play.is_some()));
+        assert_eq!(app.cut_thumb.hover, Some(key));
+        assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.cut_thumb.play.as_ref().is_some_and(|p| p.t > p.start + 0.2)), "its own clock advances");
+
+        app.cursor_moved(r.x + r.w / 2.0, app.cut_lanes().ruler.y + 4.0);
+        app.tick(0.010, (1280.0, 800.0), 2.0);
+        assert!(app.cut_thumb.play.is_none() && app.cut_thumb.hover.is_none(), "leaving stops it");
+    }
+
+    #[test]
+    fn fit_cell_crops_and_pads_to_the_atlas_cell() {
+        let (cw, ch) = (recent::THUMB_W, recent::THUMB_H);
+        let tall = vec![200u8; (cw * (ch + 40) * 4) as usize];
+        let cell = fit_cell(&tall, cw, ch + 40);
+        assert_eq!(cell.len(), (cw * ch * 4) as usize);
+        assert_eq!(cell[0], 200);
+        let short = vec![200u8; (cw * (ch - 40) * 4) as usize];
+        let cell = fit_cell(&short, cw, ch - 40);
+        assert_eq!((cell[0], cell[3]), (0, 255), "padding is opaque black");
+        assert_eq!(cell[(21 * cw * 4) as usize], 200, "the picture sits in the middle");
     }
 
     #[test]

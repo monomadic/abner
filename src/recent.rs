@@ -146,7 +146,7 @@ fn thumb(path: &Path) -> anyhow::Result<Thumb> {
 /// One frame at `at` seconds, scaled to cover `THUMB_W × THUMB_H` and
 /// centre-cropped, as raw RGBA on stdout. ffmpeg applies the display
 /// rotation itself, so a phone clip comes out upright.
-fn frame(path: &Path, at: f64) -> anyhow::Result<Vec<u8>> {
+pub fn frame(path: &Path, at: f64) -> anyhow::Result<Vec<u8>> {
     let vf = format!(
         "scale={THUMB_W}:{THUMB_H}:force_original_aspect_ratio=increase:flags=bicubic,crop={THUMB_W}:{THUMB_H}"
     );
