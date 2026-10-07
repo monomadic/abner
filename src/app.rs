@@ -2125,6 +2125,7 @@ impl App {
                 uploads: Vec::new(),
                 thumbs: Vec::new(),
                 plate: None,
+                thumbs: Vec::new(),
                 items: vec![Item::Logo {
                     r: RectPx { x: (w - lw) / 2.0, y: (h - lh) / 2.0, w: lw, h: lh },
                     alpha: 1.0,
