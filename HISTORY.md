@@ -3,6 +3,39 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-07 — the scrub panel brought level with the Figma board
+
+Implemented from the Figma file "Abner — Timeline Edit", node 25-24 (the toolbar and
+media timeline), against the build of 2026-10-05. The geometry was already the board's;
+this is the detail pass:
+
+- **Grounds**: the toolbar is `CUT_BAR` (#100f0e) and the lanes `CUT_TL` (#1a1a18), the
+  board's two surfaces. The tool buttons carry the board's 1px #232323 border at an 8px
+  radius; the zoom −/+ are its magnifiers (`Icon::ZoomOut`/`ZoomIn`, the handle a stair
+  of squares — no diagonal primitive). The snap lamp is #20c45f at 42% with a faint halo.
+- **Chapters** have three states: passed (a #393a3a flag, 2px pole down to the clips),
+  current (amber, a short pole), still to come (a faint flag over a 6px hairline). The
+  pole no longer runs up past the flag.
+- **Clips**: the sound row is 39px (was 52) and a sound clip is the board's vertical
+  gradient (#112a42 → #0c1d2f, `fade_down`) under its blue border; waveform peaks scale
+  to the row with a 6px floor. Each end of a clip has the 8px trim glow and the grips
+  inside it (38px on picture, 27 on sound). An idle thumbnail keeps a 16% white border
+  at a 5px radius. Cues are #c1a9ee.
+- **Marks**: in is a 5px bar with a foot at the top and the bottom; out keeps its tab. The
+  snapped keyframes stand tall at 1px. The razor's disc sits 4px higher. The playhead's
+  pin is the board's 11×13 tab with three dark grooves, and its timecode is a WHITE chip
+  with black type centred under the line on the keyframe row, not a dark one beside it
+  on the ruler.
+- **Dark type on light chips** (flag numbers, the timecode chip, the lit tool buttons)
+  read brown/grey: glyph coverage blends in linear light, so a thin black stroke's
+  edges over amber came back far too bright. Shader mode 6 now lifts a dark glyph's
+  coverage by the same `1 − (1 − a)^2.2` the launch overlays use (faded in below ~0.3
+  luminance, so light type on dark ground is untouched), and the flag numbers are
+  drawn twice half a pixel apart to stand in for the board's Bold weight.
+- Not taken from the board: it draws only the play disc before the clock, where the
+  toolbar keeps the chapter / keyframe / frame skips added since (they get the same
+  border); the gutter icons are white as drawn there, but built from rects as before.
+
 ## 2026-10-06 — a lone file opens on the timeline
 
 Launch with one file, drop one on an empty window, or open one from Finder / recents, and

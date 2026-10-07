@@ -212,7 +212,15 @@ fn fs_main(in: Out) -> @location(0) vec4<f32> {
         }
         case 6u: {
             let c = ui_color(in.color);
-            return vec4<f32>(c.rgb, c.a * g);
+            // Blending is linear, so a dark glyph's edge coverage over a light
+            // chip lands far too bright once the surface re-encodes it (0.3
+            // linear reads 0.58 sRGB): thin black type on amber came out
+            // brown. Dark ink lifts its coverage by the same 2.2 curve the
+            // launch overlays use; light ink on dark ground is left alone.
+            let lum = dot(c.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+            let lifted = 1.0 - pow(1.0 - g, 2.2);
+            let cov = mix(g, lifted, smoothstep(0.3, 0.05, lum));
+            return vec4<f32>(c.rgb, c.a * cov);
         }
         case 8u: {
             // Exact binary texel selection: no purple interpolation at mask edges.

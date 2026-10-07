@@ -86,8 +86,13 @@ fi
 # answered for the freshly installed /Applications copy. The hash rides in
 # its own key (AbnerGitHash) instead.
 BUILD="$(date -u +%Y%m%d.%H%M%S)"
+# What Finder's Get Info and the About panel print as "Version": the same
+# label the build line echoes, e.g. 0.1.0-509b831-dirty. Only
+# CFBundleVersion (BUILD) has to stay numeric — LaunchServices compares that
+# one, never the short string.
+DISPLAY_VERSION="$VERSION-$GIT_HASH"
 
-echo "==> building $BIN_NAME ($PROFILE, v$VERSION-$GIT_HASH)"
+echo "==> building $BIN_NAME ($PROFILE, v$DISPLAY_VERSION)"
 cargo build $CARGO_PROFILE_FLAG
 BIN="$ROOT/target/$PROFILE/$BIN_NAME"
 [ -x "$BIN" ] || { echo "error: build produced no binary at $BIN" >&2; exit 1; }
@@ -168,7 +173,7 @@ fi
 
 # --- Info.plist ------------------------------------------------------------
 sed \
-  -e "s/{{VERSION}}/$VERSION/g" \
+  -e "s/{{VERSION}}/$DISPLAY_VERSION/g" \
   -e "s/{{BUILD}}/$BUILD/g" \
   -e "s/{{GIT_HASH}}/$GIT_HASH/g" \
   -e "s/{{BUNDLE_ID}}/$BUNDLE_ID/g" \
