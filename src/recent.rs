@@ -25,6 +25,11 @@ use crate::probe::{self, VideoInfo};
 const KEEP: usize = 12;
 /// Tiles on the launch window (and ⌘1–4).
 pub const SHOWN: usize = 4;
+/// The thumbnail atlas: `ATLAS_COLS` cells a row, `ATLAS` in all. The
+/// launch row uses the first `SHOWN`; cut mode's clip and chapter posters
+/// use the lot.
+pub const ATLAS_COLS: usize = 4;
+pub const ATLAS: usize = 16;
 /// One thumbnail's pixel size: a 16:9 cover crop, about 2.4× the tile's
 /// logical size so it stays sharp on a retina display.
 pub const THUMB_W: u32 = 320;

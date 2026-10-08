@@ -38,7 +38,7 @@ rebuilt every frame in `src/app.rs` and drawn by a single wgpu pipeline
 | Colours | `const NAME: [f32; 4]` at the bottom of `src/app.rs` (workspace block ~`HEADER_H`…`TOOL_BG`; launch block `LAUNCH_BG`…`FORMATS`; crop `CROP_*`) | Variable collection **Abner** (mode *Dark*): `shell/*`, `text/*`, `accent`, `mask-red`, `transport/track`, `crop/*`, `mask/*`, `launch/*`, `clip/1–9` |
 | Clip palette | `clip_color()` in `src/app.rs` (9 hex values, cycles) | `clip/1` … `clip/9` |
 | Type | `ui_label(items, x, y, px, color, text, align, max_width)`; sizes 9/10/11/13 | Text styles `mono/13`, `mono/11`, `mono/11 medium`, `mono/10`, `mono/10 tracked`, `mono/9` |
-| Metrics | `HEADER_H 38`, `CONTEXT_H 40`, `SOURCE_H 80`, `TRANSPORT_H 60`, `STATUS_H 28`, `TITLEBAR_H 28`, `CROP_*`, `SEEK_GRAB` | Resolved geometry in the frames |
+| Metrics | `HEADER_H 44`, `CONTEXT_H 40`, `SOURCE_H 80`, `TRANSPORT_H 60`, `STATUS_H 28`, `TITLEBAR_H 28`, `CROP_*`, `SEEK_GRAB` | Resolved geometry in the frames |
 | Behavioural defaults | `abner.default.toml` (window size, view, gain, blend, checker, brush) | — |
 
 Each Figma variable's **description names its code constant** — use it to find
@@ -85,7 +85,7 @@ by hand.
 | Figma component (Components board) | Code |
 |---|---|
 | **Badge** (`Clip=1…9`) | `number_badge()` — fill `clip × 0.17 + 0.04`, 1px border clip @0.12, r5 |
-| **Tool tab** (`Selected`/`Idle`) | `controls()` → `Action::Tool`, drawn in `build_hud`; `TOOL_BG` + `ACCENT` when selected |
+| **Tool tab** (`Selected`/`Idle`) | `controls()` → `Action::Tool`, drawn by `draw_tool_control`; `CUT_HEADER_BLUE` + white when selected |
 | **Segment** (`Selected`/`Idle`/`Disabled`) | `controls()` → `Action::View/Brush/Save/Export/Param`; `CONTROL_BG` r7 selected, r6 hover; `WORKSPACE_MUTED` while its worker runs |
 | **Source row** | the rail loop in `build_hud` (`source_row()`, `SOURCE_H`) |
 | **Inspector row** | the inspector loop in `build_hud` (rows 23px apart) |
@@ -241,3 +241,14 @@ own `build_*` function called from `tick`; its layout rects come from
    `use_figma` (edit the component, not each screen, where possible) so the file
    stays the picture of what ships. Keep alpha tokens in their sRGB-equivalent
    form (§1).
+
+## Timeline Edit header
+
+The timeline header follows [Header 12:5](https://www.figma.com/design/YV0duGxqSLOKfiQsdD746T/Abner-Timeline-Edit?node-id=12-5).
+`HEADER_H` / `CUT_HEADER_H` are 44; `CUT_HEADER_BLUE` is #0074e1.
+`header_tabs` positions the 356×31 housing at x=85 after native traffic lights
+(x=14 in fullscreen), matching the updated left-aligned design. `controls()`
+shares mode-button geometry between drawing and hit testing; Sources, Timeline,
+Crop and Mask all use `build_tool_housing` and `draw_tool_control` with the active
+mode selected. The timeline alone adds Undo/Export and its export-status label;
+that label hides below 1000px. Existing mono type stands in for SF Pro.

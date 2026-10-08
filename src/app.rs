@@ -55,6 +55,9 @@ pub enum Key {
     Backspace,
     /// ⌘W: close the focused clip.
     Close,
+    DuplicateSources,
+    SelectSources,
+    OpenFiles,
     /// ⌘ plus a digit: on the launch window, open that recent file; with
     /// clips up it is the bare digit (pick that clip), as it always was.
     CmdDigit(char),
@@ -75,6 +78,7 @@ pub enum Cmd {
     /// Open the launch window's nth recent tile (a click or ⌘1–4). The
     /// runner loads it through the drop path, so it is recorded again.
     OpenRecent(usize),
+    OpenFiles,
 }
 
 /// What a press on the crop marquee took hold of.
@@ -117,6 +121,10 @@ pub enum CropCursor {
 }
 
 pub struct Video {
+    /// Batch scope is independent of the source currently shown in the viewer.
+    pub selected: bool,
+    /// An independent item referring to existing media; never a filesystem copy.
+    pub linked_copy: bool,
     pub info: VideoInfo,
     pub player: Player,
     pub shown_pts: f64,
@@ -133,6 +141,7 @@ pub struct App {
     pub videos: Vec<Video>,
     active: usize,
     source_scroll: usize,
+    source_status: String,
     masks: Vec<Option<Mask>>,
     mask_mode: bool,
     brush_diameter: f32,
@@ -512,6 +521,7 @@ impl App {
             videos,
             active: 0,
             source_scroll: 0,
+            source_status: String::new(),
             t: 0.0,
             playing: !cfg.playback.start_paused,
             started: false,
@@ -1109,6 +1119,8 @@ impl App {
         }
         self.cut = None;
         self.cut_mode = false;
+        self.source_status.clear();
+        self.source_scroll = 0;
         for v in &mut self.videos {
             v.player.seek(0.0, true);
             v.pending = false;
@@ -1133,6 +1145,43 @@ impl App {
         self.scrubbing = false;
         self.drag_hover = false;
         self.settle_cut_default();
+    }
+
+    /// Duplicate selected source items (or the viewed source when none are checked).
+    /// Media stays at its existing path; each item gets independent playback/mask state.
+    /// Do not use add_videos: duplication preserves the master time and playback state.
+    pub fn duplicate_sources(&mut self) {
+        if !self.ready() || self.cut_mode || self.mask_mode { return; }
+        let mut indices: Vec<usize> = self.videos.iter().enumerate()
+            .filter_map(|(i, v)| v.selected.then_some(i)).collect();
+        if indices.is_empty() { indices.push(self.active); }
+        let mut copies = Vec::new();
+        for &i in &indices {
+            let info = self.videos[i].info.clone();
+            let Some(player) = Player::spawn(&info.path, info.width, info.height,
+                crate::probe::vt_accel(&info.codec), info.rotation) else {
+                self.source_status = "Could not duplicate source: decoder unavailable".into();
+                return;
+            };
+            copies.push((i, Video { selected: true, linked_copy: true, info, player,
+                shown_pts: 0.0, delivered: false, pending: false, last_frame: None }));
+        }
+        for v in &mut self.videos { v.selected = false; }
+        for (i, v) in copies.into_iter().rev() {
+            self.videos.insert(i + 1, v);
+            self.masks.insert(i + 1, None);
+        }
+        self.cut = None;
+        // Insertion changes texture slots, including for paused survivors.
+        for v in &mut self.videos { v.delivered = false; }
+        self.seek_all(self.t, true);
+        self.select(indices[0] + 1);
+        self.source_status.clear();
+        self.cmds.push(Cmd::VideosChanged);
+    }
+
+    fn source_file_count(&self) -> usize {
+        self.videos.iter().map(|v| &v.info.path).collect::<std::collections::HashSet<_>>().len()
     }
 
     /// Drop the focused clip (⌘W). The survivors shift down a slot, and
@@ -1237,6 +1286,15 @@ impl App {
     }
 
     pub fn key(&mut self, mut k: Key) {
+        if k == Key::OpenFiles { self.cmds.push(Cmd::OpenFiles); return; }
+        if k == Key::DuplicateSources { self.duplicate_sources(); return; }
+        if k == Key::SelectSources {
+            if !self.cut_mode && !self.mask_mode {
+                let select = !self.videos.iter().all(|v| v.selected);
+                for v in &mut self.videos { v.selected = select; }
+            }
+            return;
+        }
         if let Key::CmdDigit(c) = k {
             if self.ready() {
                 k = Key::Char(c);
@@ -1335,7 +1393,7 @@ impl App {
                 }
             }
             Key::Backspace => self.speed = 1.0,
-            Key::Close | Key::CmdDigit(_) | Key::Undo | Key::KeyLeft | Key::KeyRight => {} // handled above
+            Key::Close | Key::CmdDigit(_) | Key::Undo | Key::KeyLeft | Key::KeyRight | Key::DuplicateSources | Key::SelectSources | Key::OpenFiles => {} // handled above
             Key::Char('V') => self.mode = self.mode.cycle(-1),
             Key::Char(c @ '1'..='9') => {
                 let idx = c as usize - '1' as usize;
@@ -1360,6 +1418,7 @@ impl App {
                 '-' => self.adjust_param(false),
                 '=' | '+' => self.adjust_param(true),
                 'v' => self.mode = self.mode.cycle(1),
+                'x' if !self.mask_mode && !self.cut_mode => self.videos[self.active].selected ^= true,
                 _ => {}
             },
         }
@@ -1437,7 +1496,12 @@ impl App {
             if !self.cut_mode && contains(self.workspace().list, x, y) {
                 let first = self.source_first();
                 for idx in first..(first + self.source_capacity()).min(self.videos.len()) {
-                    if contains(self.source_row(idx), x, y) { self.select(idx); break; }
+                    if contains(self.source_row(idx), x, y) {
+                        if !self.mask_mode && contains(self.source_checkbox(idx), x, y) {
+                            self.videos[idx].selected ^= true;
+                        } else { self.select(idx); }
+                        break;
+                    }
                 }
                 return;
             }
@@ -1529,14 +1593,14 @@ impl App {
         if !self.ready() { return; }
         if self.cut_mode && self.show_ui && self.cut_over_panel() {
             let lane = self.cut_lanes().video;
-            if dx.abs() > dy.abs() {
-                // Sideways zooms about the pointer: scrolling left dives in
-                // (the content under the pointer stays put), right backs out.
+            if dy.abs() > dx.abs() {
+                // Two fingers up and down zoom about the pointer: swiping DOWN
+                // dives in (the content under the pointer stays put), up backs out.
                 let anchor = (self.cursor.0 - lane.x).clamp(0.0, lane.w);
-                if let Some(cut) = &mut self.cut { cut.zoom((-(dx as f64) * 0.012).exp(), anchor, lane.w); }
+                if let Some(cut) = &mut self.cut { cut.zoom((dy as f64 * 0.012).exp(), anchor, lane.w); }
             } else {
-                // Up and down move the content along the track, down = earlier.
-                if let Some(cut) = &mut self.cut { cut.pan(-(dy as f64) / cut.pps.max(1e-6), lane.w); }
+                // Sideways: fingers move the content along the track.
+                if let Some(cut) = &mut self.cut { cut.pan(-(dx as f64) / cut.pps.max(1e-6), lane.w); }
             }
             return;
         }
@@ -1563,9 +1627,10 @@ impl App {
         if self.ready() && self.cut_mode && self.show_ui && self.cut_over_panel() {
             let lane = self.cut_lanes().video;
             let anchor = (self.cursor.0 - lane.x).clamp(0.0, lane.w);
-            // Exponential, a touch quicker than the video's: spreading two fingers
-            // over the track dives in about the pointer, pinching closes back out.
-            if let Some(cut) = &mut self.cut { cut.zoom((delta as f64 * 1.8).exp(), anchor, lane.w); }
+            // Exponential, a touch quicker than the video's: pinching two fingers
+            // INWARD over the track dives in about the pointer, spreading backs out
+            // (the inverse of the video's pinch — a timeline is a ruler, not a photo).
+            if let Some(cut) = &mut self.cut { cut.zoom((-(delta as f64) * 1.8).exp(), anchor, lane.w); }
             return;
         }
         if !self.ready() || !contains(self.workspace().canvas, self.cursor.0, self.cursor.1) { return; }
@@ -1871,27 +1936,42 @@ impl App {
 
     fn source_row(&self, index: usize) -> RectPx {
         let l = self.workspace();
-        RectPx { x: 10.0, y: l.list.y + (index - self.source_first()) as f32 * SOURCE_H,
-            w: l.rail - 20.0, h: SOURCE_H - 6.0 }
+        RectPx { x: 12.0, y: l.list.y + (index - self.source_first()) as f32 * SOURCE_H,
+            w: l.rail - 24.0, h: SOURCE_H - 10.0 }
+    }
+
+    fn source_checkbox(&self, index: usize) -> RectPx {
+        let r = self.source_row(index);
+        RectPx { x: r.x + 12.0, y: r.y + 12.0, w: 20.0, h: 20.0 }
     }
 
     fn controls(&self) -> Vec<Control> {
         let l = self.workspace();
         let mut out = Vec::new();
         let tool = if self.cut_mode { 3 } else if !self.mask_mode { 0 } else if self.crop.is_none() { 1 } else { 2 };
-        let mut x = if self.fullscreen { 16.0 } else { 100.0 };
-        // Shown in this order; the number is the tool (`Action::Tool`). Each tab
-        // is its label plus 11px either side, 2px apart, inside the pill.
-        for (label, i) in [("SOURCES", 0), ("TIMELINE", 3), ("CROP", 2), ("MASK", 1)] {
-            let w = (label.chars().count() as f32 * TAB_PX * MONO_ADV + 22.0).round();
-            out.push(Control::new(RectPx { x, y: 7.0, w, h: 24.0 }, label, tool == i, Action::Tool(i)));
-            x += w + 2.0;
+        let r = self.header_tabs();
+        for (label, i, offset, w) in [("Sources", 0, 3.0, 80.0),
+            ("Timeline", 3, 95.0, 74.0), ("Crop", 2, 181.0, 80.0),
+            ("Mask", 1, 273.0, 80.0)] {
+            out.push(Control::new(RectPx { x: r.x + offset, y: r.y + 3.0, w, h: 25.0 },
+                label, tool == i, Action::Tool(i)));
         }
         if self.cut_mode {
-            self.cut_controls(&mut out, x);
+            self.cut_controls(&mut out);
             return out;
         }
-        x = l.rail + 12.0;
+        if !self.mask_mode {
+            let w = (l.rail - 32.0) / 2.0;
+            for (x, label, action) in [(12.0, "Duplicate", Action::Duplicate),
+                (20.0 + w, "+ Add files", Action::OpenFiles)] {
+                out.push(Control::new(RectPx { x, y: HEADER_H + 82.0, w, h: 36.0 }, label, false, action));
+            }
+            if self.videos.iter().any(|v| v.selected) {
+                out.push(Control::new(RectPx { x: l.rail - 64.0, y: l.list.y + l.list.h + 4.0, w: 52.0, h: 24.0 },
+                    "Clear", false, Action::ClearSources));
+            }
+        }
+        let mut x = l.rail + 12.0;
         let y = HEADER_H + 6.0;
         if !self.mask_mode {
             for (mode, label, w) in [
@@ -1937,6 +2017,9 @@ impl App {
                 if !self.mask_mode { self.key(Key::Char('m')); }
                 if (tool == 2) != self.crop.is_some() { self.toggle_crop(); }
             }
+            Action::Duplicate => self.duplicate_sources(),
+            Action::OpenFiles => self.cmds.push(Cmd::OpenFiles),
+            Action::ClearSources => { for v in &mut self.videos { v.selected = false; } },
             Action::View(mode) => self.mode = mode,
             Action::Brush(up) => self.resize_brush(if up { 1.25 } else { 0.8 }),
             Action::Save => self.save_mask(),
@@ -1965,13 +2048,27 @@ impl App {
         RectPx { x, y: r.y + 28.0, w: (r.w - (x - r.x) - reserve).max(32.0), h: 4.0 }
     }
 
-    /// The tabs sit in one recessed housing — the design's segmented control:
-    /// a soft dark pill, the lit tab a navy chip inside it.
+    /// Shared Figma mode selector, left aligned after the native traffic lights.
     fn build_tool_housing(&self, items: &mut Vec<Item>) {
-        let tabs: Vec<RectPx> = self.controls().into_iter().filter(|c| matches!(c.action, Action::Tool(_))).map(|c| c.r).collect();
-        let (Some(first), Some(last)) = (tabs.first(), tabs.last()) else { return };
-        let housing = RectPx { x: first.x - 3.0, y: first.y - 3.0, w: last.x + last.w - first.x + 6.0, h: first.h + 6.0 };
-        items.push(Item::Rect(RectItem { radius: 10.0, ..RectItem::new(housing, [0.068, 0.068, 0.072, 1.0]) }));
+        items.push(Item::Rect(RectItem { radius: 9.0, border_w: 1.0,
+            border_color: mix(0x050506, 0xffffff, 0.17),
+            ..RectItem::new(self.header_tabs(), hex_color(0x050506)) }));
+    }
+
+    fn draw_tool_control(&self, items: &mut Vec<Item>, control: &Control) {
+        let r = control.r;
+        let hovered = self.cursor_inside && contains(r, self.cursor.0, self.cursor.1);
+        if control.selected {
+            items.push(Item::Rect(RectItem { radius: 6.0, border_w: 1.0,
+                border_color: mix(CUT_HEADER_BLUE, 0xa8d9ff, 0.32),
+                ..RectItem::new(r, hex_color(CUT_HEADER_BLUE)) }));
+        } else if hovered {
+            items.push(Item::Rect(RectItem { radius: 7.0, ..RectItem::new(r, CONTROL_BG) }));
+        }
+        let color = if control.selected || hovered { hex_color(0xffffff) }
+            else { mix(0x050506, 0xffffff, 0.55) };
+        ui_label(items, r.x + r.w / 2.0, r.y + r.h / 2.0, 11.5,
+            color, &control.label, Align::Center, r.w - 8.0);
     }
 
     fn build_hud(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
@@ -1992,17 +2089,23 @@ impl App {
         self.build_tool_housing(items);
         for control in self.controls() {
             let hovered = contains(control.r, self.cursor.0, self.cursor.1) && self.cursor_inside;
-            let tool = matches!(control.action, Action::Tool(_));
+            if matches!(control.action, Action::Tool(_)) {
+                self.draw_tool_control(items, &control);
+                continue;
+            }
             let disabled = matches!(control.action, Action::Save) && self.mask_save.is_some()
                 || matches!(control.action, Action::Export) && self.crop_export.is_some();
+            if matches!(control.action, Action::Duplicate | Action::OpenFiles) {
+                items.push(Item::Rect(RectItem { radius: 8.0, border_w: 1.0,
+                    border_color: hex_color(SOURCE_BORDER), ..RectItem::new(control.r, hex_color(SOURCE_SURFACE)) }));
+            }
             if control.selected || hovered {
                 items.push(Item::Rect(RectItem { radius: if control.selected { 7.0 } else { 6.0 },
-                    ..RectItem::new(control.r, if tool && control.selected { TOOL_BG } else { CONTROL_BG }) }));
+                    ..RectItem::new(control.r, CONTROL_BG) }));
             }
-            let color = if disabled { WORKSPACE_MUTED } else if tool && control.selected { ACCENT }
-                else if control.selected || hovered { WORKSPACE_TEXT } else { WORKSPACE_DIM };
+            let color = if disabled { WORKSPACE_MUTED } else if control.selected || hovered { WORKSPACE_TEXT } else { WORKSPACE_DIM };
             ui_label(items, control.r.x + control.r.w / 2.0, control.r.y + control.r.h / 2.0,
-                if tool { TAB_PX } else { 11.0 }, color, &control.label, Align::Center, control.r.w - 8.0);
+                11.0, color, &control.label, Align::Center, control.r.w - 8.0);
         }
         if self.mask_mode {
             let label = if let Some(c) = self.crop {
@@ -2021,35 +2124,7 @@ impl App {
             ui_label(items, vp.0 - 16.0, HEADER_H + CONTEXT_H / 2.0, 11.0, WORKSPACE_DIM, parameter, Align::Right, 90.0);
         }
 
-        // A scrollable numbered list; filenames are measured/ellipsized by the font renderer.
-        items.push(Item::Clip(Some(l.list)));
-        let first = self.source_first();
-        for i in first..(first + self.source_capacity()).min(self.videos.len()) {
-            let v = &self.videos[i];
-            let r = self.source_row(i);
-            let color = clip_color(i);
-            if i == self.active || contains(r, self.cursor.0, self.cursor.1) && self.cursor_inside {
-                items.push(Item::Rect(RectItem { radius: 7.0, ..RectItem::new(r, SOURCE_BG) }));
-            }
-            if i == self.active {
-                items.push(Item::Rect(RectItem::new(RectPx { w: 2.0, ..r }, color)));
-            }
-            number_badge(items, RectPx { x: r.x + 10.0, y: r.y + 12.0, w: 22.0, h: 24.0 }, i);
-            let x = r.x + 42.0;
-            let width = r.w - 50.0;
-            ui_label(items, x, r.y + 18.0, 11.0, WORKSPACE_TEXT, name_of(&v.info.path), Align::Left, width);
-            ui_label(items, x, r.y + 39.0, 10.0, WORKSPACE_DIM,
-                format!("{}×{}  {:.3} fps", v.info.width, v.info.height, v.info.fps), Align::Left, width);
-            ui_label(items, x, r.y + 56.0, 10.0, if v.player.failed() { ERR } else { WORKSPACE_MUTED },
-                if v.player.failed() { "DECODE FAILED".into() } else {
-                    format!("{}  {}", v.info.codec.to_uppercase(), fmt_time(v.info.duration))
-                }, Align::Left, width);
-        }
-        items.push(Item::Clip(None));
-        if self.videos.len() > self.source_capacity() {
-            ui_label(items, l.rail - 14.0, l.list.y + l.list.h - 6.0, 9.0, WORKSPACE_MUTED,
-                format!("{}–{} / {} · scroll", first + 1, (first + self.source_capacity()).min(self.videos.len()), self.videos.len()), Align::Right, l.rail - 28.0);
-        }
+        self.build_sources(items);
         if l.inspector.h > 0.0 {
             let v = &self.videos[self.active];
             items.push(Item::Rect(RectItem::new(RectPx { h: 1.0, ..l.inspector }, WORKSPACE_RULE)));
@@ -2070,6 +2145,82 @@ impl App {
             ui_label(items, 16.0, l.inspector.y + 190.0, 10.0, WORKSPACE_MUTED, dir.to_string_lossy(), Align::Left, l.rail - 32.0);
         }
         self.build_transport(items);
+    }
+
+    /// Figma Sources / Editable source card. Thumbnails sample the existing
+    /// frame-locked video textures: no extra decode workers or thumbnail atlas.
+    fn build_sources(&self, items: &mut Vec<Item>) {
+        let l = self.workspace();
+        let ink = hex_color(SOURCE_INK);
+        let secondary = hex_color(SOURCE_SECONDARY);
+        ui_label(items, 12.0, HEADER_H + 33.0, 18.0, ink, "Source clips", Align::Left, l.rail - 24.0);
+        ui_label(items, 12.0, HEADER_H + 60.0, 11.0, secondary,
+            format!("{} items · {} files", self.videos.len(), self.source_file_count()), Align::Left, l.rail - 24.0);
+        items.push(Item::Clip(Some(l.list)));
+        let first = self.source_first();
+        for i in first..(first + self.source_capacity()).min(self.videos.len()) {
+            let v = &self.videos[i];
+            let r = self.source_row(i);
+            let viewing = i == self.active;
+            let accent = clip_color(i);
+            let hover = self.cursor_inside && contains(r, self.cursor.0, self.cursor.1);
+            items.push(Item::Rect(RectItem { radius: 8.0, border_w: if viewing { 1.5 } else { 1.0 },
+                border_color: if viewing { accent } else if hover { secondary } else { hex_color(SOURCE_BORDER) },
+                ..RectItem::new(r, hex_color(if viewing { SOURCE_SELECTED } else { SOURCE_SURFACE })) }));
+            let check = self.source_checkbox(i);
+            if !self.mask_mode {
+                items.push(Item::Rect(RectItem { radius: 4.0, border_w: 1.0,
+                    border_color: if v.selected { hex_color(CUT_HEADER_BLUE) } else { hex_color(SOURCE_SUBTLE) },
+                    ..RectItem::new(check, if v.selected { hex_color(CUT_HEADER_BLUE) } else { WORKSPACE_PANEL }) }));
+                // Geometric check: mono fonts do not all provide a checkmark.
+                if v.selected {
+                    for (x, y) in [(0., 3.), (2., 5.), (4., 3.), (6., 1.), (8., -1.)] {
+                        items.push(Item::Rect(RectItem::new(RectPx { x: check.x + 4.0 + x, y: check.y + 7.0 + y, w: 3.0, h: 3.0 }, ink)));
+                    }
+                }
+            }
+            ui_label(items, r.x + 40.0, r.y + 22.0, 11.0, accent, format!("{:02}", i + 1), Align::Left, 26.0);
+            let compact = l.rail < 300.0;
+            ui_label(items, r.x + 66.0, r.y + 22.0, 10.0, secondary,
+                if v.linked_copy { if compact { "COPY" } else { "LINKED COPY" } } else { "ORIGINAL" }, Align::Left,
+                if viewing { r.w - 130.0 } else { r.w - 78.0 });
+            if viewing {
+                ui_label(items, r.x + r.w - 12.0, r.y + 22.0, 10.0, accent,
+                    if compact { "VIEW" } else { "VIEWING" }, Align::Right, if compact { 28.0 } else { 50.0 });
+            }
+            let tw = if compact { 58.0 } else { 86.0 };
+            let thumb = RectPx { x: r.x + 12.0, y: r.y + 44.0, w: tw, h: 54.0 };
+            items.push(Item::Rect(RectItem { radius: 4.0, ..RectItem::new(thumb, WORKSPACE_PANEL) }));
+            if v.delivered {
+                let aspect = v.info.width as f32 / v.info.height.max(1) as f32;
+                let box_aspect = thumb.w / thumb.h;
+                let (uw, uh) = if aspect > box_aspect { (box_aspect / aspect, 1.0) } else { (1.0, aspect / box_aspect) };
+                items.push(Item::Video { a: i, b: i, r: thumb,
+                    uv: [(1.0-uw)/2.0, (1.0-uh)/2.0, uw, uh], mode: VideoMode::Tex, p0: 4.0, p1: 0.0 });
+            }
+            let x = thumb.x + thumb.w + 12.0;
+            let width = r.x + r.w - 12.0 - x;
+            let name = format!("{}{}", name_of(&v.info.path), if v.linked_copy { " · copy" } else { "" });
+            ui_label(items, x, r.y + 59.0, 12.0, ink, name, Align::Left, width);
+            ui_label(items, x, r.y + 79.0, 10.0, secondary,
+                format!("{}p · {:.0} fps", v.info.height, v.info.fps), Align::Left, width);
+            let shared = self.videos.iter().filter(|other| other.info.path == v.info.path).count();
+            ui_label(items, r.x + 12.0, r.y + 117.0, 11.0, secondary,
+                if shared > 1 { format!("Shared file · {shared} items") } else { "Original file".into() }, Align::Left, r.w - 24.0);
+            ui_label(items, r.x + 12.0, r.y + 145.0, 10.0, if v.player.failed() { ERR } else { hex_color(SOURCE_SUBTLE) },
+                if v.player.failed() { "DECODE FAILED".into() } else {
+                    format!("{} · {}", v.info.codec.to_uppercase(), fmt_time(v.info.duration))
+                }, Align::Left, r.w - 24.0);
+        }
+        items.push(Item::Clip(None));
+        let n = self.videos.iter().filter(|v| v.selected).count();
+        ui_label(items, 12.0, l.list.y + l.list.h + 16.0, 10.0, secondary,
+            if n > 0 { format!("{n} selected") } else { "Click to view · X selects".into() }, Align::Left, l.rail - 82.0);
+        ui_label(items, 12.0, l.list.y + l.list.h + 36.0, 10.0, hex_color(SOURCE_SUBTLE),
+            if !self.source_status.is_empty() { self.source_status.clone() }
+            else if self.videos.len() > self.source_capacity() {
+                format!("{}–{} of {} · scroll", first + 1, (first + self.source_capacity()).min(self.videos.len()), self.videos.len())
+            } else { "Copies share the original file".into() }, Align::Left, l.rail - 24.0);
     }
 
     /// Step back, play / pause, step on: shared by Input's transport and
@@ -2644,16 +2795,14 @@ impl App {
 
     /// The header's Undo / Export and the scrub toolbar's icon buttons.
     /// `label` is what the button says when hovered; `hint` its key.
-    fn cut_controls(&self, out: &mut Vec<Control>, tabs_end: f32) {
+    fn cut_controls(&self, out: &mut Vec<Control>) {
         let Some(cut) = &self.cut else { return };
         let (w, bar) = (self.vp.0, self.workspace().transport);
         let mut push = |r: RectPx, label: &str, selected: bool, action: CutAction, hint: &'static str| {
             out.push(Control { hint, ..Control::new(r, label, selected, Action::Cut(action)) });
         };
-        if w - 180.0 > tabs_end {
-            push(RectPx { x: w - 16.0 - 64.0, y: 6.0, w: 64.0, h: 26.0 }, "Export", false, CutAction::Export, "");
-            push(RectPx { x: w - 16.0 - 64.0 - 8.0 - 88.0, y: 6.0, w: 88.0, h: 26.0 }, "Undo", false, CutAction::Undo, "⌘Z");
-        }
+        push(RectPx { x: w - 80.0, y: 8.5, w: 66.0, h: 26.0 }, "Export", false, CutAction::Export, "");
+        push(RectPx { x: w - 178.0, y: 3.5, w: 86.0, h: 36.0 }, "Undo", false, CutAction::Undo, "⌘Z");
         let cy = bar.y + bar.h / 2.0;
         // Either side of play, outward to in: a chapter, a keyframe, a frame.
         let x0 = bar.x + 16.0;
@@ -2833,7 +2982,8 @@ impl App {
         rects.iter().find(|(_, _, r)| contains(*r, self.cursor.0, self.cursor.1)).map(|(k, ..)| *k)
     }
 
-    /// Fetch posters, and play the hovered one.
+    /// Fetch posters (clips on the picture lane, chapter cards), and play
+    /// the hovered clip's.
     fn tick_cut_thumbs(&mut self, dt: f32) {
         if !self.cut_mode || self.cut.is_none() || self.videos.is_empty() {
             self.cut_thumb.play = None;
@@ -2846,7 +2996,18 @@ impl App {
             self.cut_thumb.path = Some(info.path.clone());
         }
         let rects = self.cut_thumb_rects();
-        let wanted = |key: i64| rects.iter().any(|r| r.0 == key);
+        // Posters wanted on screen, as (key, at): the clips on the picture
+        // lane, then the chapter cards while the inspector shows them.
+        let mut wants: Vec<(i64, f64)> = rects.iter().map(|(k, g, _)| (*k, g.start)).collect();
+        if self.cut_thumbs {
+            let cut = self.cut.as_ref().unwrap();
+            for (_, idx) in self.cut_chapter_rows() {
+                let at = cut.chapters[idx].start;
+                let key = (at * 1000.0).round() as i64;
+                if !wants.iter().any(|w| w.0 == key) { wants.push((key, at)); }
+            }
+        }
+        let wanted = |key: i64| wants.iter().any(|w| w.0 == key);
         while let Ok((path, key, result)) = self.cut_thumb.rx.try_recv() {
             self.cut_thumb.pending.retain(|k| *k != key);
             if Some(&path) != self.cut_thumb.path.as_ref() { continue; }
@@ -2854,7 +3015,7 @@ impl App {
                 Ok(rgba) => rgba,
                 Err(e) => { log::info!("cut thumbnail {key}ms: {e}"); self.cut_thumb.failed.push(key); continue; }
             };
-            let slot = if self.cut_thumb.cells.len() < recent::SHOWN {
+            let slot = if self.cut_thumb.cells.len() < recent::ATLAS {
                 self.cut_thumb.cells.push(ThumbCell { key, rgba: rgba.clone() });
                 self.cut_thumb.cells.len() - 1
             } else if let Some(i) = self.cut_thumb.cells.iter().position(|c| !wanted(c.key)) {
@@ -2864,12 +3025,12 @@ impl App {
             } else { continue };
             self.cut_thumb.uploads.push(ThumbUpload { slot, buf: rgba });
         }
-        for (key, g, _) in &rects {
+        for &(key, at) in &wants {
             let cb = &self.cut_thumb;
-            let room = cb.cells.len() + cb.pending.len() < recent::SHOWN || cb.cells.iter().any(|c| !wanted(c.key));
-            if cb.slot_of(*key).is_some() || cb.pending.contains(key) || cb.failed.contains(key) || !room { continue; }
-            self.cut_thumb.pending.push(*key);
-            let (tx, path, at, key) = (self.cut_thumb.tx.clone(), info.path.clone(), g.start, *key);
+            let room = cb.cells.len() + cb.pending.len() < recent::ATLAS || cb.cells.iter().any(|c| !wanted(c.key));
+            if cb.slot_of(key).is_some() || cb.pending.contains(&key) || cb.failed.contains(&key) || !room { continue; }
+            self.cut_thumb.pending.push(key);
+            let (tx, path) = (self.cut_thumb.tx.clone(), info.path.clone());
             let _ = std::thread::Builder::new().name("cut-thumb".into()).spawn(move || {
                 let result = recent::frame(&path, at).map_err(|e| format!("{e:#}"));
                 let _ = tx.send((path, key, result));
@@ -3086,34 +3247,43 @@ impl App {
         }
     }
 
+    /// Figma x=85 clears the traffic lights; fullscreen needs only outer padding.
+    fn header_tabs(&self) -> RectPx {
+        RectPx { x: if self.fullscreen { 14.0 } else { 85.0 }, y: 6.0, w: 356.0, h: 31.0 }
+    }
+
+    fn build_cut_header(&self, items: &mut Vec<Item>) {
+        let r = self.header_tabs();
+        self.build_tool_housing(items);
+        if self.vp.0 >= 1000.0 {
+            let cut = self.cut.as_ref().unwrap();
+            let (text, color) = if cut.snap == Snap::Keyframe {
+                ("LOSSLESS · STREAM COPY", hex_color(CUT_LAMP))
+            } else { ("FRAME-ACCURATE · RE-ENCODE", hex_color(CUT_CORAL_INK)) };
+            items.push(Item::Text(TextItem { align: Align::Right, valign: VAlign::Middle,
+                tracking: 0.63, max_width: Some((self.vp.0 - 202.0 - r.x - r.w).max(0.0)),
+                ..TextItem::new(self.vp.0 - 190.0, 21.5, 10.5, color, text) }));
+        }
+    }
+
     fn build_cut_hud(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
         let l = self.workspace();
         let cut = self.cut.as_ref().unwrap();
-        let rule = mix(CUT_BG, 0xffffff, 0.06);
+        let rule = mix(0x050506, 0xffffff, 0.06);
         // Opaque shell surfaces, as in Input.
-        items.push(Item::Rect(RectItem::new(RectPx { x: 0.0, y: 0.0, w: vp.0, h: HEADER_H }, WORKSPACE_PANEL)));
+        items.push(Item::Rect(RectItem::new(RectPx { x: 0.0, y: 0.0, w: vp.0, h: CUT_HEADER_H }, WORKSPACE_PANEL)));
         items.push(Item::Rect(RectItem::new(l.transport, hex_color(CUT_BAR))));
         items.push(Item::Rect(RectItem::new(l.timeline, hex_color(CUT_TL))));
         items.push(Item::Rect(RectItem::new(l.side, hex_color(CUT_BG))));
-        for r in [RectPx { x: 0.0, y: HEADER_H - 1.0, w: vp.0, h: 1.0 },
+        for r in [RectPx { x: 0.0, y: CUT_HEADER_H - 1.0, w: vp.0, h: 1.0 },
             RectPx { h: 1.0, ..l.transport }, RectPx { h: 1.0, ..l.timeline },
             RectPx { w: if l.side.w > 0.0 { 1.0 } else { 0.0 }, ..l.side }] {
             items.push(Item::Rect(RectItem::new(r, rule)));
         }
 
-        // ---- header: tabs, the clip, what an export will do ----
+        // ---- Figma timeline header ----
         let controls = self.controls();
-        let tabs_end = controls.iter().filter(|c| matches!(c.action, Action::Tool(_))).map(|c| c.r.x + c.r.w).fold(0.0, f32::max);
-        let header_right = controls.iter().filter(|c| matches!(c.action, Action::Cut(CutAction::Undo))).map(|c| c.r.x).next().unwrap_or(vp.0);
-        let (promise, promise_color) = if cut.snap == Snap::Keyframe { ("LOSSLESS · STREAM COPY", hex_color(CUT_GREEN)) }
-            else { ("FRAME-ACCURATE · RE-ENCODE", hex_color(CUT_CORAL_INK)) };
-        let promise_w = if vp.0 >= 1000.0 { promise.chars().count() as f32 * 10.5 * MONO_ADV + 26.0 } else { 0.0 };
-        if promise_w > 0.0 {
-            items.push(Item::Text(TextItem { align: Align::Right, valign: VAlign::Middle, tracking: 0.6,
-                ..TextItem::new(header_right - 14.0, HEADER_H / 2.0, 10.5, promise_color, promise) }));
-        }
-        ui_label(items, tabs_end + 16.0, HEADER_H / 2.0, 12.0, mix(0x050506, 0xffffff, 0.5), name_of(&cut.path),
-            Align::Left, header_right - promise_w - tabs_end - 44.0);
+        self.build_cut_header(items);
 
         // ---- scrub toolbar: play, the clock, the edit tools, the zoom ----
         let bar = l.transport;
@@ -3144,7 +3314,6 @@ impl App {
 
         self.build_cut_inspector(items);
         self.build_cut_timeline(items);
-        self.build_tool_housing(items);
         for control in &controls {
             self.draw_cut_control(items, control);
         }
@@ -3166,14 +3335,10 @@ impl App {
         let r = control.r;
         let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
         let Action::Cut(action) = control.action else {
-            if control.selected || hovered {
-                items.push(Item::Rect(RectItem { radius: 7.0, ..RectItem::new(r, if control.selected { TOOL_BG } else { CONTROL_BG }) }));
-            }
-            let color = if control.selected { ACCENT } else if hovered { WORKSPACE_TEXT } else { WORKSPACE_DIM };
-            ui_label(items, cx, cy, if matches!(control.action, Action::Tool(_)) { TAB_PX } else { 11.0 }, color, &control.label, Align::Center, r.w - 8.0);
+            self.draw_tool_control(items, control);
             return;
         };
-        let soft = mix(CUT_BG, 0xffffff, 0.72);
+        let soft = mix(0x050506, 0xffffff, 0.72);
         match action {
             CutAction::Export => {
                 let busy = cut.exporting() || cut.cuts().is_empty();
@@ -3184,13 +3349,13 @@ impl App {
             CutAction::Undo => {
                 let dead = !cut.can_undo();
                 items.push(Item::Rect(RectItem { radius: 7.0, border_w: 1.0,
-                    border_color: mix(CUT_BG, 0xffffff, if hovered && !dead { 0.3 } else { 0.14 }),
-                    ..RectItem::new(r, if hovered && !dead { mix(CUT_BG, 0xffffff, 0.05) } else { [0.0; 4] }) }));
-                let color = if dead { mix(CUT_BG, 0xffffff, 0.3) } else { soft };
-                let cap = control.hint.chars().count() as f32 * 10.0 * MONO_ADV + 12.0;
-                ui_label(items, r.x + 12.0, cy, 11.5, color, &control.label, Align::Left, r.w - cap - 26.0);
-                let key = RectPx { x: r.x + r.w - 6.0 - cap.max(20.0), y: cy - 10.0, w: cap.max(20.0), h: 20.0 };
-                items.push(Item::Rect(RectItem { radius: 5.0, ..RectItem::new(key, mix(CUT_BG, 0xffffff, 0.09)) }));
+                    border_color: mix(0x050506, 0xffffff, if hovered && !dead { 0.3 } else { 0.14 }),
+                    ..RectItem::new(r, if hovered && !dead { mix(0x050506, 0xffffff, 0.05) } else { [0.0; 4] }) }));
+                let color = if dead { mix(0x050506, 0xffffff, 0.3) } else { soft };
+                let cap: f32 = 22.0;
+                ui_label(items, r.x + 13.0, cy, 11.5, color, &control.label, Align::Left, 32.0);
+                let key = RectPx { x: r.x + r.w - 13.0 - cap.max(20.0), y: cy - 10.0, w: cap.max(20.0), h: 20.0 };
+                items.push(Item::Rect(RectItem { radius: 5.0, ..RectItem::new(key, mix(0x050506, 0xffffff, 0.09)) }));
                 ui_label(items, key.x + key.w / 2.0, cy, 10.0, color, control.hint, Align::Center, key.w);
             }
             CutAction::Play => {
@@ -3310,9 +3475,13 @@ impl App {
                                 let ground = if on { mix(CUT_BG, CUT_AMBER, 0.12) } else if hovered { mix(CUT_BG, 0xffffff, 0.07) } else { hex_color(CUT_LANE) };
                 if self.cut_thumbs {
                     items.push(Item::Rect(RectItem { radius: 9.0, border_w: if on { 1.0 } else { 0.0 }, border_color: hex_color(CUT_AMBER), ..RectItem::new(r, ground) }));
-                    // No frame to show yet: the film ground the picture clip uses.
+                    // The chapter's first frame; until it arrives, the film
+                    // ground the picture clip uses.
                     let pic = RectPx { x: r.x + 5.0, y: r.y + 5.0, w: r.w - 10.0, h: 62.0 };
-                    items.push(Item::Rect(RectItem { radius: 5.0, ..RectItem::new(pic, hex_color(CUT_FILM)) }));
+                    match self.cut_thumb.slot_of((c.start * 1000.0).round() as i64) {
+                        Some(slot) => items.push(Item::Thumb { r: pic, slot, radius: 5.0, alpha: 1.0 }),
+                        None => items.push(Item::Rect(RectItem { radius: 5.0, ..RectItem::new(pic, hex_color(CUT_FILM)) })),
+                    }
                     chapter_flag(items, pic.x + 4.0, pic.y + 4.0, 18.0, number, on, false);
                     items.push(Item::Rect(RectItem { radius: 3.5, ..RectItem::new(RectPx { x: pic.x + pic.w - 12.0, y: pic.y + 5.0, w: 7.0, h: 7.0 }, snap_dot) }));
                     ui_label(items, r.x + 8.0, r.y + 80.0, 12.0, mix(CUT_BG, 0xffffff, 0.88), c.title.as_str(), Align::Left, r.w - 16.0);
@@ -3947,31 +4116,31 @@ impl Workspace {
             let lanes = if h >= CUT_FULL_MIN_H { CUT_TIMELINE_H } else { CUT_TIMELINE_COMPACT_H };
             let side = if w >= 1000.0 { CUT_SIDE_W } else { 0.0 };
             let transport_y = h - STATUS_H - lanes - CUT_TOOLBAR_H;
-            let top = (transport_y - HEADER_H).max(1.0);
+            let top = (transport_y - CUT_HEADER_H).max(1.0);
             return Self {
                 rail: 0.0, list: none, inspector: none,
-                canvas: RectPx { x: 0.0, y: HEADER_H, w: (w - side).max(1.0), h: top },
-                side: RectPx { x: w - side, y: HEADER_H, w: side, h: top },
+                canvas: RectPx { x: 0.0, y: CUT_HEADER_H, w: (w - side).max(1.0), h: top },
+                side: RectPx { x: w - side, y: CUT_HEADER_H, w: side, h: top },
                 transport: RectPx { x: 0.0, y: transport_y, w, h: CUT_TOOLBAR_H },
                 timeline: RectPx { x: 0.0, y: transport_y + CUT_TOOLBAR_H, w, h: lanes },
             };
         }
-        let rail = if !visible { 0.0 } else if w < 900.0 { 210.0_f32.min(w * 0.3) } else { 280.0 };
+        let rail = if !visible { 0.0 } else if w < 900.0 { 210.0_f32.min(w * 0.3) } else { 320.0 };
         let header = if visible { HEADER_H + CONTEXT_H } else { 0.0 };
         let bottom = if visible { TRANSPORT_H + STATUS_H } else { 0.0 };
         let canvas = RectPx { x: rail, y: header, w: (w - rail).max(1.0), h: (h - header - bottom).max(1.0) };
-        let inspector_h = if visible && h >= 600.0 { 216.0 } else { 0.0 };
+        let inspector_h = if visible && h >= 1000.0 { 216.0 } else { 0.0 };
         let inspector = RectPx { x: 0.0, y: h - STATUS_H - inspector_h, w: rail, h: inspector_h };
         Self {
             rail, canvas, inspector, timeline: none, side: none,
-            list: RectPx { x: 0.0, y: HEADER_H + 12.0, w: rail, h: (inspector.y - HEADER_H - 24.0).max(SOURCE_H) },
+            list: RectPx { x: 0.0, y: HEADER_H + 132.0, w: rail, h: (inspector.y - HEADER_H - 184.0).max(SOURCE_H) },
             transport: RectPx { x: rail, y: h - STATUS_H - TRANSPORT_H, w: w - rail, h: TRANSPORT_H },
         }
     }
 }
 
 #[derive(Clone, Copy)]
-enum Action { Tool(usize), View(Mode), Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
+enum Action { Duplicate, OpenFiles, ClearSources, Tool(usize), View(Mode), Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
 #[derive(Clone, Copy, PartialEq)]
 enum CutAction { In, Out, Split, Apply, Undo, Export, Snap(Snap), Play, Zoom(bool), Step(i32), Keyframe(i32), Chapter(i32) }
 /// `hint` is the key cap a cut-mode button carries ("" for none).
@@ -4006,11 +4175,19 @@ fn number_badge(items: &mut Vec<Item>, r: RectPx, index: usize) {
         border_color: [color[0], color[1], color[2], 0.12], ..RectItem::new(r, bg) }));
     ui_label(items, r.x + r.w / 2.0, r.y + r.h / 2.0, 11.0, color, (index + 1).to_string(), Align::Center, r.w - 4.0);
 }
-const HEADER_H: f32 = 38.0;
-/// The header tabs' type size.
-const TAB_PX: f32 = 12.0;
+/// Timeline Edit / Header (12:5): 44px shell with a blue selected tab.
+const CUT_HEADER_H: f32 = 44.0;
+const CUT_HEADER_BLUE: u32 = 0x0074e1;
+const HEADER_H: f32 = CUT_HEADER_H;
 const CONTEXT_H: f32 = 40.0;
-const SOURCE_H: f32 = 80.0;
+const SOURCE_H: f32 = 178.0;
+/// Sources card variables: surface, selected, border, ink, secondary, subtle.
+const SOURCE_SURFACE: u32 = 0x11151b;
+const SOURCE_SELECTED: u32 = 0x0d1b2b;
+const SOURCE_BORDER: u32 = 0x323b47;
+const SOURCE_INK: u32 = 0xf0f3f7;
+const SOURCE_SECONDARY: u32 = 0xb3bdc9;
+const SOURCE_SUBTLE: u32 = 0x8d9aab;
 const WORKSPACE_PANEL: [f32; 4] = [0.0196, 0.0196, 0.0235, 1.0];
 const CANVAS_BG: [f32; 4] = [29.0 / 255.0, 27.0 / 255.0, 27.0 / 255.0, 1.0];
 const WORKSPACE_TEXT: [f32; 4] = [209.0 / 255.0, 209.0 / 255.0, 209.0 / 255.0, 1.0];
@@ -4018,7 +4195,6 @@ const WORKSPACE_DIM: [f32; 4] = [0.57, 0.57, 0.57, 1.0];
 const WORKSPACE_MUTED: [f32; 4] = [0.43, 0.43, 0.43, 1.0];
 const WORKSPACE_RULE: [f32; 4] = [0.09, 0.09, 0.09, 1.0];
 const CONTROL_BG: [f32; 4] = [26.0 / 255.0, 26.0 / 255.0, 26.0 / 255.0, 1.0];
-const SOURCE_BG: [f32; 4] = [0.082, 0.082, 0.082, 1.0];
 const TOOL_BG: [f32; 4] = [0.043, 0.098, 0.149, 1.0];
 
 #[cfg(test)]
@@ -4078,6 +4254,77 @@ mod tests {
         assert!(!app.mask_mode);
         assert!(app.videos.iter().all(|v| v.last_frame.is_none()));
         assert_eq!(app.mode, Mode::Blend);
+    }
+
+    #[test]
+    fn source_checkboxes_do_not_change_view_and_clear_keeps_focus() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 3);
+        app.vp = (1280.0, 800.0);
+        let r = app.source_checkbox(1);
+        app.mouse_down(r.x + 10.0, r.y + 10.0);
+        assert_eq!(app.active, 0);
+        assert!(app.videos[1].selected);
+        app.key(Key::Char('3'));
+        assert_eq!(app.active, 2);
+        assert!(app.videos[1].selected);
+        assert!(!app.videos[2].selected);
+        app.key(Key::Char('x'));
+        assert!(app.videos[2].selected);
+        app.activate(Action::ClearSources);
+        assert_eq!(app.active, 2);
+        assert!(app.videos.iter().all(|v| !v.selected));
+        app.key(Key::SelectSources);
+        assert!(app.videos.iter().all(|v| v.selected));
+        app.key(Key::SelectSources);
+        assert!(app.videos.iter().all(|v| !v.selected));
+    }
+
+    #[test]
+    fn duplicate_sources_preserve_time_media_and_independent_selection() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 2);
+        assert!(tick_until(&mut app, Duration::from_secs(3), |a| a.started && a.t > 0.1));
+        app.playing = false;
+        let t = app.t;
+        let size = std::fs::metadata(&clip).unwrap().len();
+        app.videos[0].selected = true;
+        app.videos[1].selected = true;
+        app.key(Key::DuplicateSources);
+        assert_eq!(app.t, t);
+        assert!(!app.playing);
+        assert_eq!(app.videos.len(), 4);
+        assert_eq!(app.active, 1);
+        assert_eq!(app.source_file_count(), 1);
+        assert_eq!(app.videos.iter().map(|v| v.selected).collect::<Vec<_>>(), [false, true, false, true]);
+        assert_eq!(app.videos.iter().map(|v| v.linked_copy).collect::<Vec<_>>(), [false, true, false, true]);
+        assert!(app.videos.iter().all(|v| v.info.path == clip));
+        assert_eq!(std::fs::metadata(&clip).unwrap().len(), size);
+        assert!(app.take_cmds().iter().any(|c| matches!(c, Cmd::VideosChanged)));
+        assert!(tick_until(&mut app, Duration::from_secs(3), |a| a.videos.iter().all(|v| v.delivered && !v.pending)));
+        for v in &app.videos { assert!((v.shown_pts - app.videos[0].shown_pts).abs() < 1.0 / app.fps); }
+        app.key(Key::Close);
+        assert_eq!(app.videos.len(), 3);
+        assert!(clip.exists());
+        assert!(!app.videos[1].selected);
+        assert!(app.videos[2].selected);
+        app.add_videos(vec![mk_video(&clip)], true);
+        assert_eq!(app.videos.len(), 1);
+        assert!(!app.videos[0].selected && !app.videos[0].linked_copy);
+    }
+
+    #[test]
+    fn duplicate_viewed_source_while_playing_stays_frame_locked() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        assert!(tick_until(&mut app, Duration::from_secs(3), |a| a.started && a.t > 0.1));
+        let t = app.t;
+        app.duplicate_sources();
+        assert!(app.playing);
+        assert_eq!(app.t, t);
+        assert_eq!(app.videos.len(), 2);
+        assert!(tick_until(&mut app, Duration::from_secs(3), |a| a.videos.iter().all(|v| v.delivered)));
+        assert!((app.videos[0].shown_pts - app.videos[1].shown_pts).abs() <= 1.0 / app.fps + 1e-6);
     }
 
     #[test]
@@ -4384,7 +4631,7 @@ mod tests {
             info.rotation,
         )
         .expect("spawn");
-        Video { info, player, shown_pts: 0.0, delivered: false, pending: false, last_frame: None }
+        Video { selected: false, linked_copy: false, info, player, shown_pts: 0.0, delivered: false, pending: false, last_frame: None }
     }
 
     fn mk_app(clip: &PathBuf, n: usize) -> App {
@@ -4539,6 +4786,10 @@ mod tests {
         let cards = app.cut_chapter_rows();
         assert_eq!(cards.len(), 3);
         assert!(cards[0].0.y == cards[1].0.y && cards[1].0.x > cards[0].0.x, "cards sit side by side");
+        // Each card fetches its chapter's first frame into the poster atlas.
+        let keys: Vec<i64> = app.cut.as_ref().unwrap().chapters.iter().map(|c| (c.start * 1000.0).round() as i64).collect();
+        assert!(tick_until(&mut app, Duration::from_secs(15), |a| keys.iter().all(|k| a.cut_thumb.slot_of(*k).is_some())),
+            "every chapter card gets its frame");
         app.mouse_down(side.list_btn.x + 4.0, side.list_btn.y + 4.0);
         app.mouse_up();
         assert!(!app.cut_thumbs);
@@ -4582,7 +4833,7 @@ mod tests {
         assert_eq!(app.cut.as_ref().unwrap().selection(), Some((1.0, 2.0)));
     }
 
-    /// U undoes like ⌘Z, and the sideways wheel over the timeline zooms about the pointer
+    /// U undoes like ⌘Z, and a two-finger swipe over the timeline zooms about the pointer
     /// (up in, down out) while a sideways swipe pans.
     /// A lone clip opens on the timeline; a second one drops back to Sources.
     #[test]
@@ -4715,19 +4966,25 @@ mod tests {
         let v = app.cut_lanes().video;
         app.cursor_moved(v.x + v.w * 0.5, v.y + 10.0);
         let before = app.cut.as_ref().unwrap().pps;
-        app.scroll(-20.0, 0.0);
+        app.scroll(0.0, 20.0);
         let zoomed = app.cut.as_ref().unwrap().pps;
-        assert!(zoomed > before, "scrolling left should zoom in: {before} -> {zoomed}");
-        app.scroll(20.0, 0.0);
-        assert!(app.cut.as_ref().unwrap().pps < zoomed, "scrolling right should zoom back out");
+        assert!(zoomed > before, "swiping down should zoom in: {before} -> {zoomed}");
+        app.scroll(0.0, -20.0);
+        assert!(app.cut.as_ref().unwrap().pps < zoomed, "swiping up should zoom back out");
         // Anywhere on the panel counts: the ruler, the gutter, the toolbar.
         let l = app.cut_lanes();
         for (x, y) in [(l.ruler.x + 40.0, l.ruler.y + 4.0), (l.video.x - 30.0, l.video.y + 10.0), (app.workspace().transport.x + 300.0, app.workspace().transport.y + 25.0)] {
             app.cursor_moved(x, y);
             let before = app.cut.as_ref().unwrap().pps;
-            app.scroll(-20.0, 0.0);
+            app.scroll(0.0, 20.0);
             assert!(app.cut.as_ref().unwrap().pps > before, "no zoom at ({x}, {y})");
         }
+        // Pinch: fingers closing dive in, spreading backs out.
+        let before = app.cut.as_ref().unwrap().pps;
+        app.pinch(0.2);
+        assert!(app.cut.as_ref().unwrap().pps < before, "spreading should zoom out");
+        app.pinch(-0.2);
+        assert!((app.cut.as_ref().unwrap().pps - before).abs() < 1e-6, "pinching inward should zoom back in");
     }
 
     /// The hover lift on a clip eases up over a few frames and back down after

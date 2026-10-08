@@ -3,6 +3,29 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-08 — updated shared header alignment
+
+Refreshed Figma Header `12:5`: the mode selector is now left aligned at x=85
+(x=14 in fullscreen), 356px wide, with Sources / Timeline / Crop / Mask labels.
+All four modes share the 44px header, outlined housing and blue active button,
+so switching modes keeps the selector in place. Timeline retains its existing
+Undo/Export controls and status. Drawing and hit testing use the same controls.
+
+## 2026-10-08 — Timeline Edit header
+
+Implemented Figma Timeline Edit header `12:5`: a 44px #050506 bar,
+31px outlined tab housing, blue TIMELINE selection, green stream-copy status, and
+right-aligned Undo (with ⌘Z keycap) / Export controls at the board's sizes.
+The clip filename leaves the header; it remains in the native window title.
+The timeline canvas and inspector start below the new header. The status yields
+below 1000px so the tabs and actions fit at 720px; native traffic lights retain
+100px clearance (14px in fullscreen). T / Escape still return to Sources.
+The header keeps Abner’s SOURCES, TIMELINE, CROP and MASK modes, wired to
+their existing actions. The existing mono text renderer is retained.
+Undo/export keep their existing availability and actions. All 62 tests pass;
+window captures verified the header at 1440×800 and 720×480. The existing
+scrub-toolbar overlap at 720px is outside this header change.
+
 ## 2026-10-07 — the scrub panel brought level with the Figma board
 
 Implemented from the Figma file "Abner — Timeline Edit", node 25-24 (the toolbar and

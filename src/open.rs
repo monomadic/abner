@@ -23,6 +23,7 @@ mod imp {
     static NOTIFY: OnceLock<Notify> = OnceLock::new();
 
     unsafe extern "C" {
+        fn ab_choose_files();
         fn ab_install_open_handler(cb: extern "C" fn(*const c_char)) -> std::ffi::c_int;
     }
 
@@ -55,6 +56,8 @@ mod imp {
         }
     }
 
+    pub fn choose_files() { unsafe { ab_choose_files(); } }
+
     /// Take every path the OS has asked us to open since the last drain.
     pub fn drain() -> Vec<PathBuf> {
         std::mem::take(&mut *OPENED.lock().unwrap())
@@ -65,6 +68,8 @@ mod imp {
 mod imp {
     use std::path::PathBuf;
 
+    pub fn choose_files() {}
+
     pub fn install(_notify: crate::player::Notify) {}
 
     pub fn drain() -> Vec<PathBuf> {
@@ -72,4 +77,4 @@ mod imp {
     }
 }
 
-pub use imp::{drain, install};
+pub use imp::{choose_files, drain, install};

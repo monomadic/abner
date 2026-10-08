@@ -438,8 +438,8 @@ pub struct Gpu {
     /// The launch plate: one texture for the life of the process, bound
     /// in every group like the wordmark, so mode 10 needs no batch key.
     plate: VideoTex,
-    /// The recent row's thumbnails, one `THUMB_W × THUMB_H` cell per
-    /// tile side by side — bound in every group like the plate, so mode 14
+    /// The thumbnail atlas, `recent::ATLAS` cells of `THUMB_W × THUMB_H` in
+    /// rows of `ATLAS_COLS` — bound in every group like the plate, so mode 14
     /// needs no batch key.
     thumbs: VideoTex,
     mask_tex: wgpu::Texture,
@@ -719,8 +719,8 @@ impl Gpu {
             &device,
             &blit_bgl,
             &sampler,
-            THUMB_W * recent::SHOWN as u32,
-            THUMB_H,
+            THUMB_W * recent::ATLAS_COLS as u32,
+            THUMB_H * (recent::ATLAS / recent::ATLAS_COLS) as u32,
         );
 
         let glyph_tex = device.create_texture(&wgpu::TextureDescriptor {
@@ -1036,7 +1036,7 @@ impl Gpu {
 
     /// A finished thumbnail into its cell of the recent row's atlas.
     fn upload_thumb(&mut self, up: &ThumbUpload) {
-        if up.slot >= recent::SHOWN || up.buf.len() != (THUMB_W * THUMB_H * 4) as usize {
+        if up.slot >= recent::ATLAS || up.buf.len() != (THUMB_W * THUMB_H * 4) as usize {
             log::warn!("bad thumbnail upload: slot {} {}B", up.slot, up.buf.len());
             return;
         }
@@ -1044,7 +1044,7 @@ impl Gpu {
             wgpu::TexelCopyTextureInfo {
                 texture: &self.thumbs.tex,
                 mip_level: 0,
-                origin: wgpu::Origin3d { x: up.slot as u32 * THUMB_W, y: 0, z: 0 },
+                origin: wgpu::Origin3d { x: (up.slot % recent::ATLAS_COLS) as u32 * THUMB_W, y: (up.slot / recent::ATLAS_COLS) as u32 * THUMB_H, z: 0 },
                 aspect: wgpu::TextureAspect::All,
             },
             &up.buf,
@@ -1291,13 +1291,17 @@ impl Gpu {
                 Item::Thumb { r, slot, radius, alpha } => {
                     // Half a texel in from the cell's edges, so the
                     // neighbouring cell never bleeds in through filtering.
-                    let n = recent::SHOWN as f32;
-                    let (hu, hv) = (0.5 / (THUMB_W as f32 * n), 0.5 / THUMB_H as f32);
-                    let u0 = *slot as f32 / n;
+                    let (nu, nv) = (recent::ATLAS_COLS as f32, (recent::ATLAS / recent::ATLAS_COLS) as f32);
+                    let (hu, hv) = (0.5 / (THUMB_W as f32 * nu), 0.5 / (THUMB_H as f32 * nv));
+                    let (u0, v0) = ((*slot % recent::ATLAS_COLS) as f32 / nu, (*slot / recent::ATLAS_COLS) as f32 / nv);
+                    // Cover the rect: crop the 16:9 cell to its aspect, centred.
+                    let (cell, want) = (THUMB_W as f32 / THUMB_H as f32, r.w / r.h.max(1e-3));
+                    let (ku, kv) = if want > cell { (1.0, cell / want) } else { (want / cell, 1.0) };
+                    let (cu, cv) = ((1.0 - ku) / (2.0 * nu), (1.0 - kv) / (2.0 * nv));
                     push(&mut data, &mut batches, clip, None, Instance {
                         pos: [r.x, r.y],
                         size: [r.w, r.h],
-                        uv: [u0 + hu, hv, u0 + 1.0 / n - hu, 1.0 - hv],
+                        uv: [u0 + cu + hu, v0 + cv + hv, u0 + 1.0 / nu - cu - hu, v0 + 1.0 / nv - cv - hv],
                         color: [0.0, 0.0, 0.0, *alpha],
                         mode: 14.0,
                         p0: *radius,

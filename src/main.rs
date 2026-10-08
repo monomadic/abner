@@ -38,7 +38,7 @@ use text::TextCtx;
 const USAGE: &str = "\
 abner — video comparison and editing workspace
 
-usage: abner [--config <file.toml>] [--no-video-splash] [--mask] [--crop [x,y,w,h]] [--cut [in,out]] [--view <overlay|sbs|delta|split|checker|blend>] [<video-a> [<video-b> [more...]]]
+usage: abner [--config <file.toml>] [--no-video-splash] [--duplicate] [--mask] [--crop [x,y,w,h]] [--cut [in,out]] [--view <overlay|sbs|delta|split|checker|blend>] [<video-a> [<video-b> [more...]]]
 
 Run with no arguments (or launched from the .app bundle) to open the
 launch window, then drag clips onto it: one drop fills slot 1 and plays
@@ -80,6 +80,10 @@ keys:
   Z            reset zoom
   F            fullscreen (borderless, same Space)
   Tab          toggle workspace controls
+  Cmd-D        duplicate checked sources (or the viewed source)
+  X            toggle the viewed source in the batch selection
+  Cmd-A        select / clear all sources
+  Cmd-O        add files
   Cmd-W        close the focused clip (on the empty window: quit)
   Cmd-Delete   close the focused clip
   Q            quit
@@ -99,6 +103,7 @@ fn main() -> anyhow::Result<()> {
     let mut mask_mode = false;
     let mut cut: Option<Vec<f64>> = None;
     let mut crop: Option<Option<[f32; 4]>> = None;
+    let mut duplicate = false;
     let mut paths: Vec<PathBuf> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -125,6 +130,8 @@ fn main() -> anyhow::Result<()> {
             }
         } else if a == "--no-video-splash" {
             // Any arguments already disable the splash, including this flag alone.
+        } else if a == "--duplicate" {
+            duplicate = true;
         } else if a == "--mask" {
             mask_mode = true;
         } else if a == "--cut" {
@@ -190,6 +197,10 @@ fn main() -> anyhow::Result<()> {
     recent::record(videos.iter().map(|v| v.info.path.as_path()));
 
     let mut app = App::new(videos, &config);
+    if duplicate {
+        app.duplicate_sources();
+        for v in &app.videos { v.player.set_notify(notify.clone()); }
+    }
     app.set_recent(recent::load());
     app.set_video_splash(video_splash);
     if let Some(path) = video_splash.then(backdrop_path).flatten() {
@@ -260,7 +271,7 @@ fn load_video(path: &Path) -> anyhow::Result<Video> {
         info.rotation,
     )
     .ok_or_else(|| anyhow::anyhow!("failed to start decoder for {}", path.display()))?;
-    Ok(Video { info, player, shown_pts: 0.0, delivered: false, pending: false, last_frame: None })
+    Ok(Video { selected: false, linked_copy: false, info, player, shown_pts: 0.0, delivered: false, pending: false, last_frame: None })
 }
 
 /// The launch window's floor video: `Contents/Resources/background.mp4`
@@ -333,6 +344,7 @@ impl Runner {
     /// follow the app's list; unchanged slots keep their texture (see
     /// `set_video_dims`), so an append never blanks what is on screen.
     fn sync_videos(&mut self) {
+        for v in &self.app.videos { v.player.set_notify(self.notify.clone()); }
         let dims: Vec<(u32, u32)> =
             self.app.videos.iter().map(|v| (v.player.w, v.player.h)).collect();
         if let Some(gpu) = &mut self.gpu {
@@ -373,6 +385,7 @@ impl Runner {
     fn apply_cmds(&mut self, event_loop: &ActiveEventLoop) {
         for cmd in self.app.take_cmds() {
             match cmd {
+                Cmd::OpenFiles => open::choose_files(),
                 Cmd::Quit => event_loop.exit(),
                 Cmd::ToggleFullscreen => {
                     if let Some(w) = &self.window {
@@ -624,6 +637,9 @@ impl ApplicationHandler for Runner {
                     return;
                 }
                 let key = match &event.logical_key {
+                    WinitKey::Character(s) if self.mods.super_key() && s.eq_ignore_ascii_case("d") => Some(Key::DuplicateSources),
+                    WinitKey::Character(s) if self.mods.super_key() && s.eq_ignore_ascii_case("a") => Some(Key::SelectSources),
+                    WinitKey::Character(s) if self.mods.super_key() && s.eq_ignore_ascii_case("o") => Some(Key::OpenFiles),
                     // ⌘W closes the focused clip, like a document window.
                     // Other ⌘-chords still fall through as their bare key.
                     WinitKey::Character(s)
@@ -665,7 +681,7 @@ impl ApplicationHandler for Runner {
                     WinitKey::Character(s) => s.chars().next().map(Key::Char),
                     _ => None,
                 };
-                if event.repeat && matches!(key, Some(Key::Char('m' | 'M' | 's' | 'S'))) {
+                if event.repeat && matches!(key, Some(Key::Char('m' | 'M' | 's' | 'S') | Key::DuplicateSources | Key::OpenFiles | Key::SelectSources)) {
                     return;
                 }
                 if let Some(key) = key {

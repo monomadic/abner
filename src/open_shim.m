@@ -59,3 +59,23 @@ int ab_install_open_handler(AbOpenCallback cb) {
     }
     return class_addMethod(cls, sel, (IMP)ab_application_open_urls, "v@:@@") ? 1 : 0;
 }
+
+// A non-modal picker feeds the same batch queue as Open With. Playback and
+// redraws continue while it is open. Cancellation makes no model changes.
+void ab_choose_files(void) {
+    static NSOpenPanel *panel = nil;
+    if (panel != nil) { [panel makeKeyAndOrderFront:nil]; return; }
+    panel = [NSOpenPanel openPanel];
+    panel.canChooseFiles = YES;
+    panel.canChooseDirectories = NO;
+    panel.allowsMultipleSelection = YES;
+    panel.prompt = @"Add sources";
+    [panel beginWithCompletionHandler:^(NSModalResponse response) {
+        if (response == NSModalResponseOK) {
+            for (NSURL *url in panel.URLs) {
+                if (url.isFileURL && ab_open_cb != NULL) ab_open_cb(url.fileSystemRepresentation);
+            }
+        }
+        panel = nil;
+    }];
+}

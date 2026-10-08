@@ -185,7 +185,9 @@ fn fs_main(in: Out) -> @location(0) vec4<f32> {
             return vec4<f32>(col.rgb, alpha);
         }
         case 1u: {
-            return vec4<f32>(a.rgb, 1.0);
+            // p0 is an optional corner radius for source-card thumbnails.
+            let d = sd_round_box(in.local - in.size * 0.5, in.size * 0.5, in.p0);
+            return vec4<f32>(a.rgb, select(1.0, cov(d), in.p0 > 0.0));
         }
         case 2u: {
             return vec4<f32>(abs(a.rgb - b.rgb) * in.p1, 1.0);
