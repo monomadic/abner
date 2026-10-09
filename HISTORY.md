@@ -11,6 +11,12 @@ tools shifted right. The shared control rectangles still drive both drawing and
 hit testing. Narrow windows keep the compact arrangement, including chapter
 navigation. The existing geometric icons and snap/zoom controls remain live.
 
+Follow-up: the first pass only displayed the new playback treatment at 1400
+logical pixels, so a normal half-screen window still looked unchanged. The
+compact transport now uses the Figma's unboxed playback icons and labeled
+timecode too. Below 900px it hides the zoom strip (wheel zoom still works),
+leaving the edit tools room without overlap.
+
 ## 2026-10-08 — updated shared header alignment
 
 Refreshed Figma Header `12:5`: the mode selector is now left aligned at x=85

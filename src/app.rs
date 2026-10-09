@@ -2865,9 +2865,11 @@ impl App {
             push(RectPx { x, y: cy - 16.0, w: 32.0, h: 32.0 }, label, matches!(action, CutAction::Snap(_)) && keyframe, action, hint);
             x += 42.0;
         }
-        let zoom = self.cut_zoom_bar();
-        push(RectPx { x: zoom.x - 30.0, y: cy - 12.0, w: 24.0, h: 24.0 }, "Zoom out", false, CutAction::Zoom(false), "");
-        push(RectPx { x: zoom.x + zoom.w + 6.0, y: cy - 12.0, w: 24.0, h: 24.0 }, "Zoom in", false, CutAction::Zoom(true), "");
+        if bar.w >= 900.0 {
+            let zoom = self.cut_zoom_bar();
+            push(RectPx { x: zoom.x - 30.0, y: cy - 12.0, w: 24.0, h: 24.0 }, "Zoom out", false, CutAction::Zoom(false), "");
+            push(RectPx { x: zoom.x + zoom.w + 6.0, y: cy - 12.0, w: 24.0, h: 24.0 }, "Zoom in", false, CutAction::Zoom(true), "");
+        }
     }
 
     /// Where the toolbar's icon buttons start: after the play disc, the
@@ -2929,7 +2931,7 @@ impl App {
         let l = self.workspace();
         if contains(l.transport, x, y) {
             let zoom = self.cut_zoom_bar();
-            if contains(RectPx { x: zoom.x - 4.0, y: zoom.y - 10.0, w: zoom.w + 8.0, h: zoom.h + 20.0 }, x, y) {
+            if l.transport.w >= 900.0 && contains(RectPx { x: zoom.x - 4.0, y: zoom.y - 10.0, w: zoom.w + 8.0, h: zoom.h + 20.0 }, x, y) {
                 self.cut_drag = Some(CutDrag::Zoom);
                 self.cut_drag_to(x);
             }
@@ -3328,31 +3330,31 @@ impl App {
         let tc = fmt_tc(self.t, self.fps);
         let (clock, frames) = tc.split_at(8);
         let x = self.cut_clock_x();
-        if wide {
-            ui_label(items, x, cy - 13.0, 9.0, hex_color(CUT_INK), "TIME", Align::Left, 90.0);
-            ui_label(items, x + 75.0, cy - 13.0, 9.0, mix(CUT_BAR, 0xffffff, 0.55), "FRAMES", Align::Left, 90.0);
-        }
-        let clock_y = if wide { cy + 8.0 } else { cy };
-        items.push(Item::Text(TextItem { valign: VAlign::Middle, ..TextItem::new(x, clock_y, if wide { 18.0 } else { 20.0 }, hex_color(CUT_INK), clock) }));
+        ui_label(items, x, cy - 13.0, 9.0, hex_color(CUT_INK), "TIME", Align::Left, 90.0);
+        ui_label(items, x + 75.0, cy - 13.0, 9.0, mix(CUT_BAR, 0xffffff, 0.55), "FRAMES", Align::Left, 90.0);
+        let clock_y = cy + 8.0;
+        let clock_px = if wide { 18.0 } else { 17.0 };
+        items.push(Item::Text(TextItem { valign: VAlign::Middle, ..TextItem::new(x, clock_y, clock_px, hex_color(CUT_INK), clock) }));
         items.push(Item::Text(TextItem { valign: VAlign::Middle,
-            ..TextItem::new(x + 8.0 * if wide { 18.0 } else { 20.0 } * MONO_ADV, clock_y, if wide { 18.0 } else { 20.0 }, mix(CUT_BAR, 0xffffff, 0.3), frames) }));
+            ..TextItem::new(x + 8.0 * clock_px * MONO_ADV, clock_y, clock_px, mix(CUT_BAR, 0xffffff, 0.3), frames) }));
         let sep = mix(CUT_BAR, 0xffffff, 0.12);
         items.push(Item::Rect(RectItem::new(RectPx { x: self.cut_tools_x() - 15.0, y: cy - 10.0, w: 1.0, h: 20.0 }, sep)));
-        let zoom = self.cut_zoom_bar();
-        items.push(Item::Rect(RectItem { radius: 1.5, ..RectItem::new(zoom, mix(CUT_BAR, 0xffffff, 0.14)) }));
-        let knob = zoom.x + zoom.w * cut.zoom_fraction(self.cut_lanes().video.w) as f32;
-        items.push(Item::Rect(RectItem { radius: 5.5, ..RectItem::new(RectPx { x: knob - 5.5, y: cy - 5.5, w: 11.0, h: 11.0 }, hex_color(CUT_INK)) }));
-        items.push(Item::Rect(RectItem::new(RectPx { x: zoom.x - 45.0, y: cy - 10.0, w: 1.0, h: 20.0 }, sep)));
-        // The snap lamp: lit while every cut lands on a keyframe — the board's
-        // 7px #20c45f at 42% with an 8px glow of the same green.
-        let lamp = RectPx { x: zoom.x - 66.0, y: cy - 3.5, w: 7.0, h: 7.0 };
-        if cut.snap == Snap::Keyframe {
-            for (grow, a) in [(6.0, 0.025), (3.0, 0.05)] {
-                items.push(Item::Rect(RectItem { radius: 3.5 + grow,
-                    ..RectItem::new(RectPx { x: lamp.x - grow, y: lamp.y - grow, w: 7.0 + 2.0 * grow, h: 7.0 + 2.0 * grow }, [0.125, 0.769, 0.373, a]) }));
+        if bar.w >= 900.0 {
+            let zoom = self.cut_zoom_bar();
+            items.push(Item::Rect(RectItem { radius: 1.5, ..RectItem::new(zoom, mix(CUT_BAR, 0xffffff, 0.14)) }));
+            let knob = zoom.x + zoom.w * cut.zoom_fraction(self.cut_lanes().video.w) as f32;
+            items.push(Item::Rect(RectItem { radius: 5.5, ..RectItem::new(RectPx { x: knob - 5.5, y: cy - 5.5, w: 11.0, h: 11.0 }, hex_color(CUT_INK)) }));
+            items.push(Item::Rect(RectItem::new(RectPx { x: zoom.x - 45.0, y: cy - 10.0, w: 1.0, h: 20.0 }, sep)));
+            // The snap lamp: lit while every cut lands on a keyframe.
+            let lamp = RectPx { x: zoom.x - 66.0, y: cy - 3.5, w: 7.0, h: 7.0 };
+            if cut.snap == Snap::Keyframe {
+                for (grow, a) in [(6.0, 0.025), (3.0, 0.05)] {
+                    items.push(Item::Rect(RectItem { radius: 3.5 + grow,
+                        ..RectItem::new(RectPx { x: lamp.x - grow, y: lamp.y - grow, w: 7.0 + 2.0 * grow, h: 7.0 + 2.0 * grow }, [0.125, 0.769, 0.373, a]) }));
+                }
             }
+            items.push(Item::Rect(RectItem { radius: 3.5, ..RectItem::new(lamp, if cut.snap == Snap::Keyframe { mix(CUT_BAR, CUT_LAMP, 0.42) } else { mix(CUT_BAR, 0xffffff, 0.2) }) }));
         }
-        items.push(Item::Rect(RectItem { radius: 3.5, ..RectItem::new(lamp, if cut.snap == Snap::Keyframe { mix(CUT_BAR, CUT_LAMP, 0.42) } else { mix(CUT_BAR, 0xffffff, 0.2) }) }));
 
         self.build_cut_inspector(items);
         self.build_cut_timeline(items);
@@ -3422,7 +3424,7 @@ impl App {
             _ => {
                 let dead = action == CutAction::Apply && cut.selection().is_none();
                 let fill = if control.selected { TOOL_BG } else if hovered && !dead { mix(CUT_BAR, 0xffffff, 0.07) } else { [0.0; 4] };
-                let playback = self.vp.0 >= 1400.0 && matches!(action, CutAction::Step(_) | CutAction::Keyframe(_) | CutAction::Chapter(_));
+                let playback = matches!(action, CutAction::Step(_) | CutAction::Keyframe(_) | CutAction::Chapter(_));
                 if !playback || hovered {
                     items.push(Item::Rect(RectItem { radius: 8.0, border_w: if playback { 0.0 } else { 1.0 }, border_color: hex_color(0x232323), ..RectItem::new(r, fill) }));
                 }
