@@ -3,6 +3,14 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-09 — Timeline transport styling
+
+Matched the selected Figma `transport/toolbar` frame at 1440px: black 50px ground,
+more widely spaced playback controls, labeled time and frame readouts, and edit
+tools shifted right. The shared control rectangles still drive both drawing and
+hit testing. Narrow windows keep the compact arrangement, including chapter
+navigation. The existing geometric icons and snap/zoom controls remain live.
+
 ## 2026-10-08 — updated shared header alignment
 
 Refreshed Figma Header `12:5`: the mode selector is now left aligned at x=85

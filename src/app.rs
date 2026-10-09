@@ -2829,7 +2829,17 @@ impl App {
         push(RectPx { x: w - 178.0, y: 3.5, w: 86.0, h: 36.0 }, "Undo", false, CutAction::Undo, "⌘Z");
         let cy = bar.y + bar.h / 2.0;
         // Either side of play, outward to in: a chapter, a keyframe, a frame.
-        let x0 = bar.x + 16.0;
+        let wide = bar.w >= 1400.0;
+        let x0 = bar.x + if wide { 70.0 } else { 16.0 };
+        if wide {
+            push(RectPx { x: x0 - 48.0, y: cy - 14.0, w: 28.0, h: 28.0 }, "Previous chapter", false, CutAction::Chapter(-1), "");
+            push(RectPx { x: x0, y: cy - 14.0, w: 28.0, h: 28.0 }, "Previous keyframe", false, CutAction::Keyframe(-1), "⇧←");
+            push(RectPx { x: x0 + 60.0, y: cy - 14.0, w: 28.0, h: 28.0 }, "Back one frame", false, CutAction::Step(-1), "←");
+            push(RectPx { x: x0 + 138.0, y: cy - 15.0, w: 30.0, h: 30.0 }, if self.playing { "Pause" } else { "Play" }, false, CutAction::Play, "space");
+            push(RectPx { x: x0 + 208.0, y: cy - 14.0, w: 28.0, h: 28.0 }, "Forward one frame", false, CutAction::Step(1), "→");
+            push(RectPx { x: x0 + 268.0, y: cy - 14.0, w: 28.0, h: 28.0 }, "Next keyframe", false, CutAction::Keyframe(1), "⇧→");
+            push(RectPx { x: x0 + 330.0, y: cy - 14.0, w: 28.0, h: 28.0 }, "Next chapter", false, CutAction::Chapter(1), "");
+        } else {
         for (i, (label, action, hint)) in [
             ("Previous chapter", CutAction::Chapter(-1), ""), ("Previous keyframe", CutAction::Keyframe(-1), "⇧←"),
             ("Back one frame", CutAction::Step(-1), "←"),
@@ -2842,6 +2852,7 @@ impl App {
             ("Next chapter", CutAction::Chapter(1), ""),
         ].into_iter().enumerate() {
             push(RectPx { x: x0 + 138.0 + i as f32 * 32.0, y: cy - 14.0, w: 28.0, h: 28.0 }, label, false, action, hint);
+        }
         }
         let mut x = self.cut_tools_x();
         let keyframe = cut.snap == Snap::Keyframe;
@@ -2862,12 +2873,13 @@ impl App {
     /// Where the toolbar's icon buttons start: after the play disc, the
     /// timecode and the separator.
     fn cut_tools_x(&self) -> f32 {
-        self.cut_clock_x() + 11.0 * 20.0 * MONO_ADV + 33.0
+        if self.vp.0 >= 1400.0 { self.workspace().transport.x + 827.0 }
+        else { self.cut_clock_x() + 11.0 * 20.0 * MONO_ADV + 33.0 }
     }
 
     /// The timecode's left edge: past the skip buttons and the play disc.
     fn cut_clock_x(&self) -> f32 {
-        self.workspace().transport.x + 16.0 + 246.0
+        self.workspace().transport.x + if self.vp.0 >= 1400.0 { 500.0 } else { 262.0 }
     }
 
     /// The zoom slider's track, at the toolbar's right.
@@ -3312,13 +3324,19 @@ impl App {
         // ---- scrub toolbar: play, the clock, the edit tools, the zoom ----
         let bar = l.transport;
         let cy = bar.y + bar.h / 2.0;
+        let wide = bar.w >= 1400.0;
         let tc = fmt_tc(self.t, self.fps);
         let (clock, frames) = tc.split_at(8);
         let x = self.cut_clock_x();
-        items.push(Item::Text(TextItem { valign: VAlign::Middle, ..TextItem::new(x, cy, 20.0, hex_color(CUT_INK), clock) }));
+        if wide {
+            ui_label(items, x, cy - 13.0, 9.0, hex_color(CUT_INK), "TIME", Align::Left, 90.0);
+            ui_label(items, x + 75.0, cy - 13.0, 9.0, mix(CUT_BAR, 0xffffff, 0.55), "FRAMES", Align::Left, 90.0);
+        }
+        let clock_y = if wide { cy + 8.0 } else { cy };
+        items.push(Item::Text(TextItem { valign: VAlign::Middle, ..TextItem::new(x, clock_y, if wide { 18.0 } else { 20.0 }, hex_color(CUT_INK), clock) }));
         items.push(Item::Text(TextItem { valign: VAlign::Middle,
-            ..TextItem::new(x + 8.0 * 20.0 * MONO_ADV, cy, 20.0, mix(CUT_BAR, 0xffffff, 0.3), frames) }));
-        let sep = mix(CUT_BAR, 0xffffff, 0.1);
+            ..TextItem::new(x + 8.0 * if wide { 18.0 } else { 20.0 } * MONO_ADV, clock_y, if wide { 18.0 } else { 20.0 }, mix(CUT_BAR, 0xffffff, 0.3), frames) }));
+        let sep = mix(CUT_BAR, 0xffffff, 0.12);
         items.push(Item::Rect(RectItem::new(RectPx { x: self.cut_tools_x() - 15.0, y: cy - 10.0, w: 1.0, h: 20.0 }, sep)));
         let zoom = self.cut_zoom_bar();
         items.push(Item::Rect(RectItem { radius: 1.5, ..RectItem::new(zoom, mix(CUT_BAR, 0xffffff, 0.14)) }));
@@ -3404,8 +3422,10 @@ impl App {
             _ => {
                 let dead = action == CutAction::Apply && cut.selection().is_none();
                 let fill = if control.selected { TOOL_BG } else if hovered && !dead { mix(CUT_BAR, 0xffffff, 0.07) } else { [0.0; 4] };
-                // The board's button: an 8px-radius box with a 1px #232323 border.
-                items.push(Item::Rect(RectItem { radius: 8.0, border_w: 1.0, border_color: hex_color(0x232323), ..RectItem::new(r, fill) }));
+                let playback = self.vp.0 >= 1400.0 && matches!(action, CutAction::Step(_) | CutAction::Keyframe(_) | CutAction::Chapter(_));
+                if !playback || hovered {
+                    items.push(Item::Rect(RectItem { radius: 8.0, border_w: if playback { 0.0 } else { 1.0 }, border_color: hex_color(0x232323), ..RectItem::new(r, fill) }));
+                }
                 // Every toolbar icon is plain white; only a dead one dims.
                 let white = hex_color(0xffffff);
                 let (icon, color) = match action {
@@ -4084,8 +4104,8 @@ const CUT_PAD: f32 = 16.0;
 const CUT_GRIP: f32 = 12.0;
 // The Timeline Edit design's tokens, sRGB hex (its oklch values converted).
 const CUT_BG: u32 = 0x0e0f10;
-/// The scrub toolbar's ground (the board's #100f0e).
-const CUT_BAR: u32 = 0x100f0e;
+/// The selected Figma transport/toolbar uses a black ground.
+const CUT_BAR: u32 = 0x000000;
 /// The lit tab / toggle ground: the app's TOOL_BG.
 const CUT_TOOL_ON: u32 = 0x0b1926;
 const CUT_TL: u32 = 0x1a1a18;
