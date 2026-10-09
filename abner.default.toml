@@ -39,3 +39,11 @@ checker_size = 48.0
 [mask]
 # Brush diameter in image pixels (1–4096; [ / ] adjust it live).
 brush_size = 64.0
+
+[keys]
+# A key name (tab, enter, space, backspace) or a single character.
+# Flip to the next source video.
+next_source = "tab"
+# Show the current video alone, fullscreen: the workspace shell hides and
+# the window goes fullscreen. Press again (or Esc) to come back.
+fullscreen_video = "enter"

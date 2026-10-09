@@ -4,7 +4,7 @@
 //! Sync model: one master time `t` advances by wall-clock dt while
 //! playing; every player queues `(pts, rgba)` frames and each frame the
 //! app pops everything `pts <= t` (newest wins). All streams answer to
-//! the same clock, so switching the displayed video (Enter) can never
+//! the same clock, so switching the displayed video (Tab) can never
 //! jump in time — the other stream was already decoding the same moment.
 
 use std::time::Instant;
@@ -21,7 +21,7 @@ use crate::render::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    /// Videos stacked on top of each other; Enter flips which one shows.
+    /// Videos stacked on top of each other; Tab flips which one shows.
     Overlay,
     SideBySide,
     /// Amplified |A−B| difference.
@@ -207,12 +207,14 @@ pub struct App {
     speed: f64,
     /// Seconds per ← / → (config `playback.seek_step`).
     seek_step: f64,
+    /// Rebindable keys (config `keys`).
+    keys: crate::config::Keys,
     show_ui: bool,
     /// Delta amplification.
     gain: f32,
     blend: f32,
     checker_px: f32,
-    /// Seconds left on the small clip-number flash (shown after Enter
+    /// Seconds left on the small clip-number flash (shown after Tab
     /// when the UI is hidden — switchblade's skip-bar-flash pattern).
     badge_flash: f32,
     fullscreen: bool,
@@ -530,6 +532,7 @@ impl App {
             center: (0.5, 0.5),
             speed: 1.0,
             seek_step: cfg.playback.seek_step,
+            keys: cfg.keys.clone(),
             show_ui: true,
             gain: cfg.compare.delta_gain,
             blend: cfg.compare.blend,
@@ -1335,6 +1338,15 @@ impl App {
             self.close_active();
             return;
         }
+        if k == self.keys.fullscreen_video {
+            self.toggle_video_fullscreen();
+            return;
+        }
+        if k == self.keys.next_source {
+            // Cut mode holds one clip: nothing to flip to.
+            if !self.cut_mode { self.select((self.active + 1) % self.videos.len()); }
+            return;
+        }
         if !self.cut_mode {
             k = match k { Key::KeyLeft => Key::Left, Key::KeyRight => Key::Right, k => k };
         }
@@ -1379,14 +1391,14 @@ impl App {
             self.stroke_last = None;
         }
         match k {
-            Key::Enter => self.select((self.active + 1) % self.videos.len()),
             Key::Space => self.playing = !self.playing,
-            Key::Tab => { self.mouse_up(); self.show_ui = !self.show_ui; },
+            Key::Enter | Key::Tab => {} // bindable, handled above
             Key::Left => self.seek_by(-self.seek_step),
             Key::Right => self.seek_by(self.seek_step),
             Key::Escape => {
                 if self.fullscreen {
                     self.fullscreen = false;
+                    self.show_ui = true;
                     self.cmds.push(Cmd::ToggleFullscreen);
                 } else {
                     self.cmds.push(Cmd::Quit);
@@ -1424,7 +1436,19 @@ impl App {
         }
     }
 
-    /// Show clip `idx` (Enter's flip, or its number key directly).
+    /// The current video alone: shell hidden and the window fullscreen, or
+    /// back to the workspace if that's where we already are.
+    fn toggle_video_fullscreen(&mut self) {
+        self.mouse_up();
+        let on = !(self.fullscreen && !self.show_ui);
+        self.show_ui = !on;
+        if self.fullscreen != on {
+            self.fullscreen = on;
+            self.cmds.push(Cmd::ToggleFullscreen);
+        }
+    }
+
+    /// Show clip `idx` (`keys.next_source`'s flip, or its number key directly).
     fn select(&mut self, idx: usize) {
         self.active = idx;
         let capacity = self.source_capacity();
@@ -2710,7 +2734,7 @@ impl App {
                 return true;
             }
             // One clip: nothing to flip to, no compare view to change.
-            Key::Enter | Key::Char('1'..='9' | 'v' | 'V' | '-' | '=' | '+') => return true,
+            Key::Char('1'..='9' | 'v' | 'V' | '-' | '=' | '+') => return true,
             _ => return false,
         };
         self.cut_action(action);
@@ -4348,7 +4372,7 @@ mod tests {
             app.scroll(0.0, 40.0);
             assert!(app.source_first() < 8);
         }
-        app.key(Key::Tab);
+        app.key(Key::Enter);
         let c = app.workspace().canvas;
         assert_eq!((c.x, c.y, c.w, c.h), (0.0, 0.0, 1280.0, 800.0));
     }
@@ -4426,7 +4450,7 @@ mod tests {
         assert!(app.brush_diameter > 8.0);
         app.key(Key::Char('-'));
         assert!((app.brush_diameter - 8.0).abs() < 0.01);
-        app.key(Key::Enter);
+        app.key(Key::Tab);
         assert!(app.masks[1].as_ref().unwrap().pixels.iter().all(|p| *p == 0));
         pointer_down(&mut app, 160.0, 90.0);
         app.cursor_left();
@@ -4443,7 +4467,7 @@ mod tests {
         app.key(Key::Char('m'));
         assert_eq!(app.mode, Mode::SideBySide);
         app.key(Key::Char('m'));
-        app.key(Key::Enter);
+        app.key(Key::Tab);
         assert_eq!(app.masks[0].as_ref().unwrap().revision, revision);
         app.add_videos(vec![mk_video(&clip)], false);
         assert!(app.masks[0].is_some());

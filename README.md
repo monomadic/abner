@@ -60,7 +60,7 @@ mpv-style fake fullscreen.
 
 One master clock drives every stream. Players decode into small bounded queues; each
 frame the app pops everything due and shows the newest. Flipping the displayed video
-(`Enter`) switches *textures*, not players — the other stream was already decoding the
+(`Tab`) switches *textures*, not players — the other stream was already decoding the
 same instant, so the flip is seamless and time never jumps. Pause stops the clock
 (backpressure stalls every decoder for free); framesteps are exact seeks whose landing
 frame's true pts is adopted back into the clock, so stepping can't accumulate drift.
@@ -69,13 +69,13 @@ frame's true pts is adopted back into the clock, so stepping can't accumulate dr
 
 | Key | Action |
 |---|---|
-| `Enter` | flip to the next video (in overlay mode) |
+| `Tab` | flip to the next video (in overlay mode) |
 | `Space` | pause / play |
 | `<` `>` (or `,` `.`) | frame-step back / forward |
 | `←` `→` | seek ±1s |
 | `1`…`9` | show clip 1, 2, … directly |
 | `V` / `Shift-V` | next / previous view, cycling through: |
-| | **overlay** — videos stacked, flip with Enter (the classic A/B) |
+| | **overlay** — videos stacked, flip with Tab (the classic A/B) |
 | | **side-by-side** — all videos in a row |
 | | **delta** — amplified \|A−B\| difference (`-`/`=` adjusts gain) |
 | | **split** — vertical wipe, divider follows the pointer |
@@ -89,13 +89,13 @@ frame's true pts is adopted back into the clock, so stepping can't accumulate dr
 | `Z` | reset zoom |
 | `[` `]` | slow down / speed up playback (0.25×–4×; `Backspace` resets) |
 | `F` | fullscreen (borderless, same Space, instant) |
-| `Tab` | toggle the workspace controls |
+| `Enter` | the current video alone, fullscreen (again or `Esc` to return) |
 | `Q` | quit |
 | `Esc` | leave fullscreen, else quit |
 
 In compare modes (delta/split/checker/blend) the pair is the active video vs the next
-one; `Enter` rotates which pair you're looking at. Small colored number badges match
-the source list and the `1`–`9` shortcuts. With the controls hidden, `Enter` still
+one; `Tab` rotates which pair you're looking at. Small colored number badges match
+the source list and the `1`–`9` shortcuts. With the controls hidden, `Tab` still
 flashes the number briefly so you know where you are.
 
 ## Mask painting
@@ -151,8 +151,11 @@ Scroll the rail when there are more clips than fit.
 The context row switches comparison views or exposes brush and export controls.
 The charcoal canvas holds the videos, with shared pan and zoom. The transport stays
 visible below it, with frame stepping, play/pause, scrubbing and timecodes. A quiet
-footer shows the current tool, clip, zoom and save/export status. `Tab` hides the
-whole interface to give the image the window.
+footer shows the current tool, clip, zoom and save/export status. `Enter` hides the
+whole interface and goes fullscreen to give the image the screen.
+
+Both keys are rebindable in the config's `[keys]` table (`next_source`,
+`fullscreen_video`).
 
 The rail narrows below 900px and the inspector hides below 600px high; the minimum
 window is 720×480. These changes keep tools and source selection reachable without

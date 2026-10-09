@@ -115,7 +115,7 @@ from one to the other, keeping its number.
   drawing and pointer hit testing: a numbered source rail, focused inspector,
   Sources/Timeline/Crop/Mask toolbar, contextual controls, canvas, persistent transport and
   status line. The rail is 280px (210 below 900px wide), the inspector hides below
-  600px high, and the minimum window is 720×480. `Tab` hides the whole shell.
+  600px high, and the minimum window is 720×480. `Enter` (config `keys.fullscreen_video`) hides the whole shell AND goes fullscreen; `Tab` (`keys.next_source`) flips clips. Bindings resolve in `App::key` before the mode-specific keys.
   `base_rect` fits within the canvas (or an individual side-by-side cell); every
   gesture and crop/mask transform uses that same rect. Shell clicks cannot paint.
   `Item::Clip` scissors video and overlays to the canvas/cell, including when zoomed.

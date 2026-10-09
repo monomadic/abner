@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, bail};
 use serde::Deserialize;
 
-use crate::app::Mode;
+use crate::app::{Key, Mode};
 
 const DEFAULT_TOML: &str = include_str!("../abner.default.toml");
 
@@ -23,6 +23,7 @@ pub struct Config {
     pub playback: Playback,
     pub compare: Compare,
     pub mask: MaskCfg,
+    pub keys: Keys,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -53,6 +54,30 @@ pub struct Compare {
 #[serde(deny_unknown_fields)]
 pub struct MaskCfg {
     pub brush_size: f32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Keys {
+    #[serde(deserialize_with = "de_key")]
+    pub next_source: Key,
+    #[serde(deserialize_with = "de_key")]
+    pub fullscreen_video: Key,
+}
+
+fn de_key<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Key, D::Error> {
+    let s = String::deserialize(d)?;
+    let mut chars = s.chars();
+    match (s.to_ascii_lowercase().as_str(), chars.next(), chars.next()) {
+        ("tab", ..) => Ok(Key::Tab),
+        ("enter" | "return", ..) => Ok(Key::Enter),
+        ("space", ..) => Ok(Key::Space),
+        ("backspace", ..) => Ok(Key::Backspace),
+        (_, Some(c), None) => Ok(Key::Char(c)),
+        _ => Err(serde::de::Error::custom(format!(
+            "unknown key `{s}`, expected tab, enter, space, backspace or a single character"
+        ))),
+    }
 }
 
 fn de_mode<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Mode, D::Error> {
@@ -183,6 +208,14 @@ mod tests {
         assert_eq!(c.playback.view, Mode::Overlay);
         assert_eq!((c.window.width, c.window.height), (1280.0, 800.0));
         assert!(!c.playback.start_paused);
+        assert_eq!((c.keys.next_source, c.keys.fullscreen_video), (Key::Tab, Key::Enter));
+    }
+
+    #[test]
+    fn keys_parse_names_and_characters() {
+        let c = Config::from_overlay_str("[keys]\nnext_source = \"n\"\nfullscreen_video = \"Space\"\n").unwrap();
+        assert_eq!((c.keys.next_source, c.keys.fullscreen_video), (Key::Char('n'), Key::Space));
+        assert!(err("[keys]\nnext_source = \"pgup\"\n").contains("next_source"));
     }
 
     #[test]
