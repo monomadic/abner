@@ -257,10 +257,12 @@ The inspector shows a live 93×54 source thumbnail, filename and source metadata
 above Chapters/Streams, with list/grid and add-chapter controls. It tightens the
 header gap in shorter windows and paginates chapter rows to prevent footer overlap.
 
-Playback uses five controls around a 34px play disc, a 16px time readout with
-working TIME/FRAMES selectors, and 32px edit controls. Backtick toggles the readout;
-`--cut --timeline-frames` opens that state. `{` / `}` navigate chapters. At narrow
-widths spacing and the zoom slider shrink; all hit regions share drawn geometry.
+Transport 73:111 is a 50px black bar: five playback controls around a 34px
+play disc, six unboxed 32px editing buttons with 6px gaps, then a 20px clock
+with working TIME/FRAMES selectors. Separators divide these groups; zoom stays
+right-aligned and hides below 900px. Snap uses an outlined keyframe diamond.
+Backtick toggles the readout; `--cut --timeline-frames` opens that state.
+`{` / `}` navigate chapters. Drawing and input share control geometry down to 720px.
 `CUT_CANVAS`, `CUT_HEADER_HOUSING`, `CUT_HEADER_INK`, `CUT_CHAPTER_TAG`,
 `CUT_BAR`, `CUT_TL` and `CUT_AMBER` mirror the Timeline variables.
 Dynamic media, waveform, chapters and ranges come from the loaded clip; static

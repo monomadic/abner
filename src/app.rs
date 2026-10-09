@@ -2762,6 +2762,7 @@ impl App {
             Key::Char('i' | 'I') => CutAction::In,
             Key::Char('o' | 'O') => CutAction::Out,
             Key::Char('s' | 'S') => CutAction::Split,
+            Key::Backspace if self.cut_pick.is_some() => CutAction::DeletePicked,
             Key::Char('x' | 'X') => CutAction::Apply,
             Key::Char('e' | 'E') => CutAction::Export,
             Key::Undo | Key::Char('u' | 'U') => CutAction::Undo,
@@ -2838,8 +2839,24 @@ impl App {
             }
             CutAction::In => cut.set_in(t),
             CutAction::Out => cut.set_out(t),
-            CutAction::Split => {
+            CutAction::Split | CutAction::SplitAtPlayhead => {
+                let split_at = if action == CutAction::SplitAtPlayhead { t } else { split_at };
                 if !cut.split(split_at) { cut.status = "No split here: already a boundary, or inside a cut".into(); }
+            }
+            CutAction::DeletePicked => {
+                if let Some((a, b, _)) = self.cut_pick.take() {
+                    if !cut.segments().iter().any(|s| (s.start - a).abs() < 1e-6 && (s.end - b).abs() < 1e-6) { return; }
+                    // A picked piece is already bounded by edits; don't expand it
+                    // if the snap mode has changed since those boundaries were made.
+                    let snap = cut.snap;
+                    cut.snap = Snap::Frame;
+                    cut.in_req = Some(a);
+                    cut.out_req = Some(b);
+                    cut.cut_selection();
+                    cut.snap = snap;
+                    cut.status = format!("Cut {:.2} s", b - a);
+                    return;
+                }
             }
             CutAction::Apply => {
                 let restoring = cut.selection_is_cut();
@@ -2887,45 +2904,45 @@ impl App {
         let cy = bar.y + bar.h / 2.0;
         // The Figma transport has five controls. Chapters remain in the inspector.
         for (x, label, action, hint) in [
-            (11.0, "Previous keyframe", CutAction::Keyframe(-1), "⇧←"),
-            (41.0, "Back one frame", CutAction::Step(-1), "←"),
-            (104.0, "Forward one frame", CutAction::Step(1), "→"),
-            (134.0, "Next keyframe", CutAction::Keyframe(1), "⇧→"),
+            (43.5, "Previous keyframe", CutAction::Keyframe(-1), "⇧←"),
+            (74.5, "Back one frame", CutAction::Step(-1), "←"),
+            (146.5, "Forward one frame", CutAction::Step(1), "→"),
+            (177.5, "Next keyframe", CutAction::Keyframe(1), "⇧→"),
         ] {
-            push(RectPx { x: bar.x + x, y: cy - 14.0, w: 28.0, h: 28.0 }, label, false, action, hint);
+            push(RectPx { x: bar.x + x, y: cy - 12.0, w: 24.0, h: 24.0 }, label, false, action, hint);
         }
-        push(RectPx { x: bar.x + 70.0, y: cy - 16.0, w: 32.0, h: 32.0 }, if self.playing { "Pause" } else { "Play" }, false, CutAction::Play, "space");
+        push(RectPx { x: bar.x + 105.5, y: cy - 17.0, w: 34.0, h: 34.0 }, if self.playing { "Pause" } else { "Play" }, false, CutAction::Play, "space");
         for (frames, offset, width, label) in [(false, 0.0, 30.0, "TIME"), (true, 30.0, 48.0, "FRAMES")] {
-            push(RectPx { x: self.cut_clock_x() + offset, y: bar.y + 4.0, w: width, h: 16.0 },
+            push(RectPx { x: self.cut_clock_x() + offset, y: bar.y + 5.0, w: width, h: 16.0 },
                 label, self.cut_frames == frames, CutAction::TimeDisplay(frames), "`");
         }
         let mut x = self.cut_tools_x();
         let keyframe = cut.snap == Snap::Keyframe;
         for (label, action, hint) in [
             ("Set in", CutAction::In, "I"), ("Set out", CutAction::Out, "O"), ("Split", CutAction::Split, "S"),
-            (if cut.selection_is_cut() { "Restore selection" } else { "Cut selection" }, CutAction::Apply, "X"),
+            ("Split at playhead", CutAction::SplitAtPlayhead, ""),
+            (if self.cut_pick.is_some() { "Delete selected clip" } else if cut.selection_is_cut() { "Restore selection" } else { "Cut selection" }, if self.cut_pick.is_some() { CutAction::DeletePicked } else { CutAction::Apply }, if self.cut_pick.is_some() { "Backspace" } else { "X" }),
             (if keyframe { "Snap to keyframes: on" } else { "Snap to keyframes: off" },
                 CutAction::Snap(if keyframe { Snap::Frame } else { Snap::Keyframe }), "K"),
         ] {
-            push(RectPx { x, y: cy - 15.0, w: 30.0, h: 30.0 }, label, matches!(action, CutAction::Snap(_)) && keyframe, action, hint);
-            x += 36.0;
+            push(RectPx { x, y: cy - 16.0, w: 32.0, h: 32.0 }, label, matches!(action, CutAction::Snap(_)) && keyframe, action, hint);
+            x += 38.0;
         }
         if bar.w >= 900.0 {
             let zoom = self.cut_zoom_bar();
-            push(RectPx { x: zoom.x - 30.0, y: cy - 12.0, w: 24.0, h: 24.0 }, "Zoom out", false, CutAction::Zoom(false), "");
-            push(RectPx { x: zoom.x + zoom.w + 6.0, y: cy - 12.0, w: 24.0, h: 24.0 }, "Zoom in", false, CutAction::Zoom(true), "");
+            push(RectPx { x: zoom.x - 28.0, y: cy - 12.0, w: 24.0, h: 24.0 }, "Zoom out", false, CutAction::Zoom(false), "");
+            push(RectPx { x: zoom.x + zoom.w + 4.0, y: cy - 12.0, w: 24.0, h: 24.0 }, "Zoom in", false, CutAction::Zoom(true), "");
         }
     }
 
-    /// Where the toolbar's icon buttons start: after the play disc, the
-    /// timecode and the separator.
+    /// Edit tools follow playback; the clock follows the six edit buttons.
     fn cut_tools_x(&self) -> f32 {
-        self.workspace().transport.x + 366.0
+        self.workspace().transport.x + 254.0
     }
 
-    /// The timecode's left edge: past the skip buttons and the play disc.
+    /// The timecode starts inside the LCD panel, after the edit group.
     fn cut_clock_x(&self) -> f32 {
-        self.workspace().transport.x + 215.0
+        self.workspace().transport.x + 534.0
     }
 
     /// The zoom slider's track, at the toolbar's right.
@@ -2994,6 +3011,7 @@ impl App {
                 self.cut_drag_to(x);
             } else if let Some(seg) = self.cut_ghost_at(x, y) {
                 // A removed clip is a selection: X restores it.
+                self.cut_pick = None;
                 let cut = self.cut.as_mut().unwrap();
                 cut.in_req = Some(seg.start);
                 cut.out_req = Some(seg.end);
@@ -3382,36 +3400,31 @@ impl App {
         let bar = l.transport;
         let cy = bar.y + bar.h / 2.0;
         let x = self.cut_clock_x();
-        let clock_y = cy + 8.0;
-        let clock_px = 18.0;
+        items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(
+            RectPx { x: x - 9.0, y: bar.y + 4.0, w: 148.0, h: 35.0 }, hex_color(0x020202)) }));
+        let clock_y = bar.y + 30.5;
+        let clock_px = 20.0;
         if self.cut_frames {
             ui_label(items, x, clock_y, clock_px, hex_color(CUT_INK),
                 format!("{}", (self.t * self.fps).round() as u64), Align::Left, 123.0);
         } else {
             let tc = fmt_tc(self.t, self.fps);
             let (clock, frames) = tc.split_at(8);
-            items.push(Item::Text(TextItem { valign: VAlign::Middle, ..TextItem::new(x, clock_y, clock_px, hex_color(CUT_INK), clock) }));
-            items.push(Item::Text(TextItem { valign: VAlign::Middle,
-                ..TextItem::new(x + 8.0 * clock_px * MONO_ADV, clock_y, clock_px, mix(CUT_BAR, 0xffffff, 0.3), frames) }));
+            items.push(Item::Text(TextItem { valign: VAlign::Middle, tracking: -0.2,
+                ..TextItem::new(x, clock_y, clock_px, hex_color(CUT_INK), clock) }));
+            // Same mono run origin: let the renderer measure the eight advances.
+            items.push(Item::Text(TextItem { valign: VAlign::Middle, tracking: -0.2,
+                ..TextItem::new(x, clock_y, clock_px, mix(CUT_BAR, 0xffffff, 0.3), format!("        {frames}")) }));
         }
-        let sep = mix(CUT_BAR, 0xffffff, 0.12);
-        items.push(Item::Rect(RectItem::new(RectPx { x: bar.x + 188.0, y: cy - 10.0, w: 1.0, h: 20.0 }, sep)));
-        items.push(Item::Rect(RectItem::new(RectPx { x: self.cut_tools_x() - 28.0, y: cy - 10.0, w: 1.0, h: 20.0 }, sep)));
+        for (offset, alpha) in [(13.0, 0.2), (231.0, 0.25), (498.0, 0.25), (703.0, 0.25)] {
+            items.push(Item::Rect(RectItem::new(RectPx { x: bar.x + offset, y: cy - 10.0, w: 1.0, h: 20.0 }, mix(CUT_BAR, 0xffffff, alpha))));
+        }
         if bar.w >= 900.0 {
             let zoom = self.cut_zoom_bar();
             items.push(Item::Rect(RectItem { radius: 1.5, ..RectItem::new(zoom, mix(CUT_BAR, 0xffffff, 0.14)) }));
             let knob = zoom.x + zoom.w * cut.zoom_fraction(self.cut_lanes().video.w) as f32;
             items.push(Item::Rect(RectItem { radius: 5.5, ..RectItem::new(RectPx { x: knob - 5.5, y: cy - 5.5, w: 11.0, h: 11.0 }, hex_color(CUT_INK)) }));
-            items.push(Item::Rect(RectItem::new(RectPx { x: zoom.x - 45.0, y: cy - 10.0, w: 1.0, h: 20.0 }, sep)));
-            // The snap lamp: lit while every cut lands on a keyframe.
-            let lamp = RectPx { x: zoom.x - 66.0, y: cy - 3.5, w: 7.0, h: 7.0 };
-            if cut.snap == Snap::Keyframe {
-                for (grow, a) in [(6.0, 0.025), (3.0, 0.05)] {
-                    items.push(Item::Rect(RectItem { radius: 3.5 + grow,
-                        ..RectItem::new(RectPx { x: lamp.x - grow, y: lamp.y - grow, w: 7.0 + 2.0 * grow, h: 7.0 + 2.0 * grow }, [0.125, 0.769, 0.373, a]) }));
-                }
-            }
-            items.push(Item::Rect(RectItem { radius: 3.5, ..RectItem::new(lamp, if cut.snap == Snap::Keyframe { mix(CUT_BAR, CUT_LAMP, 0.42) } else { mix(CUT_BAR, 0xffffff, 0.2) }) }));
+            items.push(Item::Rect(RectItem::new(RectPx { x: zoom.x - 39.0, y: cy - 10.0, w: 1.0, h: 20.0 }, mix(CUT_BAR, 0xffffff, 0.1))));
         }
 
         self.build_cut_inspector(items);
@@ -3443,7 +3456,7 @@ impl App {
         let soft = mix(0x050506, 0xffffff, 0.72);
         match action {
             CutAction::TimeDisplay(frames) => {
-                ui_label(items, r.x, cy, 9.0, if self.cut_frames == frames { hex_color(CUT_INK) } else { mix(CUT_BAR, 0xffffff, 0.3) },
+                ui_label(items, r.x, cy, 10.0, if self.cut_frames == frames { hex_color(CUT_INK) } else { mix(CUT_BAR, 0xffffff, 0.3) },
                     &control.label, Align::Left, r.w);
             }
             CutAction::Export => {
@@ -3467,7 +3480,7 @@ impl App {
             CutAction::Play => {
                 // Hovered: a lighter blue with a hairline ring.
                 let (fill, ring) = if hovered { (mix(0x1580de, 0xffffff, 0.16), 1.0) } else { (ACCENT, 0.0) };
-                items.push(Item::Rect(RectItem { radius: 16.0, border_w: ring, border_color: mix(0x1580de, 0xffffff, 0.45), ..RectItem::new(r, fill) }));
+                items.push(Item::Rect(RectItem { radius: 17.0, border_w: ring, border_color: mix(0x1580de, 0xffffff, 0.45), ..RectItem::new(r, fill) }));
                 let black = hex_color(0x000000);
                 if self.playing {
                     for x in [cx - 5.0, cx + 2.0] {
@@ -3484,11 +3497,10 @@ impl App {
                 draw_icon(items, if zoom_in { Icon::ZoomIn } else { Icon::ZoomOut }, cx, cy, color);
             }
             _ => {
-                let dead = action == CutAction::Apply && cut.selection().is_none();
+                let dead = action == CutAction::Apply && cut.selection().is_none() && self.cut_pick.is_none();
                 let fill = if hovered && !dead { mix(CUT_BAR, 0xffffff, 0.07) } else { [0.0; 4] };
-                let playback = matches!(action, CutAction::Step(_) | CutAction::Keyframe(_));
-                if !playback || hovered {
-                    items.push(Item::Rect(RectItem { radius: 8.0, border_w: if playback { 0.0 } else { 1.0 }, border_color: hex_color(0x232323), ..RectItem::new(r, fill) }));
+                if hovered && !dead {
+                    items.push(Item::Rect(RectItem { radius: 7.0, ..RectItem::new(r, fill) }));
                 }
                 // Every toolbar icon is plain white; only a dead one dims.
                 let white = hex_color(0xffffff);
@@ -3498,8 +3510,9 @@ impl App {
                     CutAction::In => (Icon::In, white),
                     CutAction::Out => (Icon::Out, white),
                     CutAction::Split => (Icon::Split, white),
-                    CutAction::Apply => (Icon::Trash, white),
-                    _ => (Icon::Magnet, white),
+                    CutAction::SplitAtPlayhead => (Icon::SplitAtPlayhead, white),
+                    CutAction::Apply | CutAction::DeletePicked => (Icon::Trash, white),
+                    _ => (Icon::SnapKeyframe, white),
                 };
                 draw_icon(items, icon, cx, cy, if dead { mix(CUT_BG, 0xffffff, 0.25) } else { color });
             }
@@ -3725,22 +3738,17 @@ impl App {
             for (i, c) in cut.chapters.iter().enumerate().filter(|(_, c)| c.start >= a - 40.0 / pps && c.start <= b) {
                 let x = x_of(c.start);
                 let lit = current == Some(i);
-                let past = current.is_some_and(|cur| i < cur);
                 // The board's flag: 18px tall, square on the left where the stem
                 // is, a pill on the right — a 3px / 9px corner pair, which is a
                 // pill with its left end squared off by a second, narrow rect.
-                // Three states: a passed chapter's grey flag with a 2px pole down
-                // to the clips; the current one lit amber with a short pole; one
-                // still to come a faint flag with a 6px hairline under it.
+                // Every unselected chapter has the same solid flag and full pole.
                 let flag = RectPx { x, y: r.y, w: 0.0, h: 18.0 };
                 if lit {
                     line(items, x, flag.y + 15.0, 12.0, 2.0, hex_color(CUT_AMBER));
-                } else if past {
-                    line(items, x, flag.y + 10.0, (v.y - flag.y - 10.0).max(10.0), 2.0, hex_color(CUT_FLAG_PAST));
                 } else {
-                    line(items, x, flag.y + 18.0, 6.0, 1.0, mix(CUT_TL, 0xffffff, 0.35));
+                    line(items, x, flag.y + 10.0, (v.y - flag.y - 10.0).max(10.0), 3.0, hex_color(CUT_FLAG_PAST));
                 }
-                chapter_flag(items, x, flag.y, 18.0, (i + 1).to_string(), lit, past);
+                chapter_flag(items, x, flag.y, 18.0, (i + 1).to_string(), lit, !lit);
             }
         }
 
@@ -3993,11 +4001,18 @@ impl App {
 /// The scrub panel's pictograms. The renderer draws rects and triangles,
 /// not paths, so each is built from those on a 16px box about its centre.
 #[derive(Clone, Copy)]
-enum Icon { In, Out, Split, Trash, Magnet, Flag, Film, Speaker, Caption, Ticks, List, Grid, StepBack, StepFwd, KeyBack, KeyFwd, ZoomOut, ZoomIn }
+enum Icon { In, Out, Split, SplitAtPlayhead, Trash, SnapKeyframe, Flag, Film, Speaker, Caption, Ticks, List, Grid, StepBack, StepFwd, KeyBack, KeyFwd, ZoomOut, ZoomIn }
 
 fn draw_icon(items: &mut Vec<Item>, icon: Icon, cx: f32, cy: f32, color: [f32; 4]) {
     let bar = |items: &mut Vec<Item>, x: f32, y: f32, w: f32, h: f32| {
         items.push(Item::Rect(RectItem { radius: 0.75, ..RectItem::new(RectPx { x: cx + x, y: cy + y, w, h }, color) }));
+    };
+    let stroke = |items: &mut Vec<Item>, a: (f32, f32), b: (f32, f32)| {
+        let steps = ((b.0 - a.0).abs().max((b.1 - a.1).abs()) * 3.0).ceil() as usize;
+        for i in 0..=steps {
+            let t = i as f32 / steps.max(1) as f32;
+            bar(items, a.0 + (b.0 - a.0) * t - 0.65, a.1 + (b.1 - a.1) * t - 0.65, 1.3, 1.3);
+        }
     };
     match icon {
         // An arrow running into a bracket: the range starts / ends here.
@@ -4008,7 +4023,15 @@ fn draw_icon(items: &mut Vec<Item>, icon: Icon, cx: f32, cy: f32, color: [f32; 4
             bar(items, at(0.0, 6.0), -8.0, 6.0, 1.5);
             bar(items, at(0.0, 6.0), 6.5, 6.0, 1.5);
             bar(items, at(-8.0, 6.0), -0.75, 6.0, 1.5);
-            items.push(Item::Triangle { r: RectPx { x: cx + at(-3.5, 5.5), y: cy - 4.0, w: 5.5, h: 8.0 }, color, left: m < 0.0, radius: 0.5 });
+            stroke(items, (-5.0 * m, -3.5), (-1.5 * m, 0.0));
+            stroke(items, (-1.5 * m, 0.0), (-5.0 * m, 3.5));
+        }
+        // Two outward arrows around a dashed playhead, matching the supplied icon.
+        Icon::SplitAtPlayhead => {
+            for y in [-8.0, -2.0, 4.0] { bar(items, -0.75, y, 1.5, 4.0); }
+            for (x, left) in [(-8.0, true), (3.0, false)] {
+                items.push(Item::Triangle { r: RectPx { x: cx + x, y: cy - 4.0, w: 5.0, h: 8.0 }, color, left, radius: 0.0 });
+            }
         }
         // Scissors: two finger loops, crossing stems, and the open blades.
         Icon::Split => {
@@ -4025,23 +4048,25 @@ fn draw_icon(items: &mut Vec<Item>, icon: Icon, cx: f32, cy: f32, color: [f32; 4
             bar(items, 4.0, 2.0, 1.4, 4.0);
         }
         Icon::Trash => {
-            bar(items, -7.0, -5.5, 14.0, 1.5);
-            bar(items, -2.5, -8.0, 5.0, 1.5);
-            bar(items, -2.5, -8.0, 1.5, 3.0);
-            bar(items, 1.0, -8.0, 1.5, 3.0);
-            bar(items, -5.0, -4.0, 1.5, 12.0);
-            bar(items, 3.5, -4.0, 1.5, 12.0);
-            bar(items, -5.0, 6.5, 10.0, 1.5);
-            bar(items, -1.9, -1.5, 1.5, 6.0);
-            bar(items, 0.6, -1.5, 1.5, 6.0);
+            bar(items, -7.0, -5.0, 14.0, 1.4);
+            items.push(Item::Rect(RectItem { radius: 1.5, border_w: 1.3, border_color: color,
+                ..RectItem::new(RectPx { x: cx - 2.5, y: cy - 8.0, w: 5.0, h: 4.0 }, [0.0; 4]) }));
+            stroke(items, (-5.0, -4.0), (-4.0, 6.5));
+            stroke(items, (5.0, -4.0), (4.0, 6.5));
+            stroke(items, (-4.0, 6.5), (-3.0, 7.0));
+            stroke(items, (4.0, 6.5), (3.0, 7.0));
+            bar(items, -3.0, 6.35, 6.0, 1.3);
+            bar(items, -2.0, -2.0, 1.3, 7.0);
+            bar(items, 0.7, -2.0, 1.3, 7.0);
         }
-        // Outline horseshoe with an open top, like the Figma snap icon.
-        Icon::Magnet => {
-            items.push(Item::Rect(RectItem { radius: 5.0, border_w: 2.0, border_color: color,
-                ..RectItem::new(RectPx { x: cx - 7.0, y: cy - 8.0, w: 14.0, h: 16.0 }, [0.0; 4]) }));
-            items.push(Item::Rect(RectItem::new(RectPx { x: cx - 3.0, y: cy - 8.0, w: 6.0, h: 8.0 }, hex_color(CUT_BAR))));
-            bar(items, -7.0, -8.0, 4.0, 2.0);
-            bar(items, 3.0, -8.0, 4.0, 2.0);
+        // A keyframe diamond locked to a vertical snap line.
+        Icon::SnapKeyframe => {
+            bar(items, -0.75, -8.0, 1.5, 16.0);
+            for (size, ink) in [(5.7, color), (4.3, hex_color(CUT_BAR))] {
+                for (x, left) in [(-size, true), (0.0, false)] {
+                    items.push(Item::Triangle { r: RectPx { x: cx + x, y: cy - size, w: size, h: size * 2.0 }, color: ink, left, radius: 0.0 });
+                }
+            }
         }
         Icon::Flag => {
             bar(items, -5.0, -8.0, 1.5, 16.0);
@@ -4085,16 +4110,13 @@ fn draw_icon(items: &mut Vec<Item>, icon: Icon, cx: f32, cy: f32, color: [f32; 4
             items.push(Item::Triangle { r: RectPx { x: cx + at(-4.5, 8.0), y: cy - 5.5, w: 8.0, h: 11.0 }, color, left: m < 0.0, radius: 0.5 });
         }
         Icon::KeyBack | Icon::KeyFwd => {
-            let back = matches!(icon, Icon::KeyBack);
-            let diamond_x = if back { 3.0 } else { -3.0 };
-            for i in 0..5 {
-                let d = i as f32;
-                for x in [diamond_x - d, diamond_x + d] {
-                    bar(items, x, -5.0 + d, 1.2, 1.2);
-                    bar(items, x, 5.0 - d, 1.2, 1.2);
-                }
+            let m = if matches!(icon, Icon::KeyBack) { -1.0 } else { 1.0 };
+            let center = -3.5 * m;
+            for (x, left) in [(center - 4.0, true), (center, false)] {
+                items.push(Item::Triangle { r: RectPx { x: cx + x, y: cy - 6.0, w: 4.0, h: 12.0 }, color, left, radius: 0.0 });
             }
-            items.push(Item::Triangle { r: RectPx { x: cx + if back { -9.0 } else { 4.0 }, y: cy - 4.5, w: 5.0, h: 9.0 }, color, left: back, radius: 0.5 });
+            stroke(items, (3.0 * m, -5.0), (7.0 * m, 0.0));
+            stroke(items, (7.0 * m, 0.0), (3.0 * m, 5.0));
         }
         Icon::List => {
             for y in [-5.5, -0.75, 4.0] { bar(items, -7.0, y, 14.0, 1.5); }
@@ -4259,7 +4281,7 @@ impl Workspace {
 #[derive(Clone, Copy)]
 enum Action { Duplicate, OpenFiles, ClearSources, Tool(usize), View(Mode), Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
 #[derive(Clone, Copy, PartialEq)]
-enum CutAction { TimeDisplay(bool), In, Out, Split, Apply, Undo, Export, Snap(Snap), Play, Zoom(bool), Step(i32), Keyframe(i32), Chapter(i32) }
+enum CutAction { TimeDisplay(bool), In, Out, Split, SplitAtPlayhead, Apply, DeletePicked, Undo, Export, Snap(Snap), Play, Zoom(bool), Step(i32), Keyframe(i32), Chapter(i32) }
 /// `hint` is the key cap a cut-mode button carries ("" for none).
 struct Control { r: RectPx, label: String, selected: bool, action: Action, hint: &'static str }
 impl Control {
@@ -4918,6 +4940,22 @@ mod tests {
         // Chapters remain in the inspector; the transport has five controls.
         assert_eq!(app.controls().iter().filter(|c| matches!(c.action,
             Action::Cut(CutAction::Play | CutAction::Step(_) | CutAction::Keyframe(_)))).count(), 5);
+        let original_vp = app.vp;
+        for width in [720.0, 900.0, 1440.0] {
+            app.vp = (width, 800.0);
+            let controls: Vec<_> = app.controls().into_iter().filter(|c| matches!(c.action,
+                Action::Cut(a) if a != CutAction::Export)).collect();
+            for (i, c) in controls.iter().enumerate() {
+                assert!(c.r.x >= 0.0 && c.r.x + c.r.w <= width, "toolbar overflow: {}", c.label);
+                for other in &controls[i + 1..] {
+                    assert!(c.r.x + c.r.w <= other.r.x || other.r.x + other.r.w <= c.r.x
+                        || c.r.y + c.r.h <= other.r.y || other.r.y + other.r.h <= c.r.y,
+                        "overlapping toolbar controls: {} / {}", c.label, other.label);
+                }
+            }
+            assert!(app.cut_tools_x() < app.cut_clock_x());
+        }
+        app.vp = original_vp;
         let press = |app: &mut App, want: CutAction| {
             let r = app.controls().into_iter().find(|c| matches!(c.action, Action::Cut(a) if a == want)).expect("button").r;
             app.mouse_down(r.x + r.w / 2.0, r.y + r.h / 2.0);
@@ -4934,6 +4972,13 @@ mod tests {
         press(&mut app, CutAction::Keyframe(-1));
         assert!(app.t < 0.05, "previous keyframe, t = {}", app.t);
         assert!(!app.playing);
+
+        // The new toolbar button splits at the playhead and shares undo.
+        app.seek_all(1.0, true);
+        press(&mut app, CutAction::SplitAtPlayhead);
+        assert_eq!(app.cut.as_ref().unwrap().splits(), &[1.0]);
+        app.cut_action(CutAction::Undo);
+        assert!(app.cut.as_ref().unwrap().splits().is_empty());
 
         // The time display changes representation without seeking or playing.
         let time = app.t;
@@ -4996,6 +5041,17 @@ mod tests {
         assert!(app.cut_pick.is_some());
         app.key(Key::Escape);
         assert!(app.cut_pick.is_none() && app.cut_mode, "Esc lets go of the pick before it leaves Cut mode");
+
+        // Backspace removes the picked piece, clears the pick, and is undoable.
+        app.mouse_down(v.x + v.w * 0.1, v.y + 10.0);
+        app.mouse_up();
+        app.key(Key::Backspace);
+        assert_eq!(app.cut.as_ref().unwrap().cuts(), &[(0.0, 4.0)]);
+        assert!(app.cut_pick.is_none());
+        app.key(Key::Backspace);
+        assert_eq!(app.cut.as_ref().unwrap().cuts(), &[(0.0, 4.0)], "repeat must not restore a deleted piece");
+        app.key(Key::Undo);
+        assert!(app.cut.as_ref().unwrap().cuts().is_empty());
 
         // A removed clip selects itself on a click, ready for X to restore it.
         app.seek_all(1.4, true);

@@ -3,6 +3,42 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-10 — split icon reference
+
+Matched the split-at-playhead icon to the supplied reference: sharp outward
+triangles and three separated center dashes. Its split behavior is unchanged.
+
+## 2026-10-10 — delete picked timeline clips and refine toolbar icons
+
+Backspace deletes the picked video/audio timeline piece through the existing cut
+model, with undo; the trash button also acts on the picked piece. Updated in/out
+to open arrowheads, keyframe navigation to filled diamonds with chevrons, and the
+trash icon to a tapered outline, matching the supplied references.
+
+## 2026-10-10 — current Figma transport layout
+
+Matched Transport Toolbar 73:111: playback, six unboxed edit tools, then the
+larger TIME/FRAMES display, with the design's spacing and dividers. Removed the
+extra snap lamp and matched the outlined snap diamond. Zoom stays right-aligned
+and hides at compact widths. Existing actions, shortcuts and hover labels remain.
+
+## 2026-10-09 — consistent unselected chapter flags
+
+Timeline chapters before and after the playhead now share the solid grey flag
+and a 3px stem reaching the video track, matching the supplied reference.
+The current chapter retains its amber treatment.
+
+## 2026-10-09 — simpler keyframe snap icon
+
+Replaced the magnet with a keyframe diamond centered on a vertical snap line in
+both the Rust toolbar and Figma. The existing K shortcut and snap behavior remain.
+
+## 2026-10-09 — split-at-playhead toolbar button
+
+Added the supplied outward-arrow/dashed-playhead icon beside the scissors in the
+Timeline toolbar. It splits at the current playhead using the existing snap and
+undo behavior. The scissors and S shortcut retain pointer-position splitting.
+
 ## 2026-10-09 — transport matched to the supplied reference crop
 
 The reference shows five playback controls (keyframe, frame, play, frame,
