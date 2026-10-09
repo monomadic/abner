@@ -3104,8 +3104,8 @@ impl App {
     /// Ease each clip's hover lift toward its target: a quick rise under the
     /// pointer, a slower fall after it leaves. Settled zeros are dropped.
     fn tick_cut_hot(&mut self, dt: f32) {
-        const RISE: f32 = 0.12;
-        const FALL: f32 = 0.28;
+        const RISE: f32 = 0.06;
+        const FALL: f32 = 0.14;
         let target = if self.cut_mode && self.show_ui && self.cursor_inside && self.cut_drag.is_none() {
             self.cut_clip_at(self.cursor.0, self.cursor.1).map(|(g, snd)| ((g.start * 1000.0).round() as i64, snd))
         } else {
@@ -3737,8 +3737,8 @@ impl App {
                     // The film ground: the board's 135° stripes (#2a2d30 / #202326, 14px).
                     items.push(Item::Hatch { r, a: hex_color(0x2a2d30), b: hex_color(0x202326), radius: 7.0, period: 14.0 });
                     let hot = ease(self.cut_hot_level(g.start, false));
-                    items.push(Item::Rect(RectItem { radius: 7.0, border_w: 1.0, border_color: mix(CUT_TL, 0xffffff, 0.2 + 0.12 * hot),
-                        ..RectItem::new(r, [1.0, 1.0, 1.0, 0.02 * hot]) }));
+                    items.push(Item::Rect(RectItem { radius: 7.0, border_w: 1.0, border_color: mix(CUT_TL, 0xffffff, 0.2 + 0.06 * hot),
+                        ..RectItem::new(r, [1.0, 1.0, 1.0, 0.01 * hot]) }));
                     // The picked clip: a 3px white outline, outside the rounded edge.
                     if self.cut_pick.is_some_and(|(a, b, snd)| !snd && (a - g.start).abs() < 1e-3 && (b - g.end).abs() < 1e-3) {
                         picked = Some(r);
@@ -3768,7 +3768,7 @@ impl App {
                         items.push(Item::Thumb { r: *tr, slot, radius: 4.0, alpha: 1.0 });
                         let lift = ease(self.cut_hot_level(g.start, false));
                         if self.cut_thumb.hover == Some(key) || lift > 0.0 {
-                            items.push(Item::Rect(RectItem { radius: 4.0, border_w: 1.0, border_color: [1.0, 1.0, 1.0, 0.7 * lift],
+                            items.push(Item::Rect(RectItem { radius: 4.0, border_w: 1.0, border_color: [1.0, 1.0, 1.0, 0.4 * lift],
                                 ..RectItem::new(*tr, [0.0, 0.0, 0.0, 0.18 * (1.0 - lift)]) }));
                             if let Some(p) = self.cut_thumb.play.as_ref().filter(|p| p.key == key) {
                                 let frac = (((p.t - p.start) / (p.end - p.start).max(1e-6)) as f32).clamp(0.0, 1.0);
