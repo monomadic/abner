@@ -70,6 +70,8 @@ keys:
   S            save the mask as <name>.mask.png — with a crop up, both it
                and the video under it (<name>.crop.png), cut to the marquee
   E            export the cropped clip as ProRes 422 Proxy
+  `            toggle Timeline time/frame display (--timeline-frames)
+  { / }        previous / next chapter in Timeline
   T            cut mode: the focused clip on a timeline (--cut opens there;
                --cut in,out sets the selection, in seconds)
                I / O set in / out (snapped to keyframes; K toggles frame snap)
@@ -104,6 +106,7 @@ fn main() -> anyhow::Result<()> {
     let mut cut: Option<Vec<f64>> = None;
     let mut crop: Option<Option<[f32; 4]>> = None;
     let mut duplicate = false;
+    let mut timeline_frames = false;
     let mut paths: Vec<PathBuf> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -130,6 +133,8 @@ fn main() -> anyhow::Result<()> {
             }
         } else if a == "--no-video-splash" {
             // Any arguments already disable the splash, including this flag alone.
+        } else if a == "--timeline-frames" {
+            timeline_frames = true;
         } else if a == "--duplicate" {
             duplicate = true;
         } else if a == "--mask" {
@@ -225,12 +230,14 @@ fn main() -> anyhow::Result<()> {
         redraw_at: None,
         occluded: false,
         focused: true,
+        header_click: HeaderClick::default(),
     };
     // One file opens on the timeline; --mask / --crop below take it back to
     // their own tool, and two or more files stay in Sources.
     runner.app.set_cut_default(true);
     if mask_mode { runner.app.key(Key::Char('m')); }
     if let Some(ranges) = cut { runner.app.start_cut(ranges); }
+    if timeline_frames { runner.app.key(Key::Char('`')); }
     if let Some(rect) = crop { runner.app.start_crop(rect); }
     event_loop.run_app(&mut runner)?;
     Ok(())
@@ -300,7 +307,67 @@ fn title_for(videos: &[Video]) -> String {
     format!("abner — {}", names.join(" vs "))
 }
 
+/// winit queues input, so NSApp.currentEvent is not reliably the mouse event
+/// by the time it reaches Runner. Track the gesture using the system interval.
+#[derive(Default)]
+struct HeaderClick(Option<(Instant, (f32, f32))>);
+impl HeaderClick {
+    fn press(&mut self, now: Instant, point: (f32, f32), interval: std::time::Duration) -> bool {
+        let double = self.0.is_some_and(|(last, p)| now.duration_since(last) <= interval
+            && (point.0 - p.0).abs() <= 4.0 && (point.1 - p.1).abs() <= 4.0);
+        self.0 = if double { None } else { Some((now, point)) };
+        double
+    }
+    fn moved(&mut self, point: (f32, f32)) {
+        if self.0.is_some_and(|(_, p)| (point.0 - p.0).abs() > 4.0 || (point.1 - p.1).abs() > 4.0) {
+            self.0 = None;
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn titlebar_double_click(w: &Window) {
+    use winit::platform::macos::WindowExtMacOS;
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    if w.simple_fullscreen() || w.fullscreen().is_some() { return; }
+    let Ok(handle) = w.window_handle() else { return };
+    let RawWindowHandle::AppKit(h) = handle.as_raw() else { return };
+    unsafe extern "C" { fn ab_titlebar_double_click(view: *mut std::ffi::c_void); }
+    unsafe { ab_titlebar_double_click(h.ns_view.as_ptr()); }
+}
+#[cfg(not(target_os = "macos"))]
+fn titlebar_double_click(w: &Window) { w.set_maximized(!w.is_maximized()); }
+
+/// The native transparent titlebar sits above our GPU-drawn buttons. Give
+/// those exact regions a native input view so AppKit cannot consume them as
+/// titlebar gestures before winit receives the click.
+fn update_native_header_controls(w: &Window, app: &App) {
+    #[cfg(target_os = "macos")]
+    {
+        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let Ok(handle) = w.window_handle() else { return };
+        let RawWindowHandle::AppKit(h) = handle.as_raw() else { return };
+        let rects: Vec<[f64; 4]> = app.native_header_controls().iter()
+            .map(|r| [r.x as f64, r.y as f64, r.w as f64, r.h as f64]).collect();
+        unsafe extern "C" { fn ab_set_header_controls(view: *mut std::ffi::c_void, rects: *const f64, count: usize); }
+        unsafe { ab_set_header_controls(h.ns_view.as_ptr(), rects.as_ptr().cast(), rects.len()); }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (w, app);
+}
+
+fn titlebar_click_interval() -> std::time::Duration {
+    #[cfg(target_os = "macos")]
+    {
+        unsafe extern "C" { fn ab_double_click_interval() -> f64; }
+        std::time::Duration::from_secs_f64(unsafe { ab_double_click_interval() })
+    }
+    #[cfg(not(target_os = "macos"))]
+    { std::time::Duration::from_millis(500) }
+}
+
 struct Runner {
+    header_click: HeaderClick,
     app: App,
     title: String,
     /// Initial window size in logical points (config `window`).
@@ -514,6 +581,8 @@ fn set_titlebar_glass(w: &Window) {
         // saves/restores the whole mask around simple fullscreen, so this
         // bit comes back with it.
         window.setStyleMask(window.styleMask() | NSWindowStyleMask::FullSizeContentView);
+        unsafe extern "C" { fn ab_install_header_input(view: *mut std::ffi::c_void); }
+        unsafe { ab_install_header_input(h.ns_view.as_ptr()); }
     }
 }
 
@@ -704,15 +773,18 @@ impl ApplicationHandler for Runner {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let p = position.to_logical::<f32>(self.scale());
+                self.header_click.moved((p.x, p.y));
                 self.cursor = (p.x, p.y);
                 self.app.cursor_moved(p.x, p.y);
             }
             WindowEvent::CursorLeft { .. } => {
+                self.header_click.0 = None;
                 self.app.cursor_left();
                 self.animating = true;
             }
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
+                if !focused { self.header_click.0 = None; }
                 if focused {
                     // Back in front: one frame now, at full rate from here.
                     self.last_frame = Instant::now();
@@ -725,7 +797,16 @@ impl ApplicationHandler for Runner {
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
                 let (x, y) = self.cursor;
                 match state {
-                    ElementState::Pressed => self.app.mouse_down(x, y),
+                    ElementState::Pressed => {
+                        if self.app.titlebar_background(x, y) {
+                            if self.header_click.press(Instant::now(), (x, y), titlebar_click_interval()) {
+                                if let Some(w) = &self.window { titlebar_double_click(w); }
+                            }
+                        } else {
+                            self.header_click.0 = None;
+                            self.app.mouse_down(x, y);
+                        }
+                    },
                     ElementState::Released => self.app.mouse_up(),
                 }
             }
@@ -740,6 +821,7 @@ impl ApplicationHandler for Runner {
                 let size = window.inner_size();
                 let vp = (size.width as f32 / scale, size.height as f32 / scale);
                 let desc = self.app.tick(dt, vp, scale);
+                update_native_header_controls(window, &self.app);
                 window.set_cursor_visible(!self.app.brush_cursor_visible());
                 window.set_cursor(match self.app.crop_cursor() {
                     Some(app::CropCursor::Crosshair) => CursorIcon::Crosshair,
@@ -830,5 +912,23 @@ impl ApplicationHandler for Runner {
                 event_loop.set_control_flow(ControlFlow::WaitUntil(next));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod titlebar_tests {
+    use super::*;
+    use std::time::Duration;
+    #[test]
+    fn double_click_requires_nearby_presses_without_a_drag() {
+        let mut click = HeaderClick::default();
+        let now = Instant::now();
+        let interval = Duration::from_millis(500);
+        assert!(!click.press(now, (600.0, 20.0), interval));
+        assert!(click.press(now + Duration::from_millis(200), (601.0, 20.0), interval));
+        assert!(!click.press(now + Duration::from_millis(300), (601.0, 20.0), interval));
+        click.moved((620.0, 20.0));
+        assert!(!click.press(now + Duration::from_millis(400), (601.0, 20.0), interval));
+        assert!(!click.press(now + Duration::from_secs(2), (601.0, 20.0), interval));
     }
 }

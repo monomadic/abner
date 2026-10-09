@@ -258,6 +258,22 @@ impl Cut {
         self.keys.get(i).copied().unwrap_or(self.duration)
     }
 
+    /// The chapter to jump to from `t`: the next one's start going forward;
+    /// going back, the current one's start, or the previous one when the
+    /// playhead is already within a second of it (the usual double-press).
+    pub fn chapter_step(&self, t: f64, dir: i32) -> Option<f64> {
+        if dir > 0 {
+            self.chapters.iter().map(|c| c.start).find(|s| *s > t + EPS)
+        } else {
+            let before: Vec<f64> = self.chapters.iter().map(|c| c.start).filter(|s| *s < t - EPS).collect();
+            match before.as_slice() {
+                [] => None,
+                [.., prev, last] if t - last < 1.0 => Some(*prev),
+                [.., last] => Some(*last),
+            }
+        }
+    }
+
     /// The keyframe strictly before / after `t`, for ⇧← / ⇧→.
     pub fn key_step(&self, t: f64, dir: i32) -> f64 {
         if dir > 0 {

@@ -207,7 +207,7 @@ mod tests {
         let c = Config::default();
         assert_eq!(c.playback.view, Mode::Overlay);
         assert_eq!((c.window.width, c.window.height), (1280.0, 800.0));
-        assert!(!c.playback.start_paused);
+        assert!(c.playback.start_paused);
         assert_eq!((c.keys.next_source, c.keys.fullscreen_video), (Key::Tab, Key::Enter));
     }
 

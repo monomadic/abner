@@ -176,6 +176,7 @@ pub struct App {
     cut_default: bool,
     /// The inspector's tab (0 chapters, 1 streams) and its chapter view.
     cut_tab: usize,
+    cut_frames: bool,
     cut_thumbs: bool,
     /// The start-of-clip thumbnails on the picture lane (posters, and the one under the pointer playing).
     cut_thumb: CutThumbs,
@@ -209,6 +210,9 @@ pub struct App {
     seek_step: f64,
     /// Rebindable keys (config `keys`).
     keys: crate::config::Keys,
+    /// Loaded clips open paused on their first frame (config
+    /// `playback.start_paused`) — at startup AND on every later drop/open.
+    start_paused: bool,
     show_ui: bool,
     /// Delta amplification.
     gain: f32,
@@ -514,6 +518,7 @@ impl App {
             cut_default: false,
             cut_drag: None,
             cut_tab: 0,
+            cut_frames: false,
             cut_thumbs: false,
             cut_thumb: CutThumbs::new(),
             cut_pick: None,
@@ -533,6 +538,7 @@ impl App {
             speed: 1.0,
             seek_step: cfg.playback.seek_step,
             keys: cfg.keys.clone(),
+            start_paused: cfg.playback.start_paused,
             show_ui: true,
             gain: cfg.compare.delta_gain,
             blend: cfg.compare.blend,
@@ -1139,7 +1145,7 @@ impl App {
         self.wrap = Self::wrap_of(&self.videos);
         self.t = 0.0;
         self.started = false;
-        self.playing = true;
+        self.playing = !self.start_paused;
         self.active = 0;
         self.speed = 1.0;
         self.zoom = 1.0;
@@ -1451,9 +1457,7 @@ impl App {
     /// Show clip `idx` (`keys.next_source`'s flip, or its number key directly).
     fn select(&mut self, idx: usize) {
         self.active = idx;
-        let capacity = self.source_capacity();
-        if idx < self.source_first() { self.source_scroll = idx; }
-        else if idx >= self.source_first() + capacity { self.source_scroll = idx + 1 - capacity; }
+        self.reveal_source();
         self.badge_flash = 1.2;
         self.mouse_up();
         if self.mask_mode {
@@ -1462,6 +1466,14 @@ impl App {
             // The new video has its own dimensions; a marquee carried over
             // from the old one would mean nothing.
             if self.crop.is_some() { self.crop = Some(self.full_crop()); }
+        }
+    }
+
+    fn reveal_source(&mut self) {
+        let capacity = self.source_capacity();
+        if self.active < self.source_first() { self.source_scroll = self.active; }
+        else if self.active >= self.source_first() + capacity {
+            self.source_scroll = self.active + 1 - capacity;
         }
     }
 
@@ -1726,7 +1738,14 @@ impl App {
 
     fn base_rect(&self, idx: usize) -> RectPx {
         let dims = (self.videos[idx].info.width, self.videos[idx].info.height);
-        Self::fit_rect(dims, inset_rect(self.video_cell(idx), if self.show_ui { 24.0 } else { 0.0 }))
+        let mut cell = self.video_cell(idx);
+        if self.cut_mode && self.show_ui {
+            // Timeline board: 764×430 footage centered in a 1140×583 canvas.
+            let (dx, dy) = (cell.w * 188.0 / 1140.0, cell.h * 76.5 / 583.0);
+            cell = RectPx { x: cell.x + dx, y: cell.y + dy, w: cell.w - 2.0*dx, h: cell.h - 2.0*dy };
+            return Self::fit_rect(dims, cell);
+        }
+        Self::fit_rect(dims, inset_rect(cell, if self.show_ui { 24.0 } else { 0.0 }))
     }
 
     fn content_rect(&self, idx: usize) -> RectPx {
@@ -1734,8 +1753,11 @@ impl App {
     }
 
     pub fn tick(&mut self, dt: f32, vp: (f32, f32), _scale: f32) -> FrameDesc {
-        if self.vp != vp { self.stroke_last = None; }
-        self.vp = vp;
+        if self.vp != vp {
+            self.stroke_last = None;
+            self.vp = vp;
+            self.reveal_source();
+        }
         if let Some(cut) = &mut self.cut { cut.poll(); }
         self.tick_cut_thumbs(dt);
         if !self.cut_boot.is_empty() { self.boot_cut(); }
@@ -1861,7 +1883,7 @@ impl App {
         }
         let mode = if self.single() { Mode::Overlay } else { self.shown_mode() };
         let canvas = self.workspace().canvas;
-        if self.show_ui { items.push(Item::Rect(RectItem::new(canvas, CANVAS_BG))); }
+        if self.show_ui { items.push(Item::Rect(RectItem::new(canvas, if self.cut_mode { hex_color(CUT_CANVAS) } else { CANVAS_BG }))); }
         items.push(Item::Clip(Some(canvas)));
         match mode {
             Mode::Overlay => items.push(Item::Video {
@@ -1961,12 +1983,12 @@ impl App {
     fn source_row(&self, index: usize) -> RectPx {
         let l = self.workspace();
         RectPx { x: 12.0, y: l.list.y + (index - self.source_first()) as f32 * SOURCE_H,
-            w: l.rail - 24.0, h: SOURCE_H - 10.0 }
+            w: l.rail - 24.0, h: SOURCE_H - 12.0 }
     }
 
     fn source_checkbox(&self, index: usize) -> RectPx {
         let r = self.source_row(index);
-        RectPx { x: r.x + 12.0, y: r.y + 12.0, w: 20.0, h: 20.0 }
+        RectPx { x: r.x + r.w - 39.0, y: r.y + 81.0, w: 20.0, h: 20.0 }
     }
 
     fn controls(&self) -> Vec<Control> {
@@ -1977,7 +1999,11 @@ impl App {
         for (label, i, offset, w) in [("Sources", 0, 3.0, 80.0),
             ("Timeline", 3, 95.0, 74.0), ("Crop", 2, 181.0, 80.0),
             ("Mask", 1, 273.0, 80.0)] {
-            out.push(Control::new(RectPx { x: r.x + offset, y: r.y + 3.0, w, h: 25.0 },
+            let (offset, w, pad, h) = if self.cut_mode {
+                match i { 0 => (1.0, 95.0, 1.0, 22.0), 3 => (98.0, 89.0, 1.0, 22.0),
+                    2 => (189.0, 95.0, 1.0, 22.0), _ => (286.0, 95.0, 1.0, 22.0) }
+            } else { (offset, w, 3.0, 25.0) };
+            out.push(Control::new(RectPx { x: r.x + offset, y: r.y + pad, w, h },
                 label, tool == i, Action::Tool(i)));
         }
         if self.cut_mode {
@@ -1988,7 +2014,7 @@ impl App {
             let w = (l.rail - 32.0) / 2.0;
             for (x, label, action) in [(12.0, "Duplicate", Action::Duplicate),
                 (20.0 + w, "+ Add files", Action::OpenFiles)] {
-                out.push(Control::new(RectPx { x, y: HEADER_H + 82.0, w, h: 36.0 }, label, false, action));
+                out.push(Control::new(RectPx { x, y: self.vp.1 - STATUS_H - 34.0, w, h: 28.0 }, label, false, action));
             }
             if self.videos.iter().any(|v| v.selected) {
                 out.push(Control::new(RectPx { x: l.rail - 64.0, y: l.list.y + l.list.h + 4.0, w: 52.0, h: 24.0 },
@@ -2074,6 +2100,10 @@ impl App {
 
     /// Shared Figma mode selector, left aligned after the native traffic lights.
     fn build_tool_housing(&self, items: &mut Vec<Item>) {
+        if self.cut_mode {
+            items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(self.header_tabs(), hex_color(CUT_HEADER_HOUSING)) }));
+            return;
+        }
         items.push(Item::Rect(RectItem { radius: 9.0, border_w: 1.0,
             border_color: mix(0x050506, 0xffffff, 0.17),
             ..RectItem::new(self.header_tabs(), hex_color(0x050506)) }));
@@ -2082,6 +2112,17 @@ impl App {
     fn draw_tool_control(&self, items: &mut Vec<Item>, control: &Control) {
         let r = control.r;
         let hovered = self.cursor_inside && contains(r, self.cursor.0, self.cursor.1);
+        if self.cut_mode {
+            if control.selected || hovered {
+                items.push(Item::Rect(RectItem { radius: 5.0, border_w: if control.selected { 1.0 } else { 0.0 },
+                    border_color: mix(CUT_TOOL_ON, CUT_HEADER_INK, 0.24),
+                    ..RectItem::new(r, if control.selected { hex_color(CUT_TOOL_ON) } else { CONTROL_BG }) }));
+            }
+            ui_label(items, r.x + r.w / 2.0, r.y + r.h / 2.0, 12.0,
+                if control.selected { hex_color(CUT_HEADER_INK) } else { mix(0x050506, 0xffffff, 0.51) },
+                control.label.to_uppercase(), Align::Center, r.w - 8.0);
+            return;
+        }
         if control.selected {
             items.push(Item::Rect(RectItem { radius: 6.0, border_w: 1.0,
                 border_color: mix(CUT_HEADER_BLUE, 0xa8d9ff, 0.32),
@@ -2166,85 +2207,98 @@ impl App {
                 ui_label(items, l.rail - 16.0, y, 11.0, WORKSPACE_TEXT, value, Align::Right, l.rail - 110.0);
             }
             let dir = v.info.path.parent().unwrap_or_else(|| std::path::Path::new(""));
-            ui_label(items, 16.0, l.inspector.y + 190.0, 10.0, WORKSPACE_MUTED, dir.to_string_lossy(), Align::Left, l.rail - 32.0);
+            ui_label(items, 16.0, l.inspector.y + 169.0, 10.0, WORKSPACE_MUTED, dir.to_string_lossy(), Align::Left, l.rail - 32.0);
         }
         self.build_transport(items);
     }
 
-    /// Figma Sources / Editable source card. Thumbnails sample the existing
-    /// frame-locked video textures: no extra decode workers or thumbnail atlas.
+    /// Figma Sources / Preview card: full-width live media, then filename
+    /// and two-column metadata. Selection is secondary to the active preview.
     fn build_sources(&self, items: &mut Vec<Item>) {
         let l = self.workspace();
         let ink = hex_color(SOURCE_INK);
         let secondary = hex_color(SOURCE_SECONDARY);
-        ui_label(items, 12.0, HEADER_H + 33.0, 18.0, ink, "Source clips", Align::Left, l.rail - 24.0);
-        ui_label(items, 12.0, HEADER_H + 60.0, 11.0, secondary,
-            format!("{} items · {} files", self.videos.len(), self.source_file_count()), Align::Left, l.rail - 24.0);
+        let blue = hex_color(0x61b5ee);
+        ui_label(items, 12.0, HEADER_H + 27.0, 13.0, ink, "Source clips", Align::Left, l.rail - 64.0);
+        let count = RectPx { x: l.rail - 40.0, y: HEADER_H + 16.0, w: 28.0, h: 22.0 };
+        items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(count, hex_color(SOURCE_SURFACE)) }));
+        ui_label(items, count.x + 14.0, count.y + 11.0, 11.0, secondary,
+            self.videos.len().to_string(), Align::Center, 24.0);
         items.push(Item::Clip(Some(l.list)));
         let first = self.source_first();
         for i in first..(first + self.source_capacity()).min(self.videos.len()) {
             let v = &self.videos[i];
             let r = self.source_row(i);
-            let viewing = i == self.active;
-            let accent = clip_color(i);
+            let active = i == self.active;
             let hover = self.cursor_inside && contains(r, self.cursor.0, self.cursor.1);
-            items.push(Item::Rect(RectItem { radius: 8.0, border_w: if viewing { 1.5 } else { 1.0 },
-                border_color: if viewing { accent } else if hover { secondary } else { hex_color(SOURCE_BORDER) },
-                ..RectItem::new(r, hex_color(if viewing { SOURCE_SELECTED } else { SOURCE_SURFACE })) }));
-            let check = self.source_checkbox(i);
-            if !self.mask_mode {
+            items.push(Item::Rect(RectItem { radius: 10.0, border_w: if active { 1.5 } else { 1.0 },
+                border_color: if active { blue } else if hover { secondary } else { hex_color(SOURCE_BORDER) },
+                ..RectItem::new(r, hex_color(if active { SOURCE_SELECTED } else { SOURCE_SURFACE })) }));
+            let thumb = RectPx { x: r.x + 12.0, y: r.y + 12.0, w: r.w - 24.0, h: 100.0 };
+            items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(thumb, WORKSPACE_PANEL) }));
+            if v.delivered {
+                let aspect = v.info.width as f32 / v.info.height.max(1) as f32;
+                let box_aspect = thumb.w / thumb.h;
+                let (uw, uh) = if aspect > box_aspect { (box_aspect / aspect, 1.0) } else { (1.0, aspect / box_aspect) };
+                items.push(Item::Video { a: i, b: i, r: thumb,
+                    uv: [(1.0-uw)/2.0, (1.0-uh)/2.0, uw, uh], mode: VideoMode::Tex, p0: 6.0, p1: 0.0 });
+            }
+            let badge = RectPx { x: thumb.x + 7.0, y: thumb.y + 7.0, w: 24.0, h: 24.0 };
+            items.push(Item::Rect(RectItem { radius: 5.0, ..RectItem::new(badge, hex_color(0x080d14)) }));
+            ui_label(items, badge.x + 12.0, badge.y + 12.0, 12.0, if active { blue } else { ink },
+                (i + 1).to_string(), Align::Center, 22.0);
+            if active {
+                let badge = RectPx { x: thumb.x + thumb.w - 77.0, y: thumb.y + 7.0, w: 70.0, h: 22.0 };
+                items.push(Item::Rect(RectItem { radius: 5.0, ..RectItem::new(badge, hex_color(0x09213a)) }));
+                ui_label(items, badge.x + 35.0, badge.y + 11.0, 10.0, blue, "ACTIVE", Align::Center, 62.0);
+            }
+            let shared = self.videos.iter().filter(|other| other.info.path == v.info.path).count();
+            if shared > 1 || v.linked_copy {
+                let chip = RectPx { x: thumb.x + 7.0, y: thumb.y + 70.0, w: (thumb.w - 48.0).min(142.0), h: 23.0 };
+                items.push(Item::Rect(RectItem { radius: 5.0, ..RectItem::new(chip, hex_color(0x080d14)) }));
+                ui_label(items, chip.x + 6.0, chip.y + 11.5, 10.0, secondary,
+                    if shared > 1 { format!("Shared · {shared} items") } else { "Linked copy".into() }, Align::Left, chip.w - 12.0);
+            }
+            if !self.mask_mode && (hover || v.selected) {
+                let check = self.source_checkbox(i);
                 items.push(Item::Rect(RectItem { radius: 4.0, border_w: 1.0,
-                    border_color: if v.selected { hex_color(CUT_HEADER_BLUE) } else { hex_color(SOURCE_SUBTLE) },
-                    ..RectItem::new(check, if v.selected { hex_color(CUT_HEADER_BLUE) } else { WORKSPACE_PANEL }) }));
-                // Geometric check: mono fonts do not all provide a checkmark.
+                    border_color: if v.selected { hex_color(CUT_HEADER_BLUE) } else { secondary },
+                    ..RectItem::new(check, if v.selected { hex_color(CUT_HEADER_BLUE) } else { hex_color(0x080d14) }) }));
                 if v.selected {
                     for (x, y) in [(0., 3.), (2., 5.), (4., 3.), (6., 1.), (8., -1.)] {
                         items.push(Item::Rect(RectItem::new(RectPx { x: check.x + 4.0 + x, y: check.y + 7.0 + y, w: 3.0, h: 3.0 }, ink)));
                     }
                 }
             }
-            ui_label(items, r.x + 40.0, r.y + 22.0, 11.0, accent, format!("{:02}", i + 1), Align::Left, 26.0);
-            let compact = l.rail < 300.0;
-            ui_label(items, r.x + 66.0, r.y + 22.0, 10.0, secondary,
-                if v.linked_copy { if compact { "COPY" } else { "LINKED COPY" } } else { "ORIGINAL" }, Align::Left,
-                if viewing { r.w - 130.0 } else { r.w - 78.0 });
-            if viewing {
-                ui_label(items, r.x + r.w - 12.0, r.y + 22.0, 10.0, accent,
-                    if compact { "VIEW" } else { "VIEWING" }, Align::Right, if compact { 28.0 } else { 50.0 });
-            }
-            let tw = if compact { 58.0 } else { 86.0 };
-            let thumb = RectPx { x: r.x + 12.0, y: r.y + 44.0, w: tw, h: 54.0 };
-            items.push(Item::Rect(RectItem { radius: 4.0, ..RectItem::new(thumb, WORKSPACE_PANEL) }));
-            if v.delivered {
-                let aspect = v.info.width as f32 / v.info.height.max(1) as f32;
-                let box_aspect = thumb.w / thumb.h;
-                let (uw, uh) = if aspect > box_aspect { (box_aspect / aspect, 1.0) } else { (1.0, aspect / box_aspect) };
-                items.push(Item::Video { a: i, b: i, r: thumb,
-                    uv: [(1.0-uw)/2.0, (1.0-uh)/2.0, uw, uh], mode: VideoMode::Tex, p0: 4.0, p1: 0.0 });
-            }
-            let x = thumb.x + thumb.w + 12.0;
-            let width = r.x + r.w - 12.0 - x;
             let name = format!("{}{}", name_of(&v.info.path), if v.linked_copy { " · copy" } else { "" });
-            ui_label(items, x, r.y + 59.0, 12.0, ink, name, Align::Left, width);
-            ui_label(items, x, r.y + 79.0, 10.0, secondary,
-                format!("{}p · {:.0} fps", v.info.height, v.info.fps), Align::Left, width);
-            let shared = self.videos.iter().filter(|other| other.info.path == v.info.path).count();
-            ui_label(items, r.x + 12.0, r.y + 117.0, 11.0, secondary,
-                if shared > 1 { format!("Shared file · {shared} items") } else { "Original file".into() }, Align::Left, r.w - 24.0);
-            ui_label(items, r.x + 12.0, r.y + 145.0, 10.0, if v.player.failed() { ERR } else { hex_color(SOURCE_SUBTLE) },
-                if v.player.failed() { "DECODE FAILED".into() } else {
-                    format!("{} · {}", v.info.codec.to_uppercase(), fmt_time(v.info.duration))
-                }, Align::Left, r.w - 24.0);
+            ui_label(items, r.x + 12.0, r.y + 132.0, 13.0, ink, name, Align::Left, r.w - 24.0);
+            let codec = match v.info.codec.as_str() { "h264" => "H.264".into(), "hevc" => "HEVC".into(), c => c.to_uppercase() };
+            let seconds = v.info.duration.max(0.0) as u64;
+            let meta_y = r.y + 158.0;
+            let width = r.w - 24.0;
+            if l.rail >= 280.0 {
+                ui_label(items, r.x + 12.0, meta_y, 11.0, secondary,
+                    format!("{codec} · {}p", v.info.height), Align::Left, width * 0.52);
+                ui_label(items, r.x + r.w - 12.0, meta_y, 11.0, secondary,
+                    format!("{}fps · {}:{:02}", v.info.fps, seconds / 60, seconds % 60), Align::Right, width * 0.48);
+            } else {
+                ui_label(items, r.x + 12.0, meta_y - 5.0, 10.0, secondary,
+                    format!("{codec} · {}p", v.info.height), Align::Left, width);
+                ui_label(items, r.x + 12.0, meta_y + 11.0, 10.0, secondary,
+                    format!("{}fps · {}:{:02}", v.info.fps, seconds / 60, seconds % 60), Align::Left, width);
+            }
+            if v.player.failed() {
+                ui_label(items, thumb.x + 8.0, thumb.y + 52.0, 11.0, ERR, "DECODE FAILED", Align::Left, thumb.w - 16.0);
+            }
         }
         items.push(Item::Clip(None));
         let n = self.videos.iter().filter(|v| v.selected).count();
-        ui_label(items, 12.0, l.list.y + l.list.h + 16.0, 10.0, secondary,
-            if n > 0 { format!("{n} selected") } else { "Click to view · X selects".into() }, Align::Left, l.rail - 82.0);
-        ui_label(items, 12.0, l.list.y + l.list.h + 36.0, 10.0, hex_color(SOURCE_SUBTLE),
-            if !self.source_status.is_empty() { self.source_status.clone() }
-            else if self.videos.len() > self.source_capacity() {
-                format!("{}–{} of {} · scroll", first + 1, (first + self.source_capacity()).min(self.videos.len()), self.videos.len())
-            } else { "Copies share the original file".into() }, Align::Left, l.rail - 24.0);
+        ui_label(items, 12.0, l.list.y + l.list.h + 16.0, 11.0, hex_color(SOURCE_SUBTLE),
+            if n > 0 { format!("{n} checked · X toggles") }
+            else if !self.source_status.is_empty() { self.source_status.clone() }
+            else if self.videos.len() > self.source_capacity() { format!("{}–{} / {} · scroll", first+1, (first+self.source_capacity()).min(self.videos.len()), self.videos.len()) }
+            else if self.source_file_count() < self.videos.len() { format!("{} files · 1–9 select", self.source_file_count()) }
+            else { "1–9  Select a clip".into() }, Align::Left, l.rail - if n > 0 { 82.0 } else { 24.0 });
     }
 
     /// Step back, play / pause, step on: shared by Input's transport and
@@ -2625,7 +2679,7 @@ struct CutLanes {
 struct CutSide {
     tabs: RectPx,
     tab: [RectPx; 2],
-    chips_y: f32,
+    summary: RectPx,
     count_y: f32,
     toggle: RectPx,
     add_btn: RectPx,
@@ -2702,6 +2756,9 @@ impl App {
     fn cut_key(&mut self, k: Key) -> bool {
         let t = self.t;
         let action = match k {
+            Key::Char('`') => CutAction::TimeDisplay(!self.cut_frames),
+            Key::Char('{') => CutAction::Chapter(-1),
+            Key::Char('}') => CutAction::Chapter(1),
             Key::Char('i' | 'I') => CutAction::In,
             Key::Char('o' | 'O') => CutAction::Out,
             Key::Char('s' | 'S') => CutAction::Split,
@@ -2742,6 +2799,7 @@ impl App {
     }
 
     fn cut_action(&mut self, action: CutAction) {
+        if let CutAction::TimeDisplay(frames) = action { self.cut_frames = frames; return; }
         let t = self.t;
         // S cuts where the razor shows, when it shows.
         let split_at = self.cut_razor().unwrap_or(t);
@@ -2755,10 +2813,11 @@ impl App {
             self.step(dir);
             return;
         }
-        if let CutAction::Keyframe(_) = action {
+        if matches!(action, CutAction::Keyframe(_) | CutAction::Chapter(_)) {
             let Some(cut) = self.cut.as_ref() else { return };
             let to = match action {
                 CutAction::Keyframe(dir) => Some(cut.key_step(t, dir)),
+                CutAction::Chapter(dir) => cut.chapter_step(t, dir),
                 _ => None,
             };
             if let Some(to) = to {
@@ -2771,8 +2830,8 @@ impl App {
         let Some(cut) = self.cut.as_mut() else { return };
         cut.status.clear();
         match action {
-            CutAction::Step(_) | CutAction::Keyframe(_) => {}
-            CutAction::Play => {}
+            CutAction::Step(_) | CutAction::Keyframe(_) | CutAction::Chapter(_) => {}
+            CutAction::Play | CutAction::TimeDisplay(_) => {}
             CutAction::Zoom(zoom_in) => {
                 let px = ((t - cut.t0) * cut.pps) as f32;
                 cut.zoom(if zoom_in { 1.5 } else { 1.0 / 1.5 }, if px >= 0.0 && px <= lane.w { px } else { lane.w / 2.0 }, lane.w);
@@ -2824,8 +2883,7 @@ impl App {
         let mut push = |r: RectPx, label: &str, selected: bool, action: CutAction, hint: &'static str| {
             out.push(Control { hint, ..Control::new(r, label, selected, Action::Cut(action)) });
         };
-        push(RectPx { x: w - 80.0, y: 8.5, w: 66.0, h: 26.0 }, "Export", false, CutAction::Export, "");
-        push(RectPx { x: w - 178.0, y: 3.5, w: 86.0, h: 36.0 }, "Undo", false, CutAction::Undo, "⌘Z");
+        push(RectPx { x: w - 115.0, y: 8.5, w: 101.0, h: 26.0 }, "Export", false, CutAction::Export, "");
         let cy = bar.y + bar.h / 2.0;
         // The Figma transport has five controls. Chapters remain in the inspector.
         for (x, label, action, hint) in [
@@ -2837,6 +2895,10 @@ impl App {
             push(RectPx { x: bar.x + x, y: cy - 14.0, w: 28.0, h: 28.0 }, label, false, action, hint);
         }
         push(RectPx { x: bar.x + 70.0, y: cy - 16.0, w: 32.0, h: 32.0 }, if self.playing { "Pause" } else { "Play" }, false, CutAction::Play, "space");
+        for (frames, offset, width, label) in [(false, 0.0, 30.0, "TIME"), (true, 30.0, 48.0, "FRAMES")] {
+            push(RectPx { x: self.cut_clock_x() + offset, y: bar.y + 4.0, w: width, h: 16.0 },
+                label, self.cut_frames == frames, CutAction::TimeDisplay(frames), "`");
+        }
         let mut x = self.cut_tools_x();
         let keyframe = cut.snap == Snap::Keyframe;
         for (label, action, hint) in [
@@ -2869,7 +2931,8 @@ impl App {
     /// The zoom slider's track, at the toolbar's right.
     fn cut_zoom_bar(&self) -> RectPx {
         let bar = self.workspace().transport;
-        RectPx { x: bar.x + bar.w - 16.0 - 30.0 - 110.0, y: bar.y + bar.h / 2.0 - 1.5, w: 110.0, h: 3.0 }
+        let width = if self.vp.0 < 900.0 { 60.0 } else { 110.0 };
+        RectPx { x: bar.x + bar.w - 40.0 - width, y: bar.y + bar.h / 2.0 - 1.5, w: width, h: 3.0 }
     }
 
     /// The source time under a pointer x on the lanes.
@@ -3187,22 +3250,22 @@ impl App {
     fn cut_side(&self) -> CutSide {
         let s = self.workspace().side;
         let (x0, w) = (s.x + 16.0, s.w - 32.0);
-        let tabs = RectPx { x: x0, y: s.y + 16.0, w, h: 32.0 };
+        let summary = RectPx { x: x0, y: s.y + 16.0, w, h: 54.0 };
+        let tabs = RectPx { x: x0, y: s.y + if s.h < 500.0 { 84.0 } else { 98.0 }, w, h: 32.0 };
         let half = (w - 4.0) / 2.0;
         let tab = [0, 1].map(|i| RectPx { x: x0 + 2.0 + i as f32 * half, y: tabs.y + 2.0, w: half, h: 28.0 });
-        let chips_y = tabs.y + tabs.h + 14.0;
-        let count_y = if self.cut_tab == 0 { chips_y + 34.0 } else { tabs.y + tabs.h + 12.0 };
-        let toggle = RectPx { x: x0 + w - 56.0, y: count_y, w: 56.0, h: 24.0 };
-        let add_btn = RectPx { x: toggle.x - 8.0 - 26.0, y: toggle.y + 1.0, w: 26.0, h: 22.0 };
-        let list_btn = RectPx { x: toggle.x + 2.0, y: toggle.y + 2.0, w: 26.0, h: 20.0 };
-        let grid_btn = RectPx { x: toggle.x + 28.0, ..list_btn };
+        let count_y = tabs.y + tabs.h + 14.0;
+        let toggle = RectPx { x: x0 + w - 92.0, y: count_y, w: 58.0, h: 26.0 };
+        let add_btn = RectPx { x: x0 + w - 26.0, y: toggle.y + 2.0, w: 26.0, h: 22.0 };
+        let list_btn = RectPx { x: toggle.x + 2.0, y: toggle.y + 2.0, w: 26.0, h: 22.0 };
+        let grid_btn = RectPx { x: toggle.x + 30.0, ..list_btn };
         let footer_y = s.y + s.h - 56.0;
         let warning = self.cut.as_ref().and_then(|c| c.warning()).map(|w| wrap_text(&w, 38)).unwrap_or_default();
         let warning_h = if warning.is_empty() { 0.0 } else { 16.0 + warning.len() as f32 * 15.0 };
         let warning_y = footer_y - 10.0 - warning_h;
         let body_top = if self.cut_tab == 0 { count_y + 24.0 + 10.0 } else { tabs.y + tabs.h + 16.0 };
         let body_bottom = if warning.is_empty() { footer_y - 10.0 } else { warning_y - 8.0 };
-        CutSide { tabs, tab, chips_y, count_y, toggle, add_btn, list_btn, grid_btn, footer_y, warning, warning_y, warning_h,
+        CutSide { tabs, tab, summary, count_y, toggle, add_btn, list_btn, grid_btn, footer_y, warning, warning_y, warning_h,
             body: RectPx { x: x0, y: body_top, w, h: (body_bottom - body_top).max(0.0) } }
     }
 
@@ -3238,37 +3301,47 @@ impl App {
         let Some(cut) = &self.cut else { return };
         let canvas = self.workspace().canvas;
         let image = self.content_rect(self.active);
-        let (x, top) = (image.x.max(canvas.x) + 12.0, image.y.max(canvas.y) + 12.0);
-        let bottom = (image.y + image.h).min(canvas.y + canvas.h) - 12.0;
-        if bottom - top < 70.0 || cut.keys.is_empty() { return; }
-        let frame = 1.0 / self.fps;
-        let dark = [0.031, 0.035, 0.039, 0.93];
-        let ink = mix(0x08090a, 0xffffff, 0.7);
-        let mut chip = |x: f32, y: f32, text: String, bg: [f32; 4], color: [f32; 4]| -> f32 {
-            let width = text.chars().count() as f32 * 10.5 * MONO_ADV + 16.0;
+        let x = (image.x - 9.0).max(canvas.x + 8.0);
+        let y = image.y.max(canvas.y) + 44.0;
+        if image.h < 100.0 { return; }
+        if !cut.keys.is_empty() {
+            let on = cut.on_key(self.t, 1.0 / self.fps);
             items.push(Item::Text(TextItem { valign: VAlign::Middle,
-                bg: Some(TextBg { radius: 5.0, pad_x: 8.0, pad_y: 5.0, ..TextBg::new(bg) }),
-                ..TextItem::new(x + 8.0, y, 10.5, color, text) }));
-            x + width + 6.0
-        };
-        let on_key = cut.on_key(self.t, frame);
-        let next = if on_key { chip(x, top + 10.0, "I · KEY".into(), hex_color(CUT_AMBER), hex_color(CUT_AMBER_INK)) }
-            else { chip(x, top + 10.0, "between keys".into(), dark, ink) };
-        chip(next, top + 10.0, format!("frame {}", (self.t * self.fps).round() as i64), dark, ink);
-        let frames = |a: f64, b: f64| ((b - a) * self.fps).round() as i64;
-        let before = if on_key { cut.key_step(self.t, -1) } else { cut.prev_key(self.t) };
-        let mut at = x;
-        if before < self.t - frame * 0.5 {
-            at = chip(at, bottom - 10.0, format!("◀ key {}  −{}f", fmt_tc(before, self.fps), frames(before, self.t)), dark, ink);
+                bg: Some(TextBg { radius: 4.0, pad_x: 11.0, pad_y: 3.0,
+                    ..TextBg::new(if on { hex_color(CUT_AMBER) } else { hex_color(CUT_BG) }) }),
+                ..TextItem::new(x + 11.0, y, 10.5, if on { hex_color(CUT_AMBER_INK) } else { hex_color(CUT_INK) },
+                    if on { "I · KEY" } else { "between keys" }) }));
         }
-        let after = cut.key_step(self.t, 1);
-        if after > self.t + frame * 0.5 {
-            chip(at, bottom - 10.0, format!("key {}  +{}f ▶", fmt_tc(after, self.fps), frames(self.t, after)), dark, ink);
+        if let Some((i, chapter)) = cut.chapters.iter().enumerate().rfind(|(_, c)| c.start <= self.t + 1e-6) {
+            items.push(Item::Text(TextItem { valign: VAlign::Middle, max_width: Some((image.w - 30.0).max(0.0)),
+                bg: Some(TextBg { radius: 3.0, pad_x: 11.0, pad_y: 3.0, ..TextBg::new(hex_color(CUT_CHAPTER_TAG)) }),
+                ..TextItem::new(x + 11.0, y + 30.0, 10.5, hex_color(0xffffff), format!("{:02} {}", i+1, chapter.title)) }));
         }
     }
 
     /// Figma x=85 clears the traffic lights; fullscreen needs only outer padding.
+    /// Only unoccupied header background behaves like a native titlebar.
+    /// Keep the entire tab housing (including gaps) and action buttons interactive.
+    pub fn titlebar_background(&self, x: f32, y: f32) -> bool {
+        if self.fullscreen || !self.show_ui || !(85.0..self.vp.0).contains(&x)
+            || !(0.0..HEADER_H).contains(&y) { return false; }
+        !self.ready() || (!contains(self.header_tabs(), x, y)
+            && !self.controls().iter().any(|c| contains(c.r, x, y)))
+    }
+
+    pub fn native_header_controls(&self) -> Vec<RectPx> {
+        if !self.show_ui || !self.ready() { return Vec::new(); }
+        let mut rects = vec![self.header_tabs()];
+        rects.extend(self.controls().into_iter().filter(|c| c.r.y < HEADER_H).map(|c| c.r));
+        rects
+    }
+
     fn header_tabs(&self) -> RectPx {
+        if self.cut_mode {
+            let left = if self.fullscreen { 14.0 } else { 85.0 };
+            let right = if self.vp.0 >= 1000.0 { 366.0 } else { 129.0 };
+            return RectPx { x: left + ((self.vp.0 - right - left - 382.0) / 2.0).max(0.0), y: 9.5, w: 382.0, h: 24.0 };
+        }
         RectPx { x: if self.fullscreen { 14.0 } else { 85.0 }, y: 6.0, w: 356.0, h: 31.0 }
     }
 
@@ -3281,8 +3354,8 @@ impl App {
                 ("LOSSLESS · STREAM COPY", hex_color(CUT_LAMP))
             } else { ("FRAME-ACCURATE · RE-ENCODE", hex_color(CUT_CORAL_INK)) };
             items.push(Item::Text(TextItem { align: Align::Right, valign: VAlign::Middle,
-                tracking: 0.63, max_width: Some((self.vp.0 - 202.0 - r.x - r.w).max(0.0)),
-                ..TextItem::new(self.vp.0 - 190.0, 21.5, 10.5, color, text) }));
+                tracking: 0.63, max_width: Some((self.vp.0 - 139.0 - r.x - r.w).max(0.0)),
+                ..TextItem::new(self.vp.0 - 127.0, 21.5, 10.5, color, text) }));
         }
     }
 
@@ -3308,16 +3381,19 @@ impl App {
         // ---- scrub toolbar: play, the clock, the edit tools, the zoom ----
         let bar = l.transport;
         let cy = bar.y + bar.h / 2.0;
-        let tc = fmt_tc(self.t, self.fps);
-        let (clock, frames) = tc.split_at(8);
         let x = self.cut_clock_x();
-        ui_label(items, x, cy - 13.0, 9.0, hex_color(CUT_INK), "TIME", Align::Left, 90.0);
-        ui_label(items, x + 30.0, cy - 13.0, 9.0, mix(CUT_BAR, 0xffffff, 0.55), "FRAMES", Align::Left, 90.0);
         let clock_y = cy + 8.0;
         let clock_px = 18.0;
-        items.push(Item::Text(TextItem { valign: VAlign::Middle, ..TextItem::new(x, clock_y, clock_px, hex_color(CUT_INK), clock) }));
-        items.push(Item::Text(TextItem { valign: VAlign::Middle,
-            ..TextItem::new(x + 8.0 * clock_px * MONO_ADV, clock_y, clock_px, mix(CUT_BAR, 0xffffff, 0.3), frames) }));
+        if self.cut_frames {
+            ui_label(items, x, clock_y, clock_px, hex_color(CUT_INK),
+                format!("{}", (self.t * self.fps).round() as u64), Align::Left, 123.0);
+        } else {
+            let tc = fmt_tc(self.t, self.fps);
+            let (clock, frames) = tc.split_at(8);
+            items.push(Item::Text(TextItem { valign: VAlign::Middle, ..TextItem::new(x, clock_y, clock_px, hex_color(CUT_INK), clock) }));
+            items.push(Item::Text(TextItem { valign: VAlign::Middle,
+                ..TextItem::new(x + 8.0 * clock_px * MONO_ADV, clock_y, clock_px, mix(CUT_BAR, 0xffffff, 0.3), frames) }));
+        }
         let sep = mix(CUT_BAR, 0xffffff, 0.12);
         items.push(Item::Rect(RectItem::new(RectPx { x: bar.x + 188.0, y: cy - 10.0, w: 1.0, h: 20.0 }, sep)));
         items.push(Item::Rect(RectItem::new(RectPx { x: self.cut_tools_x() - 28.0, y: cy - 10.0, w: 1.0, h: 20.0 }, sep)));
@@ -3366,6 +3442,10 @@ impl App {
         };
         let soft = mix(0x050506, 0xffffff, 0.72);
         match action {
+            CutAction::TimeDisplay(frames) => {
+                ui_label(items, r.x, cy, 9.0, if self.cut_frames == frames { hex_color(CUT_INK) } else { mix(CUT_BAR, 0xffffff, 0.3) },
+                    &control.label, Align::Left, r.w);
+            }
             CutAction::Export => {
                 let busy = cut.exporting() || cut.cuts().is_empty();
                 let fill = if busy { mix(0x050506, CUT_INK, 0.35) } else if hovered { hex_color(0xffffff) } else { hex_color(CUT_INK) };
@@ -3439,6 +3519,22 @@ impl App {
         let chip_bg = mix(CUT_BG, 0xffffff, 0.07);
         items.push(Item::Clip(Some(s)));
 
+        let source = &self.videos[self.active];
+        let pic = RectPx { x: g.summary.x, y: g.summary.y, w: 93.0, h: 54.0 };
+        items.push(Item::Rect(RectItem { radius: 4.0, ..RectItem::new(pic, hex_color(CUT_FILM)) }));
+        if source.delivered {
+            let aspect = source.info.width as f32 / source.info.height.max(1) as f32;
+            let ratio = pic.w / pic.h;
+            let (uw, uh) = if aspect > ratio { (ratio / aspect, 1.0) } else { (1.0, aspect / ratio) };
+            items.push(Item::Video { a: self.active, b: self.active, r: pic,
+                uv: [(1.0-uw)/2.0, (1.0-uh)/2.0, uw, uh], mode: VideoMode::Tex, p0: 4.0, p1: 0.0 });
+        }
+        ui_label(items, pic.x + 100.0, pic.y + 9.0, 12.0, hex_color(SOURCE_INK), name_of(&source.info.path), Align::Left, g.summary.w - 100.0);
+        let fps = format!("{:.3}", source.info.fps).trim_end_matches('0').trim_end_matches('.').to_string();
+        ui_label(items, pic.x + 100.0, pic.y + 26.0, 10.0, hex_color(SOURCE_SECONDARY),
+            format!("{}p · {fps} fps · {}", source.info.height, fmt_span(source.info.duration)), Align::Left, g.summary.w - 100.0);
+        items.push(Item::Rect(RectItem::new(RectPx { x: x0, y: g.tabs.y - 14.0, w: x1-x0, h: 1.0 }, mix(CUT_BG, 0xffffff, 0.2))));
+
         // ---- the icon tabs: chapters, streams ----
         items.push(Item::Rect(RectItem { radius: 9.0, ..RectItem::new(g.tabs, mix(CUT_BG, 0xffffff, 0.05)) }));
         for (i, (r, icon)) in g.tab.iter().zip([Icon::Flag, Icon::Film]).enumerate() {
@@ -3448,13 +3544,6 @@ impl App {
             draw_icon(items, icon, r.x + r.w / 2.0, r.y + r.h / 2.0, if on { ACCENT } else if hovered { ink } else { dim });
         }
 
-        // A chip: text on a rounded ground, left edge at `x`. Returns the next x.
-        let chip = |items: &mut Vec<Item>, x: f32, y: f32, text: &str, bg: [f32; 4], fg: [f32; 4]| -> f32 {
-            items.push(Item::Text(TextItem { valign: VAlign::Middle,
-                bg: Some(TextBg { radius: 5.0, pad_x: 7.0, pad_y: 5.0, ..TextBg::new(bg) }),
-                ..TextItem::new(x + 7.0, y, 10.0, fg, text) }));
-            x + text.chars().count() as f32 * 10.0 * MONO_ADV + 14.0 + 6.0
-        };
         let kv = |items: &mut Vec<Item>, y: f32, key: &str, value: String, color: [f32; 4]| {
             ui_label(items, x0, y, 11.5, dim, key, Align::Left, 110.0);
             ui_label(items, x1, y, 11.5, color, value, Align::Right, 170.0);
@@ -3462,20 +3551,8 @@ impl App {
 
         if self.cut_tab == 0 {
             // ---- chapters ----
-            let facts_chips: Vec<String> = if cut.facts.chips.is_empty() {
-                let v = &self.videos[self.active].info;
-                vec![v.codec.to_uppercase(), format!("{}p", v.height), format!("{:.3}", v.fps).trim_end_matches('0').trim_end_matches('.').to_string()]
-            } else { cut.facts.chips.clone() };
-            let mut x = x0;
-            let mut y = g.chips_y + 10.0;
-            for (i, text) in facts_chips.iter().enumerate() {
-                let w = text.chars().count() as f32 * 10.0 * MONO_ADV + 20.0;
-                if x + w > x1 { x = x0; y += 26.0; }
-                x = if i == 0 { chip(items, x, y, text, mix(CUT_BG, CUT_IN, 0.16), hex_color(0x6ab8f7)) }
-                    else { chip(items, x, y, text, chip_bg, mix(CUT_BG, 0xffffff, 0.75)) };
-            }
-            let cy = g.count_y + 12.0;
-            ui_label(items, x0, cy, 11.0, dim, cut.chapters.len().to_string(), Align::Left, 40.0);
+            let cy = g.count_y + 13.0;
+            ui_label(items, x0, cy, 11.0, ink, format!("Chapters {}", cut.chapters.len()), Align::Left, g.toggle.x - x0 - 8.0);
             let plus_hot = self.cursor_inside && contains(g.add_btn, self.cursor.0, self.cursor.1);
             items.push(Item::Rect(RectItem { radius: 7.0, ..RectItem::new(g.add_btn, mix(CUT_BG, 0xffffff, if plus_hot { 0.12 } else { 0.07 })) }));
             let (px, py) = (g.add_btn.x + g.add_btn.w / 2.0, g.add_btn.y + g.add_btn.h / 2.0);
@@ -3501,7 +3578,7 @@ impl App {
                 let number = (idx + 1).to_string();
                                 let ground = if on { mix(CUT_BG, CUT_AMBER, 0.12) } else if hovered { mix(CUT_BG, 0xffffff, 0.07) } else { hex_color(CUT_LANE) };
                 if self.cut_thumbs {
-                    items.push(Item::Rect(RectItem { radius: 9.0, border_w: if on { 1.0 } else { 0.0 }, border_color: hex_color(CUT_AMBER), ..RectItem::new(r, ground) }));
+                    items.push(Item::Rect(RectItem { radius: 9.0, border_w: if on { 2.0 } else { 0.0 }, border_color: hex_color(CUT_AMBER), ..RectItem::new(r, ground) }));
                     // The chapter's first frame; until it arrives, the film
                     // ground the picture clip uses.
                     let pic = RectPx { x: r.x + 5.0, y: r.y + 5.0, w: r.w - 10.0, h: 62.0 };
@@ -3514,9 +3591,9 @@ impl App {
                     ui_label(items, r.x + 8.0, r.y + 80.0, 12.0, mix(CUT_BG, 0xffffff, 0.88), c.title.as_str(), Align::Left, r.w - 16.0);
                     ui_label(items, r.x + 8.0, r.y + 95.0, 10.0, faint, format!("{} · {}", fmt_hms(c.start), fmt_span(end - c.start)), Align::Left, r.w - 16.0);
                 } else {
-                    items.push(Item::Rect(RectItem { radius: 8.0, border_w: if on { 1.0 } else { 0.0 }, border_color: hex_color(CUT_AMBER), ..RectItem::new(r, ground) }));
-                    let num = RectPx { x: r.x + 10.0, y: r.y + (r.h - 22.0) / 2.0, w: 22.0, h: 22.0 };
-                    chapter_flag(items, num.x, num.y, 22.0, number, on, false);
+                    items.push(Item::Rect(RectItem { radius: 8.0, border_w: if on { 2.0 } else { 0.0 }, border_color: hex_color(CUT_AMBER), ..RectItem::new(r, ground) }));
+                    let num = RectPx { x: r.x + 10.0, y: r.y + (r.h - 18.0) / 2.0, w: 20.0, h: 18.0 };
+                    chapter_flag(items, num.x, num.y, 18.0, number, on, false);
                     ui_label(items, r.x + 42.0, r.y + 16.0, 12.0, mix(CUT_BG, 0xffffff, 0.88), c.title.as_str(), Align::Left, r.w - 42.0 - 28.0);
                     ui_label(items, r.x + 42.0, r.y + 32.0, 10.0, faint, format!("{} · {}", fmt_hms(c.start), fmt_span(end - c.start)), Align::Left, r.w - 42.0 - 28.0);
                     items.push(Item::Rect(RectItem { radius: 3.5, ..RectItem::new(RectPx { x: r.x + r.w - 17.0, y: r.y + r.h / 2.0 - 3.5, w: 7.0, h: 7.0 }, snap_dot) }));
@@ -3622,7 +3699,7 @@ impl App {
         // Once the audio read has finished with nothing to show there is no
         // audio: no sound lane, no icon, no empty blue bar — the ground shows.
         let no_audio = cut.wave.is_empty() && !cut.reading_wave();
-        let gutter = hex_color(0xffffff);
+        let gutter = mix(CUT_TL, 0xffffff, 0.5);
         for (lane, icon) in [(lanes.chapters, Icon::Flag), (Some(v), Icon::Film), (lanes.audio, Icon::Speaker),
             (Some(lanes.subs), Icon::Caption), (Some(lanes.keys), Icon::Ticks)] {
             if let Some(r) = lane { draw_icon(items, icon, tl.x + 30.0, r.y + r.h / 2.0, gutter); }
@@ -4093,11 +4170,18 @@ const CUT_PAD: f32 = 16.0;
 const CUT_GRIP: f32 = 12.0;
 // The Timeline Edit design's tokens, sRGB hex (its oklch values converted).
 const CUT_BG: u32 = 0x0e0f10;
+/// Timeline preview surround from Figma 12:42.
+const CUT_CANVAS: u32 = 0x2c2c2c;
+/// Compact Timeline header housing and selected label (12:13).
+const CUT_HEADER_HOUSING: u32 = 0x1a1b1c;
+const CUT_HEADER_INK: u32 = 0x0088ff;
+/// Stacked current-chapter tag and transport readout (35:24 / 73:126).
+const CUT_CHAPTER_TAG: u32 = 0xd00070;
 /// The selected Figma transport/toolbar uses a black ground.
 const CUT_BAR: u32 = 0x000000;
-/// The lit tab / toggle ground in the cut inspector.
+/// The lit tab / toggle ground: the app's TOOL_BG.
 const CUT_TOOL_ON: u32 = 0x0b1926;
-const CUT_TL: u32 = 0x1a1a18;
+const CUT_TL: u32 = 0x121212;
 /// The inspector's segment rows.
 const CUT_LANE: u32 = 0x151719;
 /// A kept piece of picture, and of sound (alternating, so neighbours part).
@@ -4114,7 +4198,7 @@ const CUT_OUT: u32 = 0xff6a72;
 const CUT_HEAD: u32 = 0xf2f3f4;
 const CUT_INK: u32 = 0xededec;
 /// Chapters and the keyframe chip.
-const CUT_AMBER: u32 = 0xeaaa20;
+const CUT_AMBER: u32 = 0xe9ac00;
 const CUT_AMBER_INK: u32 = 0x1a1408;
 /// Lossless / snapped.
 const CUT_GREEN: u32 = 0x35c15f;
@@ -4158,15 +4242,15 @@ impl Workspace {
                 timeline: RectPx { x: 0.0, y: transport_y + CUT_TOOLBAR_H, w, h: lanes },
             };
         }
-        let rail = if !visible { 0.0 } else if w < 900.0 { 210.0_f32.min(w * 0.3) } else { 320.0 };
+        let rail = if !visible { 0.0 } else if w < 900.0 { 210.0_f32.min(w * 0.3) } else { 280.0 };
         let header = if visible { HEADER_H + CONTEXT_H } else { 0.0 };
         let bottom = if visible { TRANSPORT_H + STATUS_H } else { 0.0 };
         let canvas = RectPx { x: rail, y: header, w: (w - rail).max(1.0), h: (h - header - bottom).max(1.0) };
-        let inspector_h = if visible && h >= 1000.0 { 216.0 } else { 0.0 };
+        let inspector_h = if visible && h >= 800.0 { 216.0 } else { 0.0 };
         let inspector = RectPx { x: 0.0, y: h - STATUS_H - inspector_h, w: rail, h: inspector_h };
         Self {
             rail, canvas, inspector, timeline: none, side: none,
-            list: RectPx { x: 0.0, y: HEADER_H + 132.0, w: rail, h: (inspector.y - HEADER_H - 184.0).max(SOURCE_H) },
+            list: RectPx { x: 0.0, y: HEADER_H + 52.0, w: rail, h: (inspector.y - HEADER_H - 88.0 - if inspector_h == 0.0 { 36.0 } else { 0.0 }).max(SOURCE_H) },
             transport: RectPx { x: rail, y: h - STATUS_H - TRANSPORT_H, w: w - rail, h: TRANSPORT_H },
         }
     }
@@ -4175,7 +4259,7 @@ impl Workspace {
 #[derive(Clone, Copy)]
 enum Action { Duplicate, OpenFiles, ClearSources, Tool(usize), View(Mode), Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
 #[derive(Clone, Copy, PartialEq)]
-enum CutAction { In, Out, Split, Apply, Undo, Export, Snap(Snap), Play, Zoom(bool), Step(i32), Keyframe(i32) }
+enum CutAction { TimeDisplay(bool), In, Out, Split, Apply, Undo, Export, Snap(Snap), Play, Zoom(bool), Step(i32), Keyframe(i32), Chapter(i32) }
 /// `hint` is the key cap a cut-mode button carries ("" for none).
 struct Control { r: RectPx, label: String, selected: bool, action: Action, hint: &'static str }
 impl Control {
@@ -4213,7 +4297,7 @@ const CUT_HEADER_H: f32 = 44.0;
 const CUT_HEADER_BLUE: u32 = 0x0074e1;
 const HEADER_H: f32 = CUT_HEADER_H;
 const CONTEXT_H: f32 = 40.0;
-const SOURCE_H: f32 = 178.0;
+const SOURCE_H: f32 = 196.0;
 /// Sources card variables: surface, selected, border, ink, secondary, subtle.
 const SOURCE_SURFACE: u32 = 0x11151b;
 const SOURCE_SELECTED: u32 = 0x0d1b2b;
@@ -4310,6 +4394,9 @@ mod tests {
         assert!(app.videos.iter().all(|v| v.selected));
         app.key(Key::SelectSources);
         assert!(app.videos.iter().all(|v| !v.selected));
+        let desc = app.tick(0.0, (720.0, 480.0), 2.0);
+        for u in desc.uploads { app.recycle(u.idx, u.buf); }
+        assert_eq!(app.source_first(), 2, "resize keeps the viewed source visible");
     }
 
     #[test]
@@ -4357,6 +4444,26 @@ mod tests {
         assert_eq!(app.videos.len(), 2);
         assert!(tick_until(&mut app, Duration::from_secs(3), |a| a.videos.iter().all(|v| v.delivered)));
         assert!((app.videos[0].shown_pts - app.videos[1].shown_pts).abs() <= 1.0 / app.fps + 1e-6);
+    }
+
+    #[test]
+    fn native_titlebar_excludes_controls_content_and_fullscreen() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 2);
+        app.vp = (1280.0, 800.0);
+        assert!(app.titlebar_background(600.0, 20.0));
+        assert!(!app.titlebar_background(50.0, 20.0));
+        assert!(!app.titlebar_background(100.0, 20.0));
+        assert!(!app.titlebar_background(600.0, HEADER_H));
+        app.set_cut_mode(true);
+        for c in app.controls().iter().filter(|c| c.r.y < HEADER_H) {
+            assert!(!app.titlebar_background(c.r.x + c.r.w / 2.0, c.r.y + c.r.h / 2.0));
+        }
+        app.fullscreen = true;
+        assert!(!app.titlebar_background(600.0, 20.0));
+        app.fullscreen = false;
+        app.show_ui = false;
+        assert!(!app.titlebar_background(600.0, 20.0));
     }
 
     #[test]
@@ -4666,8 +4773,35 @@ mod tests {
         Video { selected: false, linked_copy: false, info, player, shown_pts: 0.0, delivered: false, pending: false, last_frame: None }
     }
 
+    /// A playing app: most tests drive the clock, so they opt out of the
+    /// paused-on-open default (`opened_clips_sit_paused_on_their_first_frame`
+    /// covers that).
     fn mk_app(clip: &PathBuf, n: usize) -> App {
-        App::new((0..n).map(|_| mk_video(clip)).collect(), &crate::config::Config::default())
+        let mut cfg = crate::config::Config::default();
+        cfg.playback.start_paused = false;
+        App::new((0..n).map(|_| mk_video(clip)).collect(), &cfg)
+    }
+
+    /// Opening files never starts playback: the clip shows its first frame
+    /// and the clock holds at 0 until Space — at startup and on a drop.
+    #[test]
+    fn opened_clips_sit_paused_on_their_first_frame() {
+        let Some(clip) = test_clip() else { return };
+        let cfg = crate::config::Config::default();
+        let mut app = App::new(vec![mk_video(&clip)], &cfg);
+        assert!(!app.playing, "startup clips must open paused");
+        assert!(tick_until(&mut app, Duration::from_secs(5), |a| a.videos[0].delivered));
+        for _ in 0..30 {
+            app.tick(0.016, (1280.0, 800.0), 2.0);
+        }
+        assert_eq!(app.t, 0.0, "the clock advanced while paused");
+
+        app.playing = true;
+        assert!(tick_until(&mut app, Duration::from_secs(5), |a| a.t > 0.1));
+        app.add_videos(vec![mk_video(&clip)], false);
+        assert!(!app.playing, "a dropped clip must not resume playback");
+        assert!(tick_until(&mut app, Duration::from_secs(5), |a| a.started));
+        assert_eq!(app.t, 0.0);
     }
 
     /// Tick until a condition holds (real decode runs behind this).
@@ -4789,12 +4923,26 @@ mod tests {
             app.mouse_down(r.x + r.w / 2.0, r.y + r.h / 2.0);
             app.mouse_up();
         };
-        app.seek_all(0.0, true);
+        app.seek_all(0.2, true);
+        app.key(Key::Char('}'));
+        assert!((app.t - 1.5).abs() < 0.05, "next chapter, t = {}", app.t);
+        app.seek_all(1.6, true);
+        app.key(Key::Char('{'));
+        assert!(app.t < 0.05, "just inside chapter two, back goes to chapter one, t = {}", app.t);
         press(&mut app, CutAction::Keyframe(1));
         assert!((app.t - 1.0).abs() < 0.05, "next keyframe, t = {}", app.t);
         press(&mut app, CutAction::Keyframe(-1));
         assert!(app.t < 0.05, "previous keyframe, t = {}", app.t);
         assert!(!app.playing);
+
+        // The time display changes representation without seeking or playing.
+        let time = app.t;
+        press(&mut app, CutAction::TimeDisplay(true));
+        assert!(app.cut_frames);
+        assert_eq!(app.t, time);
+        assert!(!app.playing);
+        app.key(Key::Char('`'));
+        assert!(!app.cut_frames);
 
         // `+` starts a chapter at the playhead; a second press there is refused.
         app.seek_all(3.0, true);

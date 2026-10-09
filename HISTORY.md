@@ -27,6 +27,67 @@ compact transport now uses the Figma's unboxed playback icons and labeled
 timecode too. Below 900px it hides the zoom strip (wheel zoom still works),
 leaving the edit tools room without overlap.
 
+## 2026-10-08 — updated Timeline Edit page
+
+Implemented the updated Figma Main 12:2 layout: compact centered Timeline header,
+wide Export button, black five-button transport, TIME/FRAMES readout, outlined
+editing controls, and the darker track ground. The preview uses the board's inset
+proportions, with stacked keyframe/current-chapter tags. The inspector now begins
+with a live source thumbnail, filename and metadata above Chapters/Streams; list,
+grid and add controls share their drawing and input geometry. Chapter rows remain
+paged clear of the footer rather than reproducing the mock's footer overlap.
+
+Backtick switches time/frame display without moving the playhead; `{` / `}` keep
+chapter navigation available after its toolbar buttons were removed in the design.
+Undo remains Cmd-Z / U. `--cut --timeline-frames` exposes the frame readout for
+captures. Sources/Crop/Mask keep their existing header style. The new Timeline
+colors are mirrored as documented Figma variables. Build and all 68 tests pass,
+including inspector navigation, linked selection behavior and the display toggle.
+Final native screenshot verification is pending: macOS was locked during review.
+
+## 2026-10-08 — Sources preview cards and header input routing
+
+Matched Figma's Sources preview cards (81:95): full-width live previews, number
+and ACTIVE badges, filenames and metadata underneath, and a source-count chip.
+Cards are 184px tall with 12px gaps in a 280px rail; compact windows stack metadata.
+Batch checkboxes appear on hover or when checked. Linked duplicates retain shared
+file labels, and Duplicate/Add files move to the rail footer. The inspector returns
+at 800px high. Existing duplication and multi-select behavior is preserved.
+
+A native input overlay routes the exact painted header control regions to winit,
+preventing AppKit's transparent titlebar from consuming button clicks as window
+zoom/drag gestures. Empty header space and traffic lights retain native handling.
+Build and all 68 tests pass. Live window checks confirmed mode-button single and
+double clicks keep window size, while empty-header double clicks zoom and restore.
+The Sources layout was visually checked at 1280×800 and in the zoomed window.
+
+## 2026-10-08 — native titlebar double-click
+
+The transparent full-size content view receives empty-header clicks as client
+input. Runner now recognizes double-clicks using the macOS interval and calls
+AppKit's zoom/restore action (or minimize/no action according to the system
+preference). Tab housing, header actions, hidden controls and fullscreen are
+excluded. Moving away, dragging or losing focus cancels the pending click.
+Build and all 67 tests pass, including header hit regions and gesture timing.
+
+## 2026-10-08 — Sources cards and linked duplicates
+
+Implemented the Figma processing proposal's source rail: live rounded thumbnails,
+readable metadata, item/file counts, linked-copy labels and separate viewed/checked
+states. Cards keep their geometry for drawing, clicking and scrolling; resizing
+keeps the viewed card visible. The 320px rail narrows at 900px; the lower inspector
+now yields below 1000px high so normal windows fit three source cards.
+
+Duplicate / Cmd-D duplicates checked items (or the viewed item) without copying
+media on disk. Copies have independent decoder/mask state; paused and playing
+insertion preserve master time and re-deliver shifted texture slots. X toggles the
+viewed checkbox, Cmd-A selects/clears all and Clear resets batch scope. Add files /
+Cmd-O uses a non-modal native multi-file picker through the Open With queue.
+`--duplicate` exposes the state for visual review. Topaz and batch processing remain
+Figma proposals. All 65 tests pass, including new selection, resize, paused/batch
+and playing duplicate-sync coverage. Targeted window captures verified the Sources
+rail at 1440×900 and 720×480; the compact view keeps the viewed copy visible.
+
 ## 2026-10-08 — updated shared header alignment
 
 Refreshed Figma Header `12:5`: the mode selector is now left aligned at x=85

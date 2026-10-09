@@ -38,7 +38,7 @@ rebuilt every frame in `src/app.rs` and drawn by a single wgpu pipeline
 | Colours | `const NAME: [f32; 4]` at the bottom of `src/app.rs` (workspace block ~`HEADER_H`…`TOOL_BG`; launch block `LAUNCH_BG`…`FORMATS`; crop `CROP_*`) | Variable collection **Abner** (mode *Dark*): `shell/*`, `text/*`, `accent`, `mask-red`, `transport/track`, `crop/*`, `mask/*`, `launch/*`, `clip/1–9` |
 | Clip palette | `clip_color()` in `src/app.rs` (9 hex values, cycles) | `clip/1` … `clip/9` |
 | Type | `ui_label(items, x, y, px, color, text, align, max_width)`; sizes 9/10/11/13 | Text styles `mono/13`, `mono/11`, `mono/11 medium`, `mono/10`, `mono/10 tracked`, `mono/9` |
-| Metrics | `HEADER_H 44`, `CONTEXT_H 40`, `SOURCE_H 80`, `TRANSPORT_H 60`, `STATUS_H 28`, `TITLEBAR_H 28`, `CROP_*`, `SEEK_GRAB` | Resolved geometry in the frames |
+| Metrics | `HEADER_H 44`, `CONTEXT_H 40`, `SOURCE_H 196`, `TRANSPORT_H 60`, `STATUS_H 28`, `TITLEBAR_H 28`, `CROP_*`, `SEEK_GRAB` | Resolved geometry in the frames |
 | Behavioural defaults | `abner.default.toml` (window size, view, gain, blend, checker, brush) | — |
 
 Each Figma variable's **description names its code constant** — use it to find
@@ -184,7 +184,7 @@ live inside the component that owns them (e.g. *Transport → Step back*).
 - **Responsive rules** live in code, not in Figma frames:
   - rail 280px, 210px (≤ 30% of width) below 900px wide; `Tab` hides the whole
     shell (`Workspace::new(…, visible=false)`);
-  - inspector hides below 600px high; minimum window 720×480;
+  - inspector hides below 800px high; minimum window 720×480;
   - transport drops the `frame · speed` readout below 720px; the status bar
     drops key hints below 1000px;
   - the launch window falls back from Splash to the bare mark under 900×520
@@ -244,11 +244,46 @@ own `build_*` function called from `tick`; its layout rects come from
 
 ## Timeline Edit header
 
-The timeline header follows [Header 12:5](https://www.figma.com/design/YV0duGxqSLOKfiQsdD746T/Abner-Timeline-Edit?node-id=12-5).
-`HEADER_H` / `CUT_HEADER_H` are 44; `CUT_HEADER_BLUE` is #0074e1.
-`header_tabs` positions the 356×31 housing at x=85 after native traffic lights
-(x=14 in fullscreen), matching the updated left-aligned design. `controls()`
-shares mode-button geometry between drawing and hit testing; Sources, Timeline,
-Crop and Mask all use `build_tool_housing` and `draw_tool_control` with the active
-mode selected. The timeline alone adds Undo/Export and its export-status label;
-that label hides below 1000px. Existing mono type stands in for SF Pro.
+The Timeline page follows [Main 12:2](https://www.figma.com/design/YV0duGxqSLOKfiQsdD746T/Abner-Timeline-Edit?node-id=12-2), including the 12:5 header, 12:42 canvas,
+12:65 inspector and 73:111 toolbar. Its 382×24 mode selector is centered in the
+space between native traffic lights and export actions. It retains Sources /
+Timeline / Crop / Mask, with Timeline selected at runtime. Sources, Crop and Mask
+keep their existing header layout. Undo remains available through Cmd-Z / U.
+
+The preview is centered at the board's 764×430 proportions within a 1140×583
+canvas. Keyframe and current-chapter tags stack at its upper left; keyframe facts
+use the decoder's actual key flags (KEY, without claiming every key is IDR).
+The inspector shows a live 93×54 source thumbnail, filename and source metadata
+above Chapters/Streams, with list/grid and add-chapter controls. It tightens the
+header gap in shorter windows and paginates chapter rows to prevent footer overlap.
+
+Playback uses five controls around a 34px play disc, a 16px time readout with
+working TIME/FRAMES selectors, and 32px edit controls. Backtick toggles the readout;
+`--cut --timeline-frames` opens that state. `{` / `}` navigate chapters. At narrow
+widths spacing and the zoom slider shrink; all hit regions share drawn geometry.
+`CUT_CANVAS`, `CUT_HEADER_HOUSING`, `CUT_HEADER_INK`, `CUT_CHAPTER_TAG`,
+`CUT_BAR`, `CUT_TL` and `CUT_AMBER` mirror the Timeline variables.
+Dynamic media, waveform, chapters and ranges come from the loaded clip; static
+Figma video placeholders are not shipped. Existing geometric icon builders remain
+the native implementation per §5.
+
+## Sources cards and duplication
+
+Implemented [Sources preview cards 81:95](https://www.figma.com/design/YV0duGxqSLOKfiQsdD746T/Abner-Timeline-Edit?node-id=81-95).
+`build_sources` draws 184px cards with 12px gaps and insets, full-width 100px
+rounded live thumbnails, number badges and an ACTIVE label. Measured filenames
+and format/resolution plus frame-rate/duration sit beneath the preview. `SOURCE_*`
+tokens mirror the source-card variables. The 280px rail narrows to 210px below
+900px, stacking metadata in compact windows; the inspector appears at 800px high.
+Shared-file labels appear only for linked items. Checkboxes appear on hover or
+when checked; Duplicate and Add files sit at the bottom of the rail.
+
+Checkboxes define a separate batch selection; clicking a card or using 1–9 only
+changes the viewer. X toggles the viewed item, Cmd-A toggles all, Clear empties the
+selection. Duplicate / Cmd-D inserts copies beside checked sources (or the viewed
+source when none are checked), sharing their file paths with independent decoders
+and mask state. No file is copied, renamed or written. The master time and playback
+state survive insertion; shifted slots are exact-seeked and uploaded again.
+Add files / Cmd-O opens the macOS multi-file picker through the existing open queue.
+`--duplicate` makes the linked-copy state reachable for targeted window captures.
+Topaz/edit-stack controls remain proposals; this change implements the source rail.

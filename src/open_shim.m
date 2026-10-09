@@ -79,3 +79,71 @@ void ab_choose_files(void) {
         panel = nil;
     }];
 }
+
+// Transparent full-size content receives the titlebar's clicks as client input.
+// Use AppKit's zoom/restore action and the user's global titlebar preference.
+double ab_double_click_interval(void) { return [NSEvent doubleClickInterval]; }
+
+void ab_titlebar_double_click(void *raw_view) {
+    NSWindow *window = ((__bridge NSView *)raw_view).window;
+    if (window == nil || (window.styleMask & NSWindowStyleMaskFullScreen)) return;
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSString *action = [defaults stringForKey:@"AppleActionOnDoubleClick"];
+    if ([action isEqualToString:@"None"]) return;
+    if ([action isEqualToString:@"Minimize"] ||
+        (action == nil && [defaults boolForKey:@"AppleMiniaturizeOnDoubleClick"])) {
+        [window performMiniaturize:nil];
+    } else {
+        // With no content-size restriction, AppKit's standard zoom frame fills
+        // the usable screen; it also owns restoring the user's previous frame.
+        [window performZoom:nil];
+    }
+}
+
+// The full-size GPU view paints beneath AppKit's titlebar. Native titlebar hit
+// testing can otherwise turn clicks on painted buttons into zoom/drag gestures.
+// Intercept only the actual controls; leave traffic lights and empty background
+// to their normal handlers. Never replace or subclass winit's content view.
+@interface AbHeaderInputView : NSView
+@property(nonatomic, weak) NSView *target;
+@property(nonatomic, copy) NSArray<NSValue *> *controlRects;
+@end
+@implementation AbHeaderInputView
+- (BOOL)isOpaque { return NO; }
+- (BOOL)acceptsFirstMouse:(NSEvent *)event { return YES; }
+- (BOOL)mouseDownCanMoveWindow { return NO; }
+- (NSView *)hitTest:(NSPoint)point {
+    NSPoint p = [self.target convertPoint:point fromView:self.superview];
+    for (NSValue *value in self.controlRects) {
+        if (NSPointInRect(p, value.rectValue)) return self;
+    }
+    return nil;
+}
+- (void)mouseDown:(NSEvent *)event { [self.target mouseDown:event]; }
+- (void)mouseUp:(NSEvent *)event { [self.target mouseUp:event]; }
+- (void)mouseDragged:(NSEvent *)event { [self.target mouseDragged:event]; }
+- (void)mouseMoved:(NSEvent *)event { [self.target mouseMoved:event]; }
+@end
+static char ab_header_input_key;
+void ab_install_header_input(void *raw_view) {
+    NSView *view = (__bridge NSView *)raw_view;
+    if (objc_getAssociatedObject(view, &ab_header_input_key)) return;
+    NSView *parent = view.window.contentView.superview;
+    if (parent == nil) return;
+    AbHeaderInputView *input = [[AbHeaderInputView alloc] initWithFrame:parent.bounds];
+    input.target = view;
+    input.controlRects = @[];
+    input.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [parent addSubview:input positioned:NSWindowAbove relativeTo:nil];
+    objc_setAssociatedObject(view, &ab_header_input_key, input, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+void ab_set_header_controls(void *raw_view, const double *rects, size_t count) {
+    NSView *view = (__bridge NSView *)raw_view;
+    AbHeaderInputView *input = objc_getAssociatedObject(view, &ab_header_input_key);
+    NSMutableArray<NSValue *> *values = [NSMutableArray arrayWithCapacity:count];
+    for (size_t i = 0; i < count; i++) {
+        const double *r = rects + i * 4;
+        [values addObject:[NSValue valueWithRect:NSMakeRect(r[0], r[1], r[2], r[3])]];
+    }
+    if (![input.controlRects isEqualToArray:values]) input.controlRects = values;
+}

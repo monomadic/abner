@@ -23,8 +23,8 @@ height = 800
 # Starting view: overlay, sbs, delta, split, checker or blend.
 # --view on the command line overrides it.
 view = "overlay"
-# Open paused instead of playing.
-start_paused = false
+# Opened clips sit paused on their first frame (startup, drops, Open With).
+start_paused = true
 # Seconds jumped by ← / →.
 seek_step = 1.0
 
