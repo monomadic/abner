@@ -269,22 +269,6 @@ impl Cut {
         }
     }
 
-    /// The chapter to jump to from `t`: the next one's start going forward;
-    /// going back, the current one's start, or the previous one when the
-    /// playhead is already within a second of it (the usual double-press).
-    pub fn chapter_step(&self, t: f64, dir: i32) -> Option<f64> {
-        if dir > 0 {
-            self.chapters.iter().map(|c| c.start).find(|s| *s > t + EPS)
-        } else {
-            let before: Vec<f64> = self.chapters.iter().map(|c| c.start).filter(|s| *s < t - EPS).collect();
-            match before.as_slice() {
-                [] => None,
-                [.., prev, last] if t - last < 1.0 => Some(*prev),
-                [.., last] => Some(*last),
-            }
-        }
-    }
-
     /// Start a chapter at `t`. Refused within half a second of one that is
     /// already there. Returns its (1-based) number.
     pub fn add_chapter(&mut self, t: f64) -> Option<usize> {
@@ -1230,18 +1214,6 @@ mod tests {
         assert!(c.gop_stats().is_none());
         c.set_keys(vec![0.0, 2.0, 4.0, 10.0, 12.0]);
         assert_eq!(c.gop_stats(), Some((5, 2.0, 6.0)));
-    }
-
-    #[test]
-    fn chapter_skips_go_to_the_next_start_and_back_to_this_or_the_last_one() {
-        let mut c = Cut::new(Path::new("x.mp4"), 100.0);
-        c.chapters = [0.0, 20.0, 50.0].iter().map(|s| Chapter { start: *s, title: String::new() }).collect();
-        assert_eq!(c.chapter_step(25.0, 1), Some(50.0));
-        assert_eq!(c.chapter_step(60.0, 1), None);
-        assert_eq!(c.chapter_step(35.0, -1), Some(20.0));
-        // Just past a chapter's start, back goes to the one before it.
-        assert_eq!(c.chapter_step(20.5, -1), Some(0.0));
-        assert_eq!(c.chapter_step(0.0, -1), None);
     }
 
     #[test]

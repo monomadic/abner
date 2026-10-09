@@ -3,6 +3,16 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-09 — transport matched to the supplied reference crop
+
+The reference shows five playback controls (keyframe, frame, play, frame,
+keyframe), a separator, TIME/FRAMES, another separator, and five tight edit
+buttons. The transport now uses that same order and spacing at every window
+width. Chapter navigation stays in the inspector; the toolbar no longer shows
+chapter buttons. Play/pause uses black marks on blue; split and snap now draw
+scissors and an outlined magnet to match the reference. Drawing and hit testing
+share the control rectangles.
+
 ## 2026-10-09 — Timeline transport styling
 
 Matched the selected Figma `transport/toolbar` frame at 1440px: black 50px ground,
