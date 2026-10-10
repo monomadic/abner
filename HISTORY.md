@@ -3,6 +3,75 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-11 — one shared Figma mode-selector component
+
+Applied the updated Figma container 122:441: transparent housing with a 2px
+neutral outline, gray selected fill, and SF Pro Display Medium 12px labels.
+ModeSelector owns drawing and control geometry in every workspace; Timeline
+no longer relocates the selector. The installed Display Medium face is preferred,
+with system SF Pro at medium/display optical size as the fallback. Other interface
+labels retain SF Compact Rounded. Mode-switch tests guard geometry consistency.
+
+## 2026-10-11 — interface typography and crisp glyph placement
+
+Verified the newer Figma label (122:444) uses SF Compact Rounded Regular at
+12px. Interface labels now use that macOS font at weight 400 with em-based
+sizing; the main timecode and explicitly authored mono runs retain their font.
+Glyph quads align to physical pixels, avoiding a second fractional filtering
+pass over rasterized coverage. Atlas keys include the face and exact raster
+size, so adjacent fractional sizes cannot accidentally reuse one bitmap.
+
+## 2026-10-10 — neutral title-bar mode selector
+
+All four workspace modes now share the reference's dark rounded housing,
+equal-width buttons, gray selected fill and border, and neutral title-case labels.
+Drawing and pointer hit testing use the same inset button geometry.
+
+## 2026-10-10 — subtitle and segment inspector tabs
+
+Expanded the inspector selector to Chapters, Streams, Subtitles and Segments.
+The new tabs show timed text cues and kept/cut ranges, with active-row highlighting
+and click-to-seek. Long lists follow the playhead, like the chapter list.
+
+## 2026-10-10 — inspector outline icons
+
+Updated the inspector to the newer notched chapter flag, divided filmstrip,
+slim list and rounded grid icons. Selected tabs and toggles have a subtle blue
+outline, and the add button precedes the view toggle as in the reference.
+
+## 2026-10-10 — full-height timeline posters
+
+The leading video-clip area now displays its thumbnail at full track height,
+under the trim grips, instead of an inset card. Short clips keep a cropped
+poster rather than losing it; existing hover playback remains available.
+
+## 2026-10-10 — timeline track-control gutter
+
+Matched the reference's darker 49px gutter, subtle divider and muted outline
+icons: bookmark, filmstrip, speaker with sound waves, and boxed A. Removed the
+extra keyframe-row icon. Media clipping and track interactions are unchanged.
+
+## 2026-10-10 — compact timeline track spacing
+
+Applied the compact Figma track offsets: ruler at 2px, chapters at 20px, video
+at 48px, audio at 108px, subtitles at 156px and keyframes at 180px. The timeline
+is now 198px high (previously 222px), reclaiming space for the preview. Short
+windows use the same tighter ruler gap in a 126px timeline. Drawing and hit
+testing continue to share the lane geometry.
+
+## 2026-10-10 — one split button, replacing scissors
+
+Removed the duplicate scissors button. The outward-arrow split icon is now the
+only split control and also marks the timeline razor. S keeps its existing
+pointer-aware split behavior; clicking the button splits at the playhead.
+Closed the toolbar gap and moved the time display left with the five-tool group.
+
+## 2026-10-10 — keep selection outlines behind the track gutter
+
+Kept the selected clip outline inside the timeline's content clipping region.
+Panning a selected video or audio piece past the left edge now leaves the track
+labels unobscured while retaining the outline above and below the clip.
+
 ## 2026-10-10 — split icon reference
 
 Matched the split-at-playhead icon to the supplied reference: sharp outward

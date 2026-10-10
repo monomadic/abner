@@ -278,6 +278,10 @@ impl TextBg {
 
 #[derive(Debug, Clone)]
 pub struct TextItem {
+    /// Proportional SF Compact Rounded for interface labels.
+    pub interface: bool,
+    /// SF Pro Display Medium for the shared mode selector.
+    pub header: bool,
     /// Anchor point; `align` decides which edge of the run sits here.
     pub x: f32,
     pub y: f32,
@@ -297,6 +301,7 @@ pub struct TextItem {
 impl TextItem {
     pub fn new(x: f32, y: f32, px: f32, color: [f32; 4], text: impl Into<String>) -> Self {
         Self {
+            interface: false, header: false,
             x,
             y,
             px,
@@ -1310,6 +1315,8 @@ impl Gpu {
                     })
                 }
                 Item::Text(t) => {
+                    self.text.set_interface(t.interface);
+                    self.text.set_header(t.header);
                     let fitted = t.max_width.map(|w| self.text.fit(&t.text, t.px * scale, t.tracking * scale, w * scale));
                     let laid = self.text.layout(fitted.as_deref().unwrap_or(&t.text), t.px * scale, t.tracking * scale);
                     let (tw, th) = (laid.w / scale, laid.h / scale);
@@ -1351,7 +1358,7 @@ impl Gpu {
                     }
                     for q in &laid.quads {
                         push(&mut data, &mut batches, clip, None, Instance {
-                            pos: [x0 + q.x / scale, y0 + q.y / scale],
+                            pos: [((x0 * scale + q.x).round()) / scale, ((y0 * scale + q.y).round()) / scale],
                             size: [q.w / scale, q.h / scale],
                             uv: q.uv,
                             color: t.color,

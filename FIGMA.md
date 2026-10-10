@@ -258,7 +258,7 @@ above Chapters/Streams, with list/grid and add-chapter controls. It tightens the
 header gap in shorter windows and paginates chapter rows to prevent footer overlap.
 
 Transport 73:111 is a 50px black bar: five playback controls around a 34px
-play disc, six unboxed 32px editing buttons with 6px gaps, then a 20px clock
+play disc, five unboxed 32px editing buttons with 6px gaps, then a 20px clock
 with working TIME/FRAMES selectors. Separators divide these groups; zoom stays
 right-aligned and hides below 900px. Snap uses an outlined keyframe diamond.
 Backtick toggles the readout; `--cut --timeline-frames` opens that state.
@@ -289,3 +289,25 @@ state survive insertion; shifted slots are exact-seeked and uploaded again.
 Add files / Cmd-O opens the macOS multi-file picker through the existing open queue.
 `--duplicate` makes the linked-copy state reachable for targeted window captures.
 Topaz/edit-stack controls remain proposals; this change implements the source rail.
+
+The compact timeline uses Figma 73:162 track offsets (2/20/48/108/156/180px)
+inside a 198px content area, trimming the obsolete empty bottom margin. Short
+windows omit chapter/audio rows and use a 126px content area.
+
+### Interface typography (2026-10-11)
+
+The newer title-bar label `122:444` in the Timeline Edit file uses **SF Compact
+Rounded Regular**, 12px. `ui_label` selects this interface face from the macOS
+system font, with weight 400 and em sizing. Direct `TextItem` runs default to
+monospace for clocks and technical readouts. Both faces share one glyph atlas;
+its keys include face and exact size, and rendered glyphs align to physical
+pixels. Other platforms retain the existing font fallback.
+
+### Shared mode selector (2026-10-11)
+
+The latest Timeline Edit container `122:441` supersedes the rounded header font:
+all four labels use **SF Pro Display Medium**, 12px, tracking 0.0337px. The
+383×24 selector has a transparent housing, 2px white/19% outline and a gray
+selected button (133/31% fill, white/8% border). `ModeSelector` owns its controls
+and drawing across every mode, anchored after the traffic lights. Remaining
+interface labels continue using SF Compact Rounded.

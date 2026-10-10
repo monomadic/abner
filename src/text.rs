@@ -1,4 +1,4 @@
-//! Minimal glyph stack: a system monospace font rasterized on demand into
+//! Minimal glyph stack: system mono and SF Compact Rounded rasterized into
 //! one R8 atlas (CPU-side shelf packer, per-glyph rect uploads). Glyphs
 //! rasterize at physical pixel size and draw at logical size, so text
 //! stays crisp on HiDPI.
@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use ab_glyph::{Font, FontVec, ScaleFont};
+use ab_glyph::{Font, FontVec, ScaleFont, VariableFont};
 
 /// 2048² × R8 = 4 MiB, which is nothing; 1024 was ~40% full with two
 /// sizes at 2× retina and one reset would have wiped the lot.
@@ -58,13 +58,17 @@ struct Entry {
 
 pub struct TextCtx {
     font: Option<FontVec>,
+    ui_font: Option<FontVec>,
+    header_font: Option<FontVec>,
+    header: bool,
+    interface: bool,
     pub atlas: Vec<u8>,
     /// Rects rasterized since the renderer last drained them.
     pub pending: Vec<Upload>,
     /// Set when a glyph didn't fit; the reset is deferred to the next
     /// frame boundary (`begin_frame`), never done mid-layout.
     full: bool,
-    cache: HashMap<(u16, u32), Option<Entry>>,
+    cache: HashMap<(u8, u16, u32), Option<Entry>>,
     cur_x: u32,
     cur_y: u32,
     row_h: u32,
@@ -96,8 +100,22 @@ impl TextCtx {
         if font.is_none() {
             log::warn!("text: no usable system font found — UI text disabled");
         }
+        let ui_font = std::fs::read("/System/Library/Fonts/SFCompactRounded.ttf").ok()
+            .and_then(|bytes| FontVec::try_from_vec(bytes).ok()).map(|mut f| {
+                f.set_variation(b"wght", 400.0);
+                f
+            });
+        if ui_font.is_none() { log::warn!("SF Compact Rounded unavailable; interface uses the fallback font"); }
+        let header_font = std::fs::read("/Library/Fonts/SF-Pro-Display-Medium.otf").ok()
+            .and_then(|bytes| FontVec::try_from_vec(bytes).ok())
+            .or_else(|| std::fs::read("/System/Library/Fonts/SFNS.ttf").ok()
+                .and_then(|bytes| FontVec::try_from_vec(bytes).ok()).map(|mut f| {
+                    f.set_variation(b"wght", 500.0);
+                    f.set_variation(b"opsz", 28.0);
+                    f
+                }));
         Self {
-            font,
+            font, ui_font, header_font, header: false, interface: false,
             atlas: vec![0; (ATLAS * ATLAS) as usize],
             pending: Vec::new(),
             full: false,
@@ -106,6 +124,22 @@ impl TextCtx {
             cur_y: 0,
             row_h: 0,
         }
+    }
+
+    pub fn set_interface(&mut self, interface: bool) { self.interface = interface; self.header = false; }
+    pub fn set_header(&mut self, header: bool) { self.header = header; }
+
+    fn face(&self) -> Option<&FontVec> {
+        if self.header { return self.header_font.as_ref().or(self.ui_font.as_ref()).or(self.font.as_ref()); }
+        if self.interface { self.ui_font.as_ref().or(self.font.as_ref()) } else { self.font.as_ref() }
+    }
+
+    // Figma sizes are em sizes; ab_glyph's scale is ascent minus descent.
+    fn raster_size(&self, px: f32) -> f32 {
+        if (self.interface && self.ui_font.is_some()) || (self.header && self.header_font.is_some()) {
+            let font = self.face().unwrap();
+            px * font.height_unscaled() / font.units_per_em().unwrap_or(1.0)
+        } else { px }
     }
 
     /// Frame boundary. If the last frame ran the atlas out of room, wipe
@@ -151,12 +185,12 @@ impl TextCtx {
     }
 
     fn entry(&mut self, ch: char, px: f32) -> Option<&Entry> {
-        let font = self.font.as_ref()?;
+        let font = self.face()?;
         let gid = font.glyph_id(ch);
-        let key = (gid.0, px.round() as u32);
+        let key = (if self.header { 2 } else { u8::from(self.interface) }, gid.0, px.to_bits());
         if !self.cache.contains_key(&key) {
             let glyph = gid.with_scale_and_position(px, ab_glyph::point(0.0, 0.0));
-            let made = self.font.as_ref()?.outline_glyph(glyph).and_then(|og| {
+            let made = self.face()?.outline_glyph(glyph).and_then(|og| {
                 let b = og.px_bounds();
                 let (w, h) = (b.width().ceil() as u32, b.height().ceil() as u32);
                 if w == 0 || h == 0 {
@@ -182,7 +216,8 @@ impl TextCtx {
     /// Fit a label before rasterizing it. Count real font advances, including
     /// tracking, rather than guessing a character limit in the app.
     pub fn fit(&self, text: &str, px: f32, tracking: f32, limit: f32) -> String {
-        let Some(font) = &self.font else { return String::new() };
+        let px = self.raster_size(px);
+        let Some(font) = self.face() else { return String::new() };
         let sf = font.as_scaled(px);
         let advance = |c| sf.h_advance(sf.glyph_id(c)) + tracking;
         let width = |s: &str| s.chars().map(advance).sum::<f32>() - if s.is_empty() { 0.0 } else { tracking };
@@ -204,7 +239,8 @@ impl TextCtx {
     /// extra advance per glyph (CSS letter-spacing). Quads are relative
     /// to the line box's top-left.
     pub fn layout(&mut self, text: &str, px: f32, tracking: f32) -> LaidText {
-        let Some(font) = self.font.as_ref() else {
+        let px = self.raster_size(px);
+        let Some(font) = self.face() else {
             return LaidText { quads: Vec::new(), w: 0.0, h: 0.0 };
         };
         let sf = font.as_scaled(px);
@@ -214,7 +250,7 @@ impl TextCtx {
         let mut pen = 0.0f32;
         for ch in text.chars() {
             let adv = {
-                let sf = self.font.as_ref().unwrap().as_scaled(px);
+                let sf = self.face().unwrap().as_scaled(px);
                 sf.h_advance(sf.glyph_id(ch))
             };
             if !ch.is_whitespace()
@@ -247,6 +283,36 @@ impl TextCtx {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn interface_font_and_fractional_sizes_have_distinct_cached_glyphs() {
+        let mut text = TextCtx::load();
+        if text.font.is_none() { return; }
+        text.layout("Sources", 24.1, 0.0);
+        let first = text.cache.len();
+        text.layout("Sources", 24.2, 0.0);
+        assert_eq!(text.cache.len(), first * 2, "nearby raster sizes must not alias");
+        text.set_interface(true);
+        #[cfg(target_os = "macos")]
+        assert!(text.ui_font.is_some(), "the Figma font must load on macOS");
+        if text.ui_font.is_some() {
+            let narrow = text.layout("iii", 24.0, 0.0).w;
+            let wide = text.layout("WWW", 24.0, 0.0).w;
+            assert!(wide > narrow * 2.0, "interface labels use the proportional face");
+            for scale in [1.0, 1.5, 2.0] {
+                let fitted = text.fit("Sources Timeline Crop Mask", 12.0 * scale, 0.0, 90.0 * scale);
+                assert!(text.layout(&fitted, 12.0 * scale, 0.0).w <= 90.0 * scale + 0.001);
+            }
+        }
+        text.set_header(true);
+        #[cfg(target_os = "macos")]
+        assert!(text.header_font.is_some(), "SF Pro Display header font loads");
+        assert!(!text.layout("Sources", 24.0, 0.0674).quads.is_empty());
+        text.set_interface(false);
+        let narrow = text.layout("iii", 24.0, 0.0).w;
+        let wide = text.layout("WWW", 24.0, 0.0).w;
+        assert!((narrow - wide).abs() < 0.01, "numeric text retains the mono face");
+    }
+
     #[test]
     fn fitted_unicode_labels_respect_measured_width() {
         let mut text = TextCtx::load();
