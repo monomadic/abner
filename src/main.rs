@@ -10,6 +10,7 @@
 mod app;
 mod config;
 mod cut;
+mod smart;
 mod mask;
 mod open;
 mod player;

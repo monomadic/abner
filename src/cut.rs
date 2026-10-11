@@ -77,6 +77,7 @@ pub struct Gop {
 
 struct Scan {
     gops: Vec<Gop>,
+    frames: Vec<f64>,
     keys: Vec<f64>,
     chapters: Vec<Chapter>,
     facts: Facts,
@@ -106,6 +107,10 @@ pub struct Cut {
     /// scan lands (`scanning`), and snapping is the identity until then.
     pub keys: Vec<f64>,
     pub gops: Vec<Gop>,
+    pub frames: Vec<f64>,
+    frame_zoom_limit: f64,
+    encode: Option<Receiver<Result<PathBuf, String>>>,
+    pub reload: Option<PathBuf>,
     pub chapters: Vec<Chapter>,
     /// Chapters were added here, so an export has something to write even
     /// with nothing cut.
@@ -146,6 +151,7 @@ impl Cut {
             duration,
             keys: Vec::new(),
             gops: Vec::new(),
+            frames: Vec::new(), frame_zoom_limit: 600.0, encode: None, reload: None,
             chapters: Vec::new(),
             chapters_edited: false,
             facts: Facts::default(),
@@ -215,9 +221,12 @@ impl Cut {
         }
         match take(&mut self.scan) {
             Some(Some(Ok(scan))) => {
-                self.chapters = scan.chapters;
+                if !self.chapters_edited { self.chapters = scan.chapters; }
                 self.facts = scan.facts;
                 self.gops = scan.gops;
+                self.frame_zoom_limit = scan.frames.windows(2).map(|p| p[1]-p[0])
+                    .filter(|d| *d > 1e-6).min_by(f64::total_cmp).map_or(600.0, |d| (16.0/d).max(600.0));
+                self.frames = scan.frames;
                 self.set_keys(scan.keys);
             }
             Some(Some(Err(e))) => {
@@ -241,6 +250,18 @@ impl Cut {
                     Err(TryRecvError::Disconnected) => { self.wave_rx = None; break; }
                 }
             }
+        }
+        match take(&mut self.encode) {
+            Some(Some(Ok(path))) => {
+                self.path = path.clone();
+                self.reload = Some(path.clone());
+                self.status = "Encoded split GOPs; original source preserved".into();
+                let (tx, rx) = channel(); self.scan = Some(rx);
+                std::thread::spawn(move || { let _ = tx.send(scan(&path).map_err(|e| e.to_string())); });
+            }
+            Some(Some(Err(e))) => self.status = format!("Encode failed: {e}"),
+            Some(None) => self.status = "Encode failed: worker stopped".into(),
+            None => {}
         }
         match take(&mut self.export) {
             Some(Some(Ok(done))) => self.status = format!("Exported {done}"),
@@ -317,17 +338,23 @@ impl Cut {
         !self.keys.is_empty() && (t - self.prev_key(t + frame * 0.5)).abs() < frame * 0.5
     }
 
+    pub fn next_frame(&self, t: f64) -> f64 {
+        if self.frames.is_empty() { return t; }
+        self.frames.get(self.frames.partition_point(|p| *p < t - 1e-6)).copied().unwrap_or(self.duration)
+    }
+
     fn snap_in(&self, t: f64) -> f64 {
-        if self.snap == Snap::Frame || self.keys.is_empty() { t } else { self.prev_key(t) }
+        if self.snap == Snap::Frame { self.next_frame(t) } else if self.keys.is_empty() { t } else { self.prev_key(t) }
     }
 
     fn snap_out(&self, t: f64) -> f64 {
-        if self.snap == Snap::Frame || self.keys.is_empty() { t } else { self.next_key(t) }
+        if self.snap == Snap::Frame { self.next_frame(t) } else if self.keys.is_empty() { t } else { self.next_key(t) }
     }
 
     /// Where a split asked for at `t` would land.
     pub fn split_point(&self, t: f64) -> f64 {
-        if self.snap == Snap::Frame || self.keys.is_empty() { return t; }
+        if self.snap == Snap::Frame { return self.next_frame(t); }
+        if self.keys.is_empty() { return t; }
         let i = self.keys.partition_point(|k| *k < t);
         match (i.checked_sub(1).map(|j| self.keys[j]), self.keys.get(i).copied()) {
             (Some(a), Some(b)) => if t - a <= b - t { a } else { b },
@@ -420,9 +447,8 @@ impl Cut {
 
     /// Where a dragged edge lands: the nearest keyframe, or as asked.
     fn snap_near(&self, t: f64) -> f64 {
-        if self.snap == Snap::Frame || self.keys.is_empty() {
-            return t;
-        }
+        if self.snap == Snap::Frame { return self.next_frame(t); }
+        if self.keys.is_empty() { return t; }
         let (a, b) = (self.prev_key(t), self.next_key(t));
         if t - a <= b - t { a } else { b }
     }
@@ -616,7 +642,7 @@ impl Cut {
         if self.pps <= 0.0 {
             self.pps = whole.max(18.0);
         }
-        self.pps = self.pps.clamp(whole, whole.max(600.0));
+        self.pps = self.pps.clamp(whole, whole.max(self.frame_zoom_limit));
         self.t0 = self.t0.clamp(0.0, (self.duration - self.span(width)).max(0.0));
     }
 
@@ -639,13 +665,13 @@ impl Cut {
     /// zoom (1), on a log scale — the zoom slider's position.
     pub fn zoom_fraction(&self, width: f32) -> f64 {
         let whole = width as f64 / self.duration.max(0.1);
-        let range = (whole.max(600.0) / whole).ln();
+        let range = (whole.max(self.frame_zoom_limit) / whole).ln();
         if range <= 0.0 { 0.0 } else { ((self.pps / whole).ln() / range).clamp(0.0, 1.0) }
     }
 
     pub fn set_zoom_fraction(&mut self, f: f64, anchor: f32, width: f32) {
         let whole = width as f64 / self.duration.max(0.1);
-        let target = whole * (whole.max(600.0) / whole).powf(f.clamp(0.0, 1.0));
+        let target = whole * (whole.max(self.frame_zoom_limit) / whole).powf(f.clamp(0.0, 1.0));
         self.zoom(target / self.pps.max(1e-6), anchor, width);
     }
 
@@ -656,6 +682,46 @@ impl Cut {
             self.t0 = t - span * 0.1;
             self.fit_view(width);
         }
+    }
+
+    pub fn encoding(&self) -> bool { self.encode.is_some() }
+
+    /// A GOP is pending when a kept segment ends or begins inside it. Switching
+    /// snap modes cannot make an existing off-keyframe edit safe to copy.
+    pub fn pending_gops(&self) -> Vec<crate::smart::Region> {
+        let boundaries: Vec<_> = self.segments().into_iter().filter(|s| !s.cut)
+            .flat_map(|s| [s.start, s.end]).collect();
+        let mut affected = std::collections::BTreeMap::<usize, Vec<f64>>::new();
+        for t in boundaries {
+            let Some(i) = self.gops.partition_point(|g| g.start <= t).checked_sub(1) else { continue };
+            let g = &self.gops[i];
+            if t > g.start + EPS && t < g.end - EPS { affected.entry(i).or_default().push(t); }
+        }
+        affected.into_iter().map(|(i, mut inside)| {
+            let g = &self.gops[i];
+            inside.sort_by(f64::total_cmp); inside.dedup_by(|a,b| (*a-*b).abs() < EPS);
+            crate::smart::Region { start: g.start, end: g.end.min(self.duration), boundaries: inside }
+        }).collect()
+    }
+
+    pub fn copy_ready(&self) -> bool {
+        !self.scanning() && !self.keys.is_empty() && self.segments().iter().filter(|s| !s.cut)
+            .flat_map(|s| [s.start, s.end]).all(|t| {
+                t < EPS || (t-self.duration).abs() < EPS || {
+                    let i = self.keys.partition_point(|k| *k < t-EPS);
+                    self.keys.get(i).is_some_and(|k| (*k-t).abs() < EPS)
+                }
+            })
+    }
+
+    pub fn start_encode(&mut self, at: Option<f64>) {
+        if self.encoding() || self.exporting() || self.scanning() { return; }
+        let regions: Vec<_> = self.pending_gops().into_iter().filter(|g| at.is_none_or(|t| t >= g.start && t < g.end)).collect();
+        if regions.is_empty() { self.status = "No split GOPs need encoding".into(); return; }
+        self.status = format!("Encoding {} GOPs…", regions.len());
+        let path = self.path.clone(); let cancel = self.cancel.clone();
+        let (tx, rx) = channel(); self.encode = Some(rx);
+        std::thread::spawn(move || { let _ = tx.send(crate::smart::encode(&path, &regions, &cancel).map_err(|e| e.to_string())); });
     }
 
     // ---- export ----
@@ -671,15 +737,15 @@ impl Cut {
 
     /// Write the kept ranges beside the source (`clip.cut.mp4`).
     pub fn start_export(&mut self) {
-        if self.export.is_some() {
+        if self.export.is_some() || self.encoding() || self.scanning() {
             return;
         }
         let keeps = self.keeps();
-        if (self.edit.cuts.is_empty() && !self.chapters_edited) || keeps.is_empty() {
+        if (self.edit.cuts.is_empty() && self.edit.splits.is_empty() && !self.chapters_edited) || keeps.is_empty() {
             self.status = "Nothing to export: cut something or add a chapter first".into();
             return;
         }
-        let (source, dest, snap) = (self.path.clone(), self.output_path(), self.snap);
+        let (source, dest, snap) = (self.path.clone(), self.output_path(), if self.copy_ready() { Snap::Keyframe } else { Snap::Frame });
         let chapters = self.chapters.clone();
         let name = dest.file_name().unwrap_or_default().to_string_lossy().into_owned();
         self.status = format!("Exporting {name}…");
@@ -741,7 +807,10 @@ fn scan(path: &Path) -> anyhow::Result<Scan> {
         let err = String::from_utf8_lossy(&out.stderr);
         anyhow::bail!("ffprobe: {}", err.lines().last().unwrap_or("failed").trim());
     }
-    let gops = parse_gops(&String::from_utf8_lossy(&out.stdout));
+    let packets = String::from_utf8_lossy(&out.stdout);
+    let mut frames: Vec<f64> = packets.lines().filter_map(|l| l.split('|').find_map(|f| f.strip_prefix("pts_time=")?.parse().ok())).collect();
+    frames.sort_by(f64::total_cmp); frames.dedup_by(|a,b| (*a-*b).abs() < 1e-7);
+    let gops = parse_gops(&packets);
     let keys = gops.iter().map(|g| g.start).collect();
     let mut chapters = Vec::new();
     let out = Command::new("ffprobe")
@@ -768,7 +837,7 @@ fn scan(path: &Path) -> anyhow::Result<Scan> {
         .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok())
         .map(|v| parse_facts(&v))
         .unwrap_or_default();
-    Ok(Scan { keys, chapters, facts, gops })
+    Ok(Scan { keys, chapters, facts, gops, frames })
 }
 
 fn codec_name(raw: &str) -> String {
@@ -1053,6 +1122,23 @@ mod tests {
         let mut cut = Cut::new(Path::new("/tmp/clip.mp4"), 60.0);
         cut.set_keys((0..30).map(|i| i as f64 * 2.0).filter(|k| !(*k > 40.0 && *k < 46.0)).collect());
         cut
+    }
+
+    #[test]
+    fn pending_gops_follow_actual_edits_not_the_snap_toggle() {
+        let mut cut = model();
+        cut.gops = (0..30).map(|i| Gop { start: i as f64*2.0, end: (i+1) as f64*2.0, packets: 60, bytes: 100 }).collect();
+        cut.snap = Snap::Frame;
+        assert!(cut.split(1.0)); assert!(cut.split(1.5)); assert!(cut.split(3.0));
+        assert_eq!(cut.pending_gops().len(), 2, "two splits in one GOP are one job");
+        cut.snap = Snap::Keyframe;
+        assert_eq!(cut.pending_gops().len(), 2);
+        cut.undo(); assert_eq!(cut.pending_gops().len(), 1);
+        cut.undo(); cut.undo(); assert!(cut.pending_gops().is_empty());
+        cut.snap = Snap::Frame;
+        cut.frames = vec![0.0, 0.03, 0.08, 0.12];
+        assert_eq!(cut.next_frame(0.04), 0.08, "actual variable-rate frame boundary");
+        assert_eq!(cut.next_frame(0.08), 0.08);
     }
 
     #[test]

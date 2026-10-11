@@ -3,6 +3,37 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-12 — working split-GOP encoding and frame markers
+
+The renderer conservatively processes the whole affected GOP, including the leading
+piece; minimizing that span requires frame-dependency analysis.
+Purple hatched regions identify GOPs crossed by kept clip boundaries, independently
+of the snap toggle. Each visible region has Encode; the transport has Encode all.
+Jobs run off the UI thread, deduplicate boundaries in the same GOP, and reject
+concurrent submissions. A cancelled or failed job leaves the source unchanged.
+Completed jobs publish a uniquely named `.encoded-*.mp4` beside the original and
+switch the active source/player to it without moving the timeline. Originals stay
+intact. Subsequent edits, undo and export use the working file's rescanned keys.
+
+The initial smart-render backend supports zero-based 8-bit H.264 4:2:0 sources,
+including B-frames and variable frame rates. It copies untouched GOPs, encodes
+requested GOPs with closed IDRs at edit boundaries, and copies audio/subtitles
+separately. Other codecs report an error; regular frame export remains available.
+Before publishing, it verifies frame count, every presentation timestamp, dimensions,
+keyframe placement and decoding. Intermediate files are removed on failure/cancel.
+The working file is persistent; this is not a destructive overwrite of the original.
+
+Actual frame timestamps drive frame snapping and video-lane markers. Markers appear
+only when neighbours are at least 10 logical pixels apart; lookup is limited to the
+visible range. Pending-GOP lookup follows edit boundaries instead of scanning the
+entire source on every redraw. The export readiness label now follows actual edits.
+
+Validated selective frame changes, identical untouched frames/audio, B-frame and
+VFR timing, cancellation cleanup, pending-region undo and the real button/worker/
+player replacement path. Targeted native capture verifies purple regions, inline
+Encode buttons, toolbar spacing and frame markers. The UI inspection connector
+stalled; the repository's targeted window-capture path completed the visual check.
+
 ## 2026-10-12 — toggleable split tool and re-encode design proposal
 
 The Split toolbar button now toggles an armed tool. Its circular split marker

@@ -170,6 +170,7 @@ pub struct App {
     /// leaving the mode, so a detour through Input doesn't lose the edit;
     /// it is dropped when the clip list changes.
     cut: Option<Cut>,
+    cut_video: usize,
     cut_mode: bool,
     /// A lone clip opens on the timeline (main.rs turns this on; tests leave
     /// it off so Sources stays the layout they exercise).
@@ -518,6 +519,7 @@ impl App {
             last_click: None,
             aspect: 0,
             cut: None,
+            cut_video: 0,
             cut_mode: false,
             cut_default: false,
             cut_drag: None,
@@ -1465,7 +1467,9 @@ impl App {
 
     /// Show clip `idx` (`keys.next_source`'s flip, or its number key directly).
     fn select(&mut self, idx: usize) {
+        let reopen_cut = self.cut_mode && self.active != idx;
         self.active = idx;
+        if reopen_cut { self.cut_mode = false; self.set_cut_mode(true); }
         self.reveal_source();
         self.badge_flash = 1.2;
         self.mouse_up();
@@ -1773,6 +1777,17 @@ impl App {
             self.reveal_source();
         }
         if let Some(cut) = &mut self.cut { cut.poll(); }
+        if let Some(path) = self.cut.as_mut().and_then(|c| c.reload.take()) {
+            let v = &mut self.videos[self.cut_video];
+            if let Some(player) = Player::spawn(&path, v.info.width, v.info.height, crate::probe::vt_accel(&v.info.codec), v.info.rotation) {
+                v.player = player;
+                v.info.path = path;
+                v.linked_copy = false;
+                v.delivered = false;
+                self.seek_all(self.t, true);
+                self.adopt_seek = false;
+            } else if let Some(cut) = &mut self.cut { cut.status = "Encoded file saved, but its preview decoder could not open".into(); }
+        }
         self.tick_cut_thumbs(dt);
         if !self.cut_boot.is_empty() { self.boot_cut(); }
         for (slot, what, done) in [
@@ -2318,8 +2333,9 @@ impl App {
             let cut = self.cut.as_ref().unwrap();
             ui_label(items, 16.0, y + STATUS_H / 2.0, 10.0, ACCENT, "TIMELINE", Align::Left, 76.0);
             let status = if !cut.status.is_empty() { cut.status.clone() } else if cut.scanning() { "Scanning keyframes…".into() } else {
-                format!("{} · {} cut · snap to {}", name_of(&cut.path), cut.cuts().len(),
-                    if cut.snap == Snap::Keyframe { "keyframes, stream copy" } else { "frames, re-encode" })
+                format!("{} · {} cut · snap to {} · {}", name_of(&cut.path), cut.cuts().len(),
+                    if cut.snap == Snap::Keyframe { "keyframes" } else { "frames" },
+                    if cut.copy_ready() { "ready to copy" } else { "encoding needed" })
             };
             let hint_width = if vp.0 >= 1000.0 { 440.0 } else { 0.0 };
             ui_label(items, 98.0, y + STATUS_H / 2.0, 10.0, WORKSPACE_DIM, status, Align::Left, vp.0 - 118.0 - hint_width);
@@ -2748,7 +2764,8 @@ impl App {
                 self.leave_mask_mode();
             }
             let info = &self.videos[self.active].info;
-            if self.cut.as_ref().is_none_or(|c| c.path != info.path) {
+            if self.cut_video != self.active || self.cut.as_ref().is_none_or(|c| c.path != info.path) {
+                self.cut_video = self.active;
                 self.cut = Some(Cut::open(&info.path, info.duration));
             }
             self.zoom = 1.0;
@@ -2884,6 +2901,8 @@ impl App {
                 if !cut.undo() { cut.status = "Nothing to undo".into(); }
             }
             CutAction::Export => cut.start_export(),
+            CutAction::EncodeAll => cut.start_encode(None),
+            CutAction::Encode(t) => cut.start_encode(Some(t)),
             CutAction::Snap(snap) => cut.snap = snap,
         }
     }
@@ -2940,6 +2959,8 @@ impl App {
             push(RectPx { x, y: cy - 16.0, w: 32.0, h: 32.0 }, label, matches!(action, CutAction::Snap(_)) && keyframe, action, hint);
             x += 38.0;
         }
+        push(RectPx { x, y: cy - 16.0, w: (self.cut_clock_x() - x - 8.0).min(100.0).max(72.0), h: 32.0 },
+            if cut.encoding() { "Encoding…" } else { "Encode all" }, false, CutAction::EncodeAll, "Encode every split GOP");
         if bar.w >= 900.0 {
             let zoom = self.cut_zoom_bar();
             push(RectPx { x: zoom.x - 28.0, y: cy - 12.0, w: 24.0, h: 24.0 }, "Zoom out", false, CutAction::Zoom(false), "");
@@ -2966,6 +2987,25 @@ impl App {
         RectPx { x: bar.x + bar.w - 40.0 - width, y: bar.y + bar.h / 2.0 - 1.5, w: width, h: 3.0 }
     }
 
+    fn encode_button(r: RectPx) -> RectPx {
+        RectPx { x: r.x + (r.w - 48.0) / 2.0, y: r.y + (r.h - 22.0) / 2.0, w: 48.0, h: 22.0 }
+    }
+
+    /// Shared paint/hit geometry, clipped to kept material and the viewport.
+    fn cut_encode_regions(&self) -> Vec<(f64, RectPx)> {
+        let Some(cut) = &self.cut else { return Vec::new() };
+        let row = self.cut_lanes().video;
+        let mut out = Vec::new();
+        for g in cut.pending_gops() {
+            for s in cut.segments().iter().filter(|s| !s.cut) {
+                let left = (row.x + ((g.start.max(s.start) - cut.t0) * cut.pps) as f32 + 2.0).max(row.x);
+                let right = (row.x + ((g.end.min(s.end) - cut.t0) * cut.pps) as f32 - 2.0).min(row.x + row.w);
+                if right > left { out.push((g.start, RectPx { x: left, y: row.y + 2.0, w: right-left, h: row.h-4.0 })); }
+            }
+        }
+        out
+    }
+
     /// The source time under a pointer x on the lanes.
     fn cut_time_at(&self, x: f32) -> f64 {
         let lane = self.cut_lanes().video;
@@ -2989,6 +3029,7 @@ impl App {
     fn split_target(&self, t: f64) -> f64 {
         let Some(cut) = &self.cut else { return t };
         if cut.snap == Snap::Keyframe { cut.split_point(t) }
+        else if !cut.frames.is_empty() { cut.next_frame(t) }
         else { ((t * self.fps.max(1.0) - 1e-7).ceil() / self.fps.max(1.0)).min(cut.duration) }
     }
 
@@ -3016,6 +3057,11 @@ impl App {
             return true;
         }
         if contains(l.timeline, x, y) {
+            if let Some((at, r)) = self.cut_encode_regions().into_iter().find(|(_, r)| r.w >= 54.0 && contains(Self::encode_button(*r), x, y)) {
+                let _ = r;
+                self.cut_action(CutAction::Encode(at));
+                return true;
+            }
             if self.split_tool && self.cut_clip_at(x, y).is_some() {
                 if let Some(at) = self.cut_razor() { self.cut.as_mut().unwrap().split(at); }
                 return true;
@@ -3407,9 +3453,12 @@ impl App {
         self.mode_selector().draw(items, self.cursor, self.cursor_inside);
         if self.vp.0 >= 1000.0 {
             let cut = self.cut.as_ref().unwrap();
-            let (text, color) = if cut.snap == Snap::Keyframe {
-                ("LOSSLESS · STREAM COPY", hex_color(CUT_LAMP))
-            } else { ("FRAME-ACCURATE · RE-ENCODE", hex_color(CUT_CORAL_INK)) };
+            let (text, color) = if cut.encoding() {
+                ("ENCODING SPLIT GOPs…", hex_color(0xb68aff))
+            } else if cut.scanning() { ("SCANNING KEYFRAMES…", hex_color(CUT_INK))
+            } else if cut.copy_ready() {
+                ("READY · STREAM COPY", hex_color(CUT_LAMP))
+            } else { ("SPLIT GOPs · ENCODING NEEDED", hex_color(0xb68aff)) };
             items.push(Item::Text(TextItem { align: Align::Right, valign: VAlign::Middle,
                 tracking: 0.63, max_width: Some((self.vp.0 - 139.0 - r.x - r.w).max(0.0)),
                 ..TextItem::new(self.vp.0 - 127.0, 21.5, 10.5, color, text) }));
@@ -3497,8 +3546,14 @@ impl App {
                 ui_label(items, r.x, cy, 10.0, if self.cut_frames == frames { hex_color(CUT_INK) } else { mix(CUT_BAR, 0xffffff, 0.3) },
                     &control.label, Align::Left, r.w);
             }
+            CutAction::EncodeAll | CutAction::Encode(_) => {
+                let disabled = cut.encoding() || cut.scanning() || cut.exporting() || cut.pending_gops().is_empty();
+                items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(r,
+                    hex_color(if disabled { 0x302839 } else if hovered { 0xd2b4ff } else { 0xb68aff })) }));
+                ui_label(items, cx, cy, 10.5, hex_color(if disabled { 0x8c7e9c } else { 0x28133f }), &control.label, Align::Center, r.w - 6.0);
+            }
             CutAction::Export => {
-                let busy = cut.exporting() || cut.cuts().is_empty();
+                let busy = cut.exporting() || cut.encoding() || cut.scanning();
                 let fill = if busy { mix(0x050506, CUT_INK, 0.35) } else if hovered { hex_color(0xffffff) } else { hex_color(CUT_INK) };
                 items.push(Item::Rect(RectItem { radius: 7.0, ..RectItem::new(r, fill) }));
                 ui_label(items, cx, cy, 11.5, hex_color(CUT_BG), &control.label, Align::Center, r.w - 8.0);
@@ -3991,6 +4046,31 @@ impl App {
             }
         }
 
+        for (_, r) in self.cut_encode_regions() {
+            items.push(Item::Hatch { r, a: hex_color(0x59348c), b: hex_color(0x704a9d), radius: 5.0, period: 12.0 });
+            items.push(Item::Rect(RectItem { radius: 5.0, border_w: 1.0, border_color: hex_color(0xb68aff), ..RectItem::new(r, [0.0; 4]) }));
+            if r.w >= 54.0 {
+                let button = Self::encode_button(r);
+                items.push(Item::Rect(RectItem { radius: 4.0, ..RectItem::new(button, hex_color(0xe4d3ff)) }));
+                ui_label(items, button.x + button.w / 2.0, button.y + button.h / 2.0, 10.0, hex_color(0x28133f),
+                    if cut.encoding() { "…" } else { "Encode" }, Align::Center, button.w);
+            }
+        }
+        // Actual presentation timestamps, not nominal FPS: VFR clips get the
+        // correct markers too. Binary search bounds the work to visible frames.
+        let lo = cut.frames.partition_point(|t| *t < a);
+        let hi = cut.frames.partition_point(|t| *t <= b);
+        let visible = &cut.frames[lo..hi];
+        if visible.len() <= (v.w / 10.0) as usize + 1 {
+            for (i, t) in visible.iter().enumerate() {
+                let index = lo+i;
+                let before = index.checked_sub(1).map_or(f64::INFINITY, |j| t-cut.frames[j]);
+                let after = cut.frames.get(index+1).map_or(f64::INFINITY, |next| next-t);
+                if before.min(after)*pps < 10.0 || !segments.iter().any(|s| !s.cut && *t >= s.start && *t < s.end) { continue; }
+                line(items, x_of(*t), v.y + v.h - 6.0, 4.0, 1.0, hex_color(0xbac0c6));
+            }
+        }
+
         // ---- subtitles: a bar per cue ----
         let s = lanes.subs;
         for c in cut.cues.iter().filter(|c| c.end > a && c.start < b) {
@@ -4411,7 +4491,7 @@ impl Workspace {
 #[derive(Clone, Copy)]
 enum Action { Duplicate, OpenFiles, ClearSources, Tool(usize), View(Mode), Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
 #[derive(Clone, Copy, PartialEq)]
-enum CutAction { TimeDisplay(bool), In, Out, Split, ToggleSplit, Apply, DeletePicked, Undo, Export, Snap(Snap), Play, Zoom(bool), Step(i32), Keyframe(i32), Chapter(i32) }
+enum CutAction { TimeDisplay(bool), In, Out, Split, ToggleSplit, Apply, DeletePicked, Undo, Export, EncodeAll, Encode(f64), Snap(Snap), Play, Zoom(bool), Step(i32), Keyframe(i32), Chapter(i32) }
 /// `hint` is the key cap a cut-mode button carries ("" for none).
 struct Control { r: RectPx, label: String, selected: bool, action: Action, hint: &'static str }
 impl Control {
@@ -5389,6 +5469,52 @@ mod tests {
         app.key(Key::Escape);
         assert!(!app.split_tool && app.cut_mode);
         assert!(app.cut_razor().is_none());
+    }
+
+    #[test]
+    fn encode_buttons_render_gops_and_replace_the_working_source() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        app.key(Key::Char('t')); app.playing = false;
+        assert!(tick_until(&mut app, Duration::from_secs(5), |a| !a.cut.as_ref().unwrap().scanning()));
+        let at = app.cut.as_ref().unwrap().frames[10];
+        let cut = app.cut.as_mut().unwrap(); cut.snap = Snap::Frame; cut.split(at);
+        let (_, region) = app.cut_encode_regions().into_iter().find(|(_, r)| r.w >= 54.0).unwrap();
+        let button = App::encode_button(region);
+        app.mouse_down(button.x+button.w/2.0, button.y+button.h/2.0); app.mouse_up();
+        assert!(app.cut.as_ref().unwrap().encoding());
+        assert!(tick_until(&mut app, Duration::from_secs(15), |a| {
+            let c = a.cut.as_ref().unwrap(); !c.encoding() && !c.scanning()
+        }));
+        let cut = app.cut.as_ref().unwrap();
+        assert!(cut.pending_gops().is_empty(), "{}", cut.status);
+        assert_ne!(app.videos[0].info.path, clip);
+        assert!(cut.keys.iter().any(|k| (*k-at).abs() < 1e-4));
+        let working = app.videos[0].info.path.clone();
+        let controls = app.controls();
+        let all = controls.iter().find(|c| matches!(c.action, Action::Cut(CutAction::EncodeAll))).unwrap();
+        assert!(all.r.x + all.r.w < app.cut_clock_x());
+        // Empty batch is a no-op, not another generation of the source.
+        app.mouse_down(all.r.x+2.0, all.r.y+2.0); app.mouse_up();
+        assert!(!app.cut.as_ref().unwrap().encoding());
+        drop(app); std::fs::remove_file(working).unwrap();
+    }
+
+    #[test]
+    fn completed_encode_belongs_to_its_source_after_switching_modes() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 2);
+        app.key(Key::Char('t'));
+        app.set_cut_mode(false); app.select(1);
+        let owned = app.cut_video;
+        app.cut.as_mut().unwrap().reload = Some(clip.clone());
+        app.videos[owned].linked_copy = true;
+        app.videos[1].linked_copy = true;
+        app.tick(0.01, (1280.0, 800.0), 2.0);
+        assert!(!app.videos[owned].linked_copy);
+        assert!(app.videos[1].linked_copy, "completion must not replace the newly focused source");
+        app.set_cut_mode(true);
+        assert_eq!(app.cut_video, 1, "even identical linked paths have independent edits");
     }
 
     #[test]
