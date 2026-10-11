@@ -3,6 +3,13 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-11 — thumbnail joins and right-aligned transport clock
+
+Timeline posters round only their left corners, with a square join to the clip
+and a faint permanent white border instead of a hover outline. Other thumbnail
+surfaces retain their rounded cards. Delete now uses an X, and the timer plus
+its controls and divider move together beside the right-hand zoom controls.
+
 ## 2026-10-11 — rounded clip trim highlights
 
 Trim highlights now use clipped slices of the clip's rounded silhouette instead

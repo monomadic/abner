@@ -386,13 +386,16 @@ fn fs_main(in: Out) -> @location(0) vec4<f32> {
             return vec4<f32>(col.rgb, col.a * cov(d));
         }
         case 14u: {
-            // Already decoded by the sample (sRGB texture). The rounded
-            // clip is mode 0's SDF, so its corners match the frame and
-            // border rects drawn over it exactly.
             let half = in.size * 0.5;
-            let r = clamp(in.p0, 0.0, min(half.x, half.y));
+            // Timeline posters meet the rest of the clip at a square edge.
+            let poster = in.p1 > 0.5;
+            let radius = select(in.p0, 0.0, poster && in.local.x > half.x);
+            let r = clamp(radius, 0.0, min(half.x, half.y));
             let d = sd_round_box(in.local - half, half, r);
-            return vec4<f32>(th.rgb, th.a * in.color.a * cov(d));
+            // A subtle permanent one-pixel border, independent of hover.
+            let edge = cov(d) - cov(d + 1.0);
+            let ink = mix(th.rgb, vec3<f32>(1.0), select(0.0, 0.025 * edge, poster));
+            return vec4<f32>(ink, th.a * in.color.a * cov(d));
         }
         default: {
             return in.color;

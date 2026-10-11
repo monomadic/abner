@@ -359,7 +359,7 @@ pub enum Item {
     Scanlines { r: RectPx, color: [f32; 4] },
     /// A recent file's thumbnail from atlas cell `slot`, clipped to a
     /// rounded rect of `radius` — the launch window's recent row.
-    Thumb { r: RectPx, slot: usize, radius: f32, alpha: f32 },
+    Thumb { r: RectPx, slot: usize, radius: f32, alpha: f32, clip_poster: bool },
     Mask { r: RectPx, id: u64, revision: u64, width: u32, height: u32, pixels: Arc<Vec<u8>> },
     /// A triangle filling `r`, pointing right (or left): transport glyphs
     /// drawn as geometry, so they centre on their shape — a font's ▶ sits
@@ -1293,7 +1293,7 @@ impl Gpu {
                     p1: 0.0,
                     pad: 0.0,
                 }),
-                Item::Thumb { r, slot, radius, alpha } => {
+                Item::Thumb { r, slot, radius, alpha, clip_poster } => {
                     // Half a texel in from the cell's edges, so the
                     // neighbouring cell never bleeds in through filtering.
                     let (nu, nv) = (recent::ATLAS_COLS as f32, (recent::ATLAS / recent::ATLAS_COLS) as f32);
@@ -1310,7 +1310,7 @@ impl Gpu {
                         color: [0.0, 0.0, 0.0, *alpha],
                         mode: 14.0,
                         p0: *radius,
-                        p1: 0.0,
+                        p1: if *clip_poster { 1.0 } else { 0.0 },
                         pad: 0.0,
                     })
                 }

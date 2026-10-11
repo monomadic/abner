@@ -2570,7 +2570,7 @@ impl App {
             items.push(Item::Rect(RectItem { radius: TILE_R, ..RectItem::new(r, WELL) }));
             if t.rgba.is_some() {
                 let inner = RectPx { x: r.x + 1.0, y: r.y + 1.0, w: r.w - 2.0, h: r.h - 2.0 };
-                items.push(Item::Thumb { r: inner, slot, radius: TILE_R - 1.0, alpha: 1.0 });
+                items.push(Item::Thumb { r: inner, slot, radius: TILE_R - 1.0, alpha: 1.0, clip_poster: false });
             }
             // The bevel: a faint white outline all round, and a brighter
             // one that is strongest along the top edge and gone by the
@@ -2931,9 +2931,11 @@ impl App {
         self.workspace().transport.x + 254.0
     }
 
-    /// The timecode starts inside the LCD panel, after the edit group.
+    /// The clock is right-aligned beside zoom, or the right edge on narrow windows.
     fn cut_clock_x(&self) -> f32 {
-        self.workspace().transport.x + 496.0
+        let bar = self.workspace().transport;
+        if bar.w >= 900.0 { self.cut_zoom_bar().x - 200.0 }
+        else { bar.x + bar.w - 180.0 }
     }
 
     /// The zoom slider's track, at the toolbar's right.
@@ -3421,7 +3423,7 @@ impl App {
             items.push(Item::Text(TextItem { valign: VAlign::Middle, tracking: -0.2,
                 ..TextItem::new(x, clock_y, clock_px, mix(CUT_BAR, 0xffffff, 0.3), format!("        {frames}")) }));
         }
-        for (offset, alpha) in [(13.0, 0.2), (231.0, 0.25), (460.0, 0.25), (665.0, 0.25)] {
+        for (offset, alpha) in [(13.0, 0.2), (231.0, 0.25), (x - bar.x - 39.0, 0.25)] {
             items.push(Item::Rect(RectItem::new(RectPx { x: bar.x + offset, y: cy - 10.0, w: 1.0, h: 20.0 }, mix(CUT_BAR, 0xffffff, alpha))));
         }
         if bar.w >= 900.0 {
@@ -3600,7 +3602,7 @@ impl App {
                     // ground the picture clip uses.
                     let pic = RectPx { x: r.x + 5.0, y: r.y + 5.0, w: r.w - 10.0, h: 62.0 };
                     match self.cut_thumb.slot_of((c.start * 1000.0).round() as i64) {
-                        Some(slot) => items.push(Item::Thumb { r: pic, slot, radius: 5.0, alpha: 1.0 }),
+                        Some(slot) => items.push(Item::Thumb { r: pic, slot, radius: 5.0, alpha: 1.0, clip_poster: false }),
                         None => items.push(Item::Rect(RectItem { radius: 5.0, ..RectItem::new(pic, hex_color(CUT_FILM)) })),
                     }
                     chapter_flag(items, pic.x + 4.0, pic.y + 4.0, 18.0, number, on, false);
@@ -3885,17 +3887,12 @@ impl App {
                 if !audio && !g.cut {
                     let key = (g.start * 1000.0).round() as i64;
                     if let (Some((_, _, tr)), Some(slot)) = (thumbs.iter().find(|t| t.0 == key), self.cut_thumb.slot_of(key)) {
-                        items.push(Item::Thumb { r: *tr, slot, radius: 6.0, alpha: 1.0 });
-                        let lift = ease(self.cut_hot_level(g.start, false));
-                        if self.cut_thumb.hover == Some(key) || lift > 0.0 {
-                            items.push(Item::Rect(RectItem { radius: 4.0, border_w: 1.0, border_color: [1.0, 1.0, 1.0, 0.4 * lift],
-                                ..RectItem::new(*tr, [0.0, 0.0, 0.0, 0.18 * (1.0 - lift)]) }));
-                            if let Some(p) = self.cut_thumb.play.as_ref().filter(|p| p.key == key) {
-                                let frac = (((p.t - p.start) / (p.end - p.start).max(1e-6)) as f32).clamp(0.0, 1.0);
-                                let bar = RectPx { x: tr.x + 1.0, y: tr.y + tr.h - 4.0, w: tr.w - 2.0, h: 3.0 };
-                                items.push(Item::Rect(RectItem::new(bar, [0.0, 0.0, 0.0, 0.55])));
-                                items.push(Item::Rect(RectItem::new(RectPx { w: (bar.w * frac).max(1.0), ..bar }, hex_color(CUT_IN))));
-                            }
+                        items.push(Item::Thumb { r: *tr, slot, radius: 6.0, alpha: 1.0, clip_poster: true });
+                        if let Some(p) = self.cut_thumb.play.as_ref().filter(|p| p.key == key) {
+                            let frac = (((p.t - p.start) / (p.end - p.start).max(1e-6)) as f32).clamp(0.0, 1.0);
+                            let bar = RectPx { x: tr.x + 1.0, y: tr.y + tr.h - 4.0, w: tr.w - 2.0, h: 3.0 };
+                            items.push(Item::Rect(RectItem::new(bar, [0.0, 0.0, 0.0, 0.55])));
+                            items.push(Item::Rect(RectItem::new(RectPx { w: (bar.w * frac).max(1.0), ..bar }, hex_color(CUT_IN))));
                         }
                     }
                 }
@@ -4098,16 +4095,8 @@ fn draw_icon(items: &mut Vec<Item>, icon: Icon, cx: f32, cy: f32, color: [f32; 4
             }
         }
         Icon::Trash => {
-            bar(items, -7.0, -5.0, 14.0, 1.4);
-            items.push(Item::Rect(RectItem { radius: 1.5, border_w: 1.3, border_color: color,
-                ..RectItem::new(RectPx { x: cx - 2.5, y: cy - 8.0, w: 5.0, h: 4.0 }, [0.0; 4]) }));
-            stroke(items, (-5.0, -4.0), (-4.0, 6.5));
-            stroke(items, (5.0, -4.0), (4.0, 6.5));
-            stroke(items, (-4.0, 6.5), (-3.0, 7.0));
-            stroke(items, (4.0, 6.5), (3.0, 7.0));
-            bar(items, -3.0, 6.35, 6.0, 1.3);
-            bar(items, -2.0, -2.0, 1.3, 7.0);
-            bar(items, 0.7, -2.0, 1.3, 7.0);
+            stroke(items, (-5.5, -5.5), (5.5, 5.5));
+            stroke(items, (5.5, -5.5), (-5.5, 5.5));
         }
         // A keyframe diamond locked to a vertical snap line.
         Icon::SnapKeyframe => {
