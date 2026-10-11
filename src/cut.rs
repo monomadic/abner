@@ -66,7 +66,17 @@ pub struct Cue {
     pub text: String,
 }
 
+/// Encoded video packets between successive key packets, in decode order.
+#[derive(Debug, Default)]
+pub struct Gop {
+    pub start: f64,
+    pub end: f64,
+    pub packets: usize,
+    pub bytes: u64,
+}
+
 struct Scan {
+    gops: Vec<Gop>,
     keys: Vec<f64>,
     chapters: Vec<Chapter>,
     facts: Facts,
@@ -95,6 +105,7 @@ pub struct Cut {
     /// Keyframe times of the first video stream, sorted. Empty until the
     /// scan lands (`scanning`), and snapping is the identity until then.
     pub keys: Vec<f64>,
+    pub gops: Vec<Gop>,
     pub chapters: Vec<Chapter>,
     /// Chapters were added here, so an export has something to write even
     /// with nothing cut.
@@ -134,6 +145,7 @@ impl Cut {
             path: path.to_path_buf(),
             duration,
             keys: Vec::new(),
+            gops: Vec::new(),
             chapters: Vec::new(),
             chapters_edited: false,
             facts: Facts::default(),
@@ -205,6 +217,7 @@ impl Cut {
             Some(Some(Ok(scan))) => {
                 self.chapters = scan.chapters;
                 self.facts = scan.facts;
+                self.gops = scan.gops;
                 self.set_keys(scan.keys);
             }
             Some(Some(Err(e))) => {
@@ -679,11 +692,40 @@ impl Cut {
 /// Keyframes (the first video stream's packets flagged `K`) and chapters.
 /// Reading packets is an index walk for MP4/MOV and a demux for the rest;
 /// either way nothing is decoded.
+fn parse_gops(data: &str) -> Vec<Gop> {
+    let mut gops: Vec<Gop> = Vec::new();
+    for line in data.lines() {
+        let (mut pts, mut duration, mut size, mut key) = (None, 0.0_f64, None, false);
+        for field in line.split('|') {
+            if let Some((name, value)) = field.split_once('=') {
+                match name {
+                    "pts_time" => pts = value.parse::<f64>().ok().filter(|v| v.is_finite()),
+                    "duration_time" => duration = value.parse::<f64>().ok().filter(|v| v.is_finite() && *v > 0.0).unwrap_or(0.0),
+                    "size" => size = value.parse::<u64>().ok(),
+                    "flags" => key = value.contains('K'),
+                    _ => {}
+                }
+            }
+        }
+        let Some(pts) = pts else { continue };
+        if key {
+            if let Some(previous) = gops.last_mut() { previous.end = pts; }
+            gops.push(Gop { start: pts, end: pts, ..Gop::default() });
+        }
+        if let Some(gop) = gops.last_mut() {
+            gop.packets += 1;
+            gop.bytes += size.unwrap_or(0);
+            gop.end = gop.end.max(pts + duration);
+        }
+    }
+    gops
+}
+
 fn scan(path: &Path) -> anyhow::Result<Scan> {
     use anyhow::Context;
     let out = Command::new("ffprobe")
         .args(["-v", "error", "-select_streams", "v:0"])
-        .args(["-show_entries", "packet=pts_time,flags", "-of", "csv=p=0"])
+        .args(["-show_entries", "packet=pts_time,duration_time,size,flags", "-of", "compact=p=0"])
         .arg(path)
         .stdin(Stdio::null())
         .output()
@@ -692,13 +734,8 @@ fn scan(path: &Path) -> anyhow::Result<Scan> {
         let err = String::from_utf8_lossy(&out.stderr);
         anyhow::bail!("ffprobe: {}", err.lines().last().unwrap_or("failed").trim());
     }
-    let keys = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| {
-            let (pts, flags) = l.split_once(',')?;
-            flags.starts_with('K').then(|| pts.trim().parse::<f64>().ok()).flatten()
-        })
-        .collect();
+    let gops = parse_gops(&String::from_utf8_lossy(&out.stdout));
+    let keys = gops.iter().map(|g| g.start).collect();
     let mut chapters = Vec::new();
     let out = Command::new("ffprobe")
         .args(["-v", "error", "-show_chapters", "-of", "json"])
@@ -724,7 +761,7 @@ fn scan(path: &Path) -> anyhow::Result<Scan> {
         .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok())
         .map(|v| parse_facts(&v))
         .unwrap_or_default();
-    Ok(Scan { keys, chapters, facts })
+    Ok(Scan { keys, chapters, facts, gops })
 }
 
 fn codec_name(raw: &str) -> String {
@@ -1172,6 +1209,12 @@ mod tests {
         }
         let found = scan(&clip).expect("scan");
         assert_eq!(found.keys.len(), 6, "{:?}", found.keys);
+        assert_eq!(found.gops.len(), 6);
+        for gop in &found.gops {
+            assert_eq!(gop.packets, 30);
+            assert!(gop.bytes > 0);
+            assert!((gop.end - gop.start - 1.0).abs() < 1e-5);
+        }
         let mut cut = Cut::new(&clip, 6.0);
         cut.set_keys(found.keys);
         let (tx, rx) = channel();
@@ -1222,6 +1265,17 @@ mod tests {
         assert_eq!(f.chips, vec!["H.265", "1080p", "25"]);
         assert!(f.audio_title.is_empty() && f.subs_title.is_empty());
         assert_eq!(f.video[2].1, "10-bit · 4:2:0");
+    }
+
+    #[test]
+    fn gop_packets_follow_decode_order_and_include_the_final_group() {
+        let gops = parse_gops("pts_time=0|duration_time=0.04|size=100|flags=K_\npts_time=0.08|duration_time=0.04|size=20|flags=__\npts_time=0.04|duration_time=0.04|size=30|flags=__\npts_time=N/A|size=99|flags=__\npts_time=0.12|duration_time=0.04|size=200|flags=K_\n");
+        assert_eq!(gops.len(), 2);
+        assert_eq!((gops[0].packets, gops[0].bytes), (3, 150));
+        assert_eq!((gops[0].start, gops[0].end), (0.0, 0.12));
+        assert_eq!((gops[1].packets, gops[1].bytes), (1, 200));
+        assert_eq!((gops[1].start, gops[1].end), (0.12, 0.16));
+        assert!(parse_gops("pts_time=0|flags=__").is_empty());
     }
 
     #[test]

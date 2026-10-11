@@ -3,6 +3,17 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-11 — inspector typography, Info tab, and GOP details
+
+Matched the right inspector to Figma's SF Pro labels and section headings,
+JetBrains Mono values, 22.3px rows and 16px section gaps. Tabs now read
+Chapters, Subtitles, Segments, Info, with a circled info icon and hollow
+keyframe diamonds. Info scrolls independently inside its fixed header/footer.
+The old Count was the file's total keyframes; it is now labeled Keyframes.
+The current GOP reports its index, encoded packet/frame count, duration and
+video payload size in B/KiB/MiB, alongside median and longest GOP durations.
+Packet counts are explicitly qualified, and sizes exclude audio/container overhead.
+
 ## 2026-10-11 — reference-video summary typography and spacing
 
 Matched Figma 109:379 with bundled JetBrains Mono Regular at 12px/10px,

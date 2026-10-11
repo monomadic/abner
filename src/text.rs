@@ -61,6 +61,8 @@ pub struct TextCtx {
     ui_font: Option<FontVec>,
     header_font: Option<FontVec>,
     regular_font: FontVec,
+    inspector_fonts: [Option<FontVec>; 3],
+    inspector: u8,
     regular: bool,
     header: bool,
     interface: bool,
@@ -112,6 +114,13 @@ impl TextCtx {
             include_bytes!("../assets/fonts/JetBrainsMono-Medium.ttf").to_vec()
         ).expect("bundled JetBrains Mono Medium must parse"));
         Self {
+            inspector_fonts: [400.0, 500.0, 600.0].map(|weight| {
+                std::fs::read("/System/Library/Fonts/SFNS.ttf").ok()
+                    .and_then(|bytes| FontVec::try_from_vec(bytes).ok()).map(|mut f| {
+                        f.set_variation(b"wght", weight); f.set_variation(b"opsz", 12.0); f
+                    })
+            }),
+            inspector: 0,
             font, ui_font, header_font,
             regular_font: FontVec::try_from_vec(include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf").to_vec()).expect("bundled JetBrains Mono Regular must parse"),
             regular: false, header: false, interface: false,
@@ -130,7 +139,10 @@ impl TextCtx {
 
     pub fn set_regular(&mut self, regular: bool) { self.regular = regular; }
 
+    pub fn set_inspector(&mut self, weight: u8) { self.inspector = weight.min(3); }
+
     fn face(&self) -> Option<&FontVec> {
+        if self.inspector > 0 { return self.inspector_fonts[(self.inspector - 1) as usize].as_ref().or(self.ui_font.as_ref()).or(self.font.as_ref()); }
         if self.regular { return Some(&self.regular_font); }
         if self.header { return self.header_font.as_ref().or(self.ui_font.as_ref()).or(self.font.as_ref()); }
         if self.interface { self.ui_font.as_ref().or(self.font.as_ref()) } else { self.font.as_ref() }
@@ -138,7 +150,7 @@ impl TextCtx {
 
     // Figma sizes are em sizes; ab_glyph's scale is ascent minus descent.
     fn raster_size(&self, px: f32) -> f32 {
-        if self.regular || (self.interface && self.ui_font.is_some()) || (self.header && self.header_font.is_some()) {
+        if self.inspector > 0 || self.regular || (self.interface && self.ui_font.is_some()) || (self.header && self.header_font.is_some()) {
             let font = self.face().unwrap();
             px * font.height_unscaled() / font.units_per_em().unwrap_or(1.0)
         } else { px }
@@ -189,7 +201,7 @@ impl TextCtx {
     fn entry(&mut self, ch: char, px: f32) -> Option<&Entry> {
         let font = self.face()?;
         let gid = font.glyph_id(ch);
-        let key = (if self.regular { 3 } else if self.header { 2 } else { u8::from(self.interface) }, gid.0, px.to_bits());
+        let key = (if self.inspector > 0 { 3 + self.inspector } else if self.regular { 3 } else if self.header { 2 } else { u8::from(self.interface) }, gid.0, px.to_bits());
         if !self.cache.contains_key(&key) {
             let glyph = gid.with_scale_and_position(px, ab_glyph::point(0.0, 0.0));
             let made = self.face()?.outline_glyph(glyph).and_then(|og| {

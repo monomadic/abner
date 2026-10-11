@@ -284,6 +284,8 @@ pub struct TextItem {
     pub header: bool,
     /// JetBrains Mono Regular for the reference-video summary.
     pub regular: bool,
+    /// SF Pro inspector weight: 0 default, 1 regular, 2 medium, 3 semibold.
+    pub inspector: u8,
     /// Anchor point; `align` decides which edge of the run sits here.
     pub x: f32,
     pub y: f32,
@@ -303,7 +305,7 @@ pub struct TextItem {
 impl TextItem {
     pub fn new(x: f32, y: f32, px: f32, color: [f32; 4], text: impl Into<String>) -> Self {
         Self {
-            interface: false, header: false, regular: false,
+            interface: false, header: false, regular: false, inspector: 0,
             x,
             y,
             px,
@@ -1320,6 +1322,7 @@ impl Gpu {
                     self.text.set_interface(t.interface);
                     self.text.set_header(t.header);
                     self.text.set_regular(t.regular);
+                    self.text.set_inspector(t.inspector);
                     let fitted = t.max_width.map(|w| self.text.fit(&t.text, t.px * scale, t.tracking * scale, w * scale));
                     let laid = self.text.layout(fitted.as_deref().unwrap_or(&t.text), t.px * scale, t.tracking * scale);
                     let (tw, th) = (laid.w / scale, laid.h / scale);

@@ -176,6 +176,7 @@ pub struct App {
     cut_default: bool,
     /// The inspector's tab (0 chapters, 1 streams) and its chapter view.
     cut_tab: usize,
+    info_scroll: f32,
     cut_frames: bool,
     cut_thumbs: bool,
     /// The start-of-clip thumbnails on the picture lane (posters, and the one under the pointer playing).
@@ -518,6 +519,7 @@ impl App {
             cut_default: false,
             cut_drag: None,
             cut_tab: 0,
+            info_scroll: 0.0,
             cut_frames: false,
             cut_thumbs: false,
             cut_thumb: CutThumbs::new(),
@@ -1627,6 +1629,10 @@ impl App {
     pub fn scroll(&mut self, dx: f32, dy: f32) {
         self.stroke_last = None;
         if !self.ready() { return; }
+        if self.cut_mode && self.show_ui && self.cut_tab == 1 && contains(self.cut_side().body, self.cursor.0, self.cursor.1) {
+            self.info_scroll = (self.info_scroll.min(self.info_scroll_max()) - dy).clamp(0.0, self.info_scroll_max());
+            return;
+        }
         if self.cut_mode && self.show_ui && self.cut_over_panel() {
             let lane = self.cut_lanes().video;
             if dy.abs() > dx.abs() {
@@ -3020,7 +3026,7 @@ impl App {
         if contains(l.side, x, y) {
             let side = self.cut_side();
             if let Some(i) = side.tab.iter().position(|r| contains(*r, x, y)) {
-                self.cut_tab = i;
+                self.cut_tab = [0, 2, 3, 1][i];
             } else if self.cut_tab == 0 && contains(side.add_btn, x, y) {
                 // A chapter starts here: the playhead.
                 let t = self.t;
@@ -3525,6 +3531,17 @@ impl App {
         }
     }
 
+    fn info_scroll_max(&self) -> f32 {
+        let Some(cut) = &self.cut else { return 0.0 };
+        let section = |rows: usize| 38.0 + rows as f32 * 22.3;
+        let mut height = section(if cut.facts.video.is_empty() { 2 } else { cut.facts.video.len() });
+        if !cut.facts.audio_title.is_empty() { height += section(cut.facts.audio.len()); }
+        if !cut.facts.subs_title.is_empty() || !cut.cues.is_empty() { height += section(1); }
+        height += section(if cut.gop_stats().is_some() { 3 } else { 1 });
+        if cut.gops.iter().any(|g| g.start <= self.t + 1e-6) { height += section(4) + 16.0; }
+        (height - self.cut_side().body.h).max(0.0)
+    }
+
     fn build_cut_inspector(&self, items: &mut Vec<Item>) {
         let s = self.workspace().side;
         if s.w <= 0.0 { return; }
@@ -3560,22 +3577,23 @@ impl App {
 
         // ---- the icon tabs: chapters, streams ----
         items.push(Item::Rect(RectItem { radius: 9.0, ..RectItem::new(g.tabs, mix(CUT_BG, 0xffffff, 0.05)) }));
-        for (i, (r, icon)) in g.tab.iter().zip([Icon::Flag, Icon::Film, Icon::Subtitle, Icon::Segments]).enumerate() {
-            let on = self.cut_tab == i;
+        for (i, (r, icon)) in g.tab.iter().zip([Icon::Flag, Icon::Subtitle, Icon::Segments, Icon::Info]).enumerate() {
+            let on = self.cut_tab == [0, 2, 3, 1][i];
             let hovered = self.cursor_inside && contains(*r, self.cursor.0, self.cursor.1);
             if on { items.push(Item::Rect(RectItem { radius: 7.0, border_w: 1.0, border_color: mix(CUT_TOOL_ON, 0x0088ff, 0.35), ..RectItem::new(*r, hex_color(CUT_TOOL_ON)) })); }
             draw_icon(items, icon, r.x + r.w / 2.0, r.y + r.h / 2.0, if on { ACCENT } else if hovered { ink } else { dim });
         }
 
         let kv = |items: &mut Vec<Item>, y: f32, key: &str, value: String, color: [f32; 4]| {
-            ui_label(items, x0, y, 11.5, dim, key, Align::Left, 110.0);
-            ui_label(items, x1, y, 11.5, color, value, Align::Right, 170.0);
+            inspector_label(items, x0, y, 11.5, dim, key, Align::Left, 110.0);
+            items.push(Item::Text(TextItem { header: true, align: Align::Right, valign: VAlign::Middle, max_width: Some(g.body.w - 80.0),
+                ..TextItem::new(x1, y, 11.5, color, value) }));
         };
 
         if self.cut_tab == 0 {
             // ---- chapters ----
             let cy = g.count_y + 13.0;
-            ui_label(items, x0, cy, 11.0, ink, format!("Chapters {}", cut.chapters.len()), Align::Left, g.add_btn.x - x0 - 8.0);
+            inspector_label(items, x0, cy, 11.0, ink, format!("Chapters {}", cut.chapters.len()), Align::Left, g.add_btn.x - x0 - 8.0);
             let plus_hot = self.cursor_inside && contains(g.add_btn, self.cursor.0, self.cursor.1);
             items.push(Item::Rect(RectItem { radius: 7.0, ..RectItem::new(g.add_btn, mix(CUT_BG, 0xffffff, if plus_hot { 0.12 } else { 0.07 })) }));
             let (px, py) = (g.add_btn.x + g.add_btn.w / 2.0, g.add_btn.y + g.add_btn.h / 2.0);
@@ -3590,7 +3608,7 @@ impl App {
             let current = cut.chapters.iter().rposition(|c| c.start <= self.t + 1e-6);
             if cut.chapters.is_empty() {
                 let msg = if cut.scanning() { "reading chapters …" } else { "no chapters in this file" };
-                ui_label(items, x0 + g.body.w / 2.0, g.body.y + 20.0, 11.0, faint, msg, Align::Center, g.body.w);
+                inspector_label(items, x0 + g.body.w / 2.0, g.body.y + 20.0, 11.0, faint, msg, Align::Center, g.body.w);
             }
             for (r, idx) in self.cut_chapter_rows() {
                 let c = &cut.chapters[idx];
@@ -3611,22 +3629,22 @@ impl App {
                     }
                     chapter_flag(items, pic.x + 4.0, pic.y + 4.0, 18.0, number, on, false);
                     items.push(Item::Rect(RectItem { radius: 3.5, ..RectItem::new(RectPx { x: pic.x + pic.w - 12.0, y: pic.y + 5.0, w: 7.0, h: 7.0 }, snap_dot) }));
-                    ui_label(items, r.x + 8.0, r.y + 80.0, 12.0, mix(CUT_BG, 0xffffff, 0.88), c.title.as_str(), Align::Left, r.w - 16.0);
-                    ui_label(items, r.x + 8.0, r.y + 95.0, 10.0, faint, format!("{} · {}", fmt_hms(c.start), fmt_span(end - c.start)), Align::Left, r.w - 16.0);
+                    inspector_label(items, r.x + 8.0, r.y + 80.0, 12.0, mix(CUT_BG, 0xffffff, 0.88), c.title.as_str(), Align::Left, r.w - 16.0);
+                    inspector_label(items, r.x + 8.0, r.y + 95.0, 10.0, faint, format!("{} · {}", fmt_hms(c.start), fmt_span(end - c.start)), Align::Left, r.w - 16.0);
                 } else {
                     items.push(Item::Rect(RectItem { radius: 8.0, border_w: if on { 2.0 } else { 0.0 }, border_color: hex_color(CUT_AMBER), ..RectItem::new(r, ground) }));
                     let num = RectPx { x: r.x + 10.0, y: r.y + (r.h - 18.0) / 2.0, w: 20.0, h: 18.0 };
                     chapter_flag(items, num.x, num.y, 18.0, number, on, false);
-                    ui_label(items, r.x + 42.0, r.y + 16.0, 12.0, mix(CUT_BG, 0xffffff, 0.88), c.title.as_str(), Align::Left, r.w - 42.0 - 28.0);
-                    ui_label(items, r.x + 42.0, r.y + 32.0, 10.0, faint, format!("{} · {}", fmt_hms(c.start), fmt_span(end - c.start)), Align::Left, r.w - 42.0 - 28.0);
+                    inspector_label(items, r.x + 42.0, r.y + 16.0, 12.0, mix(CUT_BG, 0xffffff, 0.88), c.title.as_str(), Align::Left, r.w - 42.0 - 28.0);
+                    inspector_label(items, r.x + 42.0, r.y + 32.0, 10.0, faint, format!("{} · {}", fmt_hms(c.start), fmt_span(end - c.start)), Align::Left, r.w - 42.0 - 28.0);
                     items.push(Item::Rect(RectItem { radius: 3.5, ..RectItem::new(RectPx { x: r.x + r.w - 17.0, y: r.y + r.h / 2.0 - 3.5, w: 7.0, h: 7.0 }, snap_dot) }));
                 }
             }
         } else if self.cut_tab >= 2 {
             let (title, count) = if self.cut_tab == 2 { ("Subtitles", cut.cues.len()) } else { ("Segments", cut.segments().len()) };
-            ui_label(items, x0, g.body.y + 10.0, 11.0, ink, format!("{title} {count}"), Align::Left, g.body.w);
+            inspector_label(items, x0, g.body.y + 10.0, 11.0, ink, format!("{title} {count}"), Align::Left, g.body.w);
             if count == 0 {
-                ui_label(items, x0, g.body.y + 42.0, 11.0, faint,
+                inspector_label(items, x0, g.body.y + 42.0, 11.0, faint,
                     if cut.scanning() { "reading subtitles …" } else { "no text subtitles in this file" }, Align::Left, g.body.w);
             }
             for (r, start, end, title) in self.cut_detail_rows() {
@@ -3634,21 +3652,23 @@ impl App {
                 let hovered = self.cursor_inside && contains(r, self.cursor.0, self.cursor.1);
                 items.push(Item::Rect(RectItem { radius: 8.0, border_w: if on { 1.0 } else { 0.0 }, border_color: ACCENT,
                     ..RectItem::new(r, if on { hex_color(CUT_TOOL_ON) } else if hovered { mix(CUT_BG, 0xffffff, 0.07) } else { hex_color(CUT_LANE) }) }));
-                ui_label(items, r.x + 10.0, r.y + 16.0, 12.0, ink, title, Align::Left, r.w - 20.0);
-                ui_label(items, r.x + 10.0, r.y + 32.0, 10.0, faint, format!("{} · {}", fmt_hms(start), fmt_span(end - start)), Align::Left, r.w - 20.0);
+                inspector_label(items, r.x + 10.0, r.y + 16.0, 12.0, ink, title, Align::Left, r.w - 20.0);
+                inspector_label(items, r.x + 10.0, r.y + 32.0, 10.0, faint, format!("{} · {}", fmt_hms(start), fmt_span(end - start)), Align::Left, r.w - 20.0);
             }
         } else {
             // ---- streams ----
             let section = |items: &mut Vec<Item>, y: &mut f32, icon: Icon, title: &str, rows: Vec<(String, String, [f32; 4])>| {
                 draw_icon(items, icon, x0 + 8.0, *y + 8.0, dim);
                 caps_label(items, x0 + 24.0, *y + 8.0, title);
-                *y += 24.0;
+                *y += 22.0;
                 for (k, v, color) in rows {
                     kv(items, *y + 11.0, &k, v, color);
-                    *y += 22.0;
+                    *y += 22.3;
                 }
-                *y += 14.0;
+                *y += 16.0;
             };
+            items.push(Item::Clip(Some(g.body)));
+            let body_start = items.len();
             let mut y = g.body.y;
             let facts = &cut.facts;
             let rows = |r: &Vec<(&'static str, String)>| r.iter().map(|(k, v)| (k.to_string(), v.clone(), ink)).collect::<Vec<_>>();
@@ -3665,14 +3685,38 @@ impl App {
                 let title = if facts.subs_title.is_empty() { "SUBTITLES".to_string() } else { facts.subs_title.to_uppercase() };
                 section(items, &mut y, Icon::Caption, &title, vec![("Cues".into(), cut.cues.len().to_string(), ink)]);
             }
-            if let Some((count, median, longest)) = cut.gop_stats() {
-                let long = longest > median * 2.0 + 0.5;
-                section(items, &mut y, Icon::Ticks, "KEYFRAMES", vec![
-                    ("Count".into(), format!("{count}"), ink),
-                    ("GOP".into(), format!("{median:.1} s · max {longest:.1} s"), if long { hex_color(CUT_CORAL_INK) } else { ink }),
+            let mut key_rows = vec![("Keyframes".into(), if cut.scanning() { "reading …".into() } else { cut.keys.len().to_string() }, ink)];
+            if let Some((_, median, longest)) = cut.gop_stats() {
+                key_rows.push(("Median GOP".into(), format!("{median:.2} s"), ink));
+                key_rows.push(("Longest GOP".into(), format!("{longest:.2} s"), ink));
+            }
+            section(items, &mut y, Icon::Keyframe, "KEYFRAMES", key_rows);
+            if let Some((idx, gop)) = cut.gops.iter().enumerate().rev().find(|(_, g)| g.start <= self.t + 1e-6) {
+                section(items, &mut y, Icon::Keyframe, "CURRENT GOP", vec![
+                    ("GOP".into(), format!("{} / {}", idx + 1, cut.gops.len()), ink),
+                    ("Frames¹".into(), gop.packets.to_string(), ink),
+                    ("Duration".into(), format!("{:.3} s", (gop.end - gop.start).max(0.0)), ink),
+                    ("Video size".into(), if gop.bytes < 1024 { format!("{} B", gop.bytes) } else if gop.bytes < 1024 * 1024 { format!("{:.1} KiB", gop.bytes as f64 / 1024.0) } else { fmt_size(gop.bytes) }, ink),
                 ]);
-            } else if cut.scanning() {
-                section(items, &mut y, Icon::Ticks, "KEYFRAMES", vec![("Count".into(), "reading …".into(), faint)]);
+                inspector_label(items, x0, y, 10.0, faint, "¹ Encoded packets; video payload only", Align::Left, g.body.w);
+                y += 16.0;
+            }
+            let offset = self.info_scroll.min((y - g.body.y - g.body.h).max(0.0));
+            for item in &mut items[body_start..] {
+                match item {
+                    Item::Text(t) => t.y -= offset,
+                    Item::Rect(r) => r.r.y -= offset,
+                    Item::Triangle { r, .. } | Item::TriangleDown { r, .. } => r.y -= offset,
+                    _ => {}
+                }
+            }
+            items.push(Item::Clip(Some(s)));
+            let total = y - g.body.y;
+            if total > g.body.h && g.body.h > 0.0 {
+                let h = (g.body.h * g.body.h / total).max(18.0).min(g.body.h);
+                let top = g.body.y + (g.body.h - h) * offset / (total - g.body.h);
+                items.push(Item::Rect(RectItem { radius: 1.5,
+                    ..RectItem::new(RectPx { x: s.x + s.w - 7.0, y: top, w: 3.0, h }, mix(CUT_BG, 0xffffff, 0.22)) }));
             }
         }
 
@@ -3682,7 +3726,7 @@ impl App {
             items.push(Item::Rect(RectItem { radius: 8.0, border_w: 1.0, border_color: mix(CUT_BG, CUT_CORAL, 0.28),
                 ..RectItem::new(r, mix(CUT_BG, CUT_CORAL, 0.10)) }));
             for (i, line) in g.warning.iter().enumerate() {
-                ui_label(items, r.x + 12.0, r.y + 15.0 + i as f32 * 15.0, 10.0, hex_color(CUT_CORAL_INK), line.as_str(), Align::Left, r.w - 24.0);
+                inspector_label(items, r.x + 12.0, r.y + 15.0 + i as f32 * 15.0, 10.0, hex_color(CUT_CORAL_INK), line.as_str(), Align::Left, r.w - 24.0);
             }
         }
 
@@ -3694,13 +3738,13 @@ impl App {
         let frame_mode = cut.snap == Snap::Frame;
         let right_chip = |items: &mut Vec<Item>, right: f32, text: &str, bg: [f32; 4], fg: [f32; 4]| -> f32 {
             let w = text.chars().count() as f32 * 10.0 * MONO_ADV + 14.0;
-            items.push(Item::Text(TextItem { align: Align::Right, valign: VAlign::Middle,
+            items.push(Item::Text(TextItem { header: true, align: Align::Right, valign: VAlign::Middle,
                 bg: Some(TextBg { radius: 5.0, pad_x: 7.0, pad_y: 5.0, ..TextBg::new(bg) }),
                 ..TextItem::new(right - 7.0, cy, 10.0, fg, text) }));
             right - w - 6.0
         };
         if self.cut_tab != 1 {
-            ui_label(items, x0, cy, 15.0, ink, fmt_hms(kept), Align::Left, 110.0);
+            inspector_label(items, x0, cy, 15.0, ink, fmt_hms(kept), Align::Left, 110.0);
             let (re_text, re_bg, re_fg) = if frame_mode { ("all re-enc", mix(CUT_BG, CUT_CORAL, 0.14), hex_color(CUT_CORAL_INK)) }
                 else { ("0 re-enc", mix(CUT_BG, CUT_GREEN, 0.14), green) };
             let r = right_chip(items, x1, re_text, re_bg, re_fg);
@@ -3708,7 +3752,7 @@ impl App {
                 right_chip(items, r, &format!("−{}", fmt_span(removed)), chip_bg, mix(CUT_BG, 0xffffff, 0.75));
             }
         } else {
-            ui_label(items, x0, cy, 15.0, ink, fmt_hms(cut.duration), Align::Left, 110.0);
+            inspector_label(items, x0, cy, 15.0, ink, fmt_hms(cut.duration), Align::Left, 110.0);
             let ext = cut.path.extension().map(|e| e.to_string_lossy().to_uppercase()).unwrap_or_default();
             let r = right_chip(items, x1, &ext, chip_bg, mix(CUT_BG, 0xffffff, 0.75));
             right_chip(items, r, &fmt_size(self.videos[self.active].info.file_size), chip_bg, mix(CUT_BG, 0xffffff, 0.75));
@@ -4031,7 +4075,7 @@ impl App {
 /// The scrub panel's pictograms. The renderer draws rects and triangles,
 /// not paths, so each is built from those on a 16px box about its centre.
 #[derive(Clone, Copy)]
-enum Icon { Bookmark, TrackFilm, TrackSpeaker, Subtitle, Segments, In, Out, Split, Trash, SnapKeyframe, Flag, Film, Speaker, Caption, Ticks, List, Grid, StepBack, StepFwd, KeyBack, KeyFwd, ZoomOut, ZoomIn }
+enum Icon { Info, Keyframe, Bookmark, TrackFilm, TrackSpeaker, Subtitle, Segments, In, Out, Split, Trash, SnapKeyframe, Flag, Film, Speaker, Caption, List, Grid, StepBack, StepFwd, KeyBack, KeyFwd, ZoomOut, ZoomIn }
 
 fn draw_icon(items: &mut Vec<Item>, icon: Icon, cx: f32, cy: f32, color: [f32; 4]) {
     let bar = |items: &mut Vec<Item>, x: f32, y: f32, w: f32, h: f32| {
@@ -4148,10 +4192,15 @@ fn draw_icon(items: &mut Vec<Item>, icon: Icon, cx: f32, cy: f32, color: [f32; 4
             bar(items, 0.5, -1.75, 4.0, 1.5);
             bar(items, -5.0, 1.5, 6.0, 1.5);
         }
-        Icon::Ticks => {
-            for (i, h) in [6.0, 11.0, 6.0, 11.0, 6.0].into_iter().enumerate() {
-                bar(items, -8.0 + i as f32 * 3.6, -h / 2.0, 1.5, h);
-            }
+        Icon::Info => {
+            items.push(Item::Rect(RectItem { radius: 7.5, border_w: 1.3, border_color: color,
+                ..RectItem::new(RectPx { x: cx - 7.5, y: cy - 7.5, w: 15.0, h: 15.0 }, [0.0; 4]) }));
+            bar(items, -0.75, -4.0, 1.5, 1.5);
+            bar(items, -0.75, -0.5, 1.5, 4.5);
+        }
+        Icon::Keyframe => {
+            let points = [(0.0, -7.0), (5.0, 0.0), (0.0, 7.0), (-5.0, 0.0), (0.0, -7.0)];
+            for edge in points.windows(2) { stroke(items, edge[0], edge[1]); }
         }
         // A frame: one point against a bar. A keyframe: two points. A chapter: a flag.
         Icon::StepBack | Icon::StepFwd => {
@@ -4193,9 +4242,16 @@ fn draw_icon(items: &mut Vec<Item>, icon: Icon, cx: f32, cy: f32, color: [f32; 4
 }
 
 /// The design's small-caps section label.
+fn inspector_label(items: &mut Vec<Item>, x: f32, y: f32, px: f32, color: [f32; 4], text: impl Into<String>, align: Align, width: f32) {
+    let mono = px == 10.0 || px == 15.0;
+    items.push(Item::Text(TextItem { inspector: if mono { 0 } else if px == 12.0 { 2 } else { 1 }, header: mono,
+        tracking: if mono { 0.0 } else { 0.0337 }, valign: VAlign::Middle, align, max_width: Some(width),
+        ..TextItem::new(x, y, px, color, text) }));
+}
+
 fn caps_label(items: &mut Vec<Item>, x: f32, y: f32, text: &str) {
-    items.push(Item::Text(TextItem { valign: VAlign::Middle, tracking: 0.8,
-        ..TextItem::new(x, y, 10.0, mix(CUT_BG, 0xffffff, 0.42), text) }));
+    items.push(Item::Text(TextItem { inspector: 3, valign: VAlign::Middle, tracking: 0.9323,
+        ..TextItem::new(x, y, 10.5, mix(CUT_BG, 0xffffff, 0.42), text) }));
 }
 
 /// `fg` at `alpha` over `bg`, composited in sRGB — the design's numbers.
@@ -5080,12 +5136,19 @@ mod tests {
 
         // The streams tab replaces the chapter rows.
         let side = app.cut_side();
-        app.mouse_down(side.tab[1].x + 4.0, side.tab[1].y + 4.0);
+        app.mouse_down(side.tab[3].x + 4.0, side.tab[3].y + 4.0);
         app.mouse_up();
         assert_eq!(app.cut_tab, 1);
         assert!(app.cut_chapter_rows().is_empty());
+        app.cursor = (side.body.x + 20.0, side.body.y + 20.0);
+        let timeline_scale = app.cut.as_ref().unwrap().pps;
+        app.scroll(0.0, -10000.0);
+        assert_eq!(app.info_scroll, app.info_scroll_max());
+        assert_eq!(app.cut.as_ref().unwrap().pps, timeline_scale);
+        app.scroll(0.0, 10000.0);
+        assert_eq!(app.info_scroll, 0.0);
         for tab in [2, 3] {
-            app.mouse_down(side.tab[tab].x + 4.0, side.tab[tab].y + 4.0);
+            app.mouse_down(side.tab[tab - 1].x + 4.0, side.tab[tab - 1].y + 4.0);
             app.mouse_up();
             assert_eq!(app.cut_tab, tab);
             assert!(app.cut_chapter_rows().is_empty());
