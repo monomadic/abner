@@ -3,6 +3,12 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-11 — rounded clip trim highlights
+
+Trim highlights now use clipped slices of the clip's rounded silhouette instead
+of square strips that overpainted its corners. Both video and audio ends keep
+the Figma 7px radius and use the design's inset, slimmer paired grip lines.
+
 ## 2026-10-11 — text-only mode-selector hover
 
 Hover now turns the mode label white without adding a background fill.

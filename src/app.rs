@@ -3809,17 +3809,26 @@ impl App {
             }
             items.push(Item::Clip(Some(column)));
         };
-        // The board's trim areas: an 8px glow fading in from each end of the
-        // clip (two strips stand in for the gradient) and a pair of 1px grip
-        // bars inside it, 38px tall on picture, 26px on sound.
+        // Trim highlights must follow the same rounded silhouette as the clip.
+        // Scissor slices of a rounded quad, never square strips over its corners.
         let grips = |items: &mut Vec<Item>, r: RectPx, inset: f32| {
             if r.w < 28.0 { return; }
-            for (x, w, a) in [(r.x, 4.0, 0.035), (r.x + 4.0, 4.0, 0.012), (r.x + r.w - 8.0, 4.0, 0.012), (r.x + r.w - 4.0, 4.0, 0.035)] {
-                if x + w > v.x && x < v.x + v.w { line(items, x, r.y + 1.0, r.h - 2.0, w, [1.0, 1.0, 1.0, a]); }
+            for i in 0..8 {
+                let alpha = 0.035 * (1.0 - i as f32 / 8.0);
+                for x in [r.x + i as f32, r.x + r.w - i as f32 - 1.0] {
+                    let left = x.max(column.x);
+                    let right = (x + 1.0).min(column.x + column.w);
+                    if right <= left { continue; }
+                    items.push(Item::Clip(Some(RectPx { x: left, y: r.y, w: right - left, h: r.h })));
+                    items.push(Item::Rect(RectItem { radius: 7.0,
+                        ..RectItem::new(r, [1.0, 1.0, 1.0, alpha]) }));
+                }
             }
-            for x in [r.x + 2.5, r.x + 5.0, r.x + r.w - 6.0, r.x + r.w - 3.5] {
-                // Only the ends that are on screen can be taken hold of.
-                if x > v.x && x < v.x + v.w { line(items, x, r.y + inset, r.h - 2.0 * inset, 1.0, [1.0, 1.0, 1.0, 0.22]); }
+            items.push(Item::Clip(Some(column)));
+            for x in [r.x + 2.55, r.x + 4.89, r.x + r.w - 5.45, r.x + r.w - 3.11] {
+                if x > v.x && x < v.x + v.w {
+                    line(items, x, r.y + inset, r.h - 2.0 * inset, 0.78, [1.0, 1.0, 1.0, 0.22]);
+                }
             }
         };
         for (lane, audio) in [(Some(v), false), (lanes.audio, true)] {
