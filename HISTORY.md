@@ -3,6 +3,12 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-11 — reference-video summary typography and spacing
+
+Matched Figma 109:379 with bundled JetBrains Mono Regular at 12px/10px,
+a 3px white thumbnail border, and 14px below the preview before the divider.
+Short windows keep the same summary spacing rather than collapsing the gap.
+
 ## 2026-10-11 — inset selection outlines and hollow keyframe icons
 
 Selected video and audio clips now draw their 2px white border inside the

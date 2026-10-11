@@ -282,6 +282,8 @@ pub struct TextItem {
     pub interface: bool,
     /// JetBrains Mono Medium for the shared mode selector.
     pub header: bool,
+    /// JetBrains Mono Regular for the reference-video summary.
+    pub regular: bool,
     /// Anchor point; `align` decides which edge of the run sits here.
     pub x: f32,
     pub y: f32,
@@ -301,7 +303,7 @@ pub struct TextItem {
 impl TextItem {
     pub fn new(x: f32, y: f32, px: f32, color: [f32; 4], text: impl Into<String>) -> Self {
         Self {
-            interface: false, header: false,
+            interface: false, header: false, regular: false,
             x,
             y,
             px,
@@ -1317,6 +1319,7 @@ impl Gpu {
                 Item::Text(t) => {
                     self.text.set_interface(t.interface);
                     self.text.set_header(t.header);
+                    self.text.set_regular(t.regular);
                     let fitted = t.max_width.map(|w| self.text.fit(&t.text, t.px * scale, t.tracking * scale, w * scale));
                     let laid = self.text.layout(fitted.as_deref().unwrap_or(&t.text), t.px * scale, t.tracking * scale);
                     let (tw, th) = (laid.w / scale, laid.h / scale);

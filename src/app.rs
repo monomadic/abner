@@ -3266,7 +3266,7 @@ impl App {
         let s = self.workspace().side;
         let (x0, w) = (s.x + 16.0, s.w - 32.0);
         let summary = RectPx { x: x0, y: s.y + 16.0, w, h: 54.0 };
-        let tabs = RectPx { x: x0, y: s.y + if s.h < 500.0 { 84.0 } else { 98.0 }, w, h: 32.0 };
+        let tabs = RectPx { x: x0, y: summary.y + summary.h + 28.0, w, h: 32.0 };
         let half = (w - 4.0) / 4.0;
         let tab = [0, 1, 2, 3].map(|i| RectPx { x: x0 + 2.0 + i as f32 * half, y: tabs.y + 2.0, w: half, h: 28.0 });
         let count_y = tabs.y + tabs.h + 14.0;
@@ -3548,10 +3548,14 @@ impl App {
             items.push(Item::Video { a: self.active, b: self.active, r: pic,
                 uv: [(1.0-uw)/2.0, (1.0-uh)/2.0, uw, uh], mode: VideoMode::Tex, p0: 4.0, p1: 0.0 });
         }
-        ui_label(items, pic.x + 100.0, pic.y + 9.0, 12.0, hex_color(SOURCE_INK), name_of(&source.info.path), Align::Left, g.summary.w - 100.0);
+        items.push(Item::Rect(RectItem { radius: 4.0, border_w: 3.0, border_color: hex_color(0xffffff),
+            ..RectItem::new(pic, [0.0; 4]) }));
+        items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(g.summary.w - 100.0),
+            ..TextItem::new(pic.x + 100.0, pic.y + 9.0, 12.0, hex_color(SOURCE_INK), name_of(&source.info.path)) }));
         let fps = format!("{:.3}", source.info.fps).trim_end_matches('0').trim_end_matches('.').to_string();
-        ui_label(items, pic.x + 100.0, pic.y + 26.0, 10.0, hex_color(SOURCE_SECONDARY),
-            format!("{}p · {fps} fps · {}", source.info.height, fmt_span(source.info.duration)), Align::Left, g.summary.w - 100.0);
+        items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(g.summary.w - 100.0),
+            ..TextItem::new(pic.x + 100.0, pic.y + 25.5, 10.0, hex_color(SOURCE_SECONDARY),
+                format!("{}p · {fps} fps · {}", source.info.height, fmt_span(source.info.duration))) }));
         items.push(Item::Rect(RectItem::new(RectPx { x: x0, y: g.tabs.y - 14.0, w: x1-x0, h: 1.0 }, mix(CUT_BG, 0xffffff, 0.2))));
 
         // ---- the icon tabs: chapters, streams ----
