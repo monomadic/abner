@@ -327,7 +327,14 @@ impl Cut {
 
     /// Where a split asked for at `t` would land.
     pub fn split_point(&self, t: f64) -> f64 {
-        self.snap_in(t)
+        if self.snap == Snap::Frame || self.keys.is_empty() { return t; }
+        let i = self.keys.partition_point(|k| *k < t);
+        match (i.checked_sub(1).map(|j| self.keys[j]), self.keys.get(i).copied()) {
+            (Some(a), Some(b)) => if t - a <= b - t { a } else { b },
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            _ => t,
+        }
     }
 
     pub fn in_snapped(&self) -> Option<f64> {
@@ -395,10 +402,10 @@ impl Cut {
         true
     }
 
-    /// A boundary at `t` (snapped like an in point). False when it would
+    /// A boundary at `t` (snapped to the nearest keyframe). False when it would
     /// land on an existing boundary or inside removed material.
     pub fn split(&mut self, t: f64) -> bool {
-        let t = self.snap_in(t);
+        let t = self.split_point(t);
         if t < EPS || t > self.duration - EPS || self.boundaries().iter().any(|b| (b - t).abs() < EPS) {
             return false;
         }

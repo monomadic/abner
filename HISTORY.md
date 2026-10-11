@@ -3,6 +3,20 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-12 — toggleable split tool and re-encode design proposal
+
+The Split toolbar button now toggles an armed tool. Its circular split marker
+and dashed line preview the exact click target: nearest keyframe with snapping,
+or the next nominal frame boundary without it. Clicking splits without moving
+the playhead; the tool stays armed, and Escape or the button turns it off.
+The existing S shortcut still splits directly. Added preview/click, snapping,
+repeat-use and Escape regression coverage; all 72 tests pass.
+
+Figma proposal 223:382 in the Timeline Edit file shows purple hatched re-encode
+regions with per-region Encode buttons. This is a design proposal for in-place
+GOP processing, not an implemented smart-render pipeline; current frame-mode
+export still re-encodes the whole output.
+
 ## 2026-10-11 — stable clip presses and pointer seeks
 
 Timeline mouse-down keeps the clip hover lift and thumbnail decoder active

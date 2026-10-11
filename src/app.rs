@@ -185,6 +185,7 @@ pub struct App {
     cut_thumb: CutThumbs,
     /// The picture clip last clicked, by its (start, end): drawn outlined.
     cut_pick: Option<(f64, f64, bool)>,
+    split_tool: bool,
     /// Hover lift per kept clip, keyed by (start ms, sound lane): 0..1, eased
     /// up while the pointer is over it and back down after it leaves.
     cut_hot: Vec<(i64, bool, f32)>,
@@ -527,6 +528,7 @@ impl App {
             cut_thumbs: false,
             cut_thumb: CutThumbs::new(),
             cut_pick: None,
+            split_tool: false,
             cut_hot: Vec::new(),
             cut_last_t: f64::NAN,
             cut_boot: Vec::new(),
@@ -706,6 +708,7 @@ impl App {
             return (self.cursor_inside && self.recent.hover.is_some()).then_some(CropCursor::Pointer);
         }
         if self.cut_mode && self.show_ui && self.cursor_inside {
+            if self.split_tool && self.cut_clip_at(self.cursor.0, self.cursor.1).is_some() { return Some(CropCursor::Pointer); }
             let held = matches!(self.cut_drag, Some(CutDrag::Edge(_)));
             return (held || self.cut_drag.is_none() && self.cut_edge_at(self.cursor.0, self.cursor.1).is_some())
                 .then_some(CropCursor::EwResize);
@@ -2752,6 +2755,7 @@ impl App {
             self.center = (0.5, 0.5);
             self.cut_last_t = f64::NAN;
         }
+        self.split_tool = false;
         self.cut_mode = on;
     }
 
@@ -2785,6 +2789,7 @@ impl App {
                 return true;
             }
             Key::Escape => {
+                if self.split_tool { self.split_tool = false; return true; }
                 if self.cut_pick.take().is_some() { return true; }
                 let cut = self.cut.as_mut().unwrap();
                 if cut.in_req.is_some() || cut.out_req.is_some() {
@@ -2804,9 +2809,14 @@ impl App {
 
     fn cut_action(&mut self, action: CutAction) {
         if let CutAction::TimeDisplay(frames) = action { self.cut_frames = frames; return; }
+        if action == CutAction::ToggleSplit {
+            self.split_tool = !self.split_tool;
+            self.cut_pick = None;
+            return;
+        }
         let t = self.t;
         // S cuts where the razor shows, when it shows.
-        let split_at = self.cut_razor().unwrap_or(t);
+        let split_at = self.cut_razor().unwrap_or_else(|| self.split_target(t));
         let lane = self.cut_lanes().video;
         if action == CutAction::Play {
             self.playing = !self.playing;
@@ -2835,15 +2845,14 @@ impl App {
         cut.status.clear();
         match action {
             CutAction::Step(_) | CutAction::Keyframe(_) | CutAction::Chapter(_) => {}
-            CutAction::Play | CutAction::TimeDisplay(_) => {}
+            CutAction::Play | CutAction::TimeDisplay(_) | CutAction::ToggleSplit => {}
             CutAction::Zoom(zoom_in) => {
                 let px = ((t - cut.t0) * cut.pps) as f32;
                 cut.zoom(if zoom_in { 1.5 } else { 1.0 / 1.5 }, if px >= 0.0 && px <= lane.w { px } else { lane.w / 2.0 }, lane.w);
             }
             CutAction::In => cut.set_in(t),
             CutAction::Out => cut.set_out(t),
-            CutAction::Split | CutAction::SplitAtPlayhead => {
-                let split_at = if action == CutAction::SplitAtPlayhead { t } else { split_at };
+            CutAction::Split => {
                 if !cut.split(split_at) { cut.status = "No split here: already a boundary, or inside a cut".into(); }
             }
             CutAction::DeletePicked => {
@@ -2923,7 +2932,7 @@ impl App {
         let keyframe = cut.snap == Snap::Keyframe;
         for (label, action, hint) in [
             ("Set in", CutAction::In, "I"), ("Set out", CutAction::Out, "O"),
-            ("Split at playhead", CutAction::SplitAtPlayhead, "S"),
+            ("Split tool", CutAction::ToggleSplit, "Esc to leave · S split"),
             (if self.cut_pick.is_some() { "Delete selected clip" } else if cut.selection_is_cut() { "Restore selection" } else { "Cut selection" }, if self.cut_pick.is_some() { CutAction::DeletePicked } else { CutAction::Apply }, if self.cut_pick.is_some() { "Backspace" } else { "X" }),
             (if keyframe { "Snap to keyframes: on" } else { "Snap to keyframes: off" },
                 CutAction::Snap(if keyframe { Snap::Frame } else { Snap::Keyframe }), "K"),
@@ -2977,19 +2986,21 @@ impl App {
             .min_by(|a, b| (a - t).abs().total_cmp(&(b - t).abs()))
     }
 
-    /// Where `S` would split right now: under the pointer while it is over
-    /// the clips (the razor line shows it), at the playhead otherwise.
+    fn split_target(&self, t: f64) -> f64 {
+        let Some(cut) = &self.cut else { return t };
+        if cut.snap == Snap::Keyframe { cut.split_point(t) }
+        else { ((t * self.fps.max(1.0) - 1e-7).ceil() / self.fps.max(1.0)).min(cut.duration) }
+    }
+
+    /// The split tool's preview and click share exactly the same target.
     fn cut_razor(&self) -> Option<f64> {
+        if !self.split_tool || !self.show_ui || !self.cursor_inside || self.cut_drag.is_some() { return None; }
         let (x, y) = self.cursor;
-        // A picked clip is outlined, not hovered: no razor over it.
-        if !self.show_ui || !self.cursor_inside || self.cut_drag.is_some() || self.cut_pick.is_some() { return None; }
-        let lanes = self.cut_lanes();
-        let v = lanes.video;
-        let bottom = lanes.audio.map_or(v.y + v.h, |a| a.y + a.h);
-        if x < v.x || x >= v.x + v.w || y < v.y || y >= bottom || self.cut_edge_at(x, y).is_some() { return None; }
+        let (segment, _) = self.cut_clip_at(x, y)?;
         let cut = self.cut.as_ref()?;
-        let t = cut.split_point(self.cut_time_at(x));
-        (t > cut.t0 && !cut.cuts().iter().any(|c| t > c.0 && t < c.1)).then_some(t)
+        if cut.snap == Snap::Keyframe && cut.keys.is_empty() { return None; }
+        let at = self.split_target(self.cut_time_at(x));
+        (at > segment.start + 1e-6 && at < segment.end - 1e-6).then_some(at)
     }
 
     /// A press below the header in cut mode. True = it was the scrub
@@ -3005,6 +3016,10 @@ impl App {
             return true;
         }
         if contains(l.timeline, x, y) {
+            if self.split_tool && self.cut_clip_at(x, y).is_some() {
+                if let Some(at) = self.cut_razor() { self.cut.as_mut().unwrap().split(at); }
+                return true;
+            }
             if let Some(edge) = self.cut_edge_at(x, y) {
                 if let Some(cut) = &mut self.cut { cut.begin_trim(); }
                 self.playing = false;
@@ -3521,8 +3536,9 @@ impl App {
             }
             _ => {
                 let dead = action == CutAction::Apply && cut.selection().is_none() && self.cut_pick.is_none();
-                let fill = if hovered && !dead { mix(CUT_BAR, 0xffffff, 0.07) } else { [0.0; 4] };
-                if hovered && !dead {
+                let selected = action == CutAction::ToggleSplit && self.split_tool;
+                let fill = if selected { hex_color(CUT_TOOL_ON) } else if hovered && !dead { mix(CUT_BAR, 0xffffff, 0.07) } else { [0.0; 4] };
+                if selected || (hovered && !dead) {
                     items.push(Item::Rect(RectItem { radius: 7.0, ..RectItem::new(r, fill) }));
                 }
                 // Every toolbar icon is plain white; only a dead one dims.
@@ -3533,7 +3549,7 @@ impl App {
                     CutAction::In => (Icon::In, white),
                     CutAction::Out => (Icon::Out, white),
                     CutAction::Split => (Icon::Split, white),
-                    CutAction::SplitAtPlayhead => (Icon::Split, white),
+                    CutAction::ToggleSplit => (Icon::Split, if self.split_tool { ACCENT } else { white }),
                     CutAction::Apply | CutAction::DeletePicked => (Icon::Trash, white),
                     _ => (Icon::SnapKeyframe, white),
                 };
@@ -4030,9 +4046,9 @@ impl App {
         if let Some(at) = self.cut_razor() {
             let x = x_of(at);
             let razor_bottom = lanes.audio.map_or(v.y + v.h, |r| r.y + r.h);
-            dashed(items, x - 0.75, v.y, razor_bottom, 1.5, mix(CUT_FILM, 0xffffff, 0.8));
-            items.push(Item::Rect(RectItem { radius: 12.0, ..RectItem::new(RectPx { x: x - 12.0, y: v.y - 16.0, w: 24.0, h: 24.0 }, hex_color(CUT_INK)) }));
-            draw_icon(items, Icon::Split, x, v.y - 4.0, hex_color(CUT_BG));
+            dashed(items, x - 0.75, v.y - 8.0, razor_bottom, 1.5, hex_color(CUT_INK));
+            items.push(Item::Rect(RectItem { radius: 14.0, ..RectItem::new(RectPx { x: x - 14.0, y: v.y - 34.0, w: 28.0, h: 28.0 }, hex_color(CUT_INK)) }));
+            draw_icon(items, Icon::Split, x, v.y - 20.0, hex_color(CUT_BG));
         }
         // The flags carry numbers and the cues no words, so the one under
         // the pointer says what it is.
@@ -4395,7 +4411,7 @@ impl Workspace {
 #[derive(Clone, Copy)]
 enum Action { Duplicate, OpenFiles, ClearSources, Tool(usize), View(Mode), Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
 #[derive(Clone, Copy, PartialEq)]
-enum CutAction { TimeDisplay(bool), In, Out, Split, SplitAtPlayhead, Apply, DeletePicked, Undo, Export, Snap(Snap), Play, Zoom(bool), Step(i32), Keyframe(i32), Chapter(i32) }
+enum CutAction { TimeDisplay(bool), In, Out, Split, ToggleSplit, Apply, DeletePicked, Undo, Export, Snap(Snap), Play, Zoom(bool), Step(i32), Keyframe(i32), Chapter(i32) }
 /// `hint` is the key cap a cut-mode button carries ("" for none).
 struct Control { r: RectPx, label: String, selected: bool, action: Action, hint: &'static str }
 impl Control {
@@ -5100,12 +5116,20 @@ mod tests {
         assert!(!app.playing);
 
         assert_eq!(app.controls().iter().filter(|c| matches!(c.action,
-            Action::Cut(CutAction::Split | CutAction::SplitAtPlayhead))).count(), 1,
+            Action::Cut(CutAction::Split | CutAction::ToggleSplit))).count(), 1,
             "the split icon replaces the scissors rather than adding a second button");
-        // The new toolbar button splits at the playhead and shares undo.
+        // The toolbar arms the tool; clicking uses its preview and shares undo.
         app.seek_all(1.0, true);
-        press(&mut app, CutAction::SplitAtPlayhead);
+        press(&mut app, CutAction::ToggleSplit);
+        assert!(app.split_tool);
+        assert!(app.cut.as_ref().unwrap().splits().is_empty());
+        let lane = app.cut_lanes().video;
+        let x = lane.x + ((1.0 - app.cut.as_ref().unwrap().t0) * app.cut.as_ref().unwrap().pps) as f32;
+        app.mouse_down(x, lane.y + lane.h / 2.0);
+        app.mouse_up();
         assert_eq!(app.cut.as_ref().unwrap().splits(), &[1.0]);
+        press(&mut app, CutAction::ToggleSplit);
+        assert!(!app.split_tool);
         app.cut_action(CutAction::Undo);
         assert!(app.cut.as_ref().unwrap().splits().is_empty());
 
@@ -5334,6 +5358,37 @@ mod tests {
         let cell = fit_cell(&short, cw, ch - 40);
         assert_eq!((cell[0], cell[3]), (0, 255), "padding is opaque black");
         assert_eq!(cell[(21 * cw * 4) as usize], 200, "the picture sits in the middle");
+    }
+
+    #[test]
+    fn split_tool_preview_and_click_use_nearest_key_or_next_frame() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        app.key(Key::Char('t'));
+        app.tick(0.01, (1280.0, 800.0), 2.0);
+        app.playing = false;
+        app.cut.as_mut().unwrap().set_keys(vec![0.0, 1.0, 2.0, 3.0]);
+        let lane = app.cut_lanes().video;
+        let at = |app: &App, t: f64| lane.x + ((t - app.cut.as_ref().unwrap().t0) * app.cut.as_ref().unwrap().pps) as f32;
+        app.cursor_moved(at(&app, 1.7), lane.y + lane.h / 2.0);
+        assert!(app.cut_razor().is_none(), "no preview with the tool off");
+        app.cut_action(CutAction::ToggleSplit);
+        assert_eq!(app.cut_razor(), Some(2.0), "nearest key, not the previous key");
+        let time = app.t;
+        app.mouse_down(app.cursor.0, app.cursor.1);
+        app.mouse_up();
+        assert_eq!(app.cut.as_ref().unwrap().splits(), &[2.0]);
+        assert_eq!(app.t, time, "splitting does not scrub");
+        assert!(app.split_tool, "tool remains armed for repeated cuts");
+        app.cut_action(CutAction::Snap(Snap::Frame));
+        app.cursor_moved(at(&app, 1.213), lane.y + lane.h / 2.0);
+        let expected = (1.213 * app.fps).ceil() / app.fps;
+        assert!((app.cut_razor().unwrap() - expected).abs() < 1e-6);
+        app.mouse_down(app.cursor.0, app.cursor.1);
+        assert!(app.cut.as_ref().unwrap().splits().iter().any(|t| (*t - expected).abs() < 1e-6));
+        app.key(Key::Escape);
+        assert!(!app.split_tool && app.cut_mode);
+        assert!(app.cut_razor().is_none());
     }
 
     #[test]
