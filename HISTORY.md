@@ -3,6 +3,13 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-11 — latest filled mode selector
+
+Synced Figma 122:441 again: 385×26 dark filled housing, 2px padding, 4px gaps,
+equal-width buttons, borderless gray selection and uppercase 11px JetBrains
+Mono Medium. Bundled the official font and OFL license so all installations
+use the same face. The shared component applies the update to every mode.
+
 ## 2026-10-11 — one shared Figma mode-selector component
 
 Applied the updated Figma container 122:441: transparent housing with a 2px

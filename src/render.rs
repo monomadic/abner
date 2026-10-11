@@ -280,7 +280,7 @@ impl TextBg {
 pub struct TextItem {
     /// Proportional SF Compact Rounded for interface labels.
     pub interface: bool,
-    /// SF Pro Display Medium for the shared mode selector.
+    /// JetBrains Mono Medium for the shared mode selector.
     pub header: bool,
     /// Anchor point; `align` decides which edge of the run sits here.
     pub x: f32,

@@ -106,14 +106,9 @@ impl TextCtx {
                 f
             });
         if ui_font.is_none() { log::warn!("SF Compact Rounded unavailable; interface uses the fallback font"); }
-        let header_font = std::fs::read("/Library/Fonts/SF-Pro-Display-Medium.otf").ok()
-            .and_then(|bytes| FontVec::try_from_vec(bytes).ok())
-            .or_else(|| std::fs::read("/System/Library/Fonts/SFNS.ttf").ok()
-                .and_then(|bytes| FontVec::try_from_vec(bytes).ok()).map(|mut f| {
-                    f.set_variation(b"wght", 500.0);
-                    f.set_variation(b"opsz", 28.0);
-                    f
-                }));
+        let header_font = Some(FontVec::try_from_vec(
+            include_bytes!("../assets/fonts/JetBrainsMono-Medium.ttf").to_vec()
+        ).expect("bundled JetBrains Mono Medium must parse"));
         Self {
             font, ui_font, header_font, header: false, interface: false,
             atlas: vec![0; (ATLAS * ATLAS) as usize],
@@ -305,7 +300,7 @@ mod tests {
         }
         text.set_header(true);
         #[cfg(target_os = "macos")]
-        assert!(text.header_font.is_some(), "SF Pro Display header font loads");
+        assert!(text.header_font.is_some(), "bundled JetBrains Mono header font loads");
         assert!(!text.layout("Sources", 24.0, 0.0674).quads.is_empty());
         text.set_interface(false);
         let narrow = text.layout("iii", 24.0, 0.0).w;

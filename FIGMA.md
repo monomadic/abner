@@ -311,3 +311,11 @@ all four labels use **SF Pro Display Medium**, 12px, tracking 0.0337px. The
 selected button (133/31% fill, white/8% border). `ModeSelector` owns its controls
 and drawing across every mode, anchored after the traffic lights. Remaining
 interface labels continue using SF Compact Rounded.
+
+### Latest mode-selector revision (2026-10-11)
+
+`122:441` now uses bundled JetBrains Mono Medium, uppercase at 11px, retaining
+0.0337px tracking. Geometry is 385×26, radius 8, padding 2, gap 4, with four
+92.25×22 buttons. Housing is #1a1b1c with no border; selection is #858585 at
+44% over the housing, radius 4, no border. This supersedes the SF Pro Display
+and transparent-outline selector above. Font and OFL license live in assets/fonts.

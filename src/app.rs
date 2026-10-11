@@ -2088,7 +2088,7 @@ impl App {
 
     fn mode_selector(&self) -> ModeSelector {
         ModeSelector {
-            rect: RectPx { x: if self.fullscreen { 14.0 } else { 85.0 }, y: 9.5, w: 383.0, h: 24.0 },
+            rect: RectPx { x: if self.fullscreen { 14.0 } else { 85.0 }, y: 8.5, w: 385.0, h: 26.0 },
             active: if self.cut_mode { 3 } else if !self.mask_mode { 0 } else if self.crop.is_none() { 1 } else { 2 },
         }
     }
@@ -2641,30 +2641,29 @@ struct ModeSelector {
 
 impl ModeSelector {
     fn controls(&self) -> Vec<Control> {
-        [("Sources", 0, 1.0, 95.0), ("Timeline", 3, 98.0, 90.0),
-         ("Crop", 2, 190.0, 95.0), ("Mask", 1, 287.0, 95.0)]
-            .into_iter().map(|(label, mode, x, w)| Control::new(
-                RectPx { x: self.rect.x + x, y: self.rect.y + 1.0, w, h: 22.0 },
+        let w = (self.rect.w - 4.0 - 3.0 * 4.0) / 4.0;
+        [("Sources", 0), ("Timeline", 3), ("Crop", 2), ("Mask", 1)]
+            .into_iter().enumerate().map(|(index, (label, mode))| Control::new(
+                RectPx { x: self.rect.x + 2.0 + index as f32 * (w + 4.0), y: self.rect.y + 2.0, w, h: self.rect.h - 4.0 },
                 label, self.active == mode, Action::Tool(mode))).collect()
     }
 
     fn draw(&self, items: &mut Vec<Item>, cursor: (f32, f32), inside: bool) {
-        let ground = 0x050506;
-        items.push(Item::Rect(RectItem { radius: 6.0, border_w: 2.0,
-            border_color: mix(ground, 0xffffff, 0.19), ..RectItem::new(self.rect, [0.0; 4]) }));
+        let ground = 0x1a1b1c;
+        items.push(Item::Rect(RectItem { radius: 8.0, ..RectItem::new(self.rect, hex_color(ground)) }));
         for control in self.controls() {
             let r = control.r;
             let hovered = inside && contains(r, cursor.0, cursor.1);
-            let selected = mix(ground, 0x858585, 0.31);
+            let selected = mix(ground, 0x858585, 0.44);
             if control.selected || hovered {
-                items.push(Item::Rect(RectItem { radius: 5.0, border_w: if control.selected { 1.0 } else { 0.0 },
-                    border_color: lerp4(selected, hex_color(0xffffff), 0.08),
+                items.push(Item::Rect(RectItem { radius: if control.selected { 4.0 } else { 7.0 },
                     ..RectItem::new(r, if control.selected { selected } else { mix(ground, 0xffffff, 0.08) }) }));
             }
             items.push(Item::Text(TextItem { header: true, align: Align::Center, valign: VAlign::Middle,
                 tracking: 0.0337, max_width: Some(r.w - 8.0),
-                ..TextItem::new(r.x + r.w / 2.0, r.y + r.h / 2.0, 12.0,
-                    mix(ground, 0xffffff, if control.selected { 0.88 } else { 0.51 }), control.label) }));
+                ..TextItem::new(r.x + r.w / 2.0, r.y + r.h / 2.0, 11.0,
+                    lerp4(if control.selected { selected } else { hex_color(ground) }, hex_color(0xffffff),
+                        if control.selected { 0.88 } else if control.label == "Sources" { 0.52 } else { 0.51 }), control.label.to_uppercase()) }));
         }
     }
 }
