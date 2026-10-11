@@ -3,6 +3,11 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-11 — text-only mode-selector hover
+
+Hover now turns the mode label white without adding a background fill.
+Only the selected mode retains the gray button fill, across all workspaces.
+
 ## 2026-10-11 — latest filled mode selector
 
 Synced Figma 122:441 again: 385×26 dark filled housing, 2px padding, 4px gaps,

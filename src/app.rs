@@ -2655,15 +2655,14 @@ impl ModeSelector {
             let r = control.r;
             let hovered = inside && contains(r, cursor.0, cursor.1);
             let selected = mix(ground, 0x858585, 0.44);
-            if control.selected || hovered {
-                items.push(Item::Rect(RectItem { radius: if control.selected { 4.0 } else { 7.0 },
-                    ..RectItem::new(r, if control.selected { selected } else { mix(ground, 0xffffff, 0.08) }) }));
+            if control.selected {
+                items.push(Item::Rect(RectItem { radius: 4.0, ..RectItem::new(r, selected) }));
             }
             items.push(Item::Text(TextItem { header: true, align: Align::Center, valign: VAlign::Middle,
                 tracking: 0.0337, max_width: Some(r.w - 8.0),
                 ..TextItem::new(r.x + r.w / 2.0, r.y + r.h / 2.0, 11.0,
                     lerp4(if control.selected { selected } else { hex_color(ground) }, hex_color(0xffffff),
-                        if control.selected { 0.88 } else if control.label == "Sources" { 0.52 } else { 0.51 }), control.label.to_uppercase()) }));
+                        if hovered { 1.0 } else if control.selected { 0.88 } else if control.label == "Sources" { 0.52 } else { 0.51 }), control.label.to_uppercase()) }));
         }
     }
 }
