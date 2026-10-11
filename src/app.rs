@@ -3861,7 +3861,7 @@ impl App {
                     let hot = ease(self.cut_hot_level(g.start, false));
                     items.push(Item::Rect(RectItem { radius: 7.0, border_w: 1.0, border_color: mix(CUT_TL, 0xffffff, 0.2 + 0.06 * hot),
                         ..RectItem::new(r, [1.0, 1.0, 1.0, 0.01 * hot]) }));
-                    // The picked clip: a 3px white outline, outside the rounded edge.
+                    // The picked clip gets an inset outline after all clip contents.
                     if self.cut_pick.is_some_and(|(a, b, snd)| !snd && (a - g.start).abs() < 1e-3 && (b - g.end).abs() < 1e-3) {
                         picked = Some(r);
                     }
@@ -4016,9 +4016,9 @@ impl App {
             bg: Some(TextBg { radius: 5.0, pad_x: 7.0, pad_y: 1.5, ..TextBg::new(hex_color(0xffffff)) }),
             ..TextItem::new(cx, lanes.keys.y + 5.5, 10.5, hex_color(0x000000), chip) }));
         if let Some(r) = picked {
-            // 2px, white, hugging the clip's rounded edge from outside.
-            let o = RectPx { x: r.x - 2.0, y: r.y - 2.0, w: r.w + 4.0, h: r.h + 4.0 };
-            items.push(Item::Rect(RectItem { radius: 9.0, border_w: 2.0, border_color: hex_color(0xffffff), ..RectItem::new(o, [0.0; 4]) }));
+            // The renderer places the band inside this shape. Keeping the clip's
+            // own bounds prevents the gutter and neighbouring clips cutting it off.
+            items.push(Item::Rect(RectItem { radius: 7.0, border_w: 2.0, border_color: hex_color(0xffffff), ..RectItem::new(r, [0.0; 4]) }));
         }
         items.push(Item::Clip(None));
     }
@@ -4159,9 +4159,8 @@ fn draw_icon(items: &mut Vec<Item>, icon: Icon, cx: f32, cy: f32, color: [f32; 4
         Icon::KeyBack | Icon::KeyFwd => {
             let m = if matches!(icon, Icon::KeyBack) { -1.0 } else { 1.0 };
             let center = -3.5 * m;
-            for (x, left) in [(center - 4.0, true), (center, false)] {
-                items.push(Item::Triangle { r: RectPx { x: cx + x, y: cy - 6.0, w: 4.0, h: 12.0 }, color, left, radius: 0.0 });
-            }
+            let points = [(center, -6.0), (center + 4.0, 0.0), (center, 6.0), (center - 4.0, 0.0), (center, -6.0)];
+            for edge in points.windows(2) { stroke(items, edge[0], edge[1]); }
             stroke(items, (3.0 * m, -5.0), (7.0 * m, 0.0));
             stroke(items, (7.0 * m, 0.0), (3.0 * m, 5.0));
         }
@@ -5194,6 +5193,10 @@ mod tests {
                         let bounds = clip.expect("selection must remain clipped");
                         assert_eq!(bounds.x, v.x);
                         assert_eq!(bounds.w, v.w);
+                        let lane = if audio { app.cut_lanes().audio.unwrap() } else { v };
+                        assert_eq!(r.r.y, lane.y, "selection stays inside the clip");
+                        assert_eq!(r.r.h, lane.h);
+                        assert_eq!(r.radius, 7.0);
                         saw_outline = true;
                     }
                     _ => {}

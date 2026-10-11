@@ -3,6 +3,12 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-11 — inset selection outlines and hollow keyframe icons
+
+Selected video and audio clips now draw their 2px white border inside the
+original rounded shape, over clip contents, so the gutter cannot cut off an
+outward stroke. Previous/next keyframe buttons use hollow diamonds and chevrons.
+
 ## 2026-10-11 — thumbnail joins and right-aligned transport clock
 
 Timeline posters round only their left corners, with a square join to the clip
