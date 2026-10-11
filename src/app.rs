@@ -176,6 +176,8 @@ pub struct App {
     cut_default: bool,
     /// The inspector's tab (0 chapters, 1 streams) and its chapter view.
     cut_tab: usize,
+    /// Only discrete seeks/framesteps adopt a decoded timestamp; pointer seeks stay pinned.
+    adopt_seek: bool,
     info_scroll: f32,
     cut_frames: bool,
     cut_thumbs: bool,
@@ -519,6 +521,7 @@ impl App {
             cut_default: false,
             cut_drag: None,
             cut_tab: 0,
+            adopt_seek: false,
             info_scroll: 0.0,
             cut_frames: false,
             cut_thumbs: false,
@@ -1254,6 +1257,7 @@ impl App {
     }
 
     fn seek_all(&mut self, target: f64, exact: bool) {
+        self.adopt_seek = true;
         for v in &mut self.videos {
             v.player.seek(target, exact);
         }
@@ -1624,6 +1628,7 @@ impl App {
         let s = self.seek_rect(self.vp);
         let f = ((x - s.x) / s.w.max(1.0)).clamp(0.0, 1.0) as f64;
         self.seek_all(f * (self.wrap - 0.05).max(0.0), true);
+        self.adopt_seek = false;
     }
 
     pub fn scroll(&mut self, dx: f32, dy: f32) {
@@ -1839,6 +1844,7 @@ impl App {
         let capture = self.mask_mode;
         let mut adopt = None;
         for (i, v) in self.videos.iter_mut().enumerate() {
+            let was_pending = v.pending;
             let got = if v.pending {
                 let g = v.player.take_next();
                 if g.is_some() {
@@ -1849,7 +1855,7 @@ impl App {
                 v.player.take_upto(t + 1e-6)
             };
             if let Some((pts, buf)) = got {
-                if v.pending == false && i == active && !self.playing {
+                if was_pending && self.adopt_seek && i == active && !self.playing {
                     adopt = Some(pts);
                 }
                 v.shown_pts = pts;
@@ -1863,8 +1869,8 @@ impl App {
                 uploads.push(Upload { idx: i, w: v.player.w, h: v.player.h, buf });
             }
         }
-        // While paused, glue the clock to the active stream's delivered
-        // frame (float-safe framestep adoption).
+        // Adopt once for a discrete seek/framestep. Pointer seeks retain
+        // the requested clock even when decoding lands on a nearby frame.
         if !self.playing && let Some(pts) = adopt {
             self.t = pts;
         }
@@ -3082,7 +3088,7 @@ impl App {
     }
 
     fn cut_thumb_hover(&self, rects: &[(i64, crate::cut::Segment, RectPx)]) -> Option<i64> {
-        if !self.cursor_inside || !self.show_ui || self.cut_drag.is_some() { return None; }
+        if !self.cursor_inside || !self.show_ui || !matches!(self.cut_drag, None | Some(CutDrag::Scrub)) { return None; }
         rects.iter().find(|(_, _, r)| contains(*r, self.cursor.0, self.cursor.1)).map(|(k, ..)| *k)
     }
 
@@ -3186,7 +3192,7 @@ impl App {
     fn tick_cut_hot(&mut self, dt: f32) {
         const RISE: f32 = 0.06;
         const FALL: f32 = 0.14;
-        let target = if self.cut_mode && self.show_ui && self.cursor_inside && self.cut_drag.is_none() {
+        let target = if self.cut_mode && self.show_ui && self.cursor_inside && matches!(self.cut_drag, None | Some(CutDrag::Scrub)) {
             self.cut_clip_at(self.cursor.0, self.cursor.1).map(|(g, snd)| ((g.start * 1000.0).round() as i64, snd))
         } else {
             None
@@ -3202,7 +3208,7 @@ impl App {
     }
 
     fn cut_hot_animating(&self) -> bool {
-        let target = if self.cut_mode && self.show_ui && self.cursor_inside && self.cut_drag.is_none() {
+        let target = if self.cut_mode && self.show_ui && self.cursor_inside && matches!(self.cut_drag, None | Some(CutDrag::Scrub)) {
             self.cut_clip_at(self.cursor.0, self.cursor.1).map(|(g, snd)| ((g.start * 1000.0).round() as i64, snd))
         } else {
             None
@@ -3248,12 +3254,17 @@ impl App {
         let Some(cut) = self.cut.as_mut() else { return };
         let end = (cut.duration.min(self.wrap) - 0.05).max(0.0);
         match self.cut_drag {
-            Some(CutDrag::Scrub) => self.seek_all(at.clamp(0.0, end), true),
+            Some(CutDrag::Scrub) => {
+                let target = at.clamp(0.0, end);
+                if (target - self.t).abs() > 1e-9 { self.seek_all(target, true); }
+                self.adopt_seek = false;
+            },
             Some(CutDrag::Edge(edge)) => {
                 // The canvas follows the edge, so the trim is made by eye.
                 let now = cut.move_edge(edge, at);
                 self.cut_drag = Some(CutDrag::Edge(now));
                 self.seek_all(now.min(end), true);
+                self.adopt_seek = false;
             }
             Some(CutDrag::Zoom) => {
                 // About the playhead when it is on screen, the middle if not.
@@ -5302,6 +5313,11 @@ mod tests {
         assert_eq!(app.cut_thumb.hover, Some(key));
         assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.cut_thumb.play.as_ref().is_some_and(|p| p.t > p.start + 0.2)), "its own clock advances");
 
+        let hover_time = app.cut_thumb.play.as_ref().unwrap().t;
+        app.mouse_down(app.cursor.0, app.cursor.1);
+        app.tick(0.010, (1280.0, 800.0), 2.0);
+        assert!(app.cut_thumb.play.as_ref().is_some_and(|p| p.t >= hover_time), "pressing preserves the hover decoder");
+        app.mouse_up();
         app.cursor_moved(r.x + r.w / 2.0, app.cut_lanes().ruler.y + 4.0);
         app.tick(0.010, (1280.0, 800.0), 2.0);
         assert!(app.cut_thumb.play.is_none() && app.cut_thumb.hover.is_none(), "leaving stops it");
@@ -5318,6 +5334,29 @@ mod tests {
         let cell = fit_cell(&short, cw, ch - 40);
         assert_eq!((cell[0], cell[3]), (0, 255), "padding is opaque black");
         assert_eq!(cell[(21 * cw * 4) as usize], 200, "the picture sits in the middle");
+    }
+
+    #[test]
+    fn pointer_seek_stays_exact_as_decoded_frames_arrive() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        assert!(tick_until(&mut app, Duration::from_secs(5), |a| a.started));
+        app.key(Key::Char('t'));
+        app.playing = false;
+        let lane = app.cut_lanes().video;
+        for fraction in [0.7137, 0.2237, 0.6137] {
+            app.mouse_down(lane.x + lane.w * fraction, lane.y + lane.h / 2.0);
+            let target = app.t;
+            let start = Instant::now();
+            while app.videos[0].pending && start.elapsed() < Duration::from_secs(5) {
+                app.tick(0.01, (1280.0, 800.0), 2.0);
+                assert_eq!(app.t, target, "decoder must not move a pointer-owned playhead");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(!app.videos[0].pending, "seek completed");
+            app.mouse_up();
+            for _ in 0..5 { app.tick(0.01, (1280.0, 800.0), 2.0); assert_eq!(app.t, target); }
+        }
     }
 
     #[test]
@@ -5408,6 +5447,12 @@ mod tests {
         for _ in 0..10 { app.tick(0.03, (1280.0, 800.0), 2.0); }
         assert_eq!(app.cut_hot_level(g.start, false), 1.0);
         assert!(!app.cut_hot_animating(), "settled: no redraws needed");
+        app.mouse_down(app.cursor.0, app.cursor.1);
+        for _ in 0..10 { app.tick(0.03, (1280.0, 800.0), 2.0); }
+        assert_eq!(app.cut_hot_level(g.start, false), 1.0, "pressing must not fade the hovered clip");
+        app.mouse_up();
+        app.tick(0.03, (1280.0, 800.0), 2.0);
+        assert_eq!(app.cut_hot_level(g.start, false), 1.0);
         app.cursor_moved(v.x + v.w * 0.5, v.y - 200.0);
         app.tick(0.03, (1280.0, 800.0), 2.0);
         let l2 = app.cut_hot_level(g.start, false);

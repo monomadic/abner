@@ -3,6 +3,15 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-11 — stable clip presses and pointer seeks
+
+Timeline mouse-down keeps the clip hover lift and thumbnail decoder active
+through scrubbing instead of fading/restoring and restarting them on release.
+Pointer seeks keep their requested clock position; only discrete seeks and
+frame steps adopt the first decoded frame timestamp, once. Repeated pointer
+positions no longer reissue timeline seeks. Regression coverage checks held
+hover, thumbnail continuity, and a stable playhead across real decoder delivery.
+
 ## 2026-10-11 — inspector typography, Info tab, and GOP details
 
 Matched the right inspector to Figma's SF Pro labels and section headings,
