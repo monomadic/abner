@@ -181,7 +181,6 @@ pub struct App {
     adopt_seek: bool,
     info_scroll: f32,
     cut_frames: bool,
-    show_reencoding: bool,
     cut_thumbs: bool,
     /// The start-of-clip thumbnails on the picture lane (posters, and the one under the pointer playing).
     cut_thumb: CutThumbs,
@@ -528,7 +527,6 @@ impl App {
             adopt_seek: false,
             info_scroll: 0.0,
             cut_frames: false,
-            show_reencoding: true,
             cut_thumbs: false,
             cut_thumb: CutThumbs::new(),
             cut_pick: None,
@@ -2012,7 +2010,7 @@ impl App {
     }
 
     fn cut_encode_rail(&self) -> bool {
-        self.show_reencoding && self.cut_frame_cells() &&
+        self.cut_frame_cells() &&
             self.cut.as_ref().is_some_and(|c| !c.pending_gops().is_empty())
     }
 
@@ -2795,7 +2793,6 @@ impl App {
         let t = self.t;
         let action = match k {
             Key::Char('`') => CutAction::TimeDisplay(!self.cut_frames),
-            Key::Char('r' | 'R') => CutAction::Reencoding(!self.show_reencoding),
             Key::Char('{') => CutAction::Chapter(-1),
             Key::Char('}') => CutAction::Chapter(1),
             Key::Char('i' | 'I') => CutAction::In,
@@ -2841,7 +2838,6 @@ impl App {
 
     fn cut_action(&mut self, action: CutAction) {
         if let CutAction::TimeDisplay(frames) = action { self.cut_frames = frames; return; }
-        if let CutAction::Reencoding(show) = action { self.show_reencoding = show; return; }
         if action == CutAction::ToggleSplit {
             self.split_tool = !self.split_tool;
             self.cut_pick = None;
@@ -2878,7 +2874,7 @@ impl App {
         cut.status.clear();
         match action {
             CutAction::Step(_) | CutAction::Keyframe(_) | CutAction::Chapter(_) => {}
-            CutAction::Play | CutAction::TimeDisplay(_) | CutAction::Reencoding(_) | CutAction::ToggleSplit => {}
+            CutAction::Play | CutAction::TimeDisplay(_) | CutAction::ToggleSplit => {}
             CutAction::Zoom(zoom_in) => {
                 let px = ((t - cut.t0) * cut.pps) as f32;
                 cut.zoom(if zoom_in { 1.5 } else { 1.0 / 1.5 }, if px >= 0.0 && px <= lane.w { px } else { lane.w / 2.0 }, lane.w);
@@ -2976,20 +2972,13 @@ impl App {
             push(RectPx { x, y: cy - 16.0, w: 32.0, h: 32.0 }, label, matches!(action, CutAction::Snap(_)) && keyframe, action, hint);
             x += 38.0;
         }
-        for (on, offset) in [(false, 0.0), (true, 40.0)] {
-            push(RectPx { x: x + offset, y: cy - 5.0, w: 40.0, h: 24.0 },
-                if on { "Show re-encoding" } else { "Hide re-encoding" }, self.show_reencoding == on, CutAction::Reencoding(on), "R");
-        }
-        x += 94.0;
-        if self.show_reencoding {
-            let r = if self.cut_clock_x() - x >= 108.0 {
-                RectPx { x, y: cy - 16.0, w: 100.0, h: 32.0 }
-            } else {
-                // Keep every action reachable on 720px windows without covering the clock.
-                RectPx { x: w - 209.0, y: 8.5, w: 84.0, h: 26.0 }
-            };
-            push(r, if cut.encoding() { "Encoding…" } else { "Encode all" }, false, CutAction::EncodeAll, "Encode every split GOP");
-        }
+        let r = if self.cut_clock_x() - x >= 108.0 {
+            RectPx { x, y: cy - 16.0, w: 100.0, h: 32.0 }
+        } else {
+            // Keep Encode all reachable without covering the clock on narrow windows.
+            RectPx { x: w - 209.0, y: 8.5, w: 84.0, h: 26.0 }
+        };
+        push(r, if cut.encoding() { "Encoding…" } else { "Encode all" }, false, CutAction::EncodeAll, "Encode every split GOP");
         if bar.w >= 900.0 {
             let zoom = self.cut_zoom_bar();
             push(RectPx { x: zoom.x - 28.0, y: cy - 12.0, w: 24.0, h: 24.0 }, "Zoom out", false, CutAction::Zoom(false), "");
@@ -3023,7 +3012,6 @@ impl App {
     /// Shared paint/hit geometry, clipped to kept material and the viewport.
     fn cut_encode_regions(&self) -> Vec<(f64, RectPx)> {
         let Some(cut) = &self.cut else { return Vec::new() };
-        if !self.show_reencoding { return Vec::new(); }
         let video = self.cut_lanes().video;
         let row = if self.cut_encode_rail() {
             RectPx { y: video.y + video.h + 3.0, h: 22.0, ..video }
@@ -3579,22 +3567,6 @@ impl App {
             CutAction::TimeDisplay(frames) => {
                 ui_label(items, r.x, cy, 10.0, if self.cut_frames == frames { hex_color(CUT_INK) } else { mix(CUT_BAR, 0xffffff, 0.3) },
                     &control.label, Align::Left, r.w);
-            }
-            CutAction::Reencoding(on) => {
-                let selected = self.show_reencoding == on;
-                if !on {
-                    items.push(Item::Text(TextItem::new(r.x, r.y - 12.0, 8.0, hex_color(0x9ca9b5), "RE-ENCODING")));
-                    items.push(Item::Rect(RectItem { radius: 5.0, border_w: 1.0, border_color: hex_color(0x454b53),
-                        ..RectItem::new(RectPx { w: 80.0, ..r }, hex_color(0x050608)) }));
-                }
-                if selected {
-                    items.push(Item::Rect(RectItem { radius: 3.0, ..RectItem::new(
-                        RectPx { x: r.x + 2.0, y: r.y + 2.0, w: 36.0, h: 20.0 },
-                        hex_color(if on { 0xb68aff } else { 0xc8cdd4 })) }));
-                }
-                items.push(Item::Text(TextItem { align: Align::Center, valign: VAlign::Middle,
-                    ..TextItem::new(cx, cy, 10.0, hex_color(if selected { 0x17121e } else if hovered { 0xffffff } else { 0x89939d }),
-                        if on { "ON" } else { "OFF" }) }));
             }
             CutAction::Snap(_) => {
                 let on = cut.snap == Snap::Keyframe;
@@ -4600,7 +4572,7 @@ impl Workspace {
 #[derive(Clone, Copy)]
 enum Action { Duplicate, OpenFiles, ClearSources, Tool(usize), View(Mode), Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
 #[derive(Clone, Copy, PartialEq)]
-enum CutAction { Reencoding(bool), TimeDisplay(bool), In, Out, Split, ToggleSplit, Apply, DeletePicked, Undo, Export, EncodeAll, Encode(f64), Snap(Snap), Play, Zoom(bool), Step(i32), Keyframe(i32), Chapter(i32) }
+enum CutAction { TimeDisplay(bool), In, Out, Split, ToggleSplit, Apply, DeletePicked, Undo, Export, EncodeAll, Encode(f64), Snap(Snap), Play, Zoom(bool), Step(i32), Keyframe(i32), Chapter(i32) }
 /// `hint` is the key cap a cut-mode button carries ("" for none).
 struct Control { r: RectPx, label: String, selected: bool, action: Action, hint: &'static str }
 impl Control {
@@ -4657,7 +4629,7 @@ const CONTROL_BG: [f32; 4] = [26.0 / 255.0, 26.0 / 255.0, 26.0 / 255.0, 1.0];
 #[cfg(test)]
 mod tests {
     #[test]
-    fn reencoding_toggle_preserves_edits_and_toolbar_fits() {
+    fn encoding_regions_remain_visible_and_toolbar_fits() {
         let Some(clip) = test_clip() else { return };
         let mut app = mk_app(&clip, 1);
         app.set_cut_default(true);
@@ -4671,25 +4643,14 @@ mod tests {
         let video = app.cut_lanes().video;
         assert!(app.cut_encode_regions().iter().all(|(_,r)| r.y >= video.y + video.h));
         assert!(app.cut_thumb_rects().is_empty(), "frame cells replace the poster at close zoom");
-        app.key(Key::Char('r'));
-        assert!(!app.show_reencoding && app.cut_encode_regions().is_empty());
         assert_eq!(app.cut.as_ref().unwrap().pending_gops().len(), pending);
-        assert!(!app.controls().iter().any(|c| matches!(c.action, Action::Cut(CutAction::EncodeAll))));
-        app.key(Key::Char('r'));
         for width in [720.0, 900.0, 1280.0] {
             app.vp = (width, 800.0);
             let controls = app.controls();
-            let off = controls.iter().find(|c| matches!(c.action, Action::Cut(CutAction::Reencoding(false)))).unwrap();
-            let on = controls.iter().find(|c| matches!(c.action, Action::Cut(CutAction::Reencoding(true)))).unwrap();
-            assert!(off.r.x + off.r.w <= on.r.x);
-            assert!(on.r.x + on.r.w < app.cut_clock_x());
             let all = controls.iter().find(|c| matches!(c.action, Action::Cut(CutAction::EncodeAll))).unwrap();
             assert!(all.r.x >= 0.0 && all.r.x + all.r.w <= width);
-            if all.r.y >= HEADER_H { assert!(all.r.x >= on.r.x + on.r.w && all.r.x + all.r.w < app.cut_clock_x()); }
-            let r = off.r;
-            app.mouse_down(r.x+r.w/2.0, r.y+r.h/2.0); app.mouse_up();
-            assert!(!app.show_reencoding);
-            app.cut_action(CutAction::Reencoding(true));
+            if all.r.y >= HEADER_H { assert!(all.r.x >= app.cut_tools_x() + 5.0*38.0 && all.r.x + all.r.w < app.cut_clock_x()); }
+            assert!(!app.cut_encode_regions().is_empty());
         }
     }
 

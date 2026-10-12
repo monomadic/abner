@@ -3,6 +3,13 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-12 — remove the re-encoding visibility switch
+
+Removed the toolbar switch and R binding after design review. Purple pending
+regions and Encode controls remain available, including the separate strip at
+close zoom. Frame cells, colors and the green keyframe-snap state are retained.
+Lossless/lossy mode controls are deferred to a future design.
+
 ## 2026-10-12 — outlined frame cells and toolbar toggle states
 
 Matched the revised Figma palette and frame-cell treatment: green keys, yellow I,

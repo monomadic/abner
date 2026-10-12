@@ -338,8 +338,8 @@ numbers appear at 80px/frame. Intermediate zoom keeps full-height colored lines.
 Native lanes retain their compact height. Cell widths follow actual timestamps.
 
 Toolbar states follow 245:455: snap uses a green icon/border over #082b16.
-RE-ENCODING is an OFF/ON switch (R), showing/hiding purple regions and Encode
-controls without changing pending work. ON uses #b68aff; OFF uses #c8cdd4.
+The re-encoding switch was removed after review. Pending regions and Encode
+controls remain available; lossless/lossy mode selection is deferred.
 At close zoom, pending regions occupy a separate strip below the frame cells.
 Encode all moves beside Export when the toolbar is too narrow for both it and
 the clock. Drawing and pointer handling share all control/region geometry.
