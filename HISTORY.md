@@ -3,6 +3,14 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-12 — Figma SVG frame icons and card fidelity
+
+Replaced the hand-drawn frame symbols with the original Figma SVG card variants,
+bundled and rendered locally. Frame labels and numbers now use JetBrains Mono
+Medium with the design's tracking and icon spacing. Cards fit their image area
+to the source aspect ratio, removing extra internal padding without stretching
+or cropping the picture. Narrow cards retain readable type and omit the number.
+
 ## 2026-10-12 — GOP thumbnail inspection
 
 Implemented amended Figma board 258:496: bright frame cards with the new diamond

@@ -365,3 +365,16 @@ outline and frame-type summary; Backspace removes that GOP and Undo restores it.
 Audio and wider video views retain clip selection. Purple encode regions remain
 in their own strip. `--frame-detail` and `--frame-changes` open the two views at
 maximum detail for native inspection.
+
+### Original frame SVGs and card typography (2026-10-12)
+
+Frame headers now embed the original dark SVG exports from the card instances
+258:460 / 258:468 / 258:615 / 258:486, under `assets/frame-icons`. resvg renders
+the unchanged assets at 4x into reserved atlas cells; intrinsic sizes and view
+boxes are retained. The hand-built diamond/arrow approximations are removed.
+
+Card labels and numbers use the bundled JetBrains Mono Medium at 15px with 1.4px
+tracking, with the Figma icon slots and label offsets. Narrow cards hide the number
+instead of shrinking the type. Containers retain 8px outer / 7px image radii, a
+3px colored inset and 20px identity row. Image height follows the actual video
+aspect ratio; portrait cards narrow to keep images within the 120px height cap.

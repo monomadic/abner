@@ -27,6 +27,7 @@ png = "0.18"
 # In-process libav (same setup as switchblade): links the system ffmpeg 8.x
 # dev libraries via pkg-config (`brew install ffmpeg` provides them).
 rsmpeg = { version = "0.18", default-features = false, features = ["link_system_ffmpeg", "ffmpeg8"] }
+resvg = { version = "0.45", default-features = false }
 
 # AppKit, for two things (both in main.rs): the fake-fullscreen contour fix
 # on macOS Tahoe (the ~1px window border is drawn with the shadow, so we

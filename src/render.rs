@@ -126,6 +126,31 @@ fn decode_logo() -> Logo {
     }
 }
 
+// Original Figma card-instance exports, including their intrinsic view boxes.
+const FRAME_ICON_SVGS: [&[u8]; 4] = [
+    include_bytes!("../assets/frame-icons/key.svg"), include_bytes!("../assets/frame-icons/i.svg"),
+    include_bytes!("../assets/frame-icons/p.svg"), include_bytes!("../assets/frame-icons/b.svg"),
+];
+const THUMB_ROWS: usize = recent::ATLAS / recent::ATLAS_COLS + 1;
+const ICON_SCALE: f32 = 4.0;
+
+fn frame_icon_tree(index: usize) -> resvg::usvg::Tree {
+    resvg::usvg::Tree::from_data(FRAME_ICON_SVGS[index], &resvg::usvg::Options::default())
+        .expect("bundled Figma frame icon must parse")
+}
+
+fn frame_icon_pixels(index: usize) -> Vec<u8> {
+    let tree = frame_icon_tree(index);
+    let mut pix = resvg::tiny_skia::Pixmap::new(THUMB_W, THUMB_H).unwrap();
+    resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(ICON_SCALE, ICON_SCALE), &mut pix.as_mut());
+    // resvg returns premultiplied sRGB; the texture pipeline expects straight alpha.
+    let mut rgba = pix.data().to_vec();
+    for p in rgba.chunks_exact_mut(4) {
+        if p[3] > 0 { for c in 0..3 { p[c] = ((p[c] as u32 * 255 + p[3] as u32 / 2) / p[3] as u32).min(255) as u8; } }
+    }
+    rgba
+}
+
 /// sRGB → linear for values headed to an `*UnormSrgb` render target that
 /// re-encodes on write (the shader's `ui_color`, CPU side).
 fn srgb_to_linear(c: f32) -> f64 {
@@ -363,6 +388,7 @@ pub enum Item {
     Scanlines { r: RectPx, color: [f32; 4] },
     /// A recent file's thumbnail from atlas cell `slot`, clipped to a
     /// rounded rect of `radius` — the launch window's recent row.
+    FrameIcon { x: f32, y: f32, index: usize },
     Thumb { r: RectPx, slot: usize, radius: f32, alpha: f32, cover: bool, clip_poster: bool },
     Mask { r: RectPx, id: u64, revision: u64, width: u32, height: u32, pixels: Arc<Vec<u8>> },
     /// A triangle filling `r`, pointing right (or left): transport glyphs
@@ -451,6 +477,7 @@ pub struct Gpu {
     /// rows of `ATLAS_COLS` — bound in every group like the plate, so mode 14
     /// needs no batch key.
     thumbs: VideoTex,
+    frame_icon_sizes: [(f32, f32); 4],
     mask_tex: wgpu::Texture,
     mask_view: wgpu::TextureView,
     mask_version: Option<(u64, u64)>,
@@ -729,7 +756,7 @@ impl Gpu {
             &blit_bgl,
             &sampler,
             THUMB_W * recent::ATLAS_COLS as u32,
-            THUMB_H * (recent::ATLAS / recent::ATLAS_COLS) as u32,
+            THUMB_H * THUMB_ROWS as u32,
         );
 
         let glyph_tex = device.create_texture(&wgpu::TextureDescriptor {
@@ -767,6 +794,7 @@ impl Gpu {
             logo: VideoTex { dirty: true, ..logo },
             plate: VideoTex { dirty: true, ..plate },
             thumbs,
+            frame_icon_sizes: std::array::from_fn(|i| { let t=frame_icon_tree(i); (t.size().width(), t.size().height()) }),
             mask_tex,
             mask_view,
             mask_version: None,
@@ -783,6 +811,7 @@ impl Gpu {
         };
         // Keyless batches (text/rects before any video item) fall back to
         // the (0, 0) pair — make sure it exists.
+        for i in 0..4 { gpu.upload_thumb(&ThumbUpload { slot: recent::ATLAS+i, buf: frame_icon_pixels(i) }); }
         gpu.pair_bg(0, 0);
         Ok(gpu)
     }
@@ -1045,7 +1074,7 @@ impl Gpu {
 
     /// A finished thumbnail into its cell of the recent row's atlas.
     fn upload_thumb(&mut self, up: &ThumbUpload) {
-        if up.slot >= recent::ATLAS || up.buf.len() != (THUMB_W * THUMB_H * 4) as usize {
+        if up.slot >= recent::ATLAS + 4 || up.buf.len() != (THUMB_W * THUMB_H * 4) as usize {
             log::warn!("bad thumbnail upload: slot {} {}B", up.slot, up.buf.len());
             return;
         }
@@ -1297,10 +1326,23 @@ impl Gpu {
                     p1: 0.0,
                     pad: 0.0,
                 }),
+                Item::FrameIcon { x, y, index } => {
+                    let (w, h) = self.frame_icon_sizes[*index];
+                    let slot = recent::ATLAS + *index;
+                    let tw = (THUMB_W * recent::ATLAS_COLS as u32) as f32;
+                    let th = (THUMB_H * THUMB_ROWS as u32) as f32;
+                    let u = (slot % recent::ATLAS_COLS) as f32 * THUMB_W as f32;
+                    let v = (slot / recent::ATLAS_COLS) as f32 * THUMB_H as f32;
+                    push(&mut data, &mut batches, clip, None, Instance {
+                        pos: [*x, *y], size: [w, h],
+                        uv: [u/tw, v/th, (u+w*ICON_SCALE)/tw, (v+h*ICON_SCALE)/th],
+                        color: [0.0,0.0,0.0,1.0], mode:14.0,p0:0.0,p1:0.0,pad:0.0,
+                    });
+                }
                 Item::Thumb { r, slot, radius, alpha, cover, clip_poster } => {
                     // Half a texel in from the cell's edges, so the
                     // neighbouring cell never bleeds in through filtering.
-                    let (nu, nv) = (recent::ATLAS_COLS as f32, (recent::ATLAS / recent::ATLAS_COLS) as f32);
+                    let (nu, nv) = (recent::ATLAS_COLS as f32, THUMB_ROWS as f32);
                     let (hu, hv) = (0.5 / (THUMB_W as f32 * nu), 0.5 / (THUMB_H as f32 * nv));
                     let (u0, v0) = ((*slot % recent::ATLAS_COLS) as f32 / nu, (*slot / recent::ATLAS_COLS) as f32 / nv);
                     // Cover the rect: crop the 16:9 cell to its aspect, centred.
@@ -1515,5 +1557,26 @@ mod workspace_tests {
     fn scissors_stay_inside_the_surface() {
         assert_eq!(scissor(RectPx { x: -5.0, y: 20.0, w: 50.0, h: 100.0 }, 2.0, 100, 100), [0, 40, 90, 60]);
         assert_eq!(scissor(RectPx { x: 80.0, y: 0.0, w: 50.0, h: 20.0 }, 2.0, 100, 100), [100, 0, 0, 40]);
+    }
+}
+
+#[cfg(test)]
+mod frame_icon_tests {
+    use super::*;
+
+    #[test]
+    fn figma_svg_icons_render_nonempty_distinct_pixels_at_intrinsic_size() {
+        let mut images = Vec::new();
+        for i in 0..4 {
+            let tree = frame_icon_tree(i);
+            assert!(tree.size().width()*ICON_SCALE < THUMB_W as f32);
+            assert!(tree.size().height()*ICON_SCALE < THUMB_H as f32);
+            let pixels = frame_icon_pixels(i);
+            assert!(pixels.chunks_exact(4).any(|p| p[3] > 200));
+            assert!(pixels.chunks_exact(4).any(|p| p[3] > 0 && p[3] < 255));
+            assert!(pixels.chunks_exact(4).filter(|p| p[3] == 255).all(|p| p[..3] == [27,31,34]));
+            assert!(!images.contains(&pixels));
+            images.push(pixels);
+        }
     }
 }

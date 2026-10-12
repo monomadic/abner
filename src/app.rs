@@ -2033,7 +2033,7 @@ impl App {
         if !self.frame_detail() { return 56.0; }
         let info = &self.videos[self.active].info;
         // Keep portrait pictures inside a bounded thumbnail, too.
-        (160.0 * info.height as f32 / info.width.max(1) as f32).clamp(48.0, 120.0) + 48.0
+        (154.0 * info.height as f32 / info.width.max(1) as f32).min(120.0) + 50.0
     }
 
     fn frame_detail_extra(&self) -> f32 {
@@ -2060,6 +2060,8 @@ impl App {
         let lo = c.frames.partition_point(|t| *t < c.t0).saturating_sub(1);
         let hi = c.frames.partition_point(|t| *t < end);
         let segs = c.segments();
+        let info=&self.videos[self.active].info;
+        let aspect=info.width.max(1) as f32 / info.height.max(1) as f32;
         (lo..hi).take(256).filter_map(|i| {
             let t = c.frames[i];
             let seg = segs.iter().find(|s| !s.cut && t >= s.start && t < s.end)?;
@@ -2067,9 +2069,10 @@ impl App {
             let fi = c.frame_info.partition_point(|f| f.pts < t - 1e-6);
             let info = c.frame_info.get(fi).filter(|f| (f.pts-t).abs() < 1e-6);
             let key = info.map_or_else(|| c.keys.binary_search_by(|k| k.total_cmp(&t)).is_ok(), |f| f.key);
+            let width=(((to-t)*c.pps) as f32-4.0).clamp(7.0,160.0).min(120.0*aspect+6.0);
             Some((i, t, info.map_or('?', |f| f.kind), key, RectPx {
                 x: v.x + ((t-c.t0)*c.pps) as f32 + 2.0, y: v.y + 24.0,
-                w: (((to-t)*c.pps) as f32 - 4.0).clamp(1.0, 160.0), h: v.h - 26.0 }))
+                w: width, h: (width-6.0)/aspect+26.0 }))
         }).collect()
     }
 
@@ -3262,12 +3265,20 @@ impl App {
             items.push(Item::Rect(RectItem { radius:8.0, border_w:3.0, border_color:color, ..RectItem::new(r,color) }));
             let ink = hex_color(0x1b1f22);
             let small = r.w < 120.0;
-            draw_frame_icon(items, r.x+13.0, r.y+12.0, kind, key, ink);
-            items.push(Item::Text(TextItem { valign:VAlign::Middle, tracking:if small {0.0} else {1.4}, max_width:Some((r.w-52.0).max(0.0)),
-                ..TextItem::new(r.x+27.0,r.y+12.0,if small {9.0} else {15.0},ink,if key {"KEY".into()} else {kind.to_string()}) }));
-            if r.w >= 100.0 {
-                items.push(Item::Text(TextItem { align:Align::Right,valign:VAlign::Middle,tracking:1.4,max_width:Some(r.w*0.45),
-                    ..TextItem::new(r.x+r.w-7.0,r.y+12.0,if small {10.0} else {15.0},ink,format!("{index:03}")) }));
+            let icon = if key { 0 } else { match kind { 'I'=>1, 'P'=>2, 'B'=>3, _=>0 } };
+            // Match the Figma identity row: its icon box, label gap and inset.
+            let (icon_x, icon_y, label_x) = match icon {
+                0 => (3.0, 3.0, 25.0), 1 => (3.0, 1.5, 27.0),
+                2 => (7.5, 2.0, 29.5), _ => (7.5, 3.0, 36.5),
+            };
+            if key || matches!(kind, 'I'|'P'|'B') {
+                items.push(Item::FrameIcon { x:r.x+icon_x, y:r.y+icon_y, index:icon });
+            }
+            items.push(Item::Text(TextItem { header:true, valign:VAlign::Middle, tracking:1.4, max_width:Some((r.w-label_x-8.0).max(0.0)),
+                ..TextItem::new(r.x+label_x,r.y+13.0,15.0,ink,if key {"KEY".into()} else {kind.to_string()}) }));
+            if !small {
+                items.push(Item::Text(TextItem { header:true, align:Align::Right,valign:VAlign::Middle,tracking:1.4,max_width:Some(r.w*0.45),
+                    ..TextItem::new(r.x+r.w-7.0,r.y+13.0,15.0,ink,format!("{index:03}")) }));
             }
             let box_r = RectPx {x:r.x+3.0,y:r.y+23.0,w:(r.w-6.0).max(1.0),h:r.h-26.0};
             items.push(Item::Rect(RectItem {radius:7.0,..RectItem::new(box_r,hex_color(0x1b1f22))}));
@@ -4416,20 +4427,6 @@ const FRAME_B: u32 = 0x00d0ff;
 
 fn frame_color(kind: char, key: bool) -> [f32; 4] {
     hex_color(if key {FRAME_KEY} else {match kind {'I'=>FRAME_I,'P'=>FRAME_P,'B'=>FRAME_B,_=>0x969da5}})
-}
-
-/// Diamond + directional prediction marks; all strokes use the native geometry.
-fn draw_frame_icon(items: &mut Vec<Item>, cx: f32, cy: f32, kind: char, key: bool, color: [f32;4]) {
-    let stroke = |items: &mut Vec<Item>, a:(f32,f32), b:(f32,f32)| {
-        let n=((a.0-b.0).abs().max((a.1-b.1).abs())*2.0).ceil() as usize;
-        for i in 0..=n {let t=i as f32/n.max(1) as f32;
-            items.push(Item::Rect(RectItem{radius:0.5,..RectItem::new(RectPx{x:cx+a.0+(b.0-a.0)*t-0.5,y:cy+a.1+(b.1-a.1)*t-0.5,w:1.0,h:1.0},color)}));}
-    };
-    for (a,b) in [((0.0,-5.0),(4.0,0.0)),((4.0,0.0),(0.0,5.0)),((0.0,5.0),(-4.0,0.0)),((-4.0,0.0),(0.0,-5.0))] {stroke(items,a,b);}
-    if key {return;}
-    if kind=='I' {items.push(Item::Rect(RectItem{radius:1.0,..RectItem::new(RectPx{x:cx-1.0,y:cy-1.0,w:2.0,h:2.0},color)}));}
-    if kind=='P'||kind=='B' {for (a,b) in [((-6.0,0.0),(-11.0,0.0)),((-8.0,-2.5),(-11.0,0.0)),((-11.0,0.0),(-8.0,2.5))] {stroke(items,a,b);}}
-    if kind=='B' {for (a,b) in [((6.0,0.0),(11.0,0.0)),((8.0,-2.5),(11.0,0.0)),((11.0,0.0),(8.0,2.5))] {stroke(items,a,b);}}
 }
 
 /// Cells appear at close zoom; at medium zoom only the full-height edge remains.
