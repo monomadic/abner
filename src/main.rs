@@ -71,6 +71,8 @@ keys:
   S            save the mask as <name>.mask.png — with a crop up, both it
                and the video under it (<name>.crop.png), cut to the marquee
   E            export the cropped clip as ProRes 422 Proxy
+  D            toggle decoded / changes frame thumbnails
+  --frame-detail / --frame-changes  open at maximum frame detail
   `            toggle Timeline time/frame display (--timeline-frames)
   { / }        previous / next chapter in Timeline
   T            cut mode: the focused clip on a timeline (--cut opens there;
@@ -108,6 +110,7 @@ fn main() -> anyhow::Result<()> {
     let mut crop: Option<Option<[f32; 4]>> = None;
     let mut duplicate = false;
     let mut timeline_frames = false;
+    let mut frame_detail = None;
     let mut paths: Vec<PathBuf> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -134,6 +137,8 @@ fn main() -> anyhow::Result<()> {
             }
         } else if a == "--no-video-splash" {
             // Any arguments already disable the splash, including this flag alone.
+        } else if a == "--frame-detail" || a == "--frame-changes" {
+            frame_detail = Some(a == "--frame-changes");
         } else if a == "--timeline-frames" {
             timeline_frames = true;
         } else if a == "--duplicate" {
@@ -239,6 +244,7 @@ fn main() -> anyhow::Result<()> {
     if mask_mode { runner.app.key(Key::Char('m')); }
     if let Some(ranges) = cut { runner.app.start_cut(ranges); }
     if timeline_frames { runner.app.key(Key::Char('`')); }
+    if let Some(changes) = frame_detail { runner.app.start_frame_detail(changes); }
     if let Some(rect) = crop { runner.app.start_crop(rect); }
     event_loop.run_app(&mut runner)?;
     Ok(())

@@ -343,3 +343,25 @@ controls remain available; lossless/lossy mode selection is deferred.
 At close zoom, pending regions occupy a separate strip below the frame cells.
 Encode all moves beside Export when the toolbar is too narrow for both it and
 the clock. Drawing and pointer handling share all control/region geometry.
+
+### GOP thumbnails and frame icons (2026-10-12)
+
+Amended Timeline Edit board `258:496` supersedes the close-zoom cell treatment
+above. At 80 average pixels per frame, cards show real decoded thumbnails; zoom
+stops at 160 pixels per average frame, with horizontal panning for navigation.
+Card widths still follow timestamps and never exceed 160px. Source aspect ratio
+is preserved. The existing green/yellow/magenta/cyan palette now fills the header
+and 3px card outline, with dark labels and icons: hollow diamond for keys, dotted
+diamond for other I frames, left-arrow diamond for P, two-arrow diamond for B.
+
+Decoded / Changes controls share geometry with hit testing; D switches views.
+Changes compares consecutive decoded thumbnails, whitening pixels whose RGB
+difference is at most 12/255 per channel. Keyframes remain complete images. This
+is a visual change mask, not codec residual data or dependency analysis. Workers
+load visible frames with at most two requests in flight and a bounded atlas.
+
+At thumbnail zoom, clicking video selects the containing GOP, with a white inset
+outline and frame-type summary; Backspace removes that GOP and Undo restores it.
+Audio and wider video views retain clip selection. Purple encode regions remain
+in their own strip. `--frame-detail` and `--frame-changes` open the two views at
+maximum detail for native inspection.

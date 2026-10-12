@@ -285,8 +285,7 @@ impl Cut {
                 if !self.chapters_edited { self.chapters = scan.chapters; }
                 self.facts = scan.facts;
                 self.gops = scan.gops;
-                self.frame_zoom_limit = scan.frames.windows(2).map(|p| p[1]-p[0])
-                    .filter(|d| *d > 1e-6).min_by(f64::total_cmp).map_or(600.0, |d| (112.0/d).max(600.0));
+                self.frame_zoom_limit = 160.0 * scan.frames.len().max(1) as f64 / self.duration.max(0.001);
                 self.frames = scan.frames;
                 self.set_keys(scan.keys);
             }
@@ -706,6 +705,14 @@ impl Cut {
 
     // ---- timeline view ----
 
+    /// Source GOP containing this display time; the end is exclusive.
+    pub fn gop_at(&self, at: f64) -> Option<(f64, f64)> {
+        let i = self.keys.partition_point(|t| *t <= at).checked_sub(1)?;
+        let a = self.keys[i];
+        let b = self.keys.get(i + 1).copied().unwrap_or(self.duration);
+        (at < b).then_some((a, b))
+    }
+
     /// Seconds the lanes show at the current scale.
     pub fn span(&self, width: f32) -> f64 {
         width as f64 / self.pps.max(1e-6)
@@ -714,7 +721,7 @@ impl Cut {
     /// Fit the first view (the design's 18 px/s, or the whole clip when
     /// that is shorter than the lanes) and keep `t0` inside the clip.
     pub fn fit_view(&mut self, width: f32) {
-        let whole = width as f64 / self.duration.max(0.1);
+        let whole = (width as f64 / self.duration.max(0.1)).min(self.frame_zoom_limit);
         if self.pps <= 0.0 {
             self.pps = whole.max(18.0);
         }
@@ -740,13 +747,14 @@ impl Cut {
     /// Where the scale sits between "the whole clip" (0) and the closest
     /// zoom (1), on a log scale — the zoom slider's position.
     pub fn zoom_fraction(&self, width: f32) -> f64 {
-        let whole = width as f64 / self.duration.max(0.1);
+        let whole = (width as f64 / self.duration.max(0.1)).min(self.frame_zoom_limit);
         let range = (whole.max(self.frame_zoom_limit) / whole).ln();
-        if range <= 0.0 { 0.0 } else { ((self.pps / whole).ln() / range).clamp(0.0, 1.0) }
+        if range <= 0.0 { 1.0 } else { ((self.pps / whole).ln() / range).clamp(0.0, 1.0) }
     }
 
     pub fn set_zoom_fraction(&mut self, f: f64, anchor: f32, width: f32) {
-        let whole = width as f64 / self.duration.max(0.1);
+        self.fit_view(width);
+        let whole = (width as f64 / self.duration.max(0.1)).min(self.frame_zoom_limit);
         let target = whole * (whole.max(self.frame_zoom_limit) / whole).powf(f.clamp(0.0, 1.0));
         self.zoom(target / self.pps.max(1e-6), anchor, width);
     }
@@ -1203,6 +1211,21 @@ pub fn export(source: &Path, dest: &Path, keeps: &[(f64, f64)], snap: Snap, chap
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gop_selection_and_zoom_ceiling_do_not_expand_to_the_clip() {
+        let mut c=Cut::new(Path::new("test.mp4"),0.1);
+        c.set_keys(vec![0.0,0.04,0.08]);
+        assert_eq!(c.gop_at(0.04),Some((0.04,0.08)));
+        assert_eq!(c.gop_at(0.099),Some((0.08,0.1)));
+        assert_eq!(c.gop_at(0.1),None);
+        c.frame_zoom_limit=4800.0;
+        c.set_zoom_fraction(1.0,0.0,100.0);
+        assert_eq!(c.pps,4800.0,"maximum detail also initializes an unfitted view");
+        c.fit_view(1000.0);
+        c.zoom(100.0,100.0,1000.0);
+        assert_eq!(c.pps,4800.0,"even a shorter-than-view clip stops at thumbnail size");
+    }
+
     #[test]
     fn decoded_frame_types_preserve_key_flags_and_presentation_order() {
         let dir = std::env::temp_dir().join("abner_frame_types_test");

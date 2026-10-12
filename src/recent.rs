@@ -29,7 +29,7 @@ pub const SHOWN: usize = 4;
 /// launch row uses the first `SHOWN`; cut mode's clip and chapter posters
 /// use the lot.
 pub const ATLAS_COLS: usize = 4;
-pub const ATLAS: usize = 16;
+pub const ATLAS: usize = 64;
 /// One thumbnail's pixel size: a 16:9 cover crop, about 2.4× the tile's
 /// logical size so it stays sharp on a retina display.
 pub const THUMB_W: u32 = 320;
@@ -169,6 +169,38 @@ pub fn frame(path: &Path, at: f64) -> anyhow::Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
+/// A timeline frame, without the poster's cover crop. The atlas rectangle is
+/// stretched here and restored to the source aspect ratio by the UI. Seeking
+/// just before the indexed PTS avoids skipping a frame through decimal rounding.
+pub fn timeline_frame(path: &Path, at: f64, previous: Option<f64>) -> anyhow::Result<Vec<u8>> {
+    fn decoded(path: &Path, at: f64) -> anyhow::Result<Vec<u8>> {
+        let mut cmd = Command::new("ffmpeg");
+        cmd.args(["-nostdin", "-v", "error", "-threads", "1", "-ss", &format!("{:.9}", (at - 0.000001).max(0.0)), "-i"])
+            .arg(path).args(["-map", "0:v:0", "-frames:v", "1", "-vf",
+                &format!("scale={THUMB_W}:{THUMB_H}:flags=area"),
+                "-threads", "1", "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "rgba", "-"]);
+        let out = probe::run_deadlined(&mut cmd, THUMB_DEADLINE)?
+            .ok_or_else(|| anyhow::anyhow!("frame preview timed out"))?;
+        anyhow::ensure!(out.success && out.stdout.len() == (THUMB_W * THUMB_H * 4) as usize,
+            "frame preview: {}", String::from_utf8_lossy(&out.stderr));
+        Ok(out.stdout)
+    }
+    let mut current = decoded(path, at)?;
+    if let Some(t) = previous {
+        let before = decoded(path, t)?;
+        mask_unchanged(&mut current, &before);
+    }
+    Ok(current)
+}
+
+/// Changes is a decoded-image comparison, never a claim about codec residuals.
+/// A small threshold suppresses quantization noise; unchanged pixels turn white.
+fn mask_unchanged(current: &mut [u8], previous: &[u8]) {
+    for (a, b) in current.chunks_exact_mut(4).zip(previous.chunks_exact(4)) {
+        if (0..3).all(|c| a[c].abs_diff(b[c]) <= 12) { a.copy_from_slice(&[255; 4]); }
+    }
+}
+
 /// The tile's corner chip: the container, from the file's extension.
 pub fn container(path: &Path) -> String {
     path.extension().map(|e| e.to_string_lossy().to_ascii_uppercase()).unwrap_or_default()
@@ -188,6 +220,33 @@ pub fn fmt_duration(secs: f64) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn changes_preserve_changed_pixels_and_white_out_small_differences() {
+        let previous=[20,30,40,255,100,110,120,255];
+        let mut current=[22,31,40,255,200,110,120,255];
+        super::mask_unchanged(&mut current,&previous);
+        assert_eq!(current,[255,255,255,255,200,110,120,255]);
+    }
+
+    #[test]
+    fn timeline_preview_seeks_the_requested_b_frame() {
+        use std::process::Command;
+        if Command::new("ffmpeg").arg("-version").output().is_err() {return;}
+        let path=std::env::temp_dir().join(format!("abner-frame-preview-{}.mp4",std::process::id()));
+        assert!(Command::new("ffmpeg").args(["-y","-v","error","-f","lavfi","-i","testsrc2=size=96x64:rate=8:duration=1","-c:v","libx264","-threads","1","-g","4","-bf","2"]).arg(&path).status().unwrap().success());
+        let all=Command::new("ffmpeg").args(["-v","error","-i"]).arg(&path).args(["-vf","scale=320:180:flags=area","-threads","1","-f","rawvideo","-pix_fmt","rgba","-"]).output().unwrap();
+        assert!(all.status.success());
+        let size=(super::THUMB_W*super::THUMB_H*4) as usize;
+        let frame=super::timeline_frame(&path,0.375,None).unwrap();
+        assert_eq!(frame,&all.stdout[size*3..size*4]);
+        let changes=super::timeline_frame(&path,0.375,Some(0.25)).unwrap();
+        let mut expected=frame;
+        super::mask_unchanged(&mut expected,&all.stdout[size*2..size*3]);
+        assert_eq!(changes,expected);
+        assert!(changes.chunks_exact(4).any(|p|p==[255;4]));
+        std::fs::remove_file(path).unwrap();
+    }
+
     use super::*;
 
     #[test]

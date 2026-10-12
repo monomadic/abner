@@ -3,6 +3,18 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-12 — GOP thumbnail inspection
+
+Implemented amended Figma board 258:496: bright frame cards with the new diamond
+icon language, actual per-frame previews, and Decoded / Changes controls. Changes
+whitens unchanged pixels relative to the previous decoded frame; keys stay whole.
+Preview jobs and atlas storage are bounded, and thumbnails retain source aspect.
+
+Zoom stops at 160 pixels per average frame. At thumbnail detail, selecting video
+selects its GOP, shows frame counts, and makes Backspace remove only that GOP.
+Wider views keep clip selection. Regression coverage checks real decoded pixels,
+change masking, zoom limits, GOP deletion/undo and compact layout.
+
 ## 2026-10-12 — remove the re-encoding visibility switch
 
 Removed the toolbar switch and R binding after design review. Purple pending

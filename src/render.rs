@@ -363,7 +363,7 @@ pub enum Item {
     Scanlines { r: RectPx, color: [f32; 4] },
     /// A recent file's thumbnail from atlas cell `slot`, clipped to a
     /// rounded rect of `radius` — the launch window's recent row.
-    Thumb { r: RectPx, slot: usize, radius: f32, alpha: f32, clip_poster: bool },
+    Thumb { r: RectPx, slot: usize, radius: f32, alpha: f32, cover: bool, clip_poster: bool },
     Mask { r: RectPx, id: u64, revision: u64, width: u32, height: u32, pixels: Arc<Vec<u8>> },
     /// A triangle filling `r`, pointing right (or left): transport glyphs
     /// drawn as geometry, so they centre on their shape — a font's ▶ sits
@@ -1297,7 +1297,7 @@ impl Gpu {
                     p1: 0.0,
                     pad: 0.0,
                 }),
-                Item::Thumb { r, slot, radius, alpha, clip_poster } => {
+                Item::Thumb { r, slot, radius, alpha, cover, clip_poster } => {
                     // Half a texel in from the cell's edges, so the
                     // neighbouring cell never bleeds in through filtering.
                     let (nu, nv) = (recent::ATLAS_COLS as f32, (recent::ATLAS / recent::ATLAS_COLS) as f32);
@@ -1305,7 +1305,7 @@ impl Gpu {
                     let (u0, v0) = ((*slot % recent::ATLAS_COLS) as f32 / nu, (*slot / recent::ATLAS_COLS) as f32 / nv);
                     // Cover the rect: crop the 16:9 cell to its aspect, centred.
                     let (cell, want) = (THUMB_W as f32 / THUMB_H as f32, r.w / r.h.max(1e-3));
-                    let (ku, kv) = if want > cell { (1.0, cell / want) } else { (want / cell, 1.0) };
+                    let (ku, kv) = if !cover { (1.0, 1.0) } else if want > cell { (1.0, cell / want) } else { (want / cell, 1.0) };
                     let (cu, cv) = ((1.0 - ku) / (2.0 * nu), (1.0 - kv) / (2.0 * nv));
                     push(&mut data, &mut batches, clip, None, Instance {
                         pos: [r.x, r.y],
