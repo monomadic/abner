@@ -1681,10 +1681,8 @@ impl App {
         if self.ready() && self.cut_mode && self.show_ui && self.cut_over_panel() {
             let lane = self.cut_lanes().video;
             let anchor = (self.cursor.0 - lane.x).clamp(0.0, lane.w);
-            // Exponential, a touch quicker than the video's: pinching two fingers
-            // INWARD over the track dives in about the pointer, spreading backs out
-            // (the inverse of the video's pinch — a timeline is a ruler, not a photo).
-            if let Some(cut) = &mut self.cut { cut.zoom((-(delta as f64) * 1.8).exp(), anchor, lane.w); }
+            // Spreading zooms in, closing zooms out, anchored under the pointer.
+            if let Some(cut) = &mut self.cut { cut.zoom(((delta as f64) * 1.8).exp(), anchor, lane.w); }
             return;
         }
         if !self.ready() || !contains(self.workspace().canvas, self.cursor.0, self.cursor.1) { return; }
@@ -2998,7 +2996,7 @@ impl App {
         let mut out = Vec::new();
         for g in cut.pending_gops() {
             for s in cut.segments().iter().filter(|s| !s.cut) {
-                let left = (row.x + ((g.start.max(s.start) - cut.t0) * cut.pps) as f32 + 2.0).max(row.x);
+                let left = (row.x + ((g.encode_start.max(s.start) - cut.t0) * cut.pps) as f32 + 2.0).max(row.x);
                 let right = (row.x + ((g.end.min(s.end) - cut.t0) * cut.pps) as f32 - 2.0).min(row.x + row.w);
                 if right > left { out.push((g.start, RectPx { x: left, y: row.y + 2.0, w: right-left, h: row.h-4.0 })); }
             }
@@ -5525,10 +5523,19 @@ mod tests {
         let Some(clip) = test_clip() else { return };
         let mut app = mk_app(&clip, 1);
         app.key(Key::Char('t')); app.playing = false;
-        assert!(tick_until(&mut app, Duration::from_secs(5), |a| !a.cut.as_ref().unwrap().scanning()));
+        assert!(tick_until(&mut app, Duration::from_secs(5), |a| {
+            let c = a.cut.as_ref().unwrap();
+            !c.scanning() && !c.frames.is_empty() && c.frame_info.len() == c.frames.len()
+        }));
         let at = app.cut.as_ref().unwrap().frames[10];
         let cut = app.cut.as_mut().unwrap(); cut.snap = Snap::Frame; cut.split(at);
-        let (_, region) = app.cut_encode_regions().into_iter().find(|(_, r)| r.w >= 54.0).unwrap();
+        assert_eq!(cut.pending_gops()[0].encode_start, at);
+        let regions = app.cut_encode_regions();
+        assert_eq!(regions.len(), 1, "I/P prefix has no purple encoding region");
+        let (_, region) = regions.into_iter().find(|(_, r)| r.w >= 54.0).unwrap();
+        let lane = app.cut_lanes().video;
+        let c = app.cut.as_ref().unwrap();
+        assert!(region.x >= lane.x + ((at-c.t0)*c.pps) as f32);
         let button = App::encode_button(region);
         app.mouse_down(button.x+button.w/2.0, button.y+button.h/2.0); app.mouse_up();
         assert!(app.cut.as_ref().unwrap().encoding());
@@ -5648,12 +5655,14 @@ mod tests {
             app.scroll(0.0, 20.0);
             assert!(app.cut.as_ref().unwrap().pps > before, "no zoom at ({x}, {y})");
         }
-        // Pinch: fingers closing dive in, spreading backs out.
+        // Pinch: spreading zooms in, closing zooms out.
         let before = app.cut.as_ref().unwrap().pps;
+        let anchor_before = app.cut_time_at(app.cursor.0);
         app.pinch(0.2);
-        assert!(app.cut.as_ref().unwrap().pps < before, "spreading should zoom out");
+        assert!(app.cut.as_ref().unwrap().pps > before, "spreading should zoom in");
+        assert!((app.cut_time_at(app.cursor.0) - anchor_before).abs() < 1e-6, "pinch preserves the time under the pointer");
         app.pinch(-0.2);
-        assert!((app.cut.as_ref().unwrap().pps - before).abs() < 1e-6, "pinching inward should zoom back in");
+        assert!((app.cut.as_ref().unwrap().pps - before).abs() < 1e-6, "pinching inward should zoom back out");
     }
 
     /// The hover lift on a clip eases up over a few frames and back down after

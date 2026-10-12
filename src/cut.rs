@@ -776,7 +776,19 @@ impl Cut {
         affected.into_iter().map(|(i, mut inside)| {
             let g = &self.gops[i];
             inside.sort_by(f64::total_cmp); inside.dedup_by(|a,b| (*a-*b).abs() < EPS);
-            crate::smart::Region { start: g.start, end: g.end.min(self.duration), boundaries: inside }
+            let end = g.end.min(self.duration);
+            let first = self.frames.partition_point(|t| *t < g.start - 1e-6);
+            let last = self.frames.partition_point(|t| *t < end - 1e-6);
+            let info_first = self.frame_info.partition_point(|f| f.pts < g.start - 1e-6);
+            let info_last = self.frame_info.partition_point(|f| f.pts < end - 1e-6);
+            let info = &self.frame_info[info_first..info_last];
+            // Only shrink the job once every presentation timestamp in this GOP
+            // has a known I/P type. Partial analysis stays conservative.
+            let ip_only = last > first && info.len() == last-first &&
+                info.iter().zip(&self.frames[first..last]).all(|(f,t)|
+                    matches!(f.kind, 'I' | 'P') && (f.pts-t).abs() < 1e-6);
+            let encode_start = if ip_only { inside[0] } else { g.start };
+            crate::smart::Region { start: g.start, encode_start, end, boundaries: inside }
         }).collect()
     }
 
@@ -1237,6 +1249,28 @@ mod tests {
         cut.frames = vec![0.0, 0.03, 0.08, 0.12];
         assert_eq!(cut.next_frame(0.04), 0.08, "actual variable-rate frame boundary");
         assert_eq!(cut.next_frame(0.08), 0.08);
+    }
+
+    #[test]
+    fn split_encoding_requires_complete_ip_only_gop() {
+        let mut cut = Cut::new(Path::new("source.mp4"), 2.0);
+        cut.keys = vec![0.0, 1.0];
+        cut.gops = vec![Gop { start: 0.0, end: 1.0, packets: 4, bytes: 100 }];
+        cut.frames = vec![0.0, 0.25, 0.5, 0.75];
+        cut.snap = Snap::Frame;
+        assert!(cut.split(0.5)); assert!(cut.split(0.75));
+        assert_eq!(cut.pending_gops()[0].encode_start, 0.0);
+        cut.frame_info = cut.frames.iter().map(|t| FrameInfo { pts: *t, kind: if *t == 0.0 { 'I' } else { 'P' }, key: *t == 0.0 }).collect();
+        let planned = cut.pending_gops();
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].encode_start, 0.5);
+        assert_eq!(planned[0].boundaries, vec![0.5, 0.75]);
+        cut.frame_info[3].kind = 'B';
+        assert_eq!(cut.pending_gops()[0].encode_start, 0.0, "B after the split requires the whole GOP");
+        cut.frame_info.pop();
+        assert_eq!(cut.pending_gops()[0].encode_start, 0.0, "partial metadata must not authorize copying");
+        cut.frame_info.push(FrameInfo { pts: 0.75, kind: '?', key: false });
+        assert_eq!(cut.pending_gops()[0].encode_start, 0.0);
     }
 
     #[test]

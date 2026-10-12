@@ -3,6 +3,20 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-12 — frame-aware split encoding and natural pinch zoom
+
+Fully analysed I/P-only GOPs now copy the prefix before the first split and encode
+the suffix through the next keyframe, adding keys at every split in that suffix.
+GOPs containing B-frames, unknown types or incomplete analysis still encode whole.
+Purple regions and Encode buttons use the same planned suffix. The worker verifies
+the source frame types again before copying a partial GOP and retains frame timing,
+audio and full-decode checks before publishing the working source.
+
+Regression coverage includes multiple splits, incomplete metadata, B-frame rejection,
+constant/variable frame rates, identical copied picture slices and unchanged audio.
+Timeline pinch now matches the video canvas: spread fingers to zoom in, close them
+to zoom out, preserving the source time under the pointer.
+
 ## 2026-10-12 — colored frame detail at close zoom
 
 Timeline video clips now show tall amber keyframe markers, gray non-key I frames,

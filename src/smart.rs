@@ -3,7 +3,7 @@
 use std::{path::{Path, PathBuf}, process::{Command, Stdio}, sync::atomic::{AtomicBool, Ordering}, time::{Duration, Instant}};
 use anyhow::{Context, ensure};
 
-pub struct Region { pub start: f64, pub end: f64, pub boundaries: Vec<f64> }
+pub struct Region { pub start: f64, pub encode_start: f64, pub end: f64, pub boundaries: Vec<f64> }
 struct Work(PathBuf);
 impl Drop for Work { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
 
@@ -59,8 +59,27 @@ pub fn encode(source: &Path, regions: &[Region], cancel: &AtomicBool) -> anyhow:
     }).next().unwrap_or(period);
     let duration = pts.last().unwrap() + last_duration;
     for r in regions {
-        for t in std::iter::once(&r.start).chain(std::iter::once(&r.end)).chain(&r.boundaries) {
+        for t in std::iter::once(&r.start).chain(std::iter::once(&r.encode_start)).chain(std::iter::once(&r.end)).chain(&r.boundaries) {
             ensure!((*t-duration).abs() < 0.0001 || pts.binary_search_by(|p| if (*p-*t).abs() < 0.0001 { std::cmp::Ordering::Equal } else { p.total_cmp(t) }).is_ok(), "An edit is between frames; move it to a frame boundary before encoding");
+        }
+    }
+    // Recheck the source before copying a partial GOP: the UI's asynchronous
+    // metadata must never authorize copying unknown or B-frame dependencies.
+    if regions.iter().any(|r| r.encode_start > r.start + 0.0001) {
+        let json = work.0.join("types.json");
+        run(Command::new("ffprobe").args(["-v", "error", "-select_streams", "v:0", "-show_frames",
+            "-show_entries", "frame=best_effort_timestamp_time,pict_type", "-of", "json"])
+            .arg(source).stdout(std::fs::File::create(&json)?), &work.0, cancel)?;
+        let types: serde_json::Value = serde_json::from_slice(&std::fs::read(json)?)?;
+        for r in regions.iter().filter(|r| r.encode_start > r.start + 0.0001) {
+            let decoded: Vec<_> = types["frames"].as_array().into_iter().flatten().filter_map(|f| {
+                let t: f64 = f["best_effort_timestamp_time"].as_str()?.parse().ok()?;
+                (t >= r.start-0.0001 && t < r.end-0.0001).then_some((t, f["pict_type"].as_str().unwrap_or("")))
+            }).collect();
+            let expected: Vec<_> = pts.iter().filter(|t| **t >= r.start-0.0001 && **t < r.end-0.0001).collect();
+            ensure!(!expected.is_empty() && decoded.len() == expected.len() &&
+                decoded.iter().zip(expected).all(|((t,k), p)| (t-p).abs() < 0.0001 && matches!(*k, "I" | "P")),
+                "Partial GOP copy requires complete I/P frame analysis; source unchanged");
         }
     }
     let mut spans = Vec::new(); let mut at = 0.0;
@@ -83,16 +102,26 @@ pub fn encode(source: &Path, regions: &[Region], cancel: &AtomicBool) -> anyhow:
         let copied = work.0.join(format!("copy-{i}.mp4"));
         let part = work.0.join(format!("part-{i}.mp4"));
         if let Some(r) = region {
-            let first = pts.partition_point(|t| *t < *a - 0.0001);
-            let forced = r.boundaries.iter().filter(|t| **t > *a && **t < *b)
+            let prefix = r.encode_start - a;
+            if prefix > 0.0001 {
+                let head = work.0.join(format!("head-{i}.mp4"));
+                run(ffmpeg().arg("-i").arg(&copied).args(["-map", "0:v:0", "-c", "copy", "-t",
+                    &format!("{prefix:.9}"), "-video_track_timescale", "90000"]).arg(&head), &work.0, cancel)?;
+                list.push_str(&format!("file 'head-{i}.mp4'\nduration {prefix:.9}\n"));
+            }
+            let first = pts.partition_point(|t| *t < r.encode_start - 0.0001);
+            let forced = r.boundaries.iter().filter(|t| **t > r.encode_start && **t < *b)
                 .map(|t| format!("eq(n,{})", pts.partition_point(|p| *p < *t - 0.0001) - first)).collect::<Vec<_>>().join("+");
             let mut cmd = ffmpeg();
             cmd.arg("-noautorotate").arg("-i").arg(&copied).args(["-map", "0:v:0", "-fps_mode", "passthrough", "-enc_time_base", "1:90000", "-c:v", "libx264", "-preset", "medium", "-crf", "16", "-bf", &b_frames, "-forced-idr", "1", "-x264-params", "open-gop=0:repeat-headers=1", "-sc_threshold", "0", "-pix_fmt", "yuv420p"]);
+            if prefix > 0.0001 {
+                cmd.args(["-vf", &format!("trim=start={prefix:.9},setpts=PTS-STARTPTS"), "-bf", "0"]);
+            }
             if !forced.is_empty() { cmd.args(["-force_key_frames", &format!("expr:{forced}")]); }
             cmd.args(["-video_track_timescale", "90000"]).arg(&part);
             run(&mut cmd, &work.0, cancel)?;
         } else { std::fs::rename(copied, &part)?; }
-        list.push_str(&format!("file 'part-{i}.mp4'\nduration {:.9}\n", b-a));
+        list.push_str(&format!("file 'part-{i}.mp4'\nduration {:.9}\n", b-region.map_or(*a, |r| r.encode_start)));
     }
     let playlist = work.0.join("concat.txt"); std::fs::write(&playlist, list)?;
     let output = work.0.join("output.mp4");
@@ -121,24 +150,43 @@ mod tests {
         assert!(out.status.success());
         String::from_utf8_lossy(&out.stdout).lines().filter(|l| !l.starts_with('#')).map(|l| l.split(',').last().unwrap().trim().to_string()).collect()
     }
+    fn packet_hashes(path: &Path) -> Vec<String> {
+        // Concat injects parameter sets at keyframes. Compare coded picture
+        // slices, excluding those container/header differences.
+        let out = Command::new("ffmpeg").args(["-v", "error", "-i"]).arg(path)
+            .args(["-map", "0:v:0", "-c", "copy", "-bsf:v", "filter_units=pass_types=1-5",
+                "-f", "framehash", "-hash", "sha256", "-"]).output().unwrap();
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout).lines().filter(|l| !l.starts_with('#'))
+            .map(|l| l.split(',').last().unwrap().trim().to_owned()).collect()
+    }
     #[test]
     fn only_requested_gops_change_and_audio_and_frame_timing_survive() {
         let dir = std::env::temp_dir().join(format!("abner-smart-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap(); let work = Work(dir);
-        for (bf, vfr) in [("0", false), ("2", false), ("2", true)] {
+        for (bf, vfr) in [("0", false), ("0", true), ("2", false), ("2", true)] {
         let source = work.0.join(format!("source-{bf}-{vfr}.mp4")); let cancel = AtomicBool::new(false);
         run(ffmpeg().args(["-f", "lavfi", "-i", "testsrc2=size=160x90:rate=30", "-f", "lavfi", "-i", "sine=frequency=440", "-t", "4", "-vf", if vfr { "select=not(eq(mod(n\\,7)\\,6))" } else { "null" }, "-fps_mode", "vfr", "-c:v", "libx264", "-preset", "ultrafast", "-g", "30", "-bf", bf, "-sc_threshold", "0", "-c:a", "aac"]).arg(&source), &work.0, &cancel).unwrap();
         let original = std::fs::read(&source).unwrap();
         let info = probe(&source, &work.0, &cancel).unwrap();
         let pts = frames(&info);
         let end = pts.last().unwrap() + 1.0/30.0;
-        let regions = [Region { start: pts[30], end: pts[60], boundaries: vec![pts[42], pts[51]] }, Region { start: pts[90], end, boundaries: vec![pts[98]] }];
+        let regions = [Region { start: pts[30], encode_start: if bf == "0" { pts[42] } else { pts[30] }, end: pts[60], boundaries: vec![pts[42], pts[51]] }, Region { start: pts[90], encode_start: if bf == "0" { pts[98] } else { pts[90] }, end, boundaries: vec![pts[98]] }];
         let dest = encode(&source, &regions, &cancel).unwrap();
         assert_eq!(std::fs::read(&source).unwrap(), original);
         let a = hashes(&source, false); let b = hashes(&dest, false);
         assert_eq!(a.len(), pts.len()); assert_eq!(a.len(), b.len());
         assert_eq!(&a[..30], &b[..30]); assert_eq!(&a[60..90], &b[60..90]);
-        assert_ne!(&a[30..60], &b[30..60]);
+        if bf == "0" {
+            assert_eq!(&a[30..42], &b[30..42]); assert_eq!(&a[90..98], &b[90..98]);
+            let original_packets = packet_hashes(&source); let copied_packets = packet_hashes(&dest);
+            assert_eq!(&original_packets[30..42], &copied_packets[30..42], "I/P prefix picture slices are copied verbatim");
+            assert_eq!(&original_packets[90..98], &copied_packets[90..98]);
+        } else {
+            let invalid = [Region { start: pts[30], encode_start: pts[42], end: pts[60], boundaries: vec![pts[42]] }];
+            assert!(encode(&source, &invalid, &cancel).unwrap_err().to_string().contains("complete I/P"));
+        }
+        assert_ne!(&a[42..60], &b[42..60]);
         assert_eq!(hashes(&source, true), hashes(&dest, true));
         cancel.store(true, Ordering::Relaxed);
         assert!(encode(&source, &regions, &cancel).is_err());
