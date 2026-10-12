@@ -181,6 +181,7 @@ pub struct App {
     adopt_seek: bool,
     info_scroll: f32,
     cut_frames: bool,
+    show_reencoding: bool,
     cut_thumbs: bool,
     /// The start-of-clip thumbnails on the picture lane (posters, and the one under the pointer playing).
     cut_thumb: CutThumbs,
@@ -527,6 +528,7 @@ impl App {
             adopt_seek: false,
             info_scroll: 0.0,
             cut_frames: false,
+            show_reencoding: true,
             cut_thumbs: false,
             cut_thumb: CutThumbs::new(),
             cut_pick: None,
@@ -1997,7 +1999,21 @@ impl App {
     /// Shared layout for drawing and hit testing; the image transform is always
     /// relative to this canvas, including in mask/crop and side-by-side modes.
     fn workspace(&self) -> Workspace {
-        Workspace::new(self.vp, self.show_ui, self.cut_mode)
+        let mut w = Workspace::new(self.vp, self.show_ui, self.cut_mode);
+        if self.show_ui && self.cut_mode && self.cut_encode_rail() {
+            w.canvas.h = (w.canvas.h - 26.0).max(1.0);
+            w.transport.y -= 26.0; w.timeline.y -= 26.0; w.timeline.h += 26.0;
+        }
+        w
+    }
+
+    fn cut_frame_cells(&self) -> bool {
+        self.cut.as_ref().is_some_and(|c| c.pps / self.fps.max(1.0) >= 32.0)
+    }
+
+    fn cut_encode_rail(&self) -> bool {
+        self.show_reencoding && self.cut_frame_cells() &&
+            self.cut.as_ref().is_some_and(|c| !c.pending_gops().is_empty())
     }
 
     fn source_capacity(&self) -> usize {
@@ -2779,6 +2795,7 @@ impl App {
         let t = self.t;
         let action = match k {
             Key::Char('`') => CutAction::TimeDisplay(!self.cut_frames),
+            Key::Char('r' | 'R') => CutAction::Reencoding(!self.show_reencoding),
             Key::Char('{') => CutAction::Chapter(-1),
             Key::Char('}') => CutAction::Chapter(1),
             Key::Char('i' | 'I') => CutAction::In,
@@ -2824,6 +2841,7 @@ impl App {
 
     fn cut_action(&mut self, action: CutAction) {
         if let CutAction::TimeDisplay(frames) = action { self.cut_frames = frames; return; }
+        if let CutAction::Reencoding(show) = action { self.show_reencoding = show; return; }
         if action == CutAction::ToggleSplit {
             self.split_tool = !self.split_tool;
             self.cut_pick = None;
@@ -2860,7 +2878,7 @@ impl App {
         cut.status.clear();
         match action {
             CutAction::Step(_) | CutAction::Keyframe(_) | CutAction::Chapter(_) => {}
-            CutAction::Play | CutAction::TimeDisplay(_) | CutAction::ToggleSplit => {}
+            CutAction::Play | CutAction::TimeDisplay(_) | CutAction::Reencoding(_) | CutAction::ToggleSplit => {}
             CutAction::Zoom(zoom_in) => {
                 let px = ((t - cut.t0) * cut.pps) as f32;
                 cut.zoom(if zoom_in { 1.5 } else { 1.0 / 1.5 }, if px >= 0.0 && px <= lane.w { px } else { lane.w / 2.0 }, lane.w);
@@ -2912,12 +2930,13 @@ impl App {
         let lane = |top: f32, h: f32| RectPx { x, y: tl.y + top, w, h };
         // The board's own offsets; the compact panel closes up the rows
         // it drops.
-        if tl.h >= CUT_TIMELINE_H {
+        let extra = if self.cut_encode_rail() { 26.0 } else { 0.0 };
+        if self.vp.1 >= CUT_FULL_MIN_H {
             CutLanes { ruler: lane(2.0, 14.0), chapters: Some(lane(20.0, 24.0)), video: lane(48.0, 56.0),
-                audio: Some(lane(108.0, 39.0)), subs: lane(156.0, 17.0), keys: lane(180.0, 18.0) }
+                audio: Some(lane(108.0 + extra, 39.0)), subs: lane(156.0 + extra, 17.0), keys: lane(180.0 + extra, 18.0) }
         } else {
             CutLanes { ruler: lane(2.0, 14.0), chapters: None, video: lane(20.0, 56.0),
-                audio: None, subs: lane(84.0, 17.0), keys: lane(108.0, 18.0) }
+                audio: None, subs: lane(84.0 + extra, 17.0), keys: lane(108.0 + extra, 18.0) }
         }
     }
 
@@ -2957,8 +2976,20 @@ impl App {
             push(RectPx { x, y: cy - 16.0, w: 32.0, h: 32.0 }, label, matches!(action, CutAction::Snap(_)) && keyframe, action, hint);
             x += 38.0;
         }
-        push(RectPx { x, y: cy - 16.0, w: (self.cut_clock_x() - x - 8.0).min(100.0).max(72.0), h: 32.0 },
-            if cut.encoding() { "Encoding…" } else { "Encode all" }, false, CutAction::EncodeAll, "Encode every split GOP");
+        for (on, offset) in [(false, 0.0), (true, 40.0)] {
+            push(RectPx { x: x + offset, y: cy - 5.0, w: 40.0, h: 24.0 },
+                if on { "Show re-encoding" } else { "Hide re-encoding" }, self.show_reencoding == on, CutAction::Reencoding(on), "R");
+        }
+        x += 94.0;
+        if self.show_reencoding {
+            let r = if self.cut_clock_x() - x >= 108.0 {
+                RectPx { x, y: cy - 16.0, w: 100.0, h: 32.0 }
+            } else {
+                // Keep every action reachable on 720px windows without covering the clock.
+                RectPx { x: w - 209.0, y: 8.5, w: 84.0, h: 26.0 }
+            };
+            push(r, if cut.encoding() { "Encoding…" } else { "Encode all" }, false, CutAction::EncodeAll, "Encode every split GOP");
+        }
         if bar.w >= 900.0 {
             let zoom = self.cut_zoom_bar();
             push(RectPx { x: zoom.x - 28.0, y: cy - 12.0, w: 24.0, h: 24.0 }, "Zoom out", false, CutAction::Zoom(false), "");
@@ -2986,13 +3017,17 @@ impl App {
     }
 
     fn encode_button(r: RectPx) -> RectPx {
-        RectPx { x: r.x + (r.w - 48.0) / 2.0, y: r.y + (r.h - 22.0) / 2.0, w: 48.0, h: 22.0 }
+        RectPx { x: r.x + (r.w - 48.0) / 2.0, y: r.y + (r.h - 22.0_f32.min(r.h)) / 2.0, w: 48.0, h: 22.0_f32.min(r.h) }
     }
 
     /// Shared paint/hit geometry, clipped to kept material and the viewport.
     fn cut_encode_regions(&self) -> Vec<(f64, RectPx)> {
         let Some(cut) = &self.cut else { return Vec::new() };
-        let row = self.cut_lanes().video;
+        if !self.show_reencoding { return Vec::new(); }
+        let video = self.cut_lanes().video;
+        let row = if self.cut_encode_rail() {
+            RectPx { y: video.y + video.h + 3.0, h: 22.0, ..video }
+        } else { video };
         let mut out = Vec::new();
         for g in cut.pending_gops() {
             for s in cut.segments().iter().filter(|s| !s.cut) {
@@ -3132,6 +3167,7 @@ impl App {
     /// sticks to the visible left edge while the start is scrolled away.
     fn cut_thumb_rects(&self) -> Vec<(i64, crate::cut::Segment, RectPx)> {
         let Some(cut) = self.cut.as_ref().filter(|_| self.cut_mode) else { return Vec::new() };
+        if self.cut_frame_cells() { return Vec::new(); }
         let v = self.cut_lanes().video;
         let (t0, pps) = (cut.t0, cut.pps.max(1e-6));
         let x_of = |t: f64| v.x + ((t - t0) * pps) as f32;
@@ -3416,7 +3452,7 @@ impl App {
             let on = cut.on_key(self.t, 1.0 / self.fps);
             items.push(Item::Text(TextItem { valign: VAlign::Middle,
                 bg: Some(TextBg { radius: 4.0, pad_x: 11.0, pad_y: 3.0,
-                    ..TextBg::new(if on { hex_color(CUT_AMBER) } else { hex_color(CUT_BG) }) }),
+                    ..TextBg::new(if on { hex_color(FRAME_KEY) } else { hex_color(CUT_BG) }) }),
                 ..TextItem::new(x + 11.0, y, 10.5, if on { hex_color(CUT_AMBER_INK) } else { hex_color(CUT_INK) },
                     if on { "I · KEY" } else { "between keys" }) }));
         }
@@ -3502,7 +3538,7 @@ impl App {
             items.push(Item::Text(TextItem { valign: VAlign::Middle, tracking: -0.2,
                 ..TextItem::new(x, clock_y, clock_px, mix(CUT_BAR, 0xffffff, 0.3), format!("        {frames}")) }));
         }
-        for (offset, alpha) in [(13.0, 0.2), (231.0, 0.25), (x - bar.x - 39.0, 0.25)] {
+        for (offset, alpha) in [(13.0, 0.2), (231.0, 0.25), (x - bar.x - 12.0, 0.25)] {
             items.push(Item::Rect(RectItem::new(RectPx { x: bar.x + offset, y: cy - 10.0, w: 1.0, h: 20.0 }, mix(CUT_BAR, 0xffffff, alpha))));
         }
         if bar.w >= 900.0 {
@@ -3543,6 +3579,31 @@ impl App {
             CutAction::TimeDisplay(frames) => {
                 ui_label(items, r.x, cy, 10.0, if self.cut_frames == frames { hex_color(CUT_INK) } else { mix(CUT_BAR, 0xffffff, 0.3) },
                     &control.label, Align::Left, r.w);
+            }
+            CutAction::Reencoding(on) => {
+                let selected = self.show_reencoding == on;
+                if !on {
+                    items.push(Item::Text(TextItem::new(r.x, r.y - 12.0, 8.0, hex_color(0x9ca9b5), "RE-ENCODING")));
+                    items.push(Item::Rect(RectItem { radius: 5.0, border_w: 1.0, border_color: hex_color(0x454b53),
+                        ..RectItem::new(RectPx { w: 80.0, ..r }, hex_color(0x050608)) }));
+                }
+                if selected {
+                    items.push(Item::Rect(RectItem { radius: 3.0, ..RectItem::new(
+                        RectPx { x: r.x + 2.0, y: r.y + 2.0, w: 36.0, h: 20.0 },
+                        hex_color(if on { 0xb68aff } else { 0xc8cdd4 })) }));
+                }
+                items.push(Item::Text(TextItem { align: Align::Center, valign: VAlign::Middle,
+                    ..TextItem::new(cx, cy, 10.0, hex_color(if selected { 0x17121e } else if hovered { 0xffffff } else { 0x89939d }),
+                        if on { "ON" } else { "OFF" }) }));
+            }
+            CutAction::Snap(_) => {
+                let on = cut.snap == Snap::Keyframe;
+                if on || hovered {
+                    items.push(Item::Rect(RectItem { radius: 6.0, border_w: if on { 1.0 } else { 0.0 },
+                        border_color: hex_color(FRAME_KEY), ..RectItem::new(r,
+                            hex_color(if on { 0x082b16 } else { 0x17191b })) }));
+                }
+                draw_icon(items, Icon::SnapKeyframe, cx, cy, hex_color(if on { FRAME_KEY } else { 0xececec }));
             }
             CutAction::EncodeAll | CutAction::Encode(_) => {
                 let disabled = cut.encoding() || cut.scanning() || cut.exporting() || cut.pending_gops().is_empty();
@@ -4046,26 +4107,34 @@ impl App {
 
         // Actual presentation timestamps, not nominal FPS: VFR clips get the
         // correct markers too. Binary search bounds the work to visible frames.
-        let lo = cut.frames.partition_point(|t| *t < a);
+        let lo = cut.frames.partition_point(|t| *t < a).saturating_sub(1);
         let hi = cut.frames.partition_point(|t| *t <= b);
         let visible = &cut.frames[lo..hi];
         if visible.len() <= (v.w / 10.0) as usize + 1 {
             for (i, t) in visible.iter().enumerate() {
                 let index = lo+i;
-                let before = index.checked_sub(1).map_or(f64::INFINITY, |j| t-cut.frames[j]);
-                let after = cut.frames.get(index+1).map_or(f64::INFINITY, |next| next-t);
-                if before.min(after)*pps < 10.0 || !segments.iter().any(|s| !s.cut && *t >= s.start && *t < s.end) { continue; }
-                let spacing = (before.min(after).min(cut.duration - *t)*pps) as f32;
+                let Some(segment) = segments.iter().find(|s| !s.cut && *t >= s.start && *t < s.end) else { continue };
+                let end = cut.frames.get(index+1).copied().unwrap_or(cut.duration).min(segment.end);
+                let spacing = ((end - *t)*pps) as f32;
+                if spacing < 10.0 { continue; }
                 let fi = cut.frame_info.partition_point(|f| f.pts < *t - 1e-6);
                 let info = cut.frame_info.get(fi).filter(|f| (f.pts-*t).abs() < 1e-6);
                 let key = info.map_or_else(|| cut.keys.binary_search_by(|k| k.total_cmp(t)).is_ok(), |f| f.key);
+                let left = x_of(segment.start).max(v.x);
+                let right = x_of(segment.end).min(v.x + v.w);
+                items.push(Item::Clip(Some(RectPx { x: left, y: v.y, w: (right-left).max(0.0), h: v.h })));
                 draw_frame_marker(items, RectPx { x: x_of(*t), y: v.y, w: spacing, h: v.h },
                     info.map_or('?', |f| f.kind), key, index);
+                items.push(Item::Clip(Some(column)));
             }
         }
 
         for (_, r) in self.cut_encode_regions() {
-            items.push(Item::Hatch { r, a: hex_color(0x59348c), b: hex_color(0x704a9d), radius: 5.0, period: 12.0 });
+            if self.cut_encode_rail() {
+                items.push(Item::Rect(RectItem { radius: 3.0, ..RectItem::new(r, hex_color(0x1b1f22)) }));
+            } else {
+                items.push(Item::Hatch { r, a: hex_color(0x59348c), b: hex_color(0x704a9d), radius: 5.0, period: 12.0 });
+            }
             items.push(Item::Rect(RectItem { radius: 5.0, border_w: 1.0, border_color: hex_color(0xb68aff), ..RectItem::new(r, [0.0; 4]) }));
             if r.w >= 54.0 {
                 let button = Self::encode_button(r);
@@ -4187,26 +4256,40 @@ impl App {
 #[derive(Clone, Copy)]
 enum Icon { Info, Keyframe, Bookmark, TrackFilm, TrackSpeaker, Subtitle, Segments, In, Out, Split, Trash, SnapKeyframe, Flag, Film, Speaker, Caption, List, Grid, StepBack, StepFwd, KeyBack, KeyFwd, ZoomOut, ZoomIn }
 
-/// Figma Frame marker, scaled vertically to the compact native clip lane.
+/// Figma frame/type palette. Key status is independent of picture type.
+const FRAME_KEY: u32 = 0x00ff26;
+const FRAME_I: u32 = 0xf6ff00;
+const FRAME_P: u32 = 0xff00d5;
+const FRAME_B: u32 = 0x00d0ff;
+
+/// Cells appear at close zoom; at medium zoom only the full-height edge remains.
 fn draw_frame_marker(items: &mut Vec<Item>, r: RectPx, kind: char, key: bool, index: usize) {
     if r.w < 10.0 { return; }
-    let (color, height) = if key { (CUT_AMBER, 56.0) } else {
-        match kind { 'I' => (0xc8cdd4, 44.0), 'P' => (0x61b5ee, 36.0), 'B' => (0x75cbb0, 22.0), _ => (0x969da5, 6.0) }
-    };
-    let baseline = r.y + r.h - 6.0;
-    let h = height * (r.h - 24.0).max(6.0) / 56.0;
-    items.push(Item::Rect(RectItem::new(RectPx { x: r.x + 1.0, y: baseline - h,
-        w: if key { 4.0 } else { 2.0 }, h }, hex_color(color))));
+    let color = hex_color(if key { FRAME_KEY } else {
+        match kind { 'I' => FRAME_I, 'P' => FRAME_P, 'B' => FRAME_B, _ => 0x969da5 }
+    });
+    let cell = RectPx { x: r.x + 1.0, y: r.y + 1.0, w: (r.w - 2.0).max(1.0), h: r.h - 2.0 };
     if r.w >= 32.0 {
-        // Keep type labels legible over the clip's single representative poster.
-        items.push(Item::Rect(RectItem::new(RectPx { x: r.x + 6.0, y: r.y + 1.0,
-            w: r.w - 12.0, h: 16.0 }, hex_color(0x1b1f22))));
-        items.push(Item::Text(TextItem { max_width: Some(r.w - 8.0),
-            ..TextItem::new(r.x + 8.0, r.y + 3.0, 11.0, hex_color(color), kind.to_string()) }));
+        items.push(Item::Rect(RectItem { radius: 4.0, border_w: 1.0, border_color: color,
+            ..RectItem::new(cell, hex_color(0x1b1f22)) }));
+    }
+    items.push(Item::Rect(RectItem { radius: 2.0, ..RectItem::new(
+        RectPx { w: if r.w >= 32.0 { 5.0 } else { 2.0 }, ..cell }, color) }));
+    if r.w >= 32.0 {
+        // Geometric diamond rather than a font glyph: fonts need not contain it.
+        if key {
+            for (dy, width) in [(0.0, 1.0), (1.0, 3.0), (2.0, 5.0), (3.0, 3.0), (4.0, 1.0)] {
+                for x in [cell.x + 9.0 - width / 2.0, cell.x + 9.0 + width / 2.0 - 1.0] {
+                    items.push(Item::Rect(RectItem::new(RectPx { x, y: cell.y + 8.0 + dy, w: 1.0, h: 1.0 }, color)));
+                }
+            }
+        }
+        items.push(Item::Text(TextItem { max_width: Some(r.w - 16.0),
+            ..TextItem::new(cell.x + if key { 16.0 } else { 8.0 }, cell.y + 6.0, 8.0, color, kind.to_string()) }));
     }
     if r.w >= 80.0 {
-        items.push(Item::Text(TextItem { align: Align::Right, max_width: Some(r.w - 30.0),
-            ..TextItem::new(r.x + r.w - 8.0, r.y + 3.0, 11.0, hex_color(0x969da5), format!("{index:03}")) }));
+        items.push(Item::Text(TextItem { align: Align::Right, max_width: Some(r.w - 34.0),
+            ..TextItem::new(cell.x + cell.w - 8.0, cell.y + 6.0, 8.0, hex_color(0x969da5), format!("{index:03}")) }));
     }
 }
 
@@ -4517,7 +4600,7 @@ impl Workspace {
 #[derive(Clone, Copy)]
 enum Action { Duplicate, OpenFiles, ClearSources, Tool(usize), View(Mode), Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
 #[derive(Clone, Copy, PartialEq)]
-enum CutAction { TimeDisplay(bool), In, Out, Split, ToggleSplit, Apply, DeletePicked, Undo, Export, EncodeAll, Encode(f64), Snap(Snap), Play, Zoom(bool), Step(i32), Keyframe(i32), Chapter(i32) }
+enum CutAction { Reencoding(bool), TimeDisplay(bool), In, Out, Split, ToggleSplit, Apply, DeletePicked, Undo, Export, EncodeAll, Encode(f64), Snap(Snap), Play, Zoom(bool), Step(i32), Keyframe(i32), Chapter(i32) }
 /// `hint` is the key cap a cut-mode button carries ("" for none).
 struct Control { r: RectPx, label: String, selected: bool, action: Action, hint: &'static str }
 impl Control {
@@ -4574,6 +4657,43 @@ const CONTROL_BG: [f32; 4] = [26.0 / 255.0, 26.0 / 255.0, 26.0 / 255.0, 1.0];
 #[cfg(test)]
 mod tests {
     #[test]
+    fn reencoding_toggle_preserves_edits_and_toolbar_fits() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        app.set_cut_default(true);
+        assert!(tick_until(&mut app, Duration::from_secs(5), |a| !a.cut.as_ref().unwrap().scanning()));
+        {
+            let cut = app.cut.as_mut().unwrap();
+            cut.snap = Snap::Frame; cut.split(cut.frames[10]); cut.pps = 1200.0;
+        }
+        let pending = app.cut.as_ref().unwrap().pending_gops().len();
+        assert!(pending > 0);
+        let video = app.cut_lanes().video;
+        assert!(app.cut_encode_regions().iter().all(|(_,r)| r.y >= video.y + video.h));
+        assert!(app.cut_thumb_rects().is_empty(), "frame cells replace the poster at close zoom");
+        app.key(Key::Char('r'));
+        assert!(!app.show_reencoding && app.cut_encode_regions().is_empty());
+        assert_eq!(app.cut.as_ref().unwrap().pending_gops().len(), pending);
+        assert!(!app.controls().iter().any(|c| matches!(c.action, Action::Cut(CutAction::EncodeAll))));
+        app.key(Key::Char('r'));
+        for width in [720.0, 900.0, 1280.0] {
+            app.vp = (width, 800.0);
+            let controls = app.controls();
+            let off = controls.iter().find(|c| matches!(c.action, Action::Cut(CutAction::Reencoding(false)))).unwrap();
+            let on = controls.iter().find(|c| matches!(c.action, Action::Cut(CutAction::Reencoding(true)))).unwrap();
+            assert!(off.r.x + off.r.w <= on.r.x);
+            assert!(on.r.x + on.r.w < app.cut_clock_x());
+            let all = controls.iter().find(|c| matches!(c.action, Action::Cut(CutAction::EncodeAll))).unwrap();
+            assert!(all.r.x >= 0.0 && all.r.x + all.r.w <= width);
+            if all.r.y >= HEADER_H { assert!(all.r.x >= on.r.x + on.r.w && all.r.x + all.r.w < app.cut_clock_x()); }
+            let r = off.r;
+            app.mouse_down(r.x+r.w/2.0, r.y+r.h/2.0); app.mouse_up();
+            assert!(!app.show_reencoding);
+            app.cut_action(CutAction::Reencoding(true));
+        }
+    }
+
+    #[test]
     fn frame_marker_detail_follows_zoom_and_key_flag() {
         let mut items = Vec::new();
         let r = RectPx { x: 0.0, y: 0.0, w: 9.0, h: 56.0 };
@@ -4587,11 +4707,11 @@ mod tests {
         items.clear();
         draw_frame_marker(&mut items, RectPx { w: 112.0, ..r }, 'I', false, 0);
         let Item::Rect(i) = &items[0] else { panic!() };
-        assert_eq!(i.color, hex_color(0xc8cdd4));
+        assert_eq!(i.border_color, hex_color(FRAME_I));
         items.clear();
         draw_frame_marker(&mut items, RectPx { w: 112.0, ..r }, 'I', true, 0);
         let Item::Rect(i) = &items[0] else { panic!() };
-        assert_eq!(i.color, hex_color(CUT_AMBER));
+        assert_eq!(i.border_color, hex_color(FRAME_KEY));
     }
 
     use super::*;

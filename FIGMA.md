@@ -328,3 +328,18 @@ proportionally. Labels appear at 32px/frame and zero-based frame numbers at 80px
 ticks start at 10px. Decoded metadata loads progressively; unknown types are gray
 until available. The single clip poster remains, with a dark label strip ensuring
 readability. Purple encode overlays retain priority over frame detail.
+
+### Frame cells and toolbar toggles (2026-10-12)
+
+The revised 233:411 component uses #00ff26 keyframes, #f6ff00 non-key I,
+#ff00d5 P and #00d0ff B. At 32px/frame, a dark rounded cell replaces the poster
+with a 1px colored outline, full-height 5px left edge and 8px type label; frame
+numbers appear at 80px/frame. Intermediate zoom keeps full-height colored lines.
+Native lanes retain their compact height. Cell widths follow actual timestamps.
+
+Toolbar states follow 245:455: snap uses a green icon/border over #082b16.
+RE-ENCODING is an OFF/ON switch (R), showing/hiding purple regions and Encode
+controls without changing pending work. ON uses #b68aff; OFF uses #c8cdd4.
+At close zoom, pending regions occupy a separate strip below the frame cells.
+Encode all moves beside Export when the toolbar is too narrow for both it and
+the clock. Drawing and pointer handling share all control/region geometry.

@@ -72,6 +72,7 @@ keys:
                and the video under it (<name>.crop.png), cut to the marquee
   E            export the cropped clip as ProRes 422 Proxy
   `            toggle Timeline time/frame display (--timeline-frames)
+  R            show/hide Timeline re-encoding regions and Encode controls
   { / }        previous / next chapter in Timeline
   T            cut mode: the focused clip on a timeline (--cut opens there;
                --cut in,out sets the selection, in seconds)

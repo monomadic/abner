@@ -3,6 +3,19 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-12 — outlined frame cells and toolbar toggle states
+
+Matched the revised Figma palette and frame-cell treatment: green keys, yellow I,
+magenta P and cyan B; close zoom reveals outlined cells and type labels, then
+source frame numbers. Actual timestamp intervals set cell widths, including VFR,
+and partial cells at the viewport edge stay visible. The clip poster gives way
+to frame cells at close zoom.
+
+Snap now shows a green selected state. The RE-ENCODING OFF/ON switch and R key
+show/hide pending regions and Encode controls without changing edits or jobs.
+At close zoom, the purple encoding strip sits below the video cells. Narrow
+windows move Encode all to the header so the switch and clock remain usable.
+
 ## 2026-10-12 — frame-aware split encoding and natural pinch zoom
 
 Fully analysed I/P-only GOPs now copy the prefix before the first split and encode
