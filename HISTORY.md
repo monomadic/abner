@@ -3,6 +3,12 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-12 — clean background beneath frame markers
+
+The video poster and diagonal clip fill disappear at the same visible-frame
+threshold that reveals individual frame markers, rather than waiting for frame
+cards. Zooming back out restores the clip treatment. Audio is unchanged.
+
 ## 2026-10-12 — Figma SVG frame icons and card fidelity
 
 Replaced the hand-drawn frame symbols with the original Figma SVG card variants,

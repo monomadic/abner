@@ -2025,6 +2025,17 @@ impl App {
         self.cut.as_ref().is_some_and(|c| c.pps / self.fps.max(1.0) >= 32.0)
     }
 
+    /// Use the same visible-frame density as the marker renderer, including VFR.
+    fn frame_markers_visible(&self) -> bool {
+        let Some(c) = &self.cut else { return false };
+        if c.frames.is_empty() { return false; }
+        let width = self.cut_lanes().video.w;
+        let lo = c.frames.partition_point(|t| *t < c.t0).saturating_sub(1);
+        let hi = c.frames.partition_point(|t| *t <= c.t0 + c.span(width));
+        hi - lo <= (width / 10.0) as usize + 1 && (lo..hi).any(|i|
+            (c.frames.get(i+1).copied().unwrap_or(c.duration)-c.frames[i])*c.pps >= 10.0)
+    }
+
     fn frame_detail(&self) -> bool {
         self.cut.as_ref().is_some_and(|c| !c.frames.is_empty() && c.pps * c.duration / c.frames.len().max(1) as f64 >= 80.0 - 1e-6)
     }
@@ -3325,7 +3336,7 @@ impl App {
     /// sticks to the visible left edge while the start is scrolled away.
     fn cut_thumb_rects(&self) -> Vec<(i64, crate::cut::Segment, RectPx)> {
         let Some(cut) = self.cut.as_ref().filter(|_| self.cut_mode) else { return Vec::new() };
-        if self.cut_frame_cells() { return Vec::new(); }
+        if self.frame_markers_visible() || self.frame_detail() { return Vec::new(); }
         let v = self.cut_lanes().video;
         let (t0, pps) = (cut.t0, cut.pps.max(1e-6));
         let x_of = |t: f64| v.x + ((t - t0) * pps) as f32;
@@ -4207,7 +4218,9 @@ impl App {
                     }
                 } else {
                     // The film ground: the board's 135° stripes (#2a2d30 / #202326, 14px).
-                    items.push(Item::Hatch { r, a: hex_color(0x2a2d30), b: hex_color(0x202326), radius: 7.0, period: 14.0 });
+                    if !self.frame_markers_visible() && !self.frame_detail() {
+                        items.push(Item::Hatch { r, a: hex_color(0x2a2d30), b: hex_color(0x202326), radius: 7.0, period: 14.0 });
+                    }
                     let hot = ease(self.cut_hot_level(g.start, false));
                     items.push(Item::Rect(RectItem { radius: 7.0, border_w: 1.0, border_color: mix(CUT_TL, 0xffffff, 0.2 + 0.06 * hot),
                         ..RectItem::new(r, [1.0, 1.0, 1.0, 0.01 * hot]) }));
@@ -4271,7 +4284,7 @@ impl App {
         let lo = cut.frames.partition_point(|t| *t < a).saturating_sub(1);
         let hi = cut.frames.partition_point(|t| *t <= b);
         let visible = &cut.frames[lo..hi];
-        if !self.frame_detail() && visible.len() <= (v.w / 10.0) as usize + 1 {
+        if !self.frame_detail() && self.frame_markers_visible() {
             for (i, t) in visible.iter().enumerate() {
                 let index = lo+i;
                 let Some(segment) = segments.iter().find(|s| !s.cut && *t >= s.start && *t < s.end) else { continue };
@@ -5756,7 +5769,11 @@ mod tests {
 
     #[test]
     fn cut_thumbnail_posters_load_and_the_hovered_one_plays() {
-        let Some(clip) = test_clip() else { return };
+        let Some(source) = test_clip() else { return };
+        // A longer clip stays below individual-frame detail at fit-to-window.
+        let clip = source.with_file_name("poster-hover.mp4");
+        assert!(Command::new("ffmpeg").args(["-v","error","-y","-stream_loop","1","-i"]).arg(&source)
+            .args(["-c","copy"]).arg(&clip).status().unwrap().success());
         let mut app = mk_app(&clip, 1);
         assert!(tick_until(&mut app, Duration::from_secs(5), |a| a.started));
         app.key(Key::Char('t'));
