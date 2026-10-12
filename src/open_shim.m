@@ -21,6 +21,48 @@
 #import <AppKit/AppKit.h>
 #import <objc/runtime.h>
 
+// Keep AppKit actions out of the Rust app's mutable event-loop borrow. The
+// callback queues a request; Rust applies it and then supplies the actual mode.
+typedef void (*AbViewCallback)(int mode);
+static AbViewCallback ab_view_cb = NULL;
+@interface AbViewMenuTarget : NSObject
+- (void)selectMode:(NSMenuItem *)sender;
+@end
+@implementation AbViewMenuTarget
+- (void)selectMode:(NSMenuItem *)sender {
+    if (ab_view_cb != NULL) ab_view_cb((int)sender.tag);
+}
+@end
+
+void ab_sync_view_menu(int mode, bool enabled, AbViewCallback cb) {
+    static NSMenu *menu = nil;
+    static AbViewMenuTarget *target = nil;
+    ab_view_cb = cb;
+    if (menu == nil) {
+        NSMenu *bar = NSApp.mainMenu;
+        if (bar == nil) return; // winit creates the standard application menu.
+        target = [AbViewMenuTarget new];
+        menu = [[NSMenu alloc] initWithTitle:@"View"];
+        menu.autoenablesItems = NO;
+        NSArray<NSString *> *names = @[@"Sources", @"Timeline", @"Mask", @"Crop"];
+        const NSInteger modes[] = {0, 3, 1, 2};
+        for (NSUInteger i = 0; i < names.count; i++) {
+            NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:names[i]
+                action:@selector(selectMode:) keyEquivalent:@""];
+            item.target = target;
+            item.tag = modes[i];
+            [menu addItem:item];
+        }
+        NSMenuItem *heading = [[NSMenuItem alloc] initWithTitle:@"View" action:nil keyEquivalent:@""];
+        heading.submenu = menu;
+        [bar insertItem:heading atIndex:MIN((NSInteger)1, bar.numberOfItems)];
+    }
+    for (NSMenuItem *item in menu.itemArray) {
+        item.enabled = enabled;
+        item.state = item.tag == mode ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+}
+
 typedef void (*AbOpenCallback)(const char *path);
 
 static AbOpenCallback ab_open_cb = NULL;

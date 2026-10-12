@@ -900,6 +900,12 @@ impl ApplicationHandler for Runner {
                 w.request_redraw();
             }
         }
+        if let Some(mode) = open::take_view_request() {
+            self.app.select_workspace_mode(mode);
+            self.animating = true;
+            if let Some(w) = &self.window { w.request_redraw(); }
+        }
+        open::sync_view_menu(self.app.workspace_mode(), self.app.ready());
         // The cadence rules live in `schedule` (tested there), not here.
         let Some(w) = &self.window else { return };
         match schedule::next_frame(

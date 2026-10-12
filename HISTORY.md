@@ -3,6 +3,14 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-12 — native View menu
+
+The macOS menu bar now lists Sources, Timeline, Mask and Crop under View.
+Selections use the header's existing mode transitions; a checkmark follows the
+actual workspace, including toolbar and keyboard changes. Mode commands are
+disabled on the empty launch screen. AppKit queues actions into the event loop
+instead of mutating the player from a native callback.
+
 ## 2026-10-12 — clean background beneath frame markers
 
 The video poster and diagonal clip fill disappear at the same visible-frame

@@ -2210,10 +2210,21 @@ impl App {
         RectPx { x, y: r.y + 28.0, w: (r.w - (x - r.x) - reserve).max(32.0), h: 4.0 }
     }
 
+    /// Shared by the painted header and the native View menu.
+    pub fn workspace_mode(&self) -> usize {
+        if self.cut_mode { 3 } else if !self.mask_mode { 0 } else if self.crop.is_none() { 1 } else { 2 }
+    }
+
+    pub fn select_workspace_mode(&mut self, mode: usize) {
+        if self.ready() && mode < 4 && mode != self.workspace_mode() {
+            self.activate(Action::Tool(mode));
+        }
+    }
+
     fn mode_selector(&self) -> ModeSelector {
         ModeSelector {
             rect: RectPx { x: if self.fullscreen { 14.0 } else { 85.0 }, y: 8.5, w: 385.0, h: 26.0 },
-            active: if self.cut_mode { 3 } else if !self.mask_mode { 0 } else if self.crop.is_none() { 1 } else { 2 },
+            active: self.workspace_mode(),
         }
     }
 
@@ -4940,6 +4951,30 @@ mod tests {
         let r = app.content_rect(app.active);
         let v = &app.videos[app.active];
         app.cursor_moved(r.x + x * r.w / v.info.width as f32, r.y + y * r.h / v.info.height as f32);
+    }
+
+    #[test]
+    fn native_workspace_selection_matches_header_for_every_transition() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        for from in 0..4 {
+            for to in 0..4 {
+                app.select_workspace_mode(from);
+                app.select_workspace_mode(to);
+                assert_eq!(app.workspace_mode(), to, "{from} -> {to}");
+                let selected: Vec<_> = app.mode_selector().controls().into_iter()
+                    .filter(|c| c.selected).collect();
+                assert_eq!(selected.len(), 1);
+                assert!(matches!(selected[0].action, Action::Tool(mode) if mode == to));
+            }
+        }
+        app.select_workspace_mode(0);
+        app.key(Key::Char('m'));
+        assert_eq!(app.workspace_mode(), 1);
+        app.key(Key::Escape);
+        assert_eq!(app.workspace_mode(), 0);
+        app.select_workspace_mode(99);
+        assert_eq!(app.workspace_mode(), 0);
     }
 
     #[test]
