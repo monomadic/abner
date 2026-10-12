@@ -12,7 +12,7 @@
 //! subtitle track) runs on its own worker and lands through a receiver
 //! drained by `poll`, so entering the mode never blocks the loop.
 
-use std::io::Read;
+use std::io::{Read, BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -75,6 +75,52 @@ pub struct Gop {
     pub bytes: u64,
 }
 
+/// Decoder picture type and random-access flag are independent.
+#[derive(Debug, Clone, Copy)]
+pub struct FrameInfo {
+    pub pts: f64,
+    pub kind: char,
+    pub key: bool,
+}
+
+fn parse_frame(line: &str) -> Option<FrameInfo> {
+    let mut frame = FrameInfo { pts: f64::NAN, kind: '?', key: false };
+    for field in line.split('|') {
+        if let Some(t) = field.strip_prefix("best_effort_timestamp_time=") { frame.pts = t.parse().ok()?; }
+        if let Some(k) = field.strip_prefix("pict_type=") { frame.kind = match k { "I" => 'I', "P" => 'P', "B" => 'B', _ => '?' }; }
+        if let Some(k) = field.strip_prefix("key_frame=") { frame.key = k == "1"; }
+    }
+    frame.pts.is_finite().then_some(frame)
+}
+
+/// Stream decoded metadata in small batches. A separate owner watches cancellation
+/// even while the reader is blocked in a pipe (for example on an unavailable disk).
+fn read_frames(path: &Path, cancel: &AtomicBool, tx: std::sync::mpsc::Sender<Vec<FrameInfo>>) {
+    let Ok(mut child) = Command::new("ffprobe")
+        .args(["-v", "error", "-select_streams", "v:0", "-show_frames", "-show_entries",
+            "frame=best_effort_timestamp_time,pict_type,key_frame", "-of", "compact=p=0"])
+        .arg(path).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() else { return };
+    let pipe = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut batch = Vec::new();
+        for line in BufReader::new(pipe).lines() {
+            let Ok(line) = line else { break };
+            if let Some(frame) = parse_frame(&line) { batch.push(frame); }
+            if batch.len() >= 64 && tx.send(std::mem::take(&mut batch)).is_err() { return; }
+        }
+        if !batch.is_empty() { let _ = tx.send(batch); }
+    });
+    loop {
+        if cancel.load(Ordering::Relaxed) || reader.is_finished() {
+            let _ = child.kill(); break;
+        }
+        match child.try_wait() { Ok(Some(_)) => break, Err(_) => { let _ = child.kill(); break; }, _ => {} }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let _ = child.wait();
+    let _ = reader.join();
+}
+
 struct Scan {
     gops: Vec<Gop>,
     frames: Vec<f64>,
@@ -108,6 +154,9 @@ pub struct Cut {
     pub keys: Vec<f64>,
     pub gops: Vec<Gop>,
     pub frames: Vec<f64>,
+    pub frame_info: Vec<FrameInfo>,
+    frame_rx: Option<Receiver<Vec<FrameInfo>>>,
+    frame_cancel: Arc<AtomicBool>,
     frame_zoom_limit: f64,
     encode: Option<Receiver<Result<PathBuf, String>>>,
     pub reload: Option<PathBuf>,
@@ -140,6 +189,7 @@ pub struct Cut {
 impl Drop for Cut {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
+        self.frame_cancel.store(true, Ordering::Relaxed);
     }
 }
 
@@ -151,6 +201,7 @@ impl Cut {
             duration,
             keys: Vec::new(),
             gops: Vec::new(),
+            frame_info: Vec::new(), frame_rx: None, frame_cancel: Arc::new(AtomicBool::new(false)),
             frames: Vec::new(), frame_zoom_limit: 600.0, encode: None, reload: None,
             chapters: Vec::new(),
             chapters_edited: false,
@@ -195,7 +246,17 @@ impl Cut {
             read_wave(&p, &cancel, &tx);
         });
         cut.wave_rx = Some(rx);
+        cut.start_frame_reader();
         cut
+    }
+
+    fn start_frame_reader(&mut self) {
+        self.frame_cancel.store(true, Ordering::Relaxed);
+        self.frame_cancel = Arc::new(AtomicBool::new(false));
+        self.frame_info.clear();
+        let (tx, rx) = channel(); self.frame_rx = Some(rx);
+        let path = self.path.clone(); let cancel = self.frame_cancel.clone();
+        std::thread::spawn(move || read_frames(&path, &cancel, tx));
     }
 
     pub fn scanning(&self) -> bool {
@@ -225,7 +286,7 @@ impl Cut {
                 self.facts = scan.facts;
                 self.gops = scan.gops;
                 self.frame_zoom_limit = scan.frames.windows(2).map(|p| p[1]-p[0])
-                    .filter(|d| *d > 1e-6).min_by(f64::total_cmp).map_or(600.0, |d| (16.0/d).max(600.0));
+                    .filter(|d| *d > 1e-6).min_by(f64::total_cmp).map_or(600.0, |d| (112.0/d).max(600.0));
                 self.frames = scan.frames;
                 self.set_keys(scan.keys);
             }
@@ -235,6 +296,20 @@ impl Cut {
             }
             Some(None) => self.status = "Keyframe scan failed: worker stopped".into(),
             None => {}
+        }
+        if let Some(rx) = &self.frame_rx {
+            loop {
+                match rx.try_recv() {
+                    Ok(mut batch) => {
+                        batch.sort_by(|a,b| a.pts.total_cmp(&b.pts));
+                        let reordered = self.frame_info.last().zip(batch.first()).is_some_and(|(a,b)| a.pts > b.pts);
+                        self.frame_info.append(&mut batch);
+                        if reordered { self.frame_info.sort_by(|a,b| a.pts.total_cmp(&b.pts)); }
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => { self.frame_rx = None; break; }
+                }
+            }
         }
         if let Some(Some(cues)) = take(&mut self.cue_rx) {
             self.cues = cues;
@@ -254,6 +329,7 @@ impl Cut {
         match take(&mut self.encode) {
             Some(Some(Ok(path))) => {
                 self.path = path.clone();
+                self.start_frame_reader();
                 self.reload = Some(path.clone());
                 self.status = "Encoded split GOPs; original source preserved".into();
                 let (tx, rx) = channel(); self.scan = Some(rx);
@@ -1115,6 +1191,28 @@ pub fn export(source: &Path, dest: &Path, keeps: &[(f64, f64)], snap: Snap, chap
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn decoded_frame_types_preserve_key_flags_and_presentation_order() {
+        let dir = std::env::temp_dir().join("abner_frame_types_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bframes.mp4");
+        assert!(Command::new("ffmpeg").args(["-v", "error", "-y", "-f", "lavfi", "-i",
+            "testsrc2=size=160x90:rate=1:duration=8", "-c:v", "libx264", "-g", "4", "-bf", "2",
+            "-sc_threshold", "0"]).arg(&path).status().unwrap().success());
+        let (tx, rx) = channel();
+        read_frames(&path, &AtomicBool::new(false), tx);
+        let frames: Vec<_> = rx.into_iter().flatten().collect();
+        assert_eq!(frames.len(), 8);
+        assert!(frames.windows(2).all(|p| p[0].pts < p[1].pts));
+        for kind in ['I', 'P', 'B'] { assert!(frames.iter().any(|f| f.kind == kind)); }
+        assert!(frames[0].key);
+        assert!(!parse_frame("key_frame=0|best_effort_timestamp_time=1.5|pict_type=I").unwrap().key);
+        assert!(parse_frame("best_effort_timestamp_time=N/A|pict_type=B").is_none());
+        let cancel = AtomicBool::new(true);
+        let (tx, _rx) = channel();
+        read_frames(&path, &cancel, tx);
+    }
+
     use super::*;
 
     /// 60 s with a keyframe every 2 s, and one 6 s GOP at 40–46.

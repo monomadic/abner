@@ -3,6 +3,20 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-12 — colored frame detail at close zoom
+
+Timeline video clips now show tall amber keyframe markers, gray non-key I frames,
+blue P frames and shorter mint B frames, matching Figma Frame marker 233:411.
+Ticks appear at 10px per frame, I/P/B labels at 32px, and zero-based source frame
+numbers at 80px. Zoom reaches 112px per frame. The compact track height and single
+clip poster remain; this does not introduce a per-frame filmstrip.
+
+A separate cancellable ffprobe worker streams decoded picture types and key flags
+without delaying the packet index or editing. Unknown types remain neutral until
+analysis arrives. Working-source replacement cancels the old reader and clears its
+metadata. Markers use source presentation timestamps, including variable rates;
+purple encoding overlays remain above the markers.
+
 ## 2026-10-12 — working split-GOP encoding and frame markers
 
 The renderer conservatively processes the whole affected GOP, including the leading

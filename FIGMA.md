@@ -319,3 +319,12 @@ interface labels continue using SF Compact Rounded.
 92.25×22 buttons. Housing is #1a1b1c with no border; selection is #858585 at
 44% over the housing, radius 4, no border. This supersedes the SF Pro Display
 and transparent-outline selector above. Font and OFL license live in assets/fonts.
+
+### Frame detail (2026-10-12)
+
+Timeline Edit component 233:411 maps to `draw_frame_marker`: amber keyframes,
+gray non-key I, blue P and mint B ticks. Native compact lanes scale the tick heights
+proportionally. Labels appear at 32px/frame and zero-based frame numbers at 80px;
+ticks start at 10px. Decoded metadata loads progressively; unknown types are gray
+until available. The single clip poster remains, with a dark label strip ensuring
+readability. Purple encode overlays retain priority over frame detail.

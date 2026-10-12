@@ -4046,16 +4046,6 @@ impl App {
             }
         }
 
-        for (_, r) in self.cut_encode_regions() {
-            items.push(Item::Hatch { r, a: hex_color(0x59348c), b: hex_color(0x704a9d), radius: 5.0, period: 12.0 });
-            items.push(Item::Rect(RectItem { radius: 5.0, border_w: 1.0, border_color: hex_color(0xb68aff), ..RectItem::new(r, [0.0; 4]) }));
-            if r.w >= 54.0 {
-                let button = Self::encode_button(r);
-                items.push(Item::Rect(RectItem { radius: 4.0, ..RectItem::new(button, hex_color(0xe4d3ff)) }));
-                ui_label(items, button.x + button.w / 2.0, button.y + button.h / 2.0, 10.0, hex_color(0x28133f),
-                    if cut.encoding() { "…" } else { "Encode" }, Align::Center, button.w);
-            }
-        }
         // Actual presentation timestamps, not nominal FPS: VFR clips get the
         // correct markers too. Binary search bounds the work to visible frames.
         let lo = cut.frames.partition_point(|t| *t < a);
@@ -4067,10 +4057,25 @@ impl App {
                 let before = index.checked_sub(1).map_or(f64::INFINITY, |j| t-cut.frames[j]);
                 let after = cut.frames.get(index+1).map_or(f64::INFINITY, |next| next-t);
                 if before.min(after)*pps < 10.0 || !segments.iter().any(|s| !s.cut && *t >= s.start && *t < s.end) { continue; }
-                line(items, x_of(*t), v.y + v.h - 6.0, 4.0, 1.0, hex_color(0xbac0c6));
+                let spacing = (before.min(after).min(cut.duration - *t)*pps) as f32;
+                let fi = cut.frame_info.partition_point(|f| f.pts < *t - 1e-6);
+                let info = cut.frame_info.get(fi).filter(|f| (f.pts-*t).abs() < 1e-6);
+                let key = info.map_or_else(|| cut.keys.binary_search_by(|k| k.total_cmp(t)).is_ok(), |f| f.key);
+                draw_frame_marker(items, RectPx { x: x_of(*t), y: v.y, w: spacing, h: v.h },
+                    info.map_or('?', |f| f.kind), key, index);
             }
         }
 
+        for (_, r) in self.cut_encode_regions() {
+            items.push(Item::Hatch { r, a: hex_color(0x59348c), b: hex_color(0x704a9d), radius: 5.0, period: 12.0 });
+            items.push(Item::Rect(RectItem { radius: 5.0, border_w: 1.0, border_color: hex_color(0xb68aff), ..RectItem::new(r, [0.0; 4]) }));
+            if r.w >= 54.0 {
+                let button = Self::encode_button(r);
+                items.push(Item::Rect(RectItem { radius: 4.0, ..RectItem::new(button, hex_color(0xe4d3ff)) }));
+                ui_label(items, button.x + button.w / 2.0, button.y + button.h / 2.0, 10.0, hex_color(0x28133f),
+                    if cut.encoding() { "…" } else { "Encode" }, Align::Center, button.w);
+            }
+        }
         // ---- subtitles: a bar per cue ----
         let s = lanes.subs;
         for c in cut.cues.iter().filter(|c| c.end > a && c.start < b) {
@@ -4183,6 +4188,29 @@ impl App {
 /// not paths, so each is built from those on a 16px box about its centre.
 #[derive(Clone, Copy)]
 enum Icon { Info, Keyframe, Bookmark, TrackFilm, TrackSpeaker, Subtitle, Segments, In, Out, Split, Trash, SnapKeyframe, Flag, Film, Speaker, Caption, List, Grid, StepBack, StepFwd, KeyBack, KeyFwd, ZoomOut, ZoomIn }
+
+/// Figma Frame marker, scaled vertically to the compact native clip lane.
+fn draw_frame_marker(items: &mut Vec<Item>, r: RectPx, kind: char, key: bool, index: usize) {
+    if r.w < 10.0 { return; }
+    let (color, height) = if key { (CUT_AMBER, 56.0) } else {
+        match kind { 'I' => (0xc8cdd4, 44.0), 'P' => (0x61b5ee, 36.0), 'B' => (0x75cbb0, 22.0), _ => (0x969da5, 6.0) }
+    };
+    let baseline = r.y + r.h - 6.0;
+    let h = height * (r.h - 24.0).max(6.0) / 56.0;
+    items.push(Item::Rect(RectItem::new(RectPx { x: r.x + 1.0, y: baseline - h,
+        w: if key { 4.0 } else { 2.0 }, h }, hex_color(color))));
+    if r.w >= 32.0 {
+        // Keep type labels legible over the clip's single representative poster.
+        items.push(Item::Rect(RectItem::new(RectPx { x: r.x + 6.0, y: r.y + 1.0,
+            w: r.w - 12.0, h: 16.0 }, hex_color(0x1b1f22))));
+        items.push(Item::Text(TextItem { max_width: Some(r.w - 8.0),
+            ..TextItem::new(r.x + 8.0, r.y + 3.0, 11.0, hex_color(color), kind.to_string()) }));
+    }
+    if r.w >= 80.0 {
+        items.push(Item::Text(TextItem { align: Align::Right, max_width: Some(r.w - 30.0),
+            ..TextItem::new(r.x + r.w - 8.0, r.y + 3.0, 11.0, hex_color(0x969da5), format!("{index:03}")) }));
+    }
+}
 
 fn draw_icon(items: &mut Vec<Item>, icon: Icon, cx: f32, cy: f32, color: [f32; 4]) {
     let bar = |items: &mut Vec<Item>, x: f32, y: f32, w: f32, h: f32| {
@@ -4547,6 +4575,27 @@ const CONTROL_BG: [f32; 4] = [26.0 / 255.0, 26.0 / 255.0, 26.0 / 255.0, 1.0];
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn frame_marker_detail_follows_zoom_and_key_flag() {
+        let mut items = Vec::new();
+        let r = RectPx { x: 0.0, y: 0.0, w: 9.0, h: 56.0 };
+        draw_frame_marker(&mut items, r, 'B', false, 35);
+        assert!(items.is_empty());
+        for (width, labels) in [(10.0, 0), (31.0, 0), (32.0, 1), (79.0, 1), (80.0, 2)] {
+            items.clear();
+            draw_frame_marker(&mut items, RectPx { w: width, ..r }, 'B', false, 35);
+            assert_eq!(items.iter().filter(|i| matches!(i, Item::Text(_))).count(), labels);
+        }
+        items.clear();
+        draw_frame_marker(&mut items, RectPx { w: 112.0, ..r }, 'I', false, 0);
+        let Item::Rect(i) = &items[0] else { panic!() };
+        assert_eq!(i.color, hex_color(0xc8cdd4));
+        items.clear();
+        draw_frame_marker(&mut items, RectPx { w: 112.0, ..r }, 'I', true, 0);
+        let Item::Rect(i) = &items[0] else { panic!() };
+        assert_eq!(i.color, hex_color(CUT_AMBER));
+    }
+
     use super::*;
     use crate::probe;
     use std::path::PathBuf;
