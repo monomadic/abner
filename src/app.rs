@@ -185,6 +185,7 @@ pub struct App {
     cut_gop: bool,
     frame_detail_boot: bool,
     cut_thumbs: bool,
+    cut_posters: bool,
     /// The start-of-clip thumbnails on the picture lane (posters, and the one under the pointer playing).
     cut_thumb: CutThumbs,
     split_preview: Option<SplitPreview>,
@@ -546,6 +547,7 @@ impl App {
             cut_frames: false,
             frame_changes: false, cut_gop: false, frame_detail_boot: false,
             cut_thumbs: false,
+            cut_posters: true,
             cut_thumb: CutThumbs::new(),
             split_preview: None,
             cut_pick: None,
@@ -2958,6 +2960,7 @@ impl App {
     }
 
     fn cut_action(&mut self, action: CutAction) {
+        if action == CutAction::TogglePosters { self.cut_posters = !self.cut_posters; return; }
         if let CutAction::FrameChanges(changes) = action { self.frame_changes = changes; return; }
         if let CutAction::TimeDisplay(frames) = action { self.cut_frames = frames; return; }
         if action == CutAction::ToggleSplit {
@@ -2996,7 +2999,7 @@ impl App {
         cut.status.clear();
         match action {
             CutAction::Step(_) | CutAction::Keyframe(_) | CutAction::Chapter(_) => {}
-            CutAction::Play | CutAction::TimeDisplay(_) | CutAction::FrameChanges(_) | CutAction::ToggleSplit => {}
+            CutAction::Play | CutAction::TimeDisplay(_) | CutAction::FrameChanges(_) | CutAction::ToggleSplit | CutAction::TogglePosters => {}
             CutAction::Zoom(zoom_in) => {
                 let px = ((t - cut.t0) * cut.pps) as f32;
                 cut.zoom(if zoom_in { 1.5 } else { 1.0 / 1.5 }, if px >= 0.0 && px <= lane.w { px } else { lane.w / 2.0 }, lane.w);
@@ -3069,6 +3072,9 @@ impl App {
             out.push(Control { hint, ..Control::new(r, label, selected, Action::Cut(action)) });
         };
         push(RectPx { x: w - 115.0, y: 8.5, w: 101.0, h: 26.0 }, "Export", false, CutAction::Export, "");
+        let video = self.cut_lanes().video;
+        push(RectPx { x: self.workspace().timeline.x + 19.0, y: video.y + video.h / 2.0 - 12.0, w: 24.0, h: 24.0 },
+            if self.cut_posters { "Hide clip previews" } else { "Show clip previews" }, self.cut_posters, CutAction::TogglePosters, "");
         if self.frame_detail() {
             for (r, changes, label) in [(self.frame_mode_rects()[0], false, "Decoded"), (self.frame_mode_rects()[1], true, "Changes")] {
                 push(r, label, self.frame_changes == changes, CutAction::FrameChanges(changes), "D");
@@ -3443,7 +3449,7 @@ impl App {
     /// sticks to the visible left edge while the start is scrolled away.
     fn cut_thumb_rects(&self) -> Vec<(i64, crate::cut::Segment, RectPx)> {
         let Some(cut) = self.cut.as_ref().filter(|_| self.cut_mode) else { return Vec::new() };
-        if self.frame_markers_visible() || self.frame_detail() { return Vec::new(); }
+        if !self.cut_posters || self.frame_markers_visible() || self.frame_detail() { return Vec::new(); }
         let v = self.cut_lanes().video;
         let (t0, pps) = (cut.t0, cut.pps.max(1e-6));
         let x_of = |t: f64| v.x + ((t - t0) * pps) as f32;
@@ -3863,6 +3869,10 @@ impl App {
         };
         let soft = mix(0x050506, 0xffffff, 0.72);
         match action {
+            CutAction::TogglePosters => {
+                draw_icon(items, Icon::TrackFilm, cx, cy, hex_color(
+                    if hovered { 0xd1d1d1 } else if self.cut_posters { 0x626262 } else { 0x383838 }));
+            }
             CutAction::FrameChanges(changes) => {
                 items.push(Item::Rect(RectItem { radius: 5.0, ..RectItem::new(r,
                     hex_color(if self.frame_changes == changes { 0x343838 } else { 0x1b1f22 })) }));
@@ -4204,7 +4214,7 @@ impl App {
         items.push(Item::Rect(RectItem::new(RectPx { x: tl.x, y: tl.y, w: 49.0, h: tl.h }, hex_color(0x0d0d0d))));
         line(items, tl.x + 48.0, tl.y, tl.h, 1.0, hex_color(0x242424));
         let gutter = hex_color(0x626262);
-        for (lane, icon) in [(lanes.chapters, Icon::Bookmark), (Some(v), Icon::TrackFilm),
+        for (lane, icon) in [(lanes.chapters, Icon::Bookmark),
             (lanes.audio, Icon::TrackSpeaker), (Some(lanes.subs), Icon::Subtitle)] {
             if let Some(r) = lane { draw_icon(items, icon, tl.x + 31.0, r.y + r.h / 2.0, gutter); }
         }
@@ -4925,7 +4935,7 @@ impl Workspace {
 #[derive(Clone, Copy)]
 enum Action { Duplicate, OpenFiles, ClearSources, Tool(usize), View(Mode), Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
 #[derive(Clone, Copy, PartialEq)]
-enum CutAction { FrameChanges(bool), TimeDisplay(bool), In, Out, Split, ToggleSplit, Apply, DeletePicked, Undo, Export, EncodeAll, Encode(f64), Snap(Snap), Play, Zoom(bool), Step(i32), Keyframe(i32), Chapter(i32) }
+enum CutAction { TogglePosters, FrameChanges(bool), TimeDisplay(bool), In, Out, Split, ToggleSplit, Apply, DeletePicked, Undo, Export, EncodeAll, Encode(f64), Snap(Snap), Play, Zoom(bool), Step(i32), Keyframe(i32), Chapter(i32) }
 /// `hint` is the key cap a cut-mode button carries ("" for none).
 struct Control { r: RectPx, label: String, selected: bool, action: Action, hint: &'static str }
 impl Control {
@@ -6036,6 +6046,30 @@ mod tests {
         app.split_tool = false;
         assert_eq!(pixels(&mut app), original, "turning the tool off restores playback");
         assert!(app.split_preview.is_none());
+    }
+
+    #[test]
+    fn movie_icon_toggles_clip_posters_without_seeking() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        app.set_cut_default(true);
+        app.playing = false;
+        app.tick(0.0, (1280.0, 800.0), 2.0);
+        app.cut.as_mut().unwrap().pps = 100.0;
+        assert!(!app.cut_thumb_rects().is_empty());
+        let control = app.controls().into_iter().find(|c| matches!(c.action, Action::Cut(CutAction::TogglePosters))).unwrap();
+        let t = app.t;
+        app.mouse_down(control.r.x + 12.0, control.r.y + 12.0);
+        app.mouse_up();
+        app.tick(0.0, (1280.0, 800.0), 2.0);
+        assert!(app.cut_thumb_rects().is_empty());
+        assert!(app.cut_thumb.play.is_none());
+        assert_eq!(app.t, t);
+        assert!(app.cut_drag.is_none());
+        app.mouse_down(control.r.x + 12.0, control.r.y + 12.0);
+        app.mouse_up();
+        assert!(!app.cut_thumb_rects().is_empty());
+        assert_eq!(app.t, t);
     }
 
     #[test]

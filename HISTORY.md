@@ -3,6 +3,13 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-14 — clip preview toggle
+
+The movie icon beside the video lane now toggles the leading clip previews.
+Previews start visible; hiding them also stops their hover playback. The icon
+dims when hidden and its tooltip names the next action. The setting lasts for
+the current app session and leaves frame-detail cards and chapter thumbnails alone.
+
 ## 2026-10-14 — re-encode tint follows the clip
 
 Purple re-encode regions now tint the full-height clip background, with square
