@@ -60,8 +60,9 @@ keys:
   < >  (, .)   frame-step back / forward
   ← →          seek ±1s
   [ ]          slow down / speed up playback
-  Backspace    Sources: close focused clip; Timeline: delete picked piece;
+  Backspace    Sources: close selected clips (or focused clip); Timeline: delete picked piece;
                otherwise reset playback speed
+  Option-drag  duplicate a clip in the Sources pane
   1..9         show clip 1, 2, … directly
   V            next view (Shift-V previous): overlay  side-by-side  delta  split  checker  blend
   - =          adjust delta gain / blend / checker size
@@ -813,10 +814,10 @@ impl ApplicationHandler for Runner {
                             }
                         } else {
                             self.header_click.0 = None;
-                            self.app.mouse_down(x, y);
+                            self.app.mouse_down_with_alt(x, y, self.mods.alt_key());
                         }
                     },
-                    ElementState::Released => self.app.mouse_up(),
+                    ElementState::Released => self.app.mouse_released(),
                 }
             }
             WindowEvent::RedrawRequested => {

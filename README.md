@@ -88,7 +88,8 @@ frame's true pts is adopted back into the clock, so stepping can't accumulate dr
 | `S` | save the focused mask in mask mode |
 | `Z` | reset zoom |
 | `[` `]` | slow down / speed up playback (0.25×–4×) |
-| `Backspace` | Sources: close focused clip; Timeline: delete picked piece; otherwise reset playback speed |
+| `Backspace` | Sources: close selected clips (or focused clip if none selected); Timeline: delete picked piece; otherwise reset playback speed |
+| `Option`-drag | Duplicate the dragged clip in the Sources pane, inserting its copy immediately after it |
 | `F` | fullscreen (borderless, same Space, instant) |
 | `Enter` | the current video alone, fullscreen (again or `Esc` to return) |
 | `Q` | quit |

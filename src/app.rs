@@ -141,6 +141,7 @@ pub struct App {
     pub videos: Vec<Video>,
     active: usize,
     source_scroll: usize,
+    source_copy_drag: Option<(usize, f32, f32, bool)>,
     source_status: String,
     masks: Vec<Option<Mask>>,
     mask_mode: bool,
@@ -558,6 +559,7 @@ impl App {
             videos,
             active: 0,
             source_scroll: 0,
+            source_copy_drag: None,
             source_status: String::new(),
             t: 0.0,
             playing: !cfg.playback.start_paused,
@@ -1150,6 +1152,7 @@ impl App {
     /// unsynced against them — the one thing this product must never
     /// show. Frame-lock is re-established by construction, as at startup.
     pub fn add_videos(&mut self, mut videos: Vec<Video>, replace: bool) {
+        self.source_copy_drag = None;
         if videos.is_empty() {
             return;
         }
@@ -1195,8 +1198,12 @@ impl App {
         let mut indices: Vec<usize> = self.videos.iter().enumerate()
             .filter_map(|(i, v)| v.selected.then_some(i)).collect();
         if indices.is_empty() { indices.push(self.active); }
+        self.duplicate_source_indices(&indices);
+    }
+
+    fn duplicate_source_indices(&mut self, indices: &[usize]) {
         let mut copies = Vec::new();
-        for &i in &indices {
+        for &i in indices {
             let info = self.videos[i].info.clone();
             let Some(player) = Player::spawn(&info.path, info.width, info.height,
                 crate::probe::vt_accel(&info.codec), info.rotation) else {
@@ -1231,12 +1238,21 @@ impl App {
     /// rather than showing its neighbour's last frame. Closing the last
     /// clip returns to the launch window.
     fn close_active(&mut self) {
+        self.close_sources(false);
+    }
+
+    fn close_sources(&mut self, selected: bool) {
         if self.videos.is_empty() {
             return;
         }
-        let idx = self.active.min(self.videos.len() - 1);
-        self.videos.remove(idx);
-        self.masks.remove(idx);
+        let mut indices: Vec<usize> = self.videos.iter().enumerate()
+            .filter_map(|(i, v)| (selected && v.selected).then_some(i)).collect();
+        if indices.is_empty() { indices.push(self.active.min(self.videos.len() - 1)); }
+        let idx = self.active - indices.iter().filter(|&&i| i < self.active).count();
+        for &i in indices.iter().rev() {
+            self.videos.remove(i);
+            self.masks.remove(i);
+        }
         self.cut = None;
         self.cut_mode = false;
         self.cmds.push(Cmd::VideosChanged);
@@ -1252,6 +1268,7 @@ impl App {
             return;
         }
         self.active = idx.min(self.videos.len() - 1);
+        self.reveal_source();
         self.badge_flash = 1.2;
         self.fps = Self::fps_of(&self.videos);
         self.wrap = Self::wrap_of(&self.videos);
@@ -1372,7 +1389,11 @@ impl App {
             }
             return;
         }
-        if k == Key::Close || (k == Key::Backspace && !self.cut_mode && !self.mask_mode) {
+        if k == Key::Backspace && !self.cut_mode && !self.mask_mode {
+            self.close_sources(true);
+            return;
+        }
+        if k == Key::Close {
             self.close_active();
             return;
         }
@@ -1513,6 +1534,11 @@ impl App {
 
     pub fn cursor_moved(&mut self, x: f32, y: f32) {
         self.cursor_inside = true;
+        if let Some((_, sx, sy, moved)) = &mut self.source_copy_drag {
+            *moved |= (x - *sx).hypot(y - *sy) >= 5.0;
+            self.cursor = (x, y);
+            return;
+        }
         if !self.ready() {
             self.cursor = (x, y);
             self.recent.hover = self.recent.hit(x, y);
@@ -1547,6 +1573,32 @@ impl App {
             self.drag = Some((x, y));
         }
         self.cursor = (x, y);
+    }
+
+    pub fn mouse_down_with_alt(&mut self, x: f32, y: f32, alt: bool) {
+        if alt && self.show_ui && !self.cut_mode && !self.mask_mode && contains(self.workspace().list, x, y) {
+            let first = self.source_first();
+            if let Some(idx) = (first..(first + self.source_capacity()).min(self.videos.len()))
+                .find(|&i| contains(self.source_row(i), x, y) && !contains(self.source_checkbox(i), x, y)) {
+                self.mouse_up();
+                self.cursor = (x, y);
+                self.cursor_inside = true;
+                self.source_copy_drag = Some((idx, x, y, false));
+                return;
+            }
+        }
+        self.mouse_down(x, y);
+    }
+
+    pub fn mouse_released(&mut self) {
+        let copy = self.source_copy_drag.take();
+        self.mouse_up();
+        if let Some((idx, _, _, true)) = copy {
+            if self.cursor_inside && self.show_ui && !self.cut_mode && !self.mask_mode
+                && contains(self.workspace().list, self.cursor.0, self.cursor.1) && idx < self.videos.len() {
+                self.duplicate_source_indices(&[idx]);
+            }
+        }
     }
 
     pub fn mouse_down(&mut self, x: f32, y: f32) {
@@ -1626,6 +1678,7 @@ impl App {
     }
 
     pub fn mouse_up(&mut self) {
+        self.source_copy_drag = None;
         if matches!(self.cut_drag, Some(CutDrag::Scrub)) && self.scrub_resume {
             self.playing = true;
         }
@@ -6402,6 +6455,60 @@ mod tests {
         app.take_cmds();
         app.key(Key::Close);
         assert!(app.take_cmds().iter().any(|c| matches!(c, Cmd::Quit)), "⌘W on empty quits");
+    }
+
+    #[test]
+    fn backspace_removes_checked_sources_and_preserves_unselected_focus() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 4);
+        app.playing = false;
+        app.t = 0.5;
+        app.active = 2;
+        app.videos[0].selected = true;
+        app.videos[3].selected = true;
+        app.videos[2].linked_copy = true;
+        app.key(Key::Backspace);
+        assert_eq!(app.videos.len(), 2);
+        assert_eq!(app.masks.len(), 2);
+        assert_eq!(app.active, 1);
+        assert!(app.videos[app.active].linked_copy);
+        assert_eq!(app.t, 0.5);
+        assert!(app.videos.iter().all(|v| v.pending));
+        for v in &mut app.videos { v.selected = true; }
+        app.key(Key::Backspace);
+        assert!(!app.ready());
+    }
+
+    #[test]
+    fn option_drag_duplicates_only_the_dragged_source_on_release() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 2);
+        app.playing = false;
+        app.tick(0.0, (1280.0, 800.0), 2.0);
+        app.videos[1].selected = true;
+        let row = app.source_row(0);
+        let (x, y) = (row.x + row.w / 2.0, row.y + 40.0);
+        app.mouse_down_with_alt(x, y, true);
+        app.mouse_released();
+        assert_eq!(app.videos.len(), 2, "Option-click is not a drag");
+        let t = app.t;
+        app.mouse_down_with_alt(x, y, true);
+        app.cursor_moved(x + 10.0, y + 15.0);
+        assert_eq!(app.videos.len(), 2, "no duplicate until release");
+        app.mouse_released();
+        assert_eq!(app.videos.len(), 3);
+        assert_eq!(app.active, 1);
+        assert!(app.videos[1].linked_copy && app.videos[1].selected);
+        assert!(!app.videos[2].selected);
+        assert_eq!(app.t, t);
+        assert!(!app.playing);
+        app.mouse_released();
+        assert_eq!(app.videos.len(), 3, "one copy per gesture");
+        app.mouse_down_with_alt(x, y, true);
+        app.cursor_moved(x + 10.0, y + 15.0);
+        app.cursor_left();
+        app.mouse_released();
+        assert_eq!(app.videos.len(), 3, "leaving cancels the gesture");
     }
 
     #[test]

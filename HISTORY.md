@@ -3,6 +3,14 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-14 — selection deletion and Option-drag copies
+
+Backspace in Sources now closes all checked clips, falling back to the focused
+clip when none are checked. Survivors retain their playback time and focus when
+possible. Option-dragging a source within the pane inserts an independent linked
+copy immediately after it on release. A click without movement or a cancelled
+drag creates no copy; unrelated checked sources are not duplicated.
+
 ## 2026-10-14 — Backspace closes a source
 
 In Sources, Backspace closes the focused clip through the existing close path,
