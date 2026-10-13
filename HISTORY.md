@@ -3,6 +3,13 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-14 — hover playhead preview
+
+Hovering a scrubbable part of the timeline shows a translucent playhead pin and
+line at the click target. Preview and scrub share the same time calculation,
+including frame-card snapping. It hides during drags and over trim grips,
+removed clips, split targets and controls, where clicking does something else.
+
 ## 2026-10-14 — frame-marker height hierarchy
 
 Zoomed timeline ticks now share an inset bottom baseline: B frames are short,

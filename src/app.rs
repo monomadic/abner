@@ -3135,6 +3135,35 @@ impl App {
         self.cut.as_ref().map_or(0.0, |c| c.t0 + ((x - lane.x) as f64) / c.pps.max(1e-6))
     }
 
+    /// Shared by the hover playhead and actual scrubbing, including frame cards.
+    fn cut_scrub_target(&self, x: f32) -> f64 {
+        let at = self.cut_time_at(x);
+        let Some(cut) = &self.cut else { return at };
+        if self.frame_detail() {
+            let i = cut.frames.partition_point(|t| *t <= at).saturating_sub(1);
+            cut.frames.get(i).copied().unwrap_or(at).min((self.wrap - 1e-6).max(0.0))
+        } else {
+            at.clamp(0.0, (cut.duration.min(self.wrap) - 0.05).max(0.0))
+        }
+    }
+
+    fn cut_hover_playhead(&self) -> Option<f64> {
+        if !self.cut_mode || !self.show_ui || !self.cursor_inside || self.cut_drag.is_some() { return None; }
+        let (x, y) = self.cursor;
+        let v = self.cut_lanes().video;
+        if !contains(self.workspace().timeline, x, y) || x < v.x || x >= v.x + v.w { return None; }
+        // Only promise a seek where a click really scrubs, not trims, splits,
+        // selects a removed range, or activates a timeline control.
+        if self.cut_edge_at(x, y).is_some()
+            || self.cut_ghost_at(x, y).is_some()
+            || (self.split_tool && self.cut_clip_at(x, y).is_some())
+            || self.controls().iter().any(|c| contains(c.r, x, y))
+            || self.cut_encode_regions().iter().any(|(_, r)| r.w >= 54.0 && contains(Self::encode_button(*r), x, y)) {
+            return None;
+        }
+        Some(self.cut_scrub_target(x))
+    }
+
     /// The clip edge under the pointer, if it is on one's grip: the video
     /// and audio rows, within a few px of a boundary that is on screen.
     fn cut_edge_at(&self, x: f32, y: f32) -> Option<f64> {
@@ -3534,16 +3563,13 @@ impl App {
         let lane = self.cut_lanes().video;
         let zoom = self.cut_zoom_bar();
         let at = self.cut_time_at(x);
-        let detail = self.frame_detail();
+        let scrub_target = self.cut_scrub_target(x);
         let playhead = self.t;
         let Some(cut) = self.cut.as_mut() else { return };
         let end = (cut.duration.min(self.wrap) - 0.05).max(0.0);
         match self.cut_drag {
             Some(CutDrag::Scrub) => {
-                let target = if detail {
-                    let i = cut.frames.partition_point(|t| *t <= at).saturating_sub(1);
-                    cut.frames.get(i).copied().unwrap_or(at).min((self.wrap-1e-6).max(0.0))
-                } else { at.clamp(0.0, end) };
+                let target = scrub_target;
                 if (target - self.t).abs() > 1e-9 { self.seek_all(target, true); }
                 self.adopt_seek = false;
             },
@@ -4406,6 +4432,18 @@ impl App {
                 bg: Some(TextBg { radius: 5.0, pad_x: 8.0, pad_y: 5.0, ..TextBg::new(hex_color(0x26282b)) }),
                 max_width: Some(v.w * 0.5),
                 ..TextItem::new(if right { mx - 10.0 } else { mx + 10.0 }, my - 20.0, 10.5, hex_color(CUT_INK), text) }));
+        }
+        if let Some(at) = self.cut_hover_playhead() {
+            let x = x_of(at);
+            let mut ghost = hex_color(CUT_HEAD);
+            ghost[3] = 0.22;
+            line(items, x - 0.5, tl.y + 1.0, tl.h - 1.0, 1.0, ghost);
+            items.push(Item::Rect(RectItem { radius: 1.2, ..RectItem::new(
+                RectPx { x: x - 5.5, y: tl.y - 2.0, w: 11.0, h: 7.5 }, ghost) }));
+            items.push(Item::TriangleDown { r: RectPx { x: x - 5.5, y: tl.y + 5.3, w: 11.0, h: 5.7 }, color: ghost, radius: 0.3 });
+            for (gx, h) in [(x - 2.15, 4.1), (x - 0.4, 5.25), (x + 1.35, 4.1)] {
+                line(items, gx, tl.y + 1.0, h, 0.8, [0.0, 0.0, 0.0, 0.22]);
+            }
         }
         let px = x_of(self.t);
         let head = hex_color(CUT_HEAD);
@@ -5864,6 +5902,37 @@ mod tests {
         let cell = fit_cell(&short, cw, ch - 40);
         assert_eq!((cell[0], cell[3]), (0, 255), "padding is opaque black");
         assert_eq!(cell[(21 * cw * 4) as usize], 200, "the picture sits in the middle");
+    }
+
+    #[test]
+    fn hover_playhead_matches_click_and_hides_for_other_actions() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        app.set_cut_default(true);
+        assert!(tick_until(&mut app, Duration::from_secs(5), |a| !a.cut.as_ref().unwrap().scanning()));
+        app.playing = false;
+        for detail in [false, true] {
+            if detail { app.cut.as_mut().unwrap().pps = app.fps * 100.0; }
+            let lane = app.cut_lanes().ruler;
+            let x = lane.x + 143.0;
+            let y = lane.y + 4.0;
+            app.cursor_moved(x, y);
+            let before = app.t;
+            let target = app.cut_hover_playhead().expect("ruler previews a seek");
+            assert_eq!(app.t, before, "hover does not seek");
+            app.mouse_down(x, y);
+            assert!((app.t - target).abs() < 1e-9);
+            assert!(app.cut_hover_playhead().is_none(), "hidden while dragging");
+            app.mouse_up();
+        }
+        let lane = app.cut_lanes().video;
+        app.split_tool = true;
+        app.cursor_moved(lane.x + 143.0, lane.y + 20.0);
+        assert!(app.cut_hover_playhead().is_none(), "split tool does not seek");
+        app.cursor_moved(lane.x - 20.0, lane.y);
+        assert!(app.cut_hover_playhead().is_none(), "gutter does not seek");
+        app.cursor_inside = false;
+        assert!(app.cut_hover_playhead().is_none());
     }
 
     #[test]
