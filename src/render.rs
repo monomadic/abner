@@ -200,12 +200,14 @@ pub struct ThumbUpload {
     pub buf: Vec<u8>,
 }
 
-/// One decoded frame to upload into video texture `idx` this frame.
+/// One decoded frame to upload into video texture `idx` this frame. The
+/// buffer is the decoder's cached frame, shared, so the upload path just
+/// drops it afterwards.
 pub struct Upload {
     pub idx: usize,
     pub w: u32,
     pub h: u32,
-    pub buf: Vec<u8>,
+    pub buf: crate::player::Rgba,
 }
 
 #[derive(Debug, Clone, Copy)]

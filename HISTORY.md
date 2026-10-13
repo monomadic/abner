@@ -3,49 +3,51 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
-## 2026-10-14 — seeks that land while you scrub, VP9/AV1 on VideoToolbox
+## 2026-10-14 — the frame cache: exact seeks that land at once, VP9/AV1 on VideoToolbox
 
 Clicking the seek bar and scrubbing both took seconds on long-GOP sources: every
 pointer event sent an EXACT seek, which decodes from the preceding keyframe up to
-the target, and each new target abandoned the previous one, so the reader
-restarted the GOP decode per event and never landed. A first cut kept the exact
-seek for the release and went keyframe-only during the drag, which was worse:
-a click is a press AND a release, the keyframe landed before the pointer time,
-and the paused drain walked frames forward toward the clock until the exact
-seek caught up — the picture "played" a few frames after every click.
+the target and threw every pre-target frame away, and each new target abandoned
+the previous one, so the reader restarted the GOP decode per event and never
+landed. Two wrong turns first: an exact seek on release with keyframe seeks
+during the drag made every click "play" a few frames (the keyframe landed before
+the pointer time and the paused drain walked forward to it); then switchblade's
+seekbar model — keyframe seeks only, the clock adopting the landing — which is
+fast but lands up to a GOP from the frame asked for, and this is a frame-precise
+tool: with keyframe snap off, frames must be seekable directly.
 
-Switchblade's seekbar (`sb-app` `scrub_seek`, `sb-media` `SeekBias`) is the
-model now, and it never seeks exact from the pointer at all:
+What landed instead, the rule being "never throw decoded data away":
 
-- A press, a drag hop and a release are the same thing: a KEYFRAME seek,
-  biased forward (`Player::seek_biased`) when the target is ahead of the frame
-  on screen so the picture never moves against the gesture, and the clock
-  ADOPTS the pts that lands. A click sits on a keyframe, as in every NLE; the
-  playhead shows the request while the seek is in flight, then the landing.
-  The cut panel's drag does the same, except in frame-snap mode (`K`), where
-  the exact frame was asked for and the exact seek stays.
-- Paused, the streams must still show ONE frame. Each lands on its own keyframe;
-  after the active one's pts becomes the clock, `tick` exact-seeks any stream
-  sitting more than a frame ahead or any amount behind it. Inside its own GOP
-  that is a decode-forward without a demuxer seek (below), and when the keyframe
-  grids agree it costs nothing. Measured on a 1080p pair with 4 s / 3 s GOPs:
-  clicks land synced in 13–150 ms, worst 325 ms; the old exact path took a GOP
-  decode on both.
+- **`Player` keeps a frame cache instead of a 4-deep queue.** Every frame the
+  decoder produces — the pre-target frames of an exact seek included — goes into
+  a pts-keyed cache bounded by `playback.frame_cache_mb` (default 1024 per clip;
+  1080p is ~8 MB a frame, 4K ~33 MB), evicting the frame farthest from the
+  position. The cache IS the queue: `take_upto`/`take_next` read from it, and
+  the reader, instead of parking four frames ahead, keeps decoding while there
+  is budget — so the GOP on screen stays resident and the NEXT GOP is warm by
+  the time the playhead reaches it. `seek` checks the cache first and, when the
+  span is resident, serves the frame on the caller's thread without a word to
+  the decoder. Contiguous spans (`Cache::runs`) are tracked so "the first cached
+  frame at or after t" is only trusted when nothing undecoded lies between.
+  Decoding that runs back into cached frames merges spans and skips the
+  download/convert. Frames are `Arc<Vec<u8>>` now; the upload path and the mask
+  capture share them and the pool refills from evictions.
+- Pointer seeks are EXACT again, as they must be. Measured on a 1080p pair with
+  4 s / 3 s GOPs: a cold jump into an undecoded GOP lands both streams on the
+  requested frame in 285–470 ms (the GOP decode, every frame cached), and every
+  seek inside the cached span lands in ~1.3 ms.
 - `App::seek_all` coalesces: while any player is still landing a seek
   (`Video::seeking`, cleared when a frame delivers or `buffered()` turns
   non-zero, expired after `SEEK_SETTLE`), the newest target waits in
-  `queued_seek` and `tick` dispatches it once everything has landed — the drag
-  becomes a keyframe stream at the rate the decoders deliver, switchblade's
-  decode-paced scrub.
-- `Player` runs ONE decoder thread when the VideoToolbox device is up. Frame
+  `queued_seek` and `tick` dispatches it once everything has landed. Seek-bar
+  targets snap to the frame grid (`quantize`) and a target equal to the clock
+  is dropped.
+- `Player` runs ONE decoder thread when the VideoToolbox device is up: frame
   threading delays output by a packet per thread after every flush, and the
   hardware does the decode anyway.
-- An exact seek FORWARD of the last decoded frame that stays inside the same GOP
-  (same keyframe index entry, demuxer not at EOF) no longer seeks: the reader
-  just moves `skip_until`. Forward decode is always correct; the keyframe test
-  only keeps it from grinding across GOPs when a jump would land closer.
-- Seek-bar targets snap to the frame grid (`quantize`) and a target equal to the
-  clock is dropped.
+- An exact seek FORWARD of the last decoded frame inside the same GOP (same
+  keyframe index entry, not at EOF) no longer seeks the demuxer or flushes: the
+  reader decodes on and the cache picks the frame out.
 
 VP9 and AV1 now go through VideoToolbox when the chip has the block (VP9 on M1+,
 AV1 on M3+), asked once per codec through `src/vt_shim.c`
@@ -53,9 +55,9 @@ AV1 on M3+), asked once per codec through `src/vt_shim.c`
 AV1 needs the NATIVE `av1` libav decoder — the hwaccel hangs off it and
 `libdav1d`, the default, is software-only — and it has no software path, so
 the chip check decides which decoder opens. The first decoded frame of every
-stream now logs whether it came from hardware or software. The player tests
-grow an in-GOP seek case and a VP9/AV1 decode-and-seek case; the app tests a
-coalescing case and the keyframe-landing contract.
+stream logs whether it came from hardware or software. New tests: in-GOP seeks
+served from the cache, the cache budget holding under playback, VP9/AV1
+decode-and-seek, seek coalescing.
 
 ## 2026-10-14 — positioned copies and separate restore selection
 

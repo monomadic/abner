@@ -40,6 +40,7 @@ pub struct Playback {
     pub view: Mode,
     pub start_paused: bool,
     pub seek_step: f64,
+    pub frame_cache_mb: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -101,6 +102,11 @@ impl Default for Config {
 }
 
 impl Config {
+    /// `playback.frame_cache_mb` in bytes.
+    pub fn frame_cache_bytes(&self) -> usize {
+        (self.playback.frame_cache_mb * 1048576.0) as usize
+    }
+
     /// Resolve and load the configuration for this run. `explicit` is
     /// `--config`'s path. Returns the config and the overlay file used.
     pub fn load(explicit: Option<&Path>) -> anyhow::Result<(Config, Option<PathBuf>)> {
@@ -149,6 +155,7 @@ impl Config {
         range("window.width", self.window.width, MIN_WINDOW.0, 16384.0)?;
         range("window.height", self.window.height, MIN_WINDOW.1, 16384.0)?;
         range("playback.seek_step", self.playback.seek_step, 0.001, 3600.0)?;
+        range("playback.frame_cache_mb", self.playback.frame_cache_mb, 64.0, 65536.0)?;
         range("compare.delta_gain", self.compare.delta_gain as f64, 1.0, 64.0)?;
         range("compare.blend", self.compare.blend as f64, 0.0, 1.0)?;
         range("compare.checker_size", self.compare.checker_size as f64, 4.0, 512.0)?;

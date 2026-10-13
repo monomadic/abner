@@ -194,10 +194,9 @@ pub struct App {
     cut_tab: usize,
     /// Only discrete seeks/framesteps adopt a decoded timestamp; pointer seeks stay pinned.
     adopt_seek: bool,
-    /// The seek that arrived while one was in flight: `(target, exact,
-    /// forward)`, newest wins, dispatched by `tick` once every player has
-    /// landed.
-    queued_seek: Option<(f64, bool, bool)>,
+    /// The seek that arrived while one was in flight: `(target, exact)`,
+    /// newest wins, dispatched by `tick` once every player has landed.
+    queued_seek: Option<(f64, bool)>,
     info_scroll: f32,
     cut_frames: bool,
     frame_changes: bool,
@@ -238,6 +237,8 @@ pub struct App {
     speed: f64,
     /// Seconds per ← / → (config `playback.seek_step`).
     seek_step: f64,
+    /// Per-clip decoded-frame cache budget (`playback.frame_cache_mb`).
+    cache_bytes: usize,
     /// Rebindable keys (config `keys`).
     keys: crate::config::Keys,
     /// Loaded clips open paused on their first frame (config
@@ -590,6 +591,7 @@ impl App {
             center: (0.5, 0.5),
             speed: 1.0,
             seek_step: cfg.playback.seek_step,
+            cache_bytes: cfg.frame_cache_bytes(),
             keys: cfg.keys.clone(),
             start_paused: cfg.playback.start_paused,
             show_ui: true,
@@ -1081,11 +1083,6 @@ impl App {
 
 
     /// A backdrop frame goes back to its decoder's pool.
-    pub fn recycle_backdrop(&mut self, buf: Vec<u8>) {
-        if let Some(b) = &self.backdrop {
-            b.player.recycle(buf);
-        }
-    }
 
     /// Advance the backdrop's clock and take the frame now due, spawning
     /// the decoder on the launch window's first frame.
@@ -1104,6 +1101,7 @@ impl App {
                 src.height,
                 crate::probe::vt_accel(&src.codec),
                 src.rotation,
+                crate::player::SMALL_CACHE,
             )?;
             self.backdrop = Some(Backdrop { player, t: 0.0 });
         }
@@ -1228,7 +1226,7 @@ impl App {
         for &i in indices {
             let info = self.videos[i].info.clone();
             let Some(player) = Player::spawn(&info.path, info.width, info.height,
-                crate::probe::vt_accel(&info.codec), info.rotation) else {
+                crate::probe::vt_accel(&info.codec), info.rotation, self.cache_bytes) else {
                 self.source_status = "Could not duplicate source: decoder unavailable".into();
                 return;
             };
@@ -1319,29 +1317,22 @@ impl App {
         std::mem::take(&mut self.cmds)
     }
 
-    pub fn recycle(&mut self, idx: usize, buf: Vec<u8>) {
-        if let Some(v) = self.videos.get(idx) {
-            v.player.recycle(buf);
-        }
+    /// The per-clip decoded-frame cache budget, for players spawned
+    /// outside `App` (main's drop/open loaders).
+    pub fn cache_bytes(&self) -> usize {
+        self.cache_bytes
     }
 
     /// Seek every stream. The clock moves at once; the players are told
     /// now, or — when one is still landing an earlier seek — once it has,
     /// so a burst of targets costs one restart, not one per target.
     fn seek_all(&mut self, target: f64, exact: bool) {
-        self.seek_all_biased(target, exact, false);
-    }
-
-    /// `seek_all` with a direction: a keyframe seek lands at or after the
-    /// target instead of before it when the pointer went forward, so the
-    /// picture never moves against the gesture.
-    fn seek_all_biased(&mut self, target: f64, exact: bool, forward: bool) {
         self.adopt_seek = true;
         self.t = target;
         if self.seek_in_flight() {
-            self.queued_seek = Some((target, exact, forward));
+            self.queued_seek = Some((target, exact));
         } else {
-            self.dispatch_seek(target, exact, forward);
+            self.dispatch_seek(target, exact);
         }
     }
 
@@ -1349,24 +1340,18 @@ impl App {
         self.videos.iter().any(|v| v.seeking && !v.player.failed() && v.seek_sent.elapsed() < SEEK_SETTLE)
     }
 
-    fn dispatch_seek(&mut self, target: f64, exact: bool, forward: bool) {
+    fn dispatch_seek(&mut self, target: f64, exact: bool) {
         self.queued_seek = None;
         let paused = !self.playing;
         let now = std::time::Instant::now();
         for v in &mut self.videos {
-            v.player.seek_biased(target, exact, forward);
+            v.player.seek(target, exact);
             v.seeking = true;
             v.seek_sent = now;
             if paused {
                 v.pending = true;
             }
         }
-    }
-
-    /// Where the picture IS, as opposed to `t`, which is where it is going
-    /// while a seek is in flight.
-    fn shown_t(&self) -> f64 {
-        self.videos.get(self.active).map_or(self.t, |v| v.shown_pts)
     }
 
     /// Snap a pointer time to the frame grid, so a pixel's worth of jitter
@@ -1776,12 +1761,11 @@ impl App {
         let end = (self.wrap - 0.05).max(0.0);
         let target = self.quantize(f * end).min(end);
         if (target - self.t).abs() < 1e-9 { return; }
-        // Keyframe-only, biased the way the pointer went (switchblade's
-        // seekbar): one frame of decode per target instead of a GOP, and
-        // the clock adopts the frame that lands. There is no exact seek on
-        // release — a click sits on a keyframe, the way every NLE's does.
-        let forward = target > self.shown_t();
-        self.seek_all_biased(target, false, forward);
+        // Exact, always: this is a frame-precise tool. The player's frame
+        // cache makes a seek inside the resident span instant, and the
+        // reader keeps the GOP on screen and the next one warm.
+        self.seek_all(target, true);
+        self.adopt_seek = false;
     }
 
     pub fn scroll(&mut self, dx: f32, dy: f32) {
@@ -1923,7 +1907,7 @@ impl App {
         if let Some(cut) = &mut self.cut { cut.poll(); }
         if let Some(path) = self.cut.as_mut().and_then(|c| c.reload.take()) {
             let v = &mut self.videos[self.cut_video];
-            if let Some(player) = Player::spawn(&path, v.info.width, v.info.height, crate::probe::vt_accel(&v.info.codec), v.info.rotation) {
+            if let Some(player) = Player::spawn(&path, v.info.width, v.info.height, crate::probe::vt_accel(&v.info.codec), v.info.rotation, self.cache_bytes) {
                 v.player = player;
                 v.info.path = path;
                 v.linked_copy = false;
@@ -2038,11 +2022,9 @@ impl App {
                 // its own. Mask mode is paused: this runs on entry and on
                 // seeks, not once a frame.
                 if capture {
-                    v.last_frame = Some(std::sync::Arc::new(buf.clone()));
+                    v.last_frame = Some(buf.clone());
                 }
-                if self.split_preview.as_ref().is_some_and(|p| p.idx == i && p.shown) {
-                    v.player.recycle(buf);
-                } else {
+                if !self.split_preview.as_ref().is_some_and(|p| p.idx == i && p.shown) {
                     uploads.push(Upload { idx: i, w: v.player.w, h: v.player.h, buf });
                 }
             }
@@ -2060,35 +2042,10 @@ impl App {
         if !self.playing && let Some(pts) = adopt {
             self.t = pts;
         }
-        // Paused, the streams must show ONE frame. A keyframe seek lands
-        // each on its own keyframe; the active one's pts became the clock
-        // above, so any other stream sitting elsewhere is exact-seeked to
-        // it — inside its own GOP that is a decode-forward without a
-        // demuxer seek (the reader's in-GOP extension), and when the
-        // keyframe grids agree it is nothing at all. "Elsewhere" is more
-        // than a frame ahead or any amount behind: an exact landing is the
-        // first frame at or after the clock, so a stream can sit under a
-        // frame ahead of it without that being a disagreement — re-seeking
-        // those would loop forever on streams whose grids are offset.
-        if !self.playing {
-            let t = self.t;
-            let now = std::time::Instant::now();
-            for v in &mut self.videos {
-                if v.seeking || v.pending || !v.delivered || v.player.failed() { continue; }
-                let period = 1.0 / v.info.fps.max(1.0);
-                let off = v.shown_pts - t;
-                if off < -2e-3 || off > period {
-                    v.player.seek(t, true);
-                    v.pending = true;
-                    v.seeking = true;
-                    v.seek_sent = now;
-                }
-            }
-        }
         // The seek that waited for this landing goes out now; the clock
         // already sits on its target.
-        if let Some((target, exact, forward)) = self.queued_seek && !self.seek_in_flight() {
-            self.dispatch_seek(target, exact, forward);
+        if let Some((target, exact)) = self.queued_seek && !self.seek_in_flight() {
+            self.dispatch_seek(target, exact);
         }
         if !self.started {
             self.started = self.videos.iter().all(|v| v.delivered || v.player.failed());
@@ -3433,7 +3390,7 @@ impl App {
         if self.split_preview.is_none() {
             let info = &self.videos[self.active].info;
             if let Some(player) = Player::spawn(&info.path, info.width, info.height,
-                crate::probe::vt_accel(&info.codec), info.rotation) {
+                crate::probe::vt_accel(&info.codec), info.rotation, crate::player::SMALL_CACHE) {
                 player.seek(target, true);
                 self.split_preview = Some(SplitPreview { path: info.path.clone(), idx: self.active,
                     player, target, waiting: true, shown: false, shown_pts: 0.0 });
@@ -3726,7 +3683,7 @@ impl App {
                 let slot = self.cut_thumb.slot_of(key);
                 if let (Some(g), Some(slot)) = (g, slot) {
                     let h = ((recent::THUMB_W as f64 * info.height as f64 / info.width.max(1) as f64).round() as u32).max(2);
-                    if let Some(player) = Player::spawn(&info.path, recent::THUMB_W, h, crate::probe::vt_accel(&info.codec), info.rotation) {
+                    if let Some(player) = Player::spawn(&info.path, recent::THUMB_W, h, crate::probe::vt_accel(&info.codec), info.rotation, crate::player::SMALL_CACHE) {
                         player.seek(g.start, true);
                         self.cut_thumb.play = Some(ThumbPlay { key, slot, player, start: g.start, end: g.end, fps: info.fps.max(1.0), t: g.start });
                     }
@@ -3745,7 +3702,6 @@ impl App {
                 }
                 if let Some((_, buf)) = p.player.take_upto(p.t + 1e-6) {
                     let cell = fit_cell(&buf, p.player.w, p.player.h);
-                    p.player.recycle(buf);
                     self.cut_thumb.uploads.push(ThumbUpload { slot: p.slot, buf: cell });
                 }
             }
@@ -3826,15 +3782,9 @@ impl App {
         let end = (cut.duration.min(self.wrap) - 0.05).max(0.0);
         match self.cut_drag {
             Some(CutDrag::Scrub) => {
-                // Keyframe snap: the target IS a keyframe, so a keyframe
-                // seek lands it. Frame snap asked for the exact frame.
                 let target = scrub_target;
-                let exact = cut.snap == Snap::Frame;
-                if (target - self.t).abs() > 1e-9 {
-                    let forward = target > self.shown_t();
-                    self.seek_all_biased(target, exact, forward);
-                    if exact { self.adopt_seek = false; }
-                }
+                if (target - self.t).abs() > 1e-9 { self.seek_all(target, true); }
+                self.adopt_seek = false;
             },
             Some(CutDrag::Edge(edge)) => {
                 // The canvas follows the edge, so the trim is made by eye.
@@ -5377,7 +5327,7 @@ mod tests {
         app.key(Key::SelectSources);
         assert!(app.videos.iter().all(|v| !v.selected));
         let desc = app.tick(0.0, (720.0, 480.0), 2.0);
-        for u in desc.uploads { app.recycle(u.idx, u.buf); }
+        drop(desc);
         assert_eq!(app.source_first(), 2, "resize keeps the viewed source visible");
     }
 
@@ -5762,6 +5712,7 @@ mod tests {
             info.height,
             probe::vt_accel(&info.codec),
             info.rotation,
+            crate::config::Config::default().frame_cache_bytes(),
         )
         .expect("spawn");
         Video { selected: false, linked_copy: false, info, player, shown_pts: 0.0, delivered: false, pending: false, seeking: false, seek_sent: std::time::Instant::now(), last_frame: None }
@@ -5802,10 +5753,7 @@ mod tests {
     fn tick_until(app: &mut App, within: Duration, cond: impl Fn(&App) -> bool) -> bool {
         let deadline = Instant::now() + within;
         while Instant::now() < deadline {
-            let desc = app.tick(0.010, (1280.0, 800.0), 2.0);
-            for u in desc.uploads {
-                app.recycle(u.idx, u.buf);
-            }
+            let _ = app.tick(0.010, (1280.0, 800.0), 2.0);
             if cond(app) {
                 return true;
             }
@@ -6087,7 +6035,7 @@ mod tests {
         assert!(app.videos.iter().all(|v| v.seeking));
         app.seek_all(1.4, true);
         app.seek_all(1.8, true);
-        assert_eq!(app.queued_seek, Some((1.8, true, false)), "newest target waits");
+        assert_eq!(app.queued_seek, Some((1.8, true)), "newest target waits");
         assert_eq!(app.t, 1.8, "the clock moves at once");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while app.queued_seek.is_some() && std::time::Instant::now() < deadline {
@@ -6103,9 +6051,8 @@ mod tests {
             assert!((v.shown_pts - 1.8).abs() < 0.05, "stream shows {:.3}, wanted 1.8", v.shown_pts);
         }
 
-        // A seek-bar press is a keyframe seek, forward-biased when the
-        // pointer went forward, and the clock adopts the frame that lands
-        // — nothing exact on release.
+        // A seek-bar press is an exact seek on the frame grid; the clock
+        // stays where the pointer put it, and every stream lands on it.
         app.show_ui = true;
         app.tick(0.016, vp, 1.0);
         let s = app.seek_rect(vp);
@@ -6121,11 +6068,9 @@ mod tests {
             app.tick(0.016, vp, 1.0);
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        let landed = app.t;
-        assert!(landed >= want - 1e-3, "forward bias never lands before the request: {landed} < {want}");
-        assert!((landed / 1.0 - (landed / 1.0).round()).abs() < 1e-3, "landed on a keyframe (1s GOP): {landed}");
+        assert!((app.t - want).abs() < 1e-9, "the decoder never moves a pointer-owned clock");
         for v in &app.videos {
-            assert!((v.shown_pts - landed).abs() < 1e-3, "every stream shows the landed frame: {} vs {landed}", v.shown_pts);
+            assert!((v.shown_pts - want).abs() < 1.0 / 30.0, "every stream shows the requested frame: {} vs {want}", v.shown_pts);
         }
     }
 
@@ -6451,12 +6396,8 @@ mod tests {
         assert_eq!(app.cut_video, 1, "even identical linked paths have independent edits");
     }
 
-    /// A timeline press is a keyframe seek: the clock shows the request
-    /// while it is in flight, then adopts the keyframe that landed (on the
-    /// requested side of the target when one exists there), and nothing
-    /// moves it afterwards — not the decoder, not the release.
     #[test]
-    fn pointer_seek_lands_on_a_keyframe_and_the_clock_adopts_it() {
+    fn pointer_seek_stays_exact_as_decoded_frames_arrive() {
         let Some(clip) = test_clip() else { return };
         let mut app = mk_app(&clip, 1);
         assert!(tick_until(&mut app, Duration::from_secs(5), |a| a.started));
@@ -6464,26 +6405,18 @@ mod tests {
         app.playing = false;
         let lane = app.cut_lanes().video;
         for fraction in [0.7137, 0.2237, 0.6137] {
-            let from = app.videos[0].shown_pts;
             app.mouse_down(lane.x + lane.w * fraction, lane.y + lane.h / 2.0);
             let target = app.t;
             let start = Instant::now();
             while app.videos[0].pending && start.elapsed() < Duration::from_secs(5) {
-                assert_eq!(app.t, target, "the clock holds the request while the seek is in flight");
                 app.tick(0.01, (1280.0, 800.0), 2.0);
+                assert_eq!(app.t, target, "decoder must not move a pointer-owned playhead");
                 std::thread::sleep(Duration::from_millis(5));
             }
             assert!(!app.videos[0].pending, "seek completed");
-            let landed = app.t;
-            assert_eq!(landed, app.videos[0].shown_pts, "the clock is the picture");
-            assert!((landed - landed.round()).abs() < 1e-3, "landed on a keyframe (1s GOP): {landed}");
-            if target > from && target <= 3.0 {
-                assert!(landed >= target - 1e-3, "forward request never lands behind: {landed} < {target}");
-            } else {
-                assert!(landed <= target + 1e-3, "backward request never lands ahead: {landed} > {target}");
-            }
+            assert!((app.videos[0].shown_pts - target).abs() < 1.0 / 30.0, "the exact frame: {} vs {target}", app.videos[0].shown_pts);
             app.mouse_up();
-            for _ in 0..5 { app.tick(0.01, (1280.0, 800.0), 2.0); assert_eq!(app.t, landed, "release moves nothing"); }
+            for _ in 0..5 { app.tick(0.01, (1280.0, 800.0), 2.0); assert_eq!(app.t, target); }
         }
     }
 
@@ -6826,10 +6759,7 @@ mod tests {
     fn pinch_zooms_around_the_pointer_and_z_resets() {
         let Some(clip) = test_clip() else { return };
         let mut app = mk_app(&clip, 2);
-        let desc = app.tick(0.0, (1280.0, 800.0), 2.0);
-        for u in desc.uploads {
-            app.recycle(u.idx, u.buf);
-        }
+        let _ = app.tick(0.0, (1280.0, 800.0), 2.0);
         app.cursor_moved(900.0, 300.0);
         let r0 = app.content_rect(0);
         let u0 = ((900.0 - r0.x) / r0.w, (300.0 - r0.y) / r0.h);
@@ -6864,10 +6794,7 @@ mod tests {
         assert!((app.speed - 1.5625).abs() < 1e-9);
         let t0 = app.t;
         for _ in 0..10 {
-            let desc = app.tick(0.010, (1280.0, 800.0), 2.0);
-            for u in desc.uploads {
-                app.recycle(u.idx, u.buf);
-            }
+            let _ = app.tick(0.010, (1280.0, 800.0), 2.0);
         }
         let advanced = app.t - t0;
         assert!(

@@ -1,7 +1,8 @@
 # abner — agent notes
 
 A/B video comparison player: N videos decoded in frame-locked sync, flipped/diffed
-on screen. Deliberately slim — one crate, a handful of modules, one config file, no cache.
+on screen. Deliberately slim — one crate, a handful of modules, one config file, nothing
+on disk but the recent-files list (the decoded-frame cache lives in memory).
 Sibling project: `~/src/switchblade` (the graphics learnings came from there; its
 CLAUDE.md documents the deeper media/render rationale).
 
@@ -63,24 +64,37 @@ from one to the other, keeping its number.
   that wouldn't clear). AppKit decodes the PNG, so no image crate is pulled in; other
   platforms want an already-decoded RGBA buffer, so it's a no-op there.
 - `src/player.rs` — adapted from switchblade's `SeekablePlayer` (in-process libav via
-  rsmpeg, VT decode for h264/hevc/prores only, content-relative time, bounded queue,
-  drop-wakes-the-parked-reader). **Key difference: no per-player pacing.** Players queue
-  `(pts, rgba)`; the app owns ONE master clock and drains each player with
-  `take_upto(t)` (pop all due, newest wins). Sync is by construction, pause is "stop
-  advancing t" (backpressure stalls decoders), EOF parks the reader until a seek.
+  rsmpeg, VT decode for h264/hevc/prores always and vp9/av1 when the chip has the
+  block, content-relative time, drop-wakes-the-parked-reader). **Key difference: no
+  per-player pacing, and a FRAME CACHE instead of a queue** (2026-10-14). The app
+  owns ONE master clock and drains each player with `take_upto(t)` (pop all due,
+  newest wins). Sync is by construction, pause is "stop advancing t", EOF parks the
+  reader until a seek. The reader never throws a decoded frame away: every frame —
+  the pre-target frames of an exact seek included — goes into a pts-keyed cache
+  bounded by `playback.frame_cache_mb` per clip, evicting the frame farthest from
+  the position; the reader keeps decoding ahead while there is budget (the GOP on
+  screen stays resident, the next one gets warm), and `seek` serves a target whose
+  span is resident on the CALLER's thread without touching the decoder. The cache
+  IS the queue (`take_upto`/`take_next` read it; `buffered()` counts deliverable
+  frames; `buffered() > 0` after `seek()` means it landed). `Cache::runs` tracks
+  contiguous spans so "first cached frame ≥ t" is trusted only when nothing
+  undecoded lies between; decoding that runs into cached frames merges spans and
+  skips the download/convert. Frames are `Rgba = Arc<Vec<u8>>`, shared with the
+  upload path; the pool refills from evictions. One decoder thread when
+  VideoToolbox is up (frame threads add a packet of post-flush delay each and do
+  nothing for a hw decode). An exact seek forward of `Pump::last_pts` inside the
+  same GOP (same `av_index_search_timestamp` entry, not at EOF) neither seeks nor
+  flushes — decoding on reaches it. AV1 opens the NATIVE `av1` decoder, which the
+  hwaccel needs and which has no software path (`libdav1d`, the default, is
+  sw-only), so `probe::vt_accel` asks the hardware first (`src/vt_shim.c`). The
+  first frame of every stream logs hardware vs software at `info`. Measured
+  (1080p pair, 4 s / 3 s GOPs): a cold jump lands both streams exact in 285–470 ms,
+  a seek inside the cached span in ~1.3 ms. Pointer seeks are EXACT, always: this
+  is a frame-precise tool, and switchblade's keyframe-landing seekbar was tried and
+  rejected (it lands up to a GOP away from the frame asked for).
   Decode is at native resolution — pixels are the product here, nothing scales.
-  **Seek latency rules** (2026-10-14): one decoder thread when VideoToolbox is up
-  (frame threads add a packet of post-flush delay each and do nothing for a hw
-  decode); an exact seek forward of `Pump::last_pts` inside the same GOP (same
-  `av_index_search_timestamp` entry, not at EOF) only moves `skip_until` — no
-  demuxer seek, no flush; backward or cross-GOP seeks really seek. `buffered() > 0`
-  after `seek()` means the seek landed (the drain and the stale-push refusal share
-  the `frames` lock). VP9/AV1 use VT only when `probe::vt_accel` finds the hardware
-  block (`src/vt_shim.c`); AV1 then opens the NATIVE `av1` decoder, which the
-  hwaccel needs and which has no software path (`libdav1d`, the default, is sw-only).
-  The first frame of every stream logs hardware vs software at `info`.
   Three robustness rules ported from switchblade (2026-09-04), each a shipped bug there:
-  `Drop` takes the `frames` lock for an instant before notifying (a store+notify between
+  `Drop` takes the `cache` lock for an instant before notifying (a store+notify between
   the reader's `closed` check and its wait is a lost wakeup = leaked thread); an AVIO
   interrupt callback is installed BEFORE `avformat_open_input` so a drop reaches a
   reader wedged in libav I/O on a dead mount (`dropped_player_interrupts_a_reader_blocked_in_libav_io`);
@@ -115,20 +129,13 @@ from one to the other, keeping its number.
   can't re-land on the same frame — then the delivered frame's true pts is ADOPTED as
   `t` (`pending` flags + `take_next`). The clock wraps at the shortest stream duration
   and exact-seeks everyone to 0.
-  **Pointer seeks are keyframe seeks** (2026-10-14, switchblade's seekbar model):
-  the seek bar and the cut playhead drag send `seek_all_biased(t, false, forward)`
-  — forward-biased when the target is ahead of `shown_t()` so the picture never
-  moves against the gesture — and the clock ADOPTS the pts that lands. There is
-  NO exact seek on release (a first cut had one; between a click's press and
-  release the paused drain walked frames toward the clock, so every click
-  "played" a few frames). Frame-snap cut mode (`K`) is the one pointer path that
-  stays exact. Paused, `tick` then exact-seeks any stream more than a frame ahead
-  or any amount behind the clock, so A/B still shows one frame when keyframe grids
-  differ. `seek_all` moves `t` at once but, while any `Video::seeking` player
-  hasn't landed (`SEEK_SETTLE` bounds the wait), parks the newest target in
-  `queued_seek` for `tick` to dispatch after the drain — never send a seek per
-  pointer event. Seek-bar targets are `quantize`d to the frame grid and dropped
-  when equal to `t`.
+  **Seeks coalesce** (2026-10-14): `seek_all` moves `t` at once but, while any
+  `Video::seeking` player hasn't landed (`SEEK_SETTLE` bounds the wait), parks the
+  newest target in `queued_seek` for `tick` to dispatch after the drain — never
+  send a seek per pointer event. Pointer seeks (seek bar, cut playhead drag) are
+  EXACT with `adopt_seek = false` (the clock stays where the pointer put it); the
+  player's frame cache is what makes them instant inside the resident span.
+  Seek-bar targets are `quantize`d to the frame grid and dropped when equal to `t`.
   **Keys**: `1`–`9` pick a clip directly (`select`), `V`/Shift-V cycle the view.
   ⌘W (`Key::Close`, from winit's `ModifiersChanged` state) closes the focused clip
   (`close_active`): survivors shift down a slot and are exact-seeked to the current `t`

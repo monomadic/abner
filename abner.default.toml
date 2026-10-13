@@ -27,6 +27,11 @@ view = "overlay"
 start_paused = true
 # Seconds jumped by ← / →.
 seek_step = 1.0
+# Decoded-frame cache per clip, in MB. Every frame the decoder produces is
+# kept (the whole GOP on screen, then the next one), evicting the frames
+# farthest from the playhead, so seeks and scrubs inside the cached span
+# never touch the decoder. 1080p is ~8 MB a frame, 4K ~33 MB.
+frame_cache_mb = 1024
 
 [compare]
 # Delta amplification (1–64; - / = adjust it live).

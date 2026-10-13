@@ -181,8 +181,9 @@ fn main() -> anyhow::Result<()> {
     // window; one path fills slot A and plays alone — the same state a
     // single dropped file produces.
     let mut videos = Vec::new();
+    let cache_bytes = config.frame_cache_bytes();
     for p in &paths {
-        videos.push(load_video(p)?);
+        videos.push(load_video(p, cache_bytes)?);
     }
 
     let event_loop = EventLoop::new()?;
@@ -270,7 +271,7 @@ fn parse_rect(s: &str) -> Option<[f32; 4]> {
     it.next().is_none().then_some(rect)
 }
 
-fn load_video(path: &Path) -> anyhow::Result<Video> {
+fn load_video(path: &Path, cache_bytes: usize) -> anyhow::Result<Video> {
     let info = probe::probe(path)?;
     log::info!(
         "{}: {}x{} {} {:.3}fps",
@@ -286,6 +287,7 @@ fn load_video(path: &Path) -> anyhow::Result<Video> {
         info.height,
         probe::vt_accel(&info.codec),
         info.rotation,
+        cache_bytes,
     )
     .ok_or_else(|| anyhow::anyhow!("failed to start decoder for {}", path.display()))?;
     Ok(Video { selected: false, linked_copy: false, info, player, shown_pts: 0.0, delivered: false, pending: false, seeking: false, seek_sent: std::time::Instant::now(), last_frame: None })
@@ -436,8 +438,9 @@ impl Runner {
     fn files_dropped(&mut self, paths: Vec<PathBuf>, replace: bool) {
         self.app.set_drag_hover(false);
         let mut videos = Vec::new();
+        let cache_bytes = self.app.cache_bytes();
         for p in &paths {
-            match load_video(p) {
+            match load_video(p, cache_bytes) {
                 Ok(v) => {
                     v.player.set_notify(self.notify.clone());
                     videos.push(v);
@@ -847,14 +850,9 @@ impl ApplicationHandler for Runner {
                 gpu.render(&desc, vp);
                 self.animating = desc.animating;
                 self.redraw_at = desc.redraw_at;
-                // Frame buffers go back to their decoders' pools.
-                for u in desc.uploads {
-                    self.app.recycle(u.idx, u.buf);
-                }
-                if let Some(u) = desc.plate {
+                if desc.plate.is_some() {
                     // The first backdrop frame resized the plate.
                     self.app.set_plate(gpu.plate_size(), gpu.plate_horizon());
-                    self.app.recycle_backdrop(u.buf);
                 }
                 self.apply_cmds(event_loop);
             }

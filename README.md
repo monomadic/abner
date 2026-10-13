@@ -30,6 +30,9 @@ TOML file with just those keys, in the same tables:
 [playback]
 view = "delta"
 seek_step = 5.0
+# Decoded frames kept per clip, in MB (default 1024): the GOP on screen and
+# the next one stay resident, so seeks and scrubs inside them are instant.
+frame_cache_mb = 2048
 ```
 
 abner reads the first of these that exists — `--config <file>` (or
