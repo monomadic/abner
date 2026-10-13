@@ -3,6 +3,13 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-14 — split-guide video preview
+
+While the split guide is visible, the canvas displays its exact source frame using
+a separate native-resolution decoder. Moving the guide reuses that decoder and
+replaces pending seeks; the master clock and playback state remain untouched.
+Leaving the guide or disabling the tool restores the normal playhead frame.
+
 ## 2026-10-14 — hover playhead preview
 
 Hovering a scrubbable part of the timeline shows a translucent playhead pin and

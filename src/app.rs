@@ -187,6 +187,7 @@ pub struct App {
     cut_thumbs: bool,
     /// The start-of-clip thumbnails on the picture lane (posters, and the one under the pointer playing).
     cut_thumb: CutThumbs,
+    split_preview: Option<SplitPreview>,
     /// The picture clip last clicked, by its (start, end): drawn outlined.
     cut_pick: Option<(f64, f64, bool)>,
     split_tool: bool,
@@ -425,6 +426,17 @@ struct ThumbPlay {
 
 type ThumbMsg = (std::path::PathBuf, i64, Result<Vec<u8>, String>);
 
+/// A separate native-resolution decoder: split inspection never moves the clock.
+struct SplitPreview {
+    path: std::path::PathBuf,
+    idx: usize,
+    player: Player,
+    target: f64,
+    waiting: bool,
+    shown: bool,
+    shown_pts: f64,
+}
+
 /// Cut mode's clip thumbnails. The recent row's atlas is free once a clip is
 /// loaded, so its cells hold the posters; hovering one plays it in place and
 /// leaving restores the poster.
@@ -535,6 +547,7 @@ impl App {
             frame_changes: false, cut_gop: false, frame_detail_boot: false,
             cut_thumbs: false,
             cut_thumb: CutThumbs::new(),
+            split_preview: None,
             cut_pick: None,
             split_tool: false,
             cut_hot: Vec::new(),
@@ -1801,6 +1814,7 @@ impl App {
             self.frame_detail_boot = false;
         }
         self.tick_cut_thumbs(dt);
+        self.update_split_preview();
         if !self.cut_boot.is_empty() { self.boot_cut(); }
         for (slot, what, done) in [
             (&mut self.mask_save, "Save", "Saved"),
@@ -1896,7 +1910,19 @@ impl App {
                 if capture {
                     v.last_frame = Some(std::sync::Arc::new(buf.clone()));
                 }
-                uploads.push(Upload { idx: i, w: v.player.w, h: v.player.h, buf });
+                if self.split_preview.as_ref().is_some_and(|p| p.idx == i && p.shown) {
+                    v.player.recycle(buf);
+                } else {
+                    uploads.push(Upload { idx: i, w: v.player.w, h: v.player.h, buf });
+                }
+            }
+        }
+        if let Some(p) = &mut self.split_preview {
+            if p.waiting && let Some((pts, buf)) = p.player.take_next() {
+                p.waiting = false;
+                p.shown = true;
+                p.shown_pts = pts;
+                uploads.push(Upload { idx: p.idx, w: p.player.w, h: p.player.h, buf });
             }
         }
         // Adopt once for a discrete seek/framestep. Pointer seeks retain
@@ -2003,7 +2029,8 @@ impl App {
             redraw_at: if animating {
                 None
             } else {
-                Some(Instant::now() + std::time::Duration::from_millis(100))
+                Some(Instant::now() + std::time::Duration::from_millis(
+                    if self.split_preview.as_ref().is_some_and(|p| p.waiting) { 16 } else { 100 }))
             },
         }
     }
@@ -3187,13 +3214,52 @@ impl App {
 
     /// The split tool's preview and click share exactly the same target.
     fn cut_razor(&self) -> Option<f64> {
-        if !self.split_tool || !self.show_ui || !self.cursor_inside || self.cut_drag.is_some() { return None; }
+        if !self.cut_mode || !self.split_tool || !self.show_ui || !self.cursor_inside || self.cut_drag.is_some() { return None; }
         let (x, y) = self.cursor;
         let (segment, _) = self.cut_clip_at(x, y)?;
         let cut = self.cut.as_ref()?;
         if cut.snap == Snap::Keyframe && cut.keys.is_empty() { return None; }
         let at = self.split_target(self.cut_time_at(x));
         (at > segment.start + 1e-6 && at < segment.end - 1e-6).then_some(at)
+    }
+
+    fn restore_split_preview(&mut self, idx: usize, path: &std::path::Path) {
+        if let Some(v) = self.videos.get_mut(idx).filter(|v| v.info.path == path) {
+            v.player.seek(self.t, true);
+            v.pending = true;
+            self.adopt_seek = false;
+        }
+    }
+
+    fn update_split_preview(&mut self) {
+        let target = if self.hidden { None } else { self.cut_razor() };
+        let same_source = self.split_preview.as_ref().is_some_and(|p|
+            p.idx == self.active && self.videos.get(p.idx).is_some_and(|v| v.info.path == p.path));
+        if (target.is_none() || !same_source) && let Some(p) = self.split_preview.take() {
+            if p.shown { self.restore_split_preview(p.idx, &p.path); }
+        }
+        let Some(target) = target else { return };
+        if self.split_preview.is_none() {
+            let info = &self.videos[self.active].info;
+            if let Some(player) = Player::spawn(&info.path, info.width, info.height,
+                crate::probe::vt_accel(&info.codec), info.rotation) {
+                player.seek(target, true);
+                self.split_preview = Some(SplitPreview { path: info.path.clone(), idx: self.active,
+                    player, target, waiting: true, shown: false, shown_pts: 0.0 });
+            }
+        }
+        let mut restore = None;
+        if let Some(p) = &mut self.split_preview {
+            if p.player.failed() {
+                p.waiting = false;
+                if p.shown { restore = Some((p.idx, p.path.clone())); p.shown = false; }
+            } else if (p.target - target).abs() > 1e-9 {
+                p.player.seek(target, true);
+                p.target = target;
+                p.waiting = true;
+            }
+        }
+        if let Some((idx, path)) = restore { self.restore_split_preview(idx, &path); }
     }
 
     /// A press below the header in cut mode. True = it was the scrub
@@ -3661,20 +3727,21 @@ impl App {
     /// not, its number, and the keyframes either side.
     fn build_cut_chips(&self, items: &mut Vec<Item>) {
         let Some(cut) = &self.cut else { return };
+        let shown_time = self.split_preview.as_ref().filter(|p| p.shown).map_or(self.t, |p| p.shown_pts);
         let canvas = self.workspace().canvas;
         let image = self.content_rect(self.active);
         let x = (image.x - 9.0).max(canvas.x + 8.0);
         let y = image.y.max(canvas.y) + 44.0;
         if image.h < 100.0 { return; }
         if !cut.keys.is_empty() {
-            let on = cut.on_key(self.t, 1.0 / self.fps);
+            let on = cut.on_key(shown_time, 1.0 / self.fps);
             items.push(Item::Text(TextItem { valign: VAlign::Middle,
                 bg: Some(TextBg { radius: 4.0, pad_x: 11.0, pad_y: 3.0,
                     ..TextBg::new(if on { hex_color(FRAME_KEY) } else { hex_color(CUT_BG) }) }),
                 ..TextItem::new(x + 11.0, y, 10.5, if on { hex_color(CUT_AMBER_INK) } else { hex_color(CUT_INK) },
                     if on { "I · KEY" } else { "between keys" }) }));
         }
-        if let Some((i, chapter)) = cut.chapters.iter().enumerate().rfind(|(_, c)| c.start <= self.t + 1e-6) {
+        if let Some((i, chapter)) = cut.chapters.iter().enumerate().rfind(|(_, c)| c.start <= shown_time + 1e-6) {
             items.push(Item::Text(TextItem { valign: VAlign::Middle, max_width: Some((image.w - 30.0).max(0.0)),
                 bg: Some(TextBg { radius: 3.0, pad_x: 11.0, pad_y: 3.0, ..TextBg::new(hex_color(CUT_CHAPTER_TAG)) }),
                 ..TextItem::new(x + 11.0, y + 30.0, 10.5, hex_color(0xffffff), format!("{:02} {}", i+1, chapter.title)) }));
@@ -5901,6 +5968,53 @@ mod tests {
         let cell = fit_cell(&short, cw, ch - 40);
         assert_eq!((cell[0], cell[3]), (0, 255), "padding is opaque black");
         assert_eq!(cell[(21 * cw * 4) as usize], 200, "the picture sits in the middle");
+    }
+
+    #[test]
+    fn split_guide_previews_pixels_without_moving_clock_and_restores_on_leave() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        app.set_cut_default(true);
+        app.playing = false;
+        assert!(tick_until(&mut app, Duration::from_secs(5), |a| !a.cut.as_ref().unwrap().scanning()));
+        let pixels = |app: &mut App| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let desc = app.tick(0.0, (1280.0, 800.0), 2.0);
+                if let Some(upload) = desc.uploads.into_iter().last() { break upload.buf; }
+                assert!(Instant::now() < deadline, "frame was not delivered");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        app.seek_all(1.0, true);
+        let expected = pixels(&mut app);
+        app.seek_all(0.0, true);
+        let original = pixels(&mut app);
+        assert_ne!(expected, original);
+        let lane = app.cut_lanes().video;
+        let x = lane.x + ((1.0 - app.cut.as_ref().unwrap().t0) * app.cut.as_ref().unwrap().pps) as f32;
+        app.split_tool = true;
+        app.cursor_moved(x, lane.y + lane.h / 2.0);
+        assert_eq!(app.cut_razor(), Some(1.0));
+        assert_eq!(pixels(&mut app), expected, "canvas receives the split frame");
+        assert_eq!(app.t, 0.0, "preview leaves the playhead alone");
+        assert!(!app.playing);
+        // Change target twice before delivery: only the newest seek may appear.
+        app.cut.as_mut().unwrap().snap = Snap::Frame;
+        app.cursor_moved(x + 10.0, lane.y + 20.0);
+        app.update_split_preview();
+        app.cursor_moved(x, lane.y + 20.0);
+        app.update_split_preview();
+        assert_eq!(pixels(&mut app), expected);
+        app.cursor_left();
+        assert_eq!(pixels(&mut app), original, "leaving restores the playhead frame");
+        assert!(app.split_preview.is_none());
+        assert_eq!(app.t, 0.0);
+        app.cursor_moved(x, lane.y + 20.0);
+        assert_eq!(pixels(&mut app), expected);
+        app.split_tool = false;
+        assert_eq!(pixels(&mut app), original, "turning the tool off restores playback");
+        assert!(app.split_preview.is_none());
     }
 
     #[test]
