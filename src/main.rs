@@ -59,7 +59,9 @@ keys:
   Space        pause / play
   < >  (, .)   frame-step back / forward
   ← →          seek ±1s
-  [ ]          slow down / speed up playback (Backspace resets)
+  [ ]          slow down / speed up playback
+  Backspace    Sources: close focused clip; Timeline: delete picked piece;
+               otherwise reset playback speed
   1..9         show clip 1, 2, … directly
   V            next view (Shift-V previous): overlay  side-by-side  delta  split  checker  blend
   - =          adjust delta gain / blend / checker size

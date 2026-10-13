@@ -3,6 +3,13 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-14 — Backspace closes a source
+
+In Sources, Backspace closes the focused clip through the existing close path,
+keeping survivors synced and returning to the launch window after the last clip.
+Backspace on the empty window does nothing. Timeline deletion and Mask/Crop speed
+reset retain their existing behavior.
+
 ## 2026-10-14 — clip preview toggle
 
 The movie icon beside the video lane now toggles the leading clip previews.

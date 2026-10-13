@@ -1372,7 +1372,7 @@ impl App {
             }
             return;
         }
-        if k == Key::Close {
+        if k == Key::Close || (k == Key::Backspace && !self.cut_mode && !self.mask_mode) {
             self.close_active();
             return;
         }
@@ -6404,6 +6404,23 @@ mod tests {
         assert!(app.take_cmds().iter().any(|c| matches!(c, Cmd::Quit)), "⌘W on empty quits");
     }
 
+    #[test]
+    fn backspace_closes_focused_source_and_leaves_empty_window_open() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 3);
+        app.key(Key::Char('2'));
+        app.key(Key::Backspace);
+        assert_eq!(app.videos.len(), 2);
+        assert_eq!(app.active, 1);
+        assert!(app.take_cmds().iter().any(|c| matches!(c, Cmd::VideosChanged)));
+        app.key(Key::Backspace);
+        app.key(Key::Backspace);
+        assert!(!app.ready());
+        app.take_cmds();
+        app.key(Key::Backspace);
+        assert!(!app.take_cmds().iter().any(|c| matches!(c, Cmd::Quit)));
+    }
+
     /// The 2a transport is a real control surface, not a picture of one:
     /// its buttons act and its seek bar scrubs, from the same rects the
     /// draw uses.
@@ -6510,8 +6527,10 @@ mod tests {
             (advanced - 0.10 * 1.5625).abs() < 1e-6,
             "clock should run at 1.5625×: advanced {advanced:.5}"
         );
+        app.key(Key::Char('m'));
         app.key(Key::Backspace);
         assert!((app.speed - 1.0).abs() < 1e-9);
+        assert_eq!(app.videos.len(), 2, "mask mode retains speed reset");
     }
 
     /// Pause, framestep forward twice and back once: the master clock must

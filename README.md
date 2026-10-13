@@ -87,7 +87,8 @@ frame's true pts is adopted back into the clock, so stepping can't accumulate dr
 | `+` / `-` | enlarge / shrink the brush in mask mode (`=` also enlarges) |
 | `S` | save the focused mask in mask mode |
 | `Z` | reset zoom |
-| `[` `]` | slow down / speed up playback (0.25×–4×; `Backspace` resets) |
+| `[` `]` | slow down / speed up playback (0.25×–4×) |
+| `Backspace` | Sources: close focused clip; Timeline: delete picked piece; otherwise reset playback speed |
 | `F` | fullscreen (borderless, same Space, instant) |
 | `Enter` | the current video alone, fullscreen (again or `Esc` to return) |
 | `Q` | quit |
