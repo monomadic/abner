@@ -3,6 +3,15 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-14 — positioned copies and separate restore selection
+
+Option-drag now inserts the copy at the drop boundary: before/after the card
+under the pointer, or at the end when dropped in blank space below the cards.
+Clicking a removed timeline region now selects it for restoration independently
+of explicit in/out marks. Previously that click silently assigned both marks,
+which made the colored handles appear when clicking dashed blank areas. The
+selected removed region is outlined and X restores it without changing user marks.
+
 ## 2026-10-14 — selection deletion and Option-drag copies
 
 Backspace in Sources now closes all checked clips, falling back to the focused

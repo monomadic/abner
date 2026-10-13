@@ -192,6 +192,7 @@ pub struct App {
     split_preview: Option<SplitPreview>,
     /// The picture clip last clicked, by its (start, end): drawn outlined.
     cut_pick: Option<(f64, f64, bool)>,
+    cut_restore: Option<(f64, f64)>,
     split_tool: bool,
     /// Hover lift per kept clip, keyed by (start ms, sound lane): 0..1, eased
     /// up while the pointer is over it and back down after it leaves.
@@ -552,6 +553,7 @@ impl App {
             cut_thumb: CutThumbs::new(),
             split_preview: None,
             cut_pick: None,
+            cut_restore: None,
             split_tool: false,
             cut_hot: Vec::new(),
             cut_last_t: f64::NAN,
@@ -1161,6 +1163,7 @@ impl App {
             self.masks.clear();
         }
         self.cut = None;
+        self.cut_restore = None;
         self.cut_mode = false;
         self.source_status.clear();
         self.source_scroll = 0;
@@ -1198,10 +1201,10 @@ impl App {
         let mut indices: Vec<usize> = self.videos.iter().enumerate()
             .filter_map(|(i, v)| v.selected.then_some(i)).collect();
         if indices.is_empty() { indices.push(self.active); }
-        self.duplicate_source_indices(&indices);
+        self.duplicate_source_indices(&indices, None);
     }
 
-    fn duplicate_source_indices(&mut self, indices: &[usize]) {
+    fn duplicate_source_indices(&mut self, indices: &[usize], destination: Option<usize>) {
         let mut copies = Vec::new();
         for &i in indices {
             let info = self.videos[i].info.clone();
@@ -1214,15 +1217,18 @@ impl App {
                 shown_pts: 0.0, delivered: false, pending: false, last_frame: None }));
         }
         for v in &mut self.videos { v.selected = false; }
+        let focus = destination.unwrap_or(indices[0] + 1);
         for (i, v) in copies.into_iter().rev() {
-            self.videos.insert(i + 1, v);
-            self.masks.insert(i + 1, None);
+            let at = destination.unwrap_or(i + 1);
+            self.videos.insert(at, v);
+            self.masks.insert(at, None);
         }
         self.cut = None;
+        self.cut_restore = None;
         // Insertion changes texture slots, including for paused survivors.
         for v in &mut self.videos { v.delivered = false; }
         self.seek_all(self.t, true);
-        self.select(indices[0] + 1);
+        self.select(focus);
         self.source_status.clear();
         self.cmds.push(Cmd::VideosChanged);
     }
@@ -1254,6 +1260,7 @@ impl App {
             self.masks.remove(i);
         }
         self.cut = None;
+        self.cut_restore = None;
         self.cut_mode = false;
         self.cmds.push(Cmd::VideosChanged);
         self.mouse_up();
@@ -1596,7 +1603,8 @@ impl App {
         if let Some((idx, _, _, true)) = copy {
             if self.cursor_inside && self.show_ui && !self.cut_mode && !self.mask_mode
                 && contains(self.workspace().list, self.cursor.0, self.cursor.1) && idx < self.videos.len() {
-                self.duplicate_source_indices(&[idx]);
+                let at = self.source_drop_index(self.cursor.1);
+                self.duplicate_source_indices(&[idx], Some(at));
             }
         }
     }
@@ -2190,6 +2198,14 @@ impl App {
         let l = self.workspace();
         RectPx { x: 12.0, y: l.list.y + (index - self.source_first()) as f32 * SOURCE_H,
             w: l.rail - 24.0, h: SOURCE_H - 12.0 }
+    }
+
+    fn source_drop_index(&self, y: f32) -> usize {
+        let first = self.source_first();
+        (first..self.videos.len()).find(|&i| {
+            let r = self.source_row(i);
+            y < r.y + r.h / 2.0
+        }).unwrap_or(self.videos.len())
     }
 
     fn source_checkbox(&self, index: usize) -> RectPx {
@@ -2936,6 +2952,7 @@ impl App {
     }
 
     fn set_cut_mode(&mut self, on: bool) {
+        self.cut_restore = None;
         if on == self.cut_mode || !self.ready() {
             return;
         }
@@ -2996,6 +3013,7 @@ impl App {
             Key::Escape => {
                 if self.split_tool { self.split_tool = false; return true; }
                 if self.cut_pick.take().is_some() { return true; }
+                if self.cut_restore.take().is_some() { return true; }
                 let cut = self.cut.as_mut().unwrap();
                 if cut.in_req.is_some() || cut.out_req.is_some() {
                     cut.clear_selection();
@@ -3013,6 +3031,9 @@ impl App {
     }
 
     fn cut_action(&mut self, action: CutAction) {
+        if matches!(action, CutAction::In | CutAction::Out | CutAction::Undo | CutAction::ToggleSplit) {
+            self.cut_restore = None;
+        }
         if action == CutAction::TogglePosters { self.cut_posters = !self.cut_posters; return; }
         if let CutAction::FrameChanges(changes) = action { self.frame_changes = changes; return; }
         if let CutAction::TimeDisplay(frames) = action { self.cut_frames = frames; return; }
@@ -3078,6 +3099,18 @@ impl App {
                 }
             }
             CutAction::Apply => {
+                if let Some((a, b)) = self.cut_restore.take() {
+                    if cut.segments().iter().any(|s| s.cut && (s.start-a).abs() < 1e-6 && (s.end-b).abs() < 1e-6) {
+                        let saved = (cut.in_req, cut.out_req, cut.snap);
+                        cut.in_req = Some(a);
+                        cut.out_req = Some(b);
+                        cut.snap = Snap::Frame;
+                        cut.cut_selection();
+                        (cut.in_req, cut.out_req, cut.snap) = saved;
+                        cut.status = format!("Restored {:.2} s", b-a);
+                    }
+                    return;
+                }
                 let restoring = cut.selection_is_cut();
                 match cut.selection() {
                     Some((a, b)) => {
@@ -3153,7 +3186,7 @@ impl App {
         for (label, action, hint) in [
             ("Set in", CutAction::In, "I"), ("Set out", CutAction::Out, "O"),
             ("Split tool", CutAction::ToggleSplit, "Esc to leave · S split"),
-            (if self.cut_pick.is_some() { if self.cut_gop { "Delete selected GOP" } else { "Delete selected clip" } } else if cut.selection_is_cut() { "Restore selection" } else { "Cut selection" }, if self.cut_pick.is_some() { CutAction::DeletePicked } else { CutAction::Apply }, if self.cut_pick.is_some() { "Backspace" } else { "X" }),
+            (if self.cut_pick.is_some() { if self.cut_gop { "Delete selected GOP" } else { "Delete selected clip" } } else if self.cut_restore.is_some() || cut.selection_is_cut() { "Restore selection" } else { "Cut selection" }, if self.cut_pick.is_some() { CutAction::DeletePicked } else { CutAction::Apply }, if self.cut_pick.is_some() { "Backspace" } else { "X" }),
             (if keyframe { "Snap to keyframes: on" } else { "Snap to keyframes: off" },
                 CutAction::Snap(if keyframe { Snap::Frame } else { Snap::Keyframe }), "K"),
         ] {
@@ -3350,6 +3383,7 @@ impl App {
                 self.playing = false;
                 self.cut_drag = Some(CutDrag::Edge(edge));
             } else if let Some((seg, audio)) = self.cut_clip_at(x, y) {
+                self.cut_restore = None;
                 // A picture or sound clip: pick it (outlined), and still take the playhead there.
                 self.cut_gop = self.frame_detail() && !audio;
                 let range = if self.cut_gop { self.cut.as_ref().unwrap().gop_at(self.cut_time_at(x)) } else { None };
@@ -3362,10 +3396,10 @@ impl App {
                 // A removed clip is a selection: X restores it.
                 self.cut_pick = None;
                 let cut = self.cut.as_mut().unwrap();
-                cut.in_req = Some(seg.start);
-                cut.out_req = Some(seg.end);
+                self.cut_restore = Some((seg.start, seg.end));
                 cut.status.clear();
             } else if x >= self.cut_lanes().video.x - 4.0 {
+                self.cut_restore = None;
                 // Anywhere else on the timeline lets go of the pick.
                 self.cut_pick = None;
                 self.begin_cut_scrub();
@@ -3989,7 +4023,7 @@ impl App {
                 draw_icon(items, if zoom_in { Icon::ZoomIn } else { Icon::ZoomOut }, cx, cy, color);
             }
             _ => {
-                let dead = action == CutAction::Apply && cut.selection().is_none() && self.cut_pick.is_none();
+                let dead = action == CutAction::Apply && cut.selection().is_none() && self.cut_pick.is_none() && self.cut_restore.is_none();
                 let selected = action == CutAction::ToggleSplit && self.split_tool;
                 let fill = if selected { hex_color(CUT_TOOL_ON) } else if hovered && !dead { mix(CUT_BAR, 0xffffff, 0.07) } else { [0.0; 4] };
                 if selected || (hovered && !dead) {
@@ -4374,6 +4408,9 @@ impl App {
                     dashes(items, r, mix(CUT_TL, 0x1580de, 0.2));
                 } else if g.cut {
                     dashes(items, r, mix(CUT_TL, 0xffffff, 0.3));
+                    if self.cut_restore.is_some_and(|(a,b)| (a-g.start).abs() < 1e-6 && (b-g.end).abs() < 1e-6) {
+                        picked = Some(r);
+                    }
                 } else if audio {
                     let hot = ease(self.cut_hot_level(g.start, true));
                     let ground = hex_color(if i % 2 == 1 { CUT_SOUND_ALT } else { CUT_SOUND });
@@ -5920,7 +5957,15 @@ mod tests {
         let v = app.cut_lanes().video;
         app.mouse_down(v.x + v.w * 0.375, v.y + 10.0);
         app.mouse_up();
-        assert_eq!(app.cut.as_ref().unwrap().selection(), Some((1.0, 2.0)));
+        assert_eq!(app.cut_restore, Some((1.0, 2.0)));
+        assert_eq!(app.cut.as_ref().unwrap().selection(), None, "blank clip clicks do not set in/out");
+        app.cut.as_mut().unwrap().in_req = Some(2.5);
+        app.cut.as_mut().unwrap().out_req = Some(3.5);
+        app.key(Key::Char('x'));
+        assert!(app.cut.as_ref().unwrap().cuts().is_empty());
+        assert!(app.cut_restore.is_none());
+        assert_eq!(app.cut.as_ref().unwrap().in_req, Some(2.5));
+        assert_eq!(app.cut.as_ref().unwrap().out_req, Some(3.5));
     }
 
     /// U undoes like ⌘Z, and a two-finger swipe over the timeline zooms about the pointer
@@ -6480,6 +6525,29 @@ mod tests {
     }
 
     #[test]
+    fn option_drag_inserts_at_drop_boundary_including_blank_space() {
+        let Some(clip) = test_clip() else { return };
+        for destination in [0, 1, 3] {
+            let mut app = mk_app(&clip, 3);
+            app.playing = false;
+            app.tick(0.0, (1280.0, 1000.0), 2.0);
+            let from = app.source_row(1);
+            let x = from.x + from.w / 2.0;
+            let y = if destination == 3 {
+                app.source_row(2).y + SOURCE_H + 10.0
+            } else { app.source_row(destination).y + 10.0 };
+            assert!(contains(app.workspace().list, x, y));
+            app.mouse_down_with_alt(x, from.y + 40.0, true);
+            app.cursor_moved(x, y);
+            app.mouse_released();
+            assert_eq!(app.videos.len(), 4);
+            assert_eq!(app.active, destination);
+            assert!(app.videos[destination].linked_copy);
+            assert_eq!(app.videos.iter().filter(|v| v.linked_copy).count(), 1);
+        }
+    }
+
+    #[test]
     fn option_drag_duplicates_only_the_dragged_source_on_release() {
         let Some(clip) = test_clip() else { return };
         let mut app = mk_app(&clip, 2);
@@ -6497,8 +6565,8 @@ mod tests {
         assert_eq!(app.videos.len(), 2, "no duplicate until release");
         app.mouse_released();
         assert_eq!(app.videos.len(), 3);
-        assert_eq!(app.active, 1);
-        assert!(app.videos[1].linked_copy && app.videos[1].selected);
+        assert_eq!(app.active, 0);
+        assert!(app.videos[app.active].linked_copy && app.videos[app.active].selected);
         assert!(!app.videos[2].selected);
         assert_eq!(app.t, t);
         assert!(!app.playing);
