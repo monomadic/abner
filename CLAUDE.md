@@ -115,12 +115,20 @@ from one to the other, keeping its number.
   can't re-land on the same frame — then the delivered frame's true pts is ADOPTED as
   `t` (`pending` flags + `take_next`). The clock wraps at the shortest stream duration
   and exact-seeks everyone to 0.
-  **Seeks coalesce** (2026-10-14): `seek_all` moves `t` at once but, while any
-  `Video::seeking` player hasn't landed, parks the newest target in `queued_seek`
-  for `tick` to dispatch after the drain — never send a seek per pointer event.
-  Scrubs (seek bar, cut playhead drag) are keyframe-only (`exact = false`) and
-  `mouse_up` lands the exact frame; seek-bar targets are `quantize`d to the frame
-  grid and dropped when equal to `t`.
+  **Pointer seeks are keyframe seeks** (2026-10-14, switchblade's seekbar model):
+  the seek bar and the cut playhead drag send `seek_all_biased(t, false, forward)`
+  — forward-biased when the target is ahead of `shown_t()` so the picture never
+  moves against the gesture — and the clock ADOPTS the pts that lands. There is
+  NO exact seek on release (a first cut had one; between a click's press and
+  release the paused drain walked frames toward the clock, so every click
+  "played" a few frames). Frame-snap cut mode (`K`) is the one pointer path that
+  stays exact. Paused, `tick` then exact-seeks any stream more than a frame ahead
+  or any amount behind the clock, so A/B still shows one frame when keyframe grids
+  differ. `seek_all` moves `t` at once but, while any `Video::seeking` player
+  hasn't landed (`SEEK_SETTLE` bounds the wait), parks the newest target in
+  `queued_seek` for `tick` to dispatch after the drain — never send a seek per
+  pointer event. Seek-bar targets are `quantize`d to the frame grid and dropped
+  when equal to `t`.
   **Keys**: `1`–`9` pick a clip directly (`select`), `V`/Shift-V cycle the view.
   ⌘W (`Key::Close`, from winit's `ModifiersChanged` state) closes the focused clip
   (`close_active`): survivors shift down a slot and are exact-seeked to the current `t`

@@ -52,8 +52,8 @@ struct Shared {
     /// and nothing else can reach it there — without this wake the thread
     /// leaks, pinning its frame buffers.
     closed: AtomicBool,
-    /// Latest seek request (seconds, exact) — newest wins.
-    cmd: Mutex<Option<(f64, bool)>>,
+    /// Latest seek request (seconds, exact, forward-biased) — newest wins.
+    cmd: Mutex<Option<(f64, bool, bool)>>,
     /// f64 bits: pts of the frame most recently taken (on screen), or the
     /// seek target while one is in flight.
     position: AtomicU64,
@@ -143,8 +143,18 @@ impl Player {
     /// the moment this is called — the last shown frame stays on screen
     /// until the new position delivers.
     pub fn seek(&self, target_s: f64, exact: bool) {
+        self.seek_biased(target_s, exact, false);
+    }
+
+    /// `seek` for a gesture that has a DIRECTION (switchblade's
+    /// `SeekBias`): `forward` lands a keyframe seek on the first keyframe
+    /// at or AFTER the target, so a click ahead of the picture never moves
+    /// it backward (a keyframe-before landing undershoots by up to a GOP).
+    /// Falls back to the keyframe before when none follows — near the
+    /// tail that is a smaller wrong than seeking past EOF.
+    pub fn seek_biased(&self, target_s: f64, exact: bool, forward: bool) {
         let t = target_s.max(0.0);
-        *self.shared.cmd.lock().unwrap() = Some((t, exact));
+        *self.shared.cmd.lock().unwrap() = Some((t, exact, forward));
         for (_, buf) in self.shared.frames.lock().unwrap().drain(..) {
             self.shared.recycle_buf(buf);
         }
@@ -470,17 +480,18 @@ unsafe fn reader(shared: &Shared, cfg: &ReaderCfg) -> Result<(), String> {
         let key_entry = |ts: i64| -> i32 {
             ffi::av_index_search_timestamp(stream, ts, ffi::AVSEEK_FLAG_BACKWARD as i32)
         };
-        let seek_to = |target: f64| -> bool {
+        let seek_to = |target: f64, forward: bool| -> bool {
             // `target` is content-relative; seek in absolute stream time.
             let ts = ((target + start_off) / tb) as i64;
-            let ok = ffi::avformat_seek_file(
-                fmt.0,
-                sidx,
-                i64::MIN,
-                ts,
-                ts,
-                ffi::AVSEEK_FLAG_BACKWARD as i32,
-            ) >= 0;
+            let ok = (forward && ffi::avformat_seek_file(fmt.0, sidx, ts, ts, i64::MAX, 0) >= 0)
+                || ffi::avformat_seek_file(
+                    fmt.0,
+                    sidx,
+                    i64::MIN,
+                    ts,
+                    ts,
+                    ffi::AVSEEK_FLAG_BACKWARD as i32,
+                ) >= 0;
             ffi::avcodec_flush_buffers(dec.0);
             ok
         };
@@ -489,7 +500,7 @@ unsafe fn reader(shared: &Shared, cfg: &ReaderCfg) -> Result<(), String> {
             if shared.closed.load(Ordering::Relaxed) {
                 return Ok(());
             }
-            if let Some((target, exact)) = shared.cmd.lock().unwrap().take() {
+            if let Some((target, exact, forward)) = shared.cmd.lock().unwrap().take() {
                 // A seek that fails (transient SMB fault, stale handle)
                 // must not be silent: the reader would carry on from
                 // wherever it was while the other streams land on the
@@ -513,7 +524,7 @@ unsafe fn reader(shared: &Shared, cfg: &ReaderCfg) -> Result<(), String> {
                     pump.skip_until = Some(target);
                     continue;
                 }
-                if !seek_to(target) {
+                if !seek_to(target, forward) {
                     return Err(format!("seek to {target:.3}s failed"));
                 }
                 at_eof = false;
