@@ -4453,12 +4453,21 @@ fn frame_color(kind: char, key: bool) -> [f32; 4] {
     hex_color(if key {FRAME_KEY} else {match kind {'I'=>FRAME_I,'P'=>FRAME_P,'B'=>FRAME_B,_=>0x969da5}})
 }
 
-/// Cells appear at close zoom; at medium zoom only the full-height edge remains.
+/// Cells appear at close zoom; medium zoom uses bottom-aligned frame-type ticks.
 fn draw_frame_marker(items: &mut Vec<Item>, r: RectPx, kind: char, key: bool, index: usize) {
     if r.w < 10.0 { return; }
     let color = hex_color(if key { FRAME_KEY } else {
         match kind { 'I' => FRAME_I, 'P' => FRAME_P, 'B' => FRAME_B, _ => 0x969da5 }
     });
+    if r.w < 32.0 {
+        // Match the design's short B / medium P / tall keyframe rhythm.
+        // Leave a little air below the shared baseline and above the tallest tick.
+        let h: f32 = if key { 32.0 } else { match kind { 'I' => 26.0, 'P' => 20.0, _ => 12.0 } };
+        let h = h.min((r.h - 10.0).max(0.0));
+        items.push(Item::Rect(RectItem::new(
+            RectPx { x: r.x + 1.0, y: r.y + r.h - 5.0 - h, w: 2.0, h }, color)));
+        return;
+    }
     let cell = RectPx { x: r.x + 1.0, y: r.y + 1.0, w: (r.w - 2.0).max(1.0), h: r.h - 2.0 };
     if r.w >= 32.0 {
         items.push(Item::Rect(RectItem { radius: 4.0, border_w: 1.0, border_color: color,

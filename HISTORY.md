@@ -3,6 +3,12 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-14 — frame-marker height hierarchy
+
+Zoomed timeline ticks now share an inset bottom baseline: B frames are short,
+P and I frames progressively taller, and keyframes tallest, following the original
+design's height rhythm. Existing frame colors and closer-zoom cards are preserved.
+
 ## 2026-10-12 — native View menu
 
 The macOS menu bar now lists Sources, Timeline, Mask and Crop under View.
