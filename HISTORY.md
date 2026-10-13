@@ -3,6 +3,14 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-14 — re-encode tint follows the clip
+
+Purple re-encode regions now tint the full-height clip background, with square
+internal GOP boundaries and rounded corners only at the clip's own ends. The
+stripe pattern follows the original clip, and frame markers stay above the tint.
+Encode buttons retain their shared drawing/hit geometry; the close-zoom encoding
+rail is unchanged.
+
 ## 2026-10-14 — split-guide video preview
 
 While the split guide is visible, the canvas displays its exact source frame using

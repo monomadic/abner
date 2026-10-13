@@ -3145,12 +3145,14 @@ impl App {
         let row = if self.cut_encode_rail() {
             RectPx { y: video.y + video.h + 3.0, h: 22.0, ..video }
         } else { video };
+        let rail = self.cut_encode_rail();
         let mut out = Vec::new();
         for g in cut.pending_gops() {
             for s in cut.segments().iter().filter(|s| !s.cut) {
-                let left = (row.x + ((g.encode_start.max(s.start) - cut.t0) * cut.pps) as f32 + 2.0).max(row.x);
-                let right = (row.x + ((g.end.min(s.end) - cut.t0) * cut.pps) as f32 - 2.0).min(row.x + row.w);
-                if right > left { out.push((g.start, RectPx { x: left, y: row.y + 2.0, w: right-left, h: row.h-4.0 })); }
+                let inset = if rail { 2.0 } else { 0.0 };
+                let left = (row.x + ((g.encode_start.max(s.start) - cut.t0) * cut.pps) as f32 + inset).max(row.x);
+                let right = (row.x + ((g.end.min(s.end) - cut.t0) * cut.pps) as f32 - inset).min(row.x + row.w);
+                if right > left { out.push((g.start, RectPx { x: left, y: row.y + inset, w: right-left, h: row.h-2.0*inset })); }
             }
         }
         out
@@ -4244,6 +4246,7 @@ impl App {
         // ---- video and audio: one clip per piece ----
         let segments = cut.segments();
         let thumbs = self.cut_thumb_rects();
+        let encode_regions = self.cut_encode_regions();
         // The kept clip under the pointer, picture or sound: a slight lift,
         // eased in and out by `tick_cut_hot`.
         let ease = |l: f32| l * l * (3.0 - 2.0 * l);
@@ -4323,6 +4326,26 @@ impl App {
                     // The film ground: the board's 135° stripes (#2a2d30 / #202326, 14px).
                     if !self.frame_markers_visible() && !self.frame_detail() {
                         items.push(Item::Hatch { r, a: hex_color(0x2a2d30), b: hex_color(0x202326), radius: 7.0, period: 14.0 });
+                    }
+                    if !self.cut_encode_rail() {
+                        for (_, region) in &encode_regions {
+                            let left = region.x.max(r.x);
+                            let right = (region.x + region.w).min(r.x + r.w);
+                            if right <= left { continue; }
+                            // Tint a slice of the original clip silhouette. Interior
+                            // GOP boundaries stay square; only clip ends are rounded.
+                            items.push(Item::Clip(Some(RectPx { x: left, y: r.y, w: right-left, h: r.h })));
+                            items.push(Item::Hatch { r, a: hex_color(0x59348c), b: hex_color(0x704a9d), radius: 7.0, period: 14.0 });
+                            let border = hex_color(0xb68aff);
+                            items.push(Item::Rect(RectItem { radius: 7.0, border_w: 2.0, border_color: border, ..RectItem::new(r, [0.0; 4]) }));
+                            for edge in [region.x, region.x + region.w - 2.0] {
+                                if edge > r.x + 7.0 && edge < r.x + r.w - 7.0
+                                    && edge > v.x && edge < v.x + v.w - 2.0 {
+                                    line(items, edge, r.y, r.h, 2.0, border);
+                                }
+                            }
+                            items.push(Item::Clip(Some(column)));
+                        }
                     }
                     let hot = ease(self.cut_hot_level(g.start, false));
                     items.push(Item::Rect(RectItem { radius: 7.0, border_w: 1.0, border_color: mix(CUT_TL, 0xffffff, 0.2 + 0.06 * hot),
@@ -4408,13 +4431,11 @@ impl App {
 
         if self.frame_detail() { self.build_frame_detail(items, column); }
 
-        for (_, r) in self.cut_encode_regions() {
+        for (_, r) in encode_regions {
             if self.cut_encode_rail() {
                 items.push(Item::Rect(RectItem { radius: 3.0, ..RectItem::new(r, hex_color(0x59348c)) }));
-            } else {
-                items.push(Item::Hatch { r, a: hex_color(0x59348c), b: hex_color(0x704a9d), radius: 5.0, period: 12.0 });
+                items.push(Item::Rect(RectItem { radius: 5.0, border_w: 1.0, border_color: hex_color(0xb68aff), ..RectItem::new(r, [0.0; 4]) }));
             }
-            items.push(Item::Rect(RectItem { radius: 5.0, border_w: 1.0, border_color: hex_color(0xb68aff), ..RectItem::new(r, [0.0; 4]) }));
             if r.w >= 54.0 {
                 let button = Self::encode_button(r);
                 items.push(Item::Rect(RectItem { radius: 4.0, ..RectItem::new(button, hex_color(0xe4d3ff)) }));
