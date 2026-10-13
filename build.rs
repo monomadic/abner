@@ -51,13 +51,18 @@ fn main() {
     //  - open_shim.m: the Open With application delegate (see src/open.rs).
     #[cfg(target_os = "macos")]
     {
+        //  - vt_shim.c: VideoToolbox hardware-decode support queries (see probe.rs).
         println!("cargo:rerun-if-changed=src/open_shim.m");
+        println!("cargo:rerun-if-changed=src/vt_shim.c");
         cc::Build::new()
             .file("src/open_shim.m")
             .flag("-fobjc-arc")
             .compile("ab_shims");
+        cc::Build::new().file("src/vt_shim.c").compile("ab_vt");
         // objc2-app-kit already links AppKit, but be explicit so the shim's
         // symbols resolve regardless of link order.
         println!("cargo:rustc-link-lib=framework=AppKit");
+        println!("cargo:rustc-link-lib=framework=VideoToolbox");
+        println!("cargo:rustc-link-lib=framework=CoreMedia");
     }
 }

@@ -3,6 +3,43 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-14 — seeks that land while you scrub, VP9/AV1 on VideoToolbox
+
+Clicking the seek bar and scrubbing both took seconds on long-GOP sources: every
+pointer event sent an EXACT seek, which decodes from the preceding keyframe up to
+the target, and each new target abandoned the previous one, so the reader
+restarted the GOP decode per event and never landed. Five changes, smallest
+first in the player and up through the app:
+
+- `Player` runs ONE decoder thread when the VideoToolbox device is up. Frame
+  threading delays output by a packet per thread after every flush, and the
+  hardware does the decode anyway — on this 12-core machine that was ~12 packets
+  of pure latency on every seek.
+- An exact seek FORWARD of the last decoded frame that stays inside the same GOP
+  (same keyframe index entry, demuxer not at EOF) no longer seeks: the reader
+  just moves `skip_until`. Forward decode is always correct; the keyframe test
+  only keeps it from grinding across GOPs when a jump would land closer.
+- `App::seek_all` coalesces: while any player is still landing a seek
+  (`Video::seeking`, cleared when a frame delivers or `buffered()` turns
+  non-zero), the newest target waits in `queued_seek` and `tick` dispatches it
+  once everything has landed. The clock moves at once either way.
+- Scrubbing (the seek bar and the cut panel's playhead drag) seeks KEYFRAME-ONLY
+  while the pointer moves and `mouse_up` lands the exact frame — the resting
+  state is the one that must be frame-accurate across streams; mid-drag two
+  encodes with different GOP structures may briefly show different keyframes.
+- Seek-bar targets snap to the frame grid (`quantize`) and a target equal to the
+  clock is dropped, so pixel jitter naming the same frame isn't a new seek.
+
+VP9 and AV1 now go through VideoToolbox when the chip has the block (VP9 on M1+,
+AV1 on M3+), asked once per codec through `src/vt_shim.c`
+(`VTIsHardwareDecodeSupported`, after registering VP9's supplemental decoder).
+AV1 needs the NATIVE `av1` libav decoder — the hwaccel hangs off it and
+`libdav1d`, the default, is software-only — and it has no software path, so
+the chip check decides which decoder opens. The first decoded frame of every
+stream now logs whether it came from hardware or software. The player tests
+grow an in-GOP seek case and a VP9/AV1 decode-and-seek case; the app tests a
+coalescing case.
+
 ## 2026-10-14 — positioned copies and separate restore selection
 
 Option-drag now inserts the copy at the drop boundary: before/after the card

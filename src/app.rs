@@ -131,6 +131,12 @@ pub struct Video {
     pub delivered: bool,
     /// Waiting to adopt the first frame after an exact seek while paused.
     pub pending: bool,
+    /// A seek was sent and nothing has landed from it yet. While any
+    /// player is in this state `seek_all` holds the newest target back
+    /// (`App::queued_seek`) instead of restarting the reader — otherwise a
+    /// scrub sends a seek per pointer event, each one abandoning the
+    /// previous GOP decode, and nothing ever reaches the screen.
+    pub seeking: bool,
     /// The frame on screen, kept only while mask mode is on: a crop export
     /// writes these pixels, and the GPU's copy can't be read back. Mask
     /// mode is paused, so this costs one copy per seek, not per frame.
@@ -180,6 +186,9 @@ pub struct App {
     cut_tab: usize,
     /// Only discrete seeks/framesteps adopt a decoded timestamp; pointer seeks stay pinned.
     adopt_seek: bool,
+    /// The seek that arrived while one was in flight: `(target, exact)`,
+    /// newest wins, dispatched by `tick` once every player has landed.
+    queued_seek: Option<(f64, bool)>,
     info_scroll: f32,
     cut_frames: bool,
     frame_changes: bool,
@@ -545,6 +554,7 @@ impl App {
             cut_drag: None,
             cut_tab: 0,
             adopt_seek: false,
+            queued_seek: None,
             info_scroll: 0.0,
             cut_frames: false,
             frame_changes: false, cut_gop: false, frame_detail_boot: false,
@@ -1214,7 +1224,7 @@ impl App {
                 return;
             };
             copies.push((i, Video { selected: true, linked_copy: true, info, player,
-                shown_pts: 0.0, delivered: false, pending: false, last_frame: None }));
+                shown_pts: 0.0, delivered: false, pending: false, seeking: false, last_frame: None }));
         }
         for v in &mut self.videos { v.selected = false; }
         let focus = destination.unwrap_or(indices[0] + 1);
@@ -1306,17 +1316,40 @@ impl App {
         }
     }
 
+    /// Seek every stream. The clock moves at once; the players are told
+    /// now, or — when one is still landing an earlier seek — once it has,
+    /// so a burst of targets costs one restart, not one per target.
     fn seek_all(&mut self, target: f64, exact: bool) {
         self.adopt_seek = true;
+        self.t = target;
+        if self.seek_in_flight() {
+            self.queued_seek = Some((target, exact));
+        } else {
+            self.dispatch_seek(target, exact);
+        }
+    }
+
+    fn seek_in_flight(&self) -> bool {
+        self.videos.iter().any(|v| v.seeking && !v.player.failed())
+    }
+
+    fn dispatch_seek(&mut self, target: f64, exact: bool) {
+        self.queued_seek = None;
+        let paused = !self.playing;
         for v in &mut self.videos {
             v.player.seek(target, exact);
-        }
-        self.t = target;
-        if !self.playing {
-            for v in &mut self.videos {
+            v.seeking = true;
+            if paused {
                 v.pending = true;
             }
         }
+    }
+
+    /// Snap a pointer time to the frame grid, so a pixel's worth of jitter
+    /// that names the same frame doesn't become a fresh seek.
+    fn quantize(&self, t: f64) -> f64 {
+        let d = 1.0 / self.fps.max(1.0);
+        (t / d).round() * d
     }
 
     /// Step one frame. Targets sit half a frame period past/before the
@@ -1687,6 +1720,14 @@ impl App {
 
     pub fn mouse_up(&mut self) {
         self.source_copy_drag = None;
+        // A scrub seeks keyframe-only while dragging; the release lands
+        // the exact frame under the playhead, which is the state that
+        // must be frame-accurate across every stream.
+        if self.scrubbing || matches!(self.cut_drag, Some(CutDrag::Scrub)) {
+            let t = self.t;
+            self.seek_all(t, true);
+            self.adopt_seek = false;
+        }
         if matches!(self.cut_drag, Some(CutDrag::Scrub)) && self.scrub_resume {
             self.playing = true;
         }
@@ -1716,7 +1757,12 @@ impl App {
         }
         let s = self.seek_rect(self.vp);
         let f = ((x - s.x) / s.w.max(1.0)).clamp(0.0, 1.0) as f64;
-        self.seek_all(f * (self.wrap - 0.05).max(0.0), true);
+        let end = (self.wrap - 0.05).max(0.0);
+        let target = self.quantize(f * end).min(end);
+        if (target - self.t).abs() < 1e-9 { return; }
+        // Keyframe-only while the pointer moves: one frame of decode per
+        // target instead of a GOP. `mouse_up` lands the exact frame.
+        self.seek_all(target, false);
         self.adopt_seek = false;
     }
 
@@ -1961,6 +2007,9 @@ impl App {
             } else {
                 v.player.take_upto(t + 1e-6)
             };
+            if got.is_some() || v.player.failed() || v.player.buffered() > 0 {
+                v.seeking = false;
+            }
             if let Some((pts, buf)) = got {
                 if was_pending && self.adopt_seek && i == active && !self.playing {
                     adopt = Some(pts);
@@ -1992,6 +2041,11 @@ impl App {
         // the requested clock even when decoding lands on a nearby frame.
         if !self.playing && let Some(pts) = adopt {
             self.t = pts;
+        }
+        // The seek that waited for this landing goes out now; the clock
+        // already sits on its target.
+        if let Some((target, exact)) = self.queued_seek && !self.seek_in_flight() {
+            self.dispatch_seek(target, exact);
         }
         if !self.started {
             self.started = self.videos.iter().all(|v| v.delivered || v.player.failed());
@@ -3730,7 +3784,7 @@ impl App {
         match self.cut_drag {
             Some(CutDrag::Scrub) => {
                 let target = scrub_target;
-                if (target - self.t).abs() > 1e-9 { self.seek_all(target, true); }
+                if (target - self.t).abs() > 1e-9 { self.seek_all(target, false); }
                 self.adopt_seek = false;
             },
             Some(CutDrag::Edge(edge)) => {
@@ -5661,7 +5715,7 @@ mod tests {
             info.rotation,
         )
         .expect("spawn");
-        Video { selected: false, linked_copy: false, info, player, shown_pts: 0.0, delivered: false, pending: false, last_frame: None }
+        Video { selected: false, linked_copy: false, info, player, shown_pts: 0.0, delivered: false, pending: false, seeking: false, last_frame: None }
     }
 
     /// A playing app: most tests drive the clock, so they opt out of the
@@ -5970,6 +6024,51 @@ mod tests {
 
     /// U undoes like ⌘Z, and a two-finger swipe over the timeline zooms about the pointer
     /// (up in, down out) while a sideways swipe pans.
+    /// Seeks sent while one is still landing are held back and coalesced:
+    /// the clock takes the newest target at once, the players hear about
+    /// it once the earlier seek has delivered, and a scrub release lands
+    /// the exact frame.
+    #[test]
+    fn seeks_coalesce_while_one_is_in_flight() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 2);
+        let vp = (1280.0, 720.0);
+        app.playing = false;
+        app.seek_all(1.0, true);
+        assert!(app.videos.iter().all(|v| v.seeking));
+        app.seek_all(1.4, true);
+        app.seek_all(1.8, true);
+        assert_eq!(app.queued_seek, Some((1.8, true)), "newest target waits");
+        assert_eq!(app.t, 1.8, "the clock moves at once");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.queued_seek.is_some() && std::time::Instant::now() < deadline {
+            app.tick(0.016, vp, 1.0);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(app.queued_seek.is_none(), "the queued seek dispatches once the first lands");
+        while app.seek_in_flight() && std::time::Instant::now() < deadline {
+            app.tick(0.016, vp, 1.0);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        for v in &app.videos {
+            assert!((v.shown_pts - 1.8).abs() < 0.05, "stream shows {:.3}, wanted 1.8", v.shown_pts);
+        }
+
+        // A scrub drags keyframe-only and lands exact on release.
+        app.show_ui = true;
+        app.tick(0.016, vp, 1.0);
+        let s = app.seek_rect(vp);
+        app.mouse_down(s.x + s.w * 0.5, s.y + s.h / 2.0);
+        assert!(app.scrubbing);
+        let want = app.quantize(0.5 * (app.wrap - 0.05));
+        assert!((app.t - want).abs() < 1e-9, "scrub target is on the frame grid: {} vs {want}", app.t);
+        let sent = app.queued_seek.map(|q| q.1).unwrap_or(false);
+        assert!(!sent, "drag seeks are keyframe-only");
+        app.mouse_up();
+        assert_eq!(app.queued_seek.map(|q| q.1), Some(true), "release lands the exact frame");
+        assert!((app.t - want).abs() < 1e-9, "release keeps the clock where the pointer left it");
+    }
+
     /// A lone clip opens on the timeline; a second one drops back to Sources.
     #[test]
     fn a_lone_clip_opens_in_timeline_mode() {

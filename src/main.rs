@@ -288,7 +288,7 @@ fn load_video(path: &Path) -> anyhow::Result<Video> {
         info.rotation,
     )
     .ok_or_else(|| anyhow::anyhow!("failed to start decoder for {}", path.display()))?;
-    Ok(Video { selected: false, linked_copy: false, info, player, shown_pts: 0.0, delivered: false, pending: false, last_frame: None })
+    Ok(Video { selected: false, linked_copy: false, info, player, shown_pts: 0.0, delivered: false, pending: false, seeking: false, last_frame: None })
 }
 
 /// The launch window's floor video: `Contents/Resources/background.mp4`

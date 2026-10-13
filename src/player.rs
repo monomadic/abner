@@ -194,7 +194,10 @@ impl Player {
         self.shared.failed.load(Ordering::Relaxed)
     }
 
-    #[allow(dead_code)] // used by tests; kept public API
+    /// Frames decoded and waiting. After `seek` this is non-zero only once
+    /// the new position has delivered (the seek drains the queue and the
+    /// reader refuses stale pushes under the same lock), so `buffered() > 0`
+    /// means the seek landed even when the clock won't pop the frame yet.
     pub fn buffered(&self) -> usize {
         self.shared.frames.lock().unwrap().len()
     }
@@ -332,6 +335,13 @@ struct Pump<'a> {
     filtered: FramePtr,
     /// Exact-seek refinement: drop decoded frames until this pts.
     skip_until: Option<f64>,
+    /// Absolute stream pts of the last frame the decoder produced
+    /// (shown or discarded), `i64::MIN` right after a seek. An exact seek
+    /// forward of this that stays inside the current GOP just moves
+    /// `skip_until` instead of re-seeking the demuxer and flushing the
+    /// decoder — a scrub inside one GOP otherwise restarts the whole GOP
+    /// decode on every pointer event and never lands.
+    last_pts: i64,
 }
 
 /// Clamp libav's stderr chatter (the benign "No accelerated colorspace
@@ -393,6 +403,16 @@ unsafe fn reader(shared: &Shared, cfg: &ReaderCfg) -> Result<(), String> {
             return Err("no video stream".into());
         }
         let stream = *(*fmt.0).streams.add(sidx as usize);
+        // libav's default AV1 decoder is libdav1d (software); the
+        // VideoToolbox hwaccel hangs off the NATIVE `av1` decoder, which
+        // has no software path at all. So it is only chosen when the caller
+        // already established hardware AV1 support (`probe::vt_accel`).
+        if cfg.use_vt && (*(*stream).codecpar).codec_id == ffi::AV_CODEC_ID_AV1 {
+            let native = ffi::avcodec_find_decoder_by_name(c"av1".as_ptr());
+            if !native.is_null() {
+                codec = native;
+            }
+        }
         let stream_tb = (*stream).time_base;
         let tb = stream_tb.num as f64 / stream_tb.den as f64;
         let start_off = {
@@ -418,6 +438,12 @@ unsafe fn reader(shared: &Shared, cfg: &ReaderCfg) -> Result<(), String> {
         {
             (*dec.0).hw_device_ctx = ffi::av_buffer_ref(_hw_dev.0);
             (*dec.0).get_format = Some(get_hw_format);
+            // Frame threading delays output by one packet per thread after
+            // every flush, and with the hardware doing the decode the
+            // threads do nothing else — on a 12-core machine that was ~12
+            // packets of pure latency on every seek. One thread: the first
+            // frame after a seek comes out as soon as it is decoded.
+            (*dec.0).thread_count = 1;
         }
         if ffi::avcodec_open2(dec.0, codec, ptr::null_mut()) < 0 {
             return Err("decoder open failed".into());
@@ -435,8 +461,15 @@ unsafe fn reader(shared: &Shared, cfg: &ReaderCfg) -> Result<(), String> {
             transfer: FramePtr(ffi::av_frame_alloc()),
             filtered: FramePtr(ffi::av_frame_alloc()),
             skip_until: None,
+            last_pts: i64::MIN,
         };
+        let mut at_eof = false;
 
+        // Index entry of the keyframe at or before an absolute stream ts,
+        // -1 when the container keeps no usable index.
+        let key_entry = |ts: i64| -> i32 {
+            ffi::av_index_search_timestamp(stream, ts, ffi::AVSEEK_FLAG_BACKWARD as i32)
+        };
         let seek_to = |target: f64| -> bool {
             // `target` is content-relative; seek in absolute stream time.
             let ts = ((target + start_off) / tb) as i64;
@@ -462,9 +495,29 @@ unsafe fn reader(shared: &Shared, cfg: &ReaderCfg) -> Result<(), String> {
                 // wherever it was while the other streams land on the
                 // target, and A/B on the same frame — the product — would
                 // be quietly false. Failing the player puts it in the HUD.
+                //
+                // An exact target AHEAD of the last decoded frame, in the
+                // same GOP, needs no seek at all: decoding on from here
+                // reaches it with every reference intact, so only the
+                // discard threshold moves. Forward decode is always
+                // correct; the same-keyframe test is purely about not
+                // decoding across GOPs when a jump would land closer.
+                let ts = ((target + start_off) / tb) as i64;
+                let extend = exact
+                    && !at_eof
+                    && pump.last_pts != i64::MIN
+                    && ts > pump.last_pts
+                    && key_entry(ts) >= 0
+                    && key_entry(ts) == key_entry(pump.last_pts);
+                if extend {
+                    pump.skip_until = Some(target);
+                    continue;
+                }
                 if !seek_to(target) {
                     return Err(format!("seek to {target:.3}s failed"));
                 }
+                at_eof = false;
+                pump.last_pts = i64::MIN;
                 pump.skip_until = exact.then_some(target);
                 continue;
             }
@@ -472,6 +525,7 @@ unsafe fn reader(shared: &Shared, cfg: &ReaderCfg) -> Result<(), String> {
             if r == ffi::AVERROR_EOF {
                 // Drain the decoder's tail, then park: the app owns the
                 // clock and will send a seek when it wraps.
+                at_eof = true;
                 let _ = ffi::avcodec_send_packet(dec.0, ptr::null());
                 loop {
                     let rr = ffi::avcodec_receive_frame(dec.0, frame.0);
@@ -529,6 +583,9 @@ impl Pump<'_> {
         unsafe {
             let pts = (*frame).best_effort_timestamp;
             let pts_s = pts as f64 * self.tb - self.start_off;
+            if pts != ffi::AV_NOPTS_VALUE {
+                self.last_pts = pts;
+            }
             if let Some(t) = self.skip_until {
                 if pts != ffi::AV_NOPTS_VALUE && pts_s < t - 1e-3 {
                     ffi::av_frame_unref(frame);
@@ -537,6 +594,16 @@ impl Pump<'_> {
                 self.skip_until = None;
             }
             let is_hw = (*frame).format == ffi::AV_PIX_FMT_VIDEOTOOLBOX;
+            if self.graph.is_none() {
+                // Once per stream: the only way to tell from outside which
+                // path a clip ended up on (VT device creation failing, or
+                // a profile VT declines, both fall back silently).
+                log::info!(
+                    "player: {} decoding in {}",
+                    self.cfg.path.display(),
+                    if is_hw { "hardware (VideoToolbox)" } else { "software" }
+                );
+            }
             let feed = if is_hw {
                 ffi::av_frame_unref(self.transfer.0);
                 if ffi::av_hwframe_transfer_data(self.transfer.0, frame, 0) < 0 {
@@ -792,6 +859,69 @@ mod tests {
         thread::sleep(Duration::from_millis(50));
         assert!(p.buffered() <= QUEUE_DEPTH);
         assert!(!p.failed());
+    }
+
+    /// An exact seek forward inside the GOP being decoded continues from
+    /// where the reader is instead of restarting at the keyframe, and a
+    /// seek backward inside it still restarts; both land on the target.
+    #[test]
+    fn exact_seeks_inside_one_gop_land_forward_and_back() {
+        let Some(clip) = test_clip("gop.mp4", 4) else { return };
+        let p = Player::spawn(&clip, 320, 180, true, None).expect("spawn");
+        // GOP is 30 frames at 30 fps: 1.0..2.0 is one GOP.
+        p.seek(1.1, true);
+        assert!(wait_buffered(&p, 1, Duration::from_secs(5)), "no frame after seek");
+        let (pts, buf) = p.take_next().unwrap();
+        assert!((1.08..=1.14).contains(&pts), "landed {pts}");
+        p.recycle(buf);
+        p.seek(1.7, true); // forward, same GOP: extended, not re-seeked
+        assert!(wait_buffered(&p, 1, Duration::from_secs(5)), "no frame after forward seek");
+        let (pts, buf) = p.take_next().unwrap();
+        assert!((1.68..=1.74).contains(&pts), "forward landed {pts}");
+        p.recycle(buf);
+        p.seek(1.3, true); // backward, same GOP: must restart from the keyframe
+        assert!(wait_buffered(&p, 1, Duration::from_secs(5)), "no frame after backward seek");
+        let (pts, buf) = p.take_next().unwrap();
+        assert!((1.28..=1.34).contains(&pts), "backward landed {pts}");
+        p.recycle(buf);
+        p.seek(3.5, true); // forward across GOPs: a real seek
+        assert!(wait_buffered(&p, 1, Duration::from_secs(5)), "no frame after far seek");
+        let (pts, buf) = p.take_next().unwrap();
+        assert!((3.48..=3.54).contains(&pts), "far landed {pts}");
+        p.recycle(buf);
+        assert!(!p.failed());
+    }
+
+    /// VP9 and AV1 decode (hardware where the chip has it, software
+    /// otherwise) and exact-seek like everything else. Skipped quietly
+    /// when the encoders aren't built into the PATH ffmpeg.
+    #[test]
+    fn vp9_and_av1_decode_and_seek() {
+        let Some(h264) = test_clip("codecs-src.mp4", 3) else { return };
+        let dir = h264.parent().unwrap();
+        for (name, args) in [
+            ("codecs.webm", ["-c:v", "libvpx-vp9", "-b:v", "1M", "-g", "30"]),
+            ("codecs-av1.mp4", ["-c:v", "libsvtav1", "-crf", "40", "-g", "30"]),
+        ] {
+            let clip = dir.join(name);
+            if !clip.exists() {
+                let ok = Command::new("ffmpeg")
+                    .args(["-y", "-v", "error", "-i"]).arg(&h264).args(args).arg(&clip)
+                    .status().map(|s| s.success()).unwrap_or(false);
+                if !ok {
+                    eprintln!("skipping {name}: encoder unavailable");
+                    continue;
+                }
+            }
+            let codec = if name.ends_with(".webm") { "vp9" } else { "av1" };
+            let p = Player::spawn(&clip, 320, 180, crate::probe::vt_accel(codec), None).expect("spawn");
+            assert!(wait_buffered(&p, 1, Duration::from_secs(10)), "{name}: no frames");
+            p.seek(1.5, true);
+            assert!(wait_buffered(&p, 1, Duration::from_secs(10)), "{name}: no frame after seek");
+            let (pts, _) = p.take_next().unwrap();
+            assert!((1.45..=1.6).contains(&pts), "{name}: exact seek landed {pts}");
+            assert!(!p.failed(), "{name}: player failed");
+        }
     }
 
     #[test]

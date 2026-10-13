@@ -250,11 +250,41 @@ fn probe_ffprobe(path: &Path) -> anyhow::Result<VideoInfo> {
     })
 }
 
-/// Hardware decode gate carried over from switchblade (benchmarked there):
-/// VideoToolbox only for the codecs it actually accelerates — VP9/AV1
-/// measured *slower* routed through VT than straight software decode.
+/// Hardware decode gate. h264/hevc/prores always go through VideoToolbox
+/// on macOS; VP9 and AV1 only when this chip has the block (M1+ for VP9,
+/// M3+ for AV1), asked once per codec via `vt_shim.c`. Without the block
+/// they stay in software: the native AV1 decoder the hwaccel needs has no
+/// software path, and VT's software VP9 was measured slower than libav's
+/// own in switchblade.
 pub fn vt_accel(codec: &str) -> bool {
-    cfg!(target_os = "macos") && matches!(codec, "h264" | "hevc" | "h265" | "prores")
+    match codec {
+        "h264" | "hevc" | "h265" | "prores" => cfg!(target_os = "macos"),
+        "vp9" => vt_hw_decodes(b"vp09"),
+        "av1" => vt_hw_decodes(b"av01"),
+        _ => false,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn vt_hw_decodes(fourcc: &[u8; 4]) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    unsafe extern "C" {
+        fn ab_vt_hw_decodes(codec_type: u32) -> bool;
+    }
+    static CACHE: OnceLock<Mutex<HashMap<u32, bool>>> = OnceLock::new();
+    let key = u32::from_be_bytes(*fourcc);
+    let mut cache = CACHE.get_or_init(Default::default).lock().unwrap();
+    *cache.entry(key).or_insert_with(|| {
+        let yes = unsafe { ab_vt_hw_decodes(key) };
+        log::info!("VideoToolbox hardware {}: {}", String::from_utf8_lossy(fourcc), if yes { "yes" } else { "no" });
+        yes
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn vt_hw_decodes(_fourcc: &[u8; 4]) -> bool {
+    false
 }
 
 #[cfg(test)]

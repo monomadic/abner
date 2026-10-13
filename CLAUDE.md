@@ -69,6 +69,16 @@ from one to the other, keeping its number.
   `take_upto(t)` (pop all due, newest wins). Sync is by construction, pause is "stop
   advancing t" (backpressure stalls decoders), EOF parks the reader until a seek.
   Decode is at native resolution — pixels are the product here, nothing scales.
+  **Seek latency rules** (2026-10-14): one decoder thread when VideoToolbox is up
+  (frame threads add a packet of post-flush delay each and do nothing for a hw
+  decode); an exact seek forward of `Pump::last_pts` inside the same GOP (same
+  `av_index_search_timestamp` entry, not at EOF) only moves `skip_until` — no
+  demuxer seek, no flush; backward or cross-GOP seeks really seek. `buffered() > 0`
+  after `seek()` means the seek landed (the drain and the stale-push refusal share
+  the `frames` lock). VP9/AV1 use VT only when `probe::vt_accel` finds the hardware
+  block (`src/vt_shim.c`); AV1 then opens the NATIVE `av1` decoder, which the
+  hwaccel needs and which has no software path (`libdav1d`, the default, is sw-only).
+  The first frame of every stream logs hardware vs software at `info`.
   Three robustness rules ported from switchblade (2026-09-04), each a shipped bug there:
   `Drop` takes the `frames` lock for an instant before notifying (a store+notify between
   the reader's `closed` check and its wait is a lost wakeup = leaked thread); an AVIO
@@ -105,6 +115,12 @@ from one to the other, keeping its number.
   can't re-land on the same frame — then the delivered frame's true pts is ADOPTED as
   `t` (`pending` flags + `take_next`). The clock wraps at the shortest stream duration
   and exact-seeks everyone to 0.
+  **Seeks coalesce** (2026-10-14): `seek_all` moves `t` at once but, while any
+  `Video::seeking` player hasn't landed, parks the newest target in `queued_seek`
+  for `tick` to dispatch after the drain — never send a seek per pointer event.
+  Scrubs (seek bar, cut playhead drag) are keyframe-only (`exact = false`) and
+  `mouse_up` lands the exact frame; seek-bar targets are `quantize`d to the frame
+  grid and dropped when equal to `t`.
   **Keys**: `1`–`9` pick a clip directly (`select`), `V`/Shift-V cycle the view.
   ⌘W (`Key::Close`, from winit's `ModifiersChanged` state) closes the focused clip
   (`close_active`): survivors shift down a slot and are exact-seeked to the current `t`
