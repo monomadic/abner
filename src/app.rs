@@ -3148,7 +3148,7 @@ impl App {
     }
 
     fn cut_hover_playhead(&self) -> Option<f64> {
-        if !self.cut_mode || !self.show_ui || !self.cursor_inside || self.cut_drag.is_some() { return None; }
+        if !self.cut_mode || !self.show_ui || !self.cursor_inside || self.split_tool || self.cut_drag.is_some() { return None; }
         let (x, y) = self.cursor;
         let v = self.cut_lanes().video;
         if !contains(self.workspace().timeline, x, y) || x < v.x || x >= v.x + v.w { return None; }
@@ -3156,7 +3156,6 @@ impl App {
         // selects a removed range, or activates a timeline control.
         if self.cut_edge_at(x, y).is_some()
             || self.cut_ghost_at(x, y).is_some()
-            || (self.split_tool && self.cut_clip_at(x, y).is_some())
             || self.controls().iter().any(|c| contains(c.r, x, y))
             || self.cut_encode_regions().iter().any(|(_, r)| r.w >= 54.0 && contains(Self::encode_button(*r), x, y)) {
             return None;
@@ -5929,6 +5928,11 @@ mod tests {
         app.split_tool = true;
         app.cursor_moved(lane.x + 143.0, lane.y + 20.0);
         assert!(app.cut_hover_playhead().is_none(), "split tool does not seek");
+        let ruler = app.cut_lanes().ruler;
+        app.cursor_moved(ruler.x + 143.0, ruler.y + 4.0);
+        assert!(app.cut_hover_playhead().is_none(), "split tool hides preview outside clips too");
+        app.split_tool = false;
+        assert!(app.cut_hover_playhead().is_some(), "turning split off restores the preview");
         app.cursor_moved(lane.x - 20.0, lane.y);
         assert!(app.cut_hover_playhead().is_none(), "gutter does not seek");
         app.cursor_inside = false;

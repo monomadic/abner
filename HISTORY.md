@@ -7,8 +7,8 @@ existed there before it landed; earlier entries predate the task list.
 
 Hovering a scrubbable part of the timeline shows a translucent playhead pin and
 line at the click target. Preview and scrub share the same time calculation,
-including frame-card snapping. It hides during drags and over trim grips,
-removed clips, split targets and controls, where clicking does something else.
+including frame-card snapping. It hides everywhere while the split tool is on,
+and during drags and over trim grips, removed clips and controls.
 
 ## 2026-10-14 — frame-marker height hierarchy
 
