@@ -88,6 +88,8 @@ struct Cache {
     /// — or starts a fresh one after a seek (`broken`).
     last_key: i64,
     broken: bool,
+    /// A background seek is filling a gap after the displayed frame.
+    gap_refill: bool,
 }
 
 impl Cache {
@@ -125,15 +127,20 @@ impl Cache {
                 if t_us < lo {
                     return None;
                 }
-                let k = *self.frames.range(lo..=t_us).next_back()?.0;
-                self.covers(k, t).then_some(k)
+                // A later, disjoint cached run must not hide a valid frame
+                // in the run containing the seek target.
+                self.frames.range(lo..=t_us).rev()
+                    .map(|(k, _)| *k)
+                    .find(|&k| self.covers(k, t))
             }
             None => {
                 let lo = self.position.saturating_add(1);
                 if t_us < lo {
                     return None;
                 }
-                self.frames.range(lo..=t_us).next_back().map(|(k, _)| *k)
+                self.frames.range(lo..=t_us).rev()
+                    .map(|(k, _)| *k)
+                    .find(|&k| self.position == i64::MIN || self.covers(k, self.position))
             }
         }
     }
@@ -149,6 +156,7 @@ impl Cache {
         self.position = key;
         self.pending = None;
         self.landing = false;
+        self.gap_refill = false;
     }
 
     fn anchor(&self) -> i64 {
@@ -321,6 +329,7 @@ impl Player {
                 landing: false,
                 last_key: i64::MIN,
                 broken: true,
+                gap_refill: false,
             }),
             space: Condvar::new(),
             closed: AtomicBool::new(false),
@@ -336,9 +345,19 @@ impl Player {
             // A drop aborts blocked libav I/O via the interrupt callback,
             // and that abort surfaces here as an ordinary error — a
             // closed player shutting down is not a stream failure.
-            if let Err(e) = unsafe { reader(&reader_shared, &cfg) }
+            let mut result = unsafe { reader(&reader_shared, &cfg) };
+            // VT can claim AV1 hardware support yet reject the actual
+            // stream. If it produced nothing, reopen with libdav1d.
+            if result.as_ref().is_err_and(|e| e.starts_with("hardware AV1:"))
                 && !reader_shared.closed.load(Ordering::Relaxed)
+                && reader_shared.cache.lock().unwrap().frames.is_empty()
             {
+                log::warn!("player: {} — hardware decode failed before first frame; retrying in software", cfg.path.display());
+                let mut software = cfg.clone();
+                software.use_vt = false;
+                result = unsafe { reader(&reader_shared, &software) };
+            }
+            if let Err(e) = result && !reader_shared.closed.load(Ordering::Relaxed) {
                 log::warn!("player: {} — {e}", cfg.path.display());
                 reader_shared.failed.store(true, Ordering::Relaxed);
             }
@@ -363,6 +382,7 @@ impl Player {
         let key = us(t);
         let mut c = self.shared.cache.lock().unwrap();
         c.position = key;
+        c.gap_refill = false;
         self.shared.set_position(key);
         let cached = exact
             && c
@@ -392,7 +412,24 @@ impl Player {
     /// slow decoder degrades to a lower frame rate, never to lag).
     pub fn take_upto(&self, t: f64) -> Option<(f64, Rgba)> {
         let mut c = self.shared.cache.lock().unwrap();
-        let key = c.upto_key(us(t))?;
+        let key = match c.upto_key(us(t)) {
+            Some(key) => key,
+            None => {
+                // A cache hit can leave the reader decoding elsewhere.
+                // Refill a gap before playback crosses into a later run.
+                if c.pending.is_none() && !c.gap_refill && c.position != i64::MIN
+                    && us(t) > c.position
+                    && c.frames.range(c.position.saturating_add(1)..=us(t)).next().is_some()
+                {
+                    let target = c.position.saturating_add(SAME_FRAME_US + 1);
+                    c.pending = Some(target);
+                    c.gap_refill = true;
+                    *self.shared.cmd.lock().unwrap() = Some((target as f64 * 1e-6, true, false));
+                    self.shared.space.notify_all();
+                }
+                return None;
+            }
+        };
         let f = c.frames.get(&key)?.clone();
         c.took(key);
         self.shared.set_position(key);
@@ -462,6 +499,7 @@ impl Drop for Player {
     }
 }
 
+#[derive(Clone)]
 struct ReaderCfg {
     path: PathBuf,
     cpath: CString,
@@ -636,7 +674,8 @@ unsafe fn reader(shared: &Shared, cfg: &ReaderCfg) -> Result<(), String> {
         // VideoToolbox hwaccel hangs off the NATIVE `av1` decoder, which
         // has no software path at all. So it is only chosen when the caller
         // already established hardware AV1 support (`probe::vt_accel`).
-        if cfg.use_vt && (*(*stream).codecpar).codec_id == ffi::AV_CODEC_ID_AV1 {
+        let native_av1 = cfg.use_vt && (*(*stream).codecpar).codec_id == ffi::AV_CODEC_ID_AV1;
+        if native_av1 {
             let native = ffi::avcodec_find_decoder_by_name(c"av1".as_ptr());
             if !native.is_null() {
                 codec = native;
@@ -675,7 +714,7 @@ unsafe fn reader(shared: &Shared, cfg: &ReaderCfg) -> Result<(), String> {
             (*dec.0).thread_count = 1;
         }
         if ffi::avcodec_open2(dec.0, codec, ptr::null_mut()) < 0 {
-            return Err("decoder open failed".into());
+            return Err(if native_av1 { "hardware AV1: decoder open failed" } else { "decoder open failed" }.into());
         }
 
         let pkt = PktPtr(ffi::av_packet_alloc());
@@ -765,6 +804,9 @@ unsafe fn reader(shared: &Shared, cfg: &ReaderCfg) -> Result<(), String> {
                         return Ok(());
                     }
                 }
+                if native_av1 && shared.cache.lock().unwrap().frames.is_empty() {
+                    return Err("hardware AV1: no decoded frames".into());
+                }
                 loop {
                     if shared.closed.load(Ordering::Relaxed) {
                         return Ok(());
@@ -795,7 +837,7 @@ unsafe fn reader(shared: &Shared, cfg: &ReaderCfg) -> Result<(), String> {
                     break;
                 }
                 if rr < 0 {
-                    return Err("decode error".into());
+                    return Err(if native_av1 { "hardware AV1: decode error" } else { "decode error" }.into());
                 }
                 if let Flow::Stop = pump.frame_in(frame.0) {
                     return Ok(());
@@ -1117,6 +1159,59 @@ mod tests {
             thread::sleep(Duration::from_millis(5));
         }
         false
+    }
+
+    #[test]
+    fn pending_seek_uses_its_covered_run_even_with_a_later_cached_run() {
+        let mut c = Cache {
+            frames: BTreeMap::new(), runs: vec![(100_000, 120_000), (200_000, 220_000)],
+            bytes: 0, budget: 1024, position: 105_000, pending: Some(105_000),
+            landing: false, last_key: 220_000, broken: false, gap_refill: false,
+        };
+        for key in [100_000, 110_000, 120_000, 200_000, 210_000, 220_000] {
+            c.frames.insert(key, Arc::new(vec![0]));
+        }
+        assert_eq!(c.upto_key(220_000), Some(120_000));
+        c.took(120_000);
+        assert_eq!(c.position, 120_000);
+        assert_eq!(c.upto_key(220_000), None, "playback cannot jump over a cache gap");
+    }
+
+    /// Manual performance probe: run with
+    /// `cargo test benchmark_three_4k_players -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn benchmark_three_4k_players() {
+        let dir = std::env::temp_dir().join(format!("abner-bench-4k-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join("source.mp4");
+        let ok = Command::new("ffmpeg")
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i",
+                "testsrc2=duration=2:size=3840x2160:rate=24",
+                "-c:v", "libx264", "-preset", "ultrafast", "-threads", "4",
+                "-pix_fmt", "yuv420p", "-g", "48"])
+            .arg(&clip).status().unwrap().success();
+        assert!(ok, "4K fixture encode failed");
+        let players: Vec<_> = (0..3).map(|_| {
+            Player::spawn(&clip, 3840, 2160, true, None, 256 << 20).unwrap()
+        }).collect();
+        let cold = Instant::now();
+        for p in &players { p.seek(1.5, true); }
+        for p in &players {
+            assert!(wait_buffered(p, 1, Duration::from_secs(30)), "cold 4K seek stalled");
+        }
+        let cold_ms = cold.elapsed().as_millis();
+        let landed: Vec<_> = players.iter().map(|p| p.take_next().unwrap().0).collect();
+        assert!(landed.iter().all(|&pts| (pts - landed[0]).abs() < 1.0 / 24.0));
+        let cached = Instant::now();
+        for p in &players { p.seek(1.42, true); }
+        let cached_pts: Vec<_> = players.iter().map(|p| p.take_next().expect("cache hit").0).collect();
+        assert!(cached_pts.iter().all(|&pts| pts < landed[0]), "cache seek should move to an earlier frame");
+        let cached_us = cached.elapsed().as_micros();
+        let cache_mib: f64 = players.iter().map(|p| p.cached_bytes() as f64).sum::<f64>() / 1048576.0;
+        eprintln!("4K x3: cold={cold_ms}ms, cached={cached_us}us, cached_frames={cached_pts:?}, cache={cache_mib:.1}MiB");
+        drop(players);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

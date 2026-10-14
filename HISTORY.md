@@ -3,6 +3,26 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-14 — seek cache gap safety and AV1 fallback
+
+Cached spans can be disjoint after seeks. Playback now takes frames only from
+the span containing its current frame; if it reaches a gap, it asks the reader
+to decode through that gap instead of jumping to a later cached frame. A
+pending exact seek also chooses the newest frame in the span covering its
+target, even when another cached span has a later frame. A regression test
+covers both cases.
+
+VideoToolbox's AV1 capability check can return true while the actual stream
+fails to decode. If native hardware AV1 produces no frames, the reader reopens
+the stream with the software decoder. The AV1 decode-and-seek test now passes
+in that environment.
+
+An ignored, opt-in three-player 4K benchmark uses a 256 MiB cache per clip.
+On the software fallback path here, a cold exact seek to 1.5 s took 658 ms,
+a cached seek back to 1.458 s took about 2 µs, and the three caches held
+759.4 MiB. These figures describe this fixture and machine, not a throughput
+guarantee.
+
 ## 2026-10-14 — the frame cache: exact seeks that land at once, VP9/AV1 on VideoToolbox
 
 Clicking the seek bar and scrubbing both took seconds on long-GOP sources: every
