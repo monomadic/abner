@@ -245,6 +245,11 @@ pub struct App {
     /// `playback.start_paused`) — at startup AND on every later drop/open.
     start_paused: bool,
     show_ui: bool,
+    /// The Sources sidebar (Figma Abner / Toolbar / Sidebar toggle): the
+    /// Finder-style button in the header hides the rail in every mode that
+    /// has one. Remembered across mode switches; opening a clip never
+    /// forces a hidden rail open.
+    show_sources: bool,
     /// Delta amplification.
     gain: f32,
     blend: f32,
@@ -595,6 +600,7 @@ impl App {
             keys: cfg.keys.clone(),
             start_paused: cfg.playback.start_paused,
             show_ui: true,
+            show_sources: true,
             gain: cfg.compare.delta_gain,
             blend: cfg.compare.blend,
             checker_px: cfg.compare.checker_size,
@@ -2160,7 +2166,7 @@ impl App {
     /// Shared layout for drawing and hit testing; the image transform is always
     /// relative to this canvas, including in mask/crop and side-by-side modes.
     fn workspace(&self) -> Workspace {
-        let mut w = Workspace::new(self.vp, self.show_ui, self.cut_mode);
+        let mut w = Workspace::new(self.vp, self.show_ui, self.cut_mode, self.show_sources);
         if self.show_ui && self.cut_mode {
             let extra = self.frame_detail_extra() + if self.cut_encode_rail() { 26.0 } else { 0.0 };
             w.canvas.h = (w.canvas.h - extra).max(1.0);
@@ -2279,7 +2285,7 @@ impl App {
             self.cut_controls(&mut out);
             return out;
         }
-        if !self.mask_mode {
+        if l.rail > 0.0 && !self.mask_mode {
             let w = (l.rail - 32.0) / 2.0;
             for (x, label, action) in [(12.0, "Duplicate", Action::Duplicate),
                 (20.0 + w, "+ Add files", Action::OpenFiles)] {
@@ -2290,6 +2296,7 @@ impl App {
                     "Clear", false, Action::ClearSources));
             }
         }
+        out.push(Control::new(self.sidebar_toggle(), "", self.show_sources, Action::ToggleSources));
         let mut x = l.rail + 12.0;
         let y = HEADER_H + 6.0;
         if !self.mask_mode {
@@ -2339,6 +2346,7 @@ impl App {
             Action::Duplicate => self.duplicate_sources(),
             Action::OpenFiles => self.cmds.push(Cmd::OpenFiles),
             Action::ClearSources => { for v in &mut self.videos { v.selected = false; } },
+            Action::ToggleSources => self.show_sources = !self.show_sources,
             Action::View(mode) => self.mode = mode,
             Action::Brush(up) => self.resize_brush(if up { 1.25 } else { 0.8 }),
             Action::Save => self.save_mask(),
@@ -2372,15 +2380,27 @@ impl App {
         if self.cut_mode { 3 } else if !self.mask_mode { 0 } else if self.crop.is_none() { 1 } else { 2 }
     }
 
+    /// `--no-sources`: the rail hidden, as the header toggle leaves it.
+    pub fn set_sources_visible(&mut self, shown: bool) {
+        self.show_sources = shown;
+    }
+
     pub fn select_workspace_mode(&mut self, mode: usize) {
         if self.ready() && mode < 4 && mode != self.workspace_mode() {
             self.activate(Action::Tool(mode));
         }
     }
 
+    /// Header (12:5): the sidebar toggle sits at x=78, clear of the traffic
+    /// lights, and the mode selector 22px after it. Fullscreen has no
+    /// lights, so both slide to the outer padding.
+    fn sidebar_toggle(&self) -> RectPx {
+        RectPx { x: if self.fullscreen { 14.0 } else { 78.0 }, y: 8.0, w: 32.0, h: 28.0 }
+    }
+
     fn mode_selector(&self) -> ModeSelector {
         ModeSelector {
-            rect: RectPx { x: if self.fullscreen { 14.0 } else { 85.0 }, y: 8.5, w: 385.0, h: 26.0 },
+            rect: RectPx { x: self.sidebar_toggle().x + 54.0, y: 8.0, w: 385.0, h: 28.0 },
             active: self.workspace_mode(),
         }
     }
@@ -2401,9 +2421,11 @@ impl App {
             items.push(Item::Rect(RectItem::new(r, WORKSPACE_RULE)));
         }
         self.mode_selector().draw(items, self.cursor, self.cursor_inside);
+        let toggle = self.sidebar_toggle();
+        draw_sidebar_toggle(items, toggle, self.show_sources, self.cursor_inside && contains(toggle, self.cursor.0, self.cursor.1));
         for control in self.controls() {
             let hovered = contains(control.r, self.cursor.0, self.cursor.1) && self.cursor_inside;
-            if matches!(control.action, Action::Tool(_)) {
+            if matches!(control.action, Action::Tool(_) | Action::ToggleSources) {
                 continue;
             }
             let disabled = matches!(control.action, Action::Save) && self.mask_save.is_some()
@@ -2455,23 +2477,22 @@ impl App {
                 ui_label(items, l.rail - 16.0, y, 11.0, WORKSPACE_TEXT, value, Align::Right, l.rail - 110.0);
             }
             let dir = v.info.path.parent().unwrap_or_else(|| std::path::Path::new(""));
-            ui_label(items, 16.0, l.inspector.y + 169.0, 10.0, WORKSPACE_MUTED, dir.to_string_lossy(), Align::Left, l.rail - 32.0);
+            ui_label(items, 16.0, l.inspector.y + 190.0, 10.0, WORKSPACE_MUTED, dir.to_string_lossy(), Align::Left, l.rail - 32.0);
         }
         self.build_transport(items);
     }
 
-    /// Figma Sources / Preview card: full-width live media, then filename
-    /// and two-column metadata. Selection is secondary to the active preview.
+    /// Sources sidebar (Abner — Timeline Edit, 278:584): a stack of
+    /// preview cards — cover-fitted live media under a white keycap, then
+    /// the filename and a two-column metadata line — ringed orange on the
+    /// focused clip and on a navy surface otherwise. The hover checkbox,
+    /// the shared/linked chip and the footer line are the app's batch
+    /// affordances, kept where the design leaves room for them.
     fn build_sources(&self, items: &mut Vec<Item>) {
         let l = self.workspace();
+        if l.rail <= 0.0 { return; }
         let ink = hex_color(SOURCE_INK);
         let secondary = hex_color(SOURCE_SECONDARY);
-        let blue = hex_color(0x61b5ee);
-        ui_label(items, 12.0, HEADER_H + 27.0, 13.0, ink, "Source clips", Align::Left, l.rail - 64.0);
-        let count = RectPx { x: l.rail - 40.0, y: HEADER_H + 16.0, w: 28.0, h: 22.0 };
-        items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(count, hex_color(SOURCE_SURFACE)) }));
-        ui_label(items, count.x + 14.0, count.y + 11.0, 11.0, secondary,
-            self.videos.len().to_string(), Align::Center, 24.0);
         items.push(Item::Clip(Some(l.list)));
         let first = self.source_first();
         for i in first..(first + self.source_capacity()).min(self.videos.len()) {
@@ -2479,27 +2500,28 @@ impl App {
             let r = self.source_row(i);
             let active = i == self.active;
             let hover = self.cursor_inside && contains(r, self.cursor.0, self.cursor.1);
-            items.push(Item::Rect(RectItem { radius: 10.0, border_w: if active { 1.5 } else { 1.0 },
-                border_color: if active { blue } else if hover { secondary } else { hex_color(SOURCE_BORDER) },
-                ..RectItem::new(r, hex_color(if active { SOURCE_SELECTED } else { SOURCE_SURFACE })) }));
-            let thumb = RectPx { x: r.x + 12.0, y: r.y + 12.0, w: r.w - 24.0, h: 100.0 };
-            items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(thumb, WORKSPACE_PANEL) }));
+            items.push(Item::Rect(RectItem { radius: 10.0, border_w: 2.0,
+                border_color: hex_color(if active { SOURCE_RING } else if hover { SOURCE_BORDER } else { SOURCE_EDGE }),
+                ..RectItem::new(r, if active { WORKSPACE_PANEL } else { hex_color(SOURCE_SELECTED) }) }));
+            // The preview fills the card inside its ring with only its top
+            // corners rounded: the quad runs 6px past the clip so the
+            // bottom radius never shows.
+            let thumb = RectPx { x: r.x + 2.0, y: r.y + 2.0, w: r.w - 4.0, h: SOURCE_THUMB_H };
+            items.push(Item::Clip(Some(intersect(thumb, l.list))));
+            let quad = RectPx { h: thumb.h + 6.0, ..thumb };
+            items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(quad, WORKSPACE_PANEL) }));
             if v.delivered {
                 let aspect = v.info.width as f32 / v.info.height.max(1) as f32;
-                let box_aspect = thumb.w / thumb.h;
+                let box_aspect = quad.w / quad.h;
                 let (uw, uh) = if aspect > box_aspect { (box_aspect / aspect, 1.0) } else { (1.0, aspect / box_aspect) };
-                items.push(Item::Video { a: i, b: i, r: thumb,
+                items.push(Item::Video { a: i, b: i, r: quad,
                     uv: [(1.0-uw)/2.0, (1.0-uh)/2.0, uw, uh], mode: VideoMode::Tex, p0: 6.0, p1: 0.0 });
             }
+            items.push(Item::Clip(Some(l.list)));
             let badge = RectPx { x: thumb.x + 7.0, y: thumb.y + 7.0, w: 24.0, h: 24.0 };
-            items.push(Item::Rect(RectItem { radius: 5.0, ..RectItem::new(badge, hex_color(0x080d14)) }));
-            ui_label(items, badge.x + 12.0, badge.y + 12.0, 12.0, if active { blue } else { ink },
-                (i + 1).to_string(), Align::Center, 22.0);
-            if active {
-                let badge = RectPx { x: thumb.x + thumb.w - 77.0, y: thumb.y + 7.0, w: 70.0, h: 22.0 };
-                items.push(Item::Rect(RectItem { radius: 5.0, ..RectItem::new(badge, hex_color(0x09213a)) }));
-                ui_label(items, badge.x + 35.0, badge.y + 11.0, 10.0, blue, "ACTIVE", Align::Center, 62.0);
-            }
+            items.push(Item::Rect(RectItem { radius: 12.0, ..RectItem::new(badge, SOURCE_KEYCAP) }));
+            items.push(Item::Text(TextItem { header: true, align: Align::Center, valign: VAlign::Middle, max_width: Some(22.0),
+                ..TextItem::new(badge.x + 12.0, badge.y + 12.0, 15.0, hex_color(0x000000), (i + 1).to_string()) }));
             let shared = self.videos.iter().filter(|other| other.info.path == v.info.path).count();
             if shared > 1 || v.linked_copy {
                 let chip = RectPx { x: thumb.x + 7.0, y: thumb.y + 70.0, w: (thumb.w - 48.0).min(142.0), h: 23.0 };
@@ -2518,22 +2540,25 @@ impl App {
                     }
                 }
             }
+            // Text block: 7px side padding inside the ring, 6px below the
+            // preview; the name and the metadata are 18px lines.
+            let (tx, tw) = (thumb.x + 7.0, thumb.w - 14.0);
             let name = format!("{}{}", name_of(&v.info.path), if v.linked_copy { " · copy" } else { "" });
-            ui_label(items, r.x + 12.0, r.y + 132.0, 13.0, ink, name, Align::Left, r.w - 24.0);
+            items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(tw),
+                ..TextItem::new(tx, thumb.y + thumb.h + 15.0, 13.0, ink, name) }));
             let codec = match v.info.codec.as_str() { "h264" => "H.264".into(), "hevc" => "HEVC".into(), c => c.to_uppercase() };
             let seconds = v.info.duration.max(0.0) as u64;
-            let meta_y = r.y + 158.0;
-            let width = r.w - 24.0;
+            let meta_y = thumb.y + thumb.h + 33.0;
+            let left = format!("{codec} · {}p", v.info.height);
+            let right = format!("{}fps · {}:{:02}", v.info.fps, seconds / 60, seconds % 60);
             if l.rail >= 280.0 {
-                ui_label(items, r.x + 12.0, meta_y, 11.0, secondary,
-                    format!("{codec} · {}p", v.info.height), Align::Left, width * 0.52);
-                ui_label(items, r.x + r.w - 12.0, meta_y, 11.0, secondary,
-                    format!("{}fps · {}:{:02}", v.info.fps, seconds / 60, seconds % 60), Align::Right, width * 0.48);
+                items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(tw - 112.0),
+                    ..TextItem::new(tx, meta_y, 11.0, secondary, left) }));
+                items.push(Item::Text(TextItem { regular: true, align: Align::Right, valign: VAlign::Middle, max_width: Some(108.0),
+                    ..TextItem::new(tx + tw, meta_y, 11.0, secondary, right) }));
             } else {
-                ui_label(items, r.x + 12.0, meta_y - 5.0, 10.0, secondary,
-                    format!("{codec} · {}p", v.info.height), Align::Left, width);
-                ui_label(items, r.x + 12.0, meta_y + 11.0, 10.0, secondary,
-                    format!("{}fps · {}:{:02}", v.info.fps, seconds / 60, seconds % 60), Align::Left, width);
+                items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(tw),
+                    ..TextItem::new(tx, meta_y, 10.0, secondary, format!("{left} · {right}")) }));
             }
             if v.player.failed() {
                 ui_label(items, thumb.x + 8.0, thumb.y + 52.0, 11.0, ERR, "DECODE FAILED", Align::Left, thumb.w - 16.0);
@@ -2933,29 +2958,34 @@ struct ModeSelector {
 }
 
 impl ModeSelector {
+    /// Header / Container (122:441): 2px padding, 1px gaps, four equal segments.
     fn controls(&self) -> Vec<Control> {
-        let w = (self.rect.w - 4.0 - 3.0 * 4.0) / 4.0;
+        let w = (self.rect.w - 4.0 - 3.0 * 1.0) / 4.0;
         [("Sources", 0), ("Timeline", 3), ("Crop", 2), ("Mask", 1)]
             .into_iter().enumerate().map(|(index, (label, mode))| Control::new(
-                RectPx { x: self.rect.x + 2.0 + index as f32 * (w + 4.0), y: self.rect.y + 2.0, w, h: self.rect.h - 4.0 },
+                RectPx { x: self.rect.x + 2.0 + index as f32 * (w + 1.0), y: self.rect.y + 2.0, w, h: self.rect.h - 4.0 },
                 label, self.active == mode, Action::Tool(mode))).collect()
     }
 
+    /// A #151515 housing with a 42%-ink hairline; the selected segment is
+    /// lifted to #ededec with dark type, the rest sit at 34% ink. The
+    /// design's alphas are baked with `mix()` over their ground — linear
+    /// blending would read them far too bright.
     fn draw(&self, items: &mut Vec<Item>, cursor: (f32, f32), inside: bool) {
-        let ground = 0x1a1b1c;
-        items.push(Item::Rect(RectItem { radius: 8.0, ..RectItem::new(self.rect, hex_color(ground)) }));
+        let ground = 0x151515;
+        items.push(Item::Rect(RectItem { radius: 4.0, border_w: 1.0, border_color: mix(ground, 0xededec, 0.42),
+            ..RectItem::new(self.rect, hex_color(ground)) }));
         for control in self.controls() {
             let r = control.r;
             let hovered = inside && contains(r, cursor.0, cursor.1);
-            let selected = mix(ground, 0x858585, 0.44);
             if control.selected {
-                items.push(Item::Rect(RectItem { radius: 4.0, ..RectItem::new(r, selected) }));
+                items.push(Item::Rect(RectItem { radius: 3.0, ..RectItem::new(r, hex_color(0xededec)) }));
             }
+            let color = if control.selected { hex_color(0x11151b) }
+                else { mix(ground, 0xededec, if hovered { 0.7 } else { 0.34 }) };
             items.push(Item::Text(TextItem { header: true, align: Align::Center, valign: VAlign::Middle,
                 tracking: 0.0337, max_width: Some(r.w - 8.0),
-                ..TextItem::new(r.x + r.w / 2.0, r.y + r.h / 2.0, 11.0,
-                    lerp4(if control.selected { selected } else { hex_color(ground) }, hex_color(0xffffff),
-                        if hovered { 1.0 } else if control.selected { 0.88 } else if control.label == "Sources" { 0.52 } else { 0.51 }), control.label.to_uppercase()) }));
+                ..TextItem::new(r.x + r.w / 2.0, r.y + r.h / 2.0, 11.0, color, control.label.to_uppercase()) }));
         }
     }
 }
@@ -3901,11 +3931,11 @@ impl App {
         }
     }
 
-    /// Figma x=85 clears the traffic lights; fullscreen needs only outer padding.
+    /// Figma x=78 (the sidebar toggle) clears the traffic lights; fullscreen needs only outer padding.
     /// Only unoccupied header background behaves like a native titlebar.
     /// Keep the entire tab housing (including gaps) and action buttons interactive.
     pub fn titlebar_background(&self, x: f32, y: f32) -> bool {
-        if self.fullscreen || !self.show_ui || !(85.0..self.vp.0).contains(&x)
+        if self.fullscreen || !self.show_ui || !(78.0..self.vp.0).contains(&x)
             || !(0.0..HEADER_H).contains(&y) { return false; }
         !self.ready() || (!contains(self.header_tabs(), x, y)
             && !self.controls().iter().any(|c| contains(c.r, x, y)))
@@ -5048,7 +5078,7 @@ struct Workspace {
     side: RectPx,
 }
 impl Workspace {
-    fn new(vp: (f32, f32), visible: bool, cut: bool) -> Self {
+    fn new(vp: (f32, f32), visible: bool, cut: bool, sources: bool) -> Self {
         let (w, h) = vp;
         let none = RectPx { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
         if visible && cut {
@@ -5066,22 +5096,28 @@ impl Workspace {
                 timeline: RectPx { x: 0.0, y: transport_y + CUT_TOOLBAR_H, w, h: lanes },
             };
         }
-        let rail = if !visible { 0.0 } else if w < 900.0 { 210.0_f32.min(w * 0.3) } else { 280.0 };
+        let rail = if !visible || !sources { 0.0 } else if w < 900.0 { 210.0_f32.min(w * 0.3) } else { 280.0 };
         let header = if visible { HEADER_H + CONTEXT_H } else { 0.0 };
         let bottom = if visible { TRANSPORT_H + STATUS_H } else { 0.0 };
         let canvas = RectPx { x: rail, y: header, w: (w - rail).max(1.0), h: (h - header - bottom).max(1.0) };
-        let inspector_h = if visible && h >= 800.0 { 216.0 } else { 0.0 };
-        let inspector = RectPx { x: 0.0, y: h - STATUS_H - inspector_h, w: rail, h: inspector_h };
+        // Sources sidebar (278:584): the list starts 14px under the header
+        // and the focused inspector is 216px. The app's own rows — the
+        // footer line above the inspector and the Duplicate / Add files
+        // buttons under it — are not in the design and take their own
+        // strips, so nothing overlaps the inspector's path line.
+        let inspector_h = if rail > 0.0 && h >= 800.0 { 216.0 } else { 0.0 };
+        let inspector = RectPx { x: 0.0, y: h - STATUS_H - RAIL_ACTIONS_H - inspector_h, w: rail, h: inspector_h };
+        let list_y = HEADER_H + 14.0;
         Self {
             rail, canvas, inspector, timeline: none, side: none,
-            list: RectPx { x: 0.0, y: HEADER_H + 52.0, w: rail, h: (inspector.y - HEADER_H - 88.0 - if inspector_h == 0.0 { 36.0 } else { 0.0 }).max(SOURCE_H) },
+            list: RectPx { x: 0.0, y: list_y, w: rail, h: (inspector.y - RAIL_FOOTER_H - list_y).max(SOURCE_H) },
             transport: RectPx { x: rail, y: h - STATUS_H - TRANSPORT_H, w: w - rail, h: TRANSPORT_H },
         }
     }
 }
 
 #[derive(Clone, Copy)]
-enum Action { Duplicate, OpenFiles, ClearSources, Tool(usize), View(Mode), Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
+enum Action { Duplicate, OpenFiles, ClearSources, ToggleSources, Tool(usize), View(Mode), Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
 #[derive(Clone, Copy, PartialEq)]
 enum CutAction { TogglePosters, FrameChanges(bool), TimeDisplay(bool), In, Out, Split, ToggleSplit, Apply, DeletePicked, Undo, Export, EncodeAll, Encode(f64), Snap(Snap), Play, Zoom(bool), Step(i32), Keyframe(i32), Chapter(i32) }
 /// `hint` is the key cap a cut-mode button carries ("" for none).
@@ -5109,6 +5145,27 @@ fn clip_color(index: usize) -> [f32; 4] {
     const COLORS: [u32; 9] = [0x61b5ee, 0xe6ac69, 0xb89ae8, 0x6dc7aa, 0xe88891, 0xc9c970, 0x70c8d2, 0xdb9bc6, 0xa4b9d4];
     hex_color(COLORS[index % COLORS.len()])
 }
+fn intersect(a: RectPx, b: RectPx) -> RectPx {
+    let (x0, y0) = (a.x.max(b.x), a.y.max(b.y));
+    let (x1, y1) = ((a.x + a.w).min(b.x + b.w), (a.y + a.h).min(b.y + b.h));
+    RectPx { x: x0, y: y0, w: (x1 - x0).max(0.0), h: (y1 - y0).max(0.0) }
+}
+/// Abner / Toolbar / Sidebar toggle (278:573): Finder's sidebar glyph — a
+/// rounded frame with a narrow leading pane of three dots — on a neutral
+/// #292929 plate while the panel is shown, bare while it is hidden. Rects
+/// only: the renderer has no path primitive.
+fn draw_sidebar_toggle(items: &mut Vec<Item>, r: RectPx, shown: bool, hovered: bool) {
+    if shown || hovered {
+        items.push(Item::Rect(RectItem { radius: 5.0, ..RectItem::new(r, hex_color(if shown { 0x292929 } else { 0x1c1c1c })) }));
+    }
+    let ink = hex_color(if shown { 0xededec } else { 0x8f8f8f });
+    let f = RectPx { x: r.x + 6.0, y: r.y + 6.0, w: 20.0, h: 16.0 };
+    items.push(Item::Rect(RectItem { radius: 3.5, border_w: 1.5, border_color: ink, ..RectItem::new(f, [0.0; 4]) }));
+    items.push(Item::Rect(RectItem::new(RectPx { x: f.x + 6.5, y: f.y + 1.0, w: 1.5, h: f.h - 2.0 }, ink)));
+    for k in 0..3 {
+        items.push(Item::Rect(RectItem::new(RectPx { x: f.x + 3.25, y: f.y + 4.0 + k as f32 * 3.0, w: 1.5, h: 1.5 }, ink)));
+    }
+}
 fn number_badge(items: &mut Vec<Item>, r: RectPx, index: usize) {
     let color = clip_color(index);
     let bg = [color[0] * 0.17 + 0.04, color[1] * 0.17 + 0.04, color[2] * 0.17 + 0.04, 1.0];
@@ -5121,7 +5178,18 @@ const CUT_HEADER_H: f32 = 44.0;
 const CUT_HEADER_BLUE: u32 = 0x0074e1;
 const HEADER_H: f32 = CUT_HEADER_H;
 const CONTEXT_H: f32 = 40.0;
-const SOURCE_H: f32 = 196.0;
+/// Sources sidebar (278:584): 157px cards on a 12px gap, a 100px preview.
+const SOURCE_H: f32 = 169.0;
+const SOURCE_THUMB_H: f32 = 100.0;
+/// The app's rows the design leaves out: the footer line above the
+/// inspector and the Duplicate / Add files buttons under it.
+const RAIL_FOOTER_H: f32 = 36.0;
+const RAIL_ACTIONS_H: f32 = 40.0;
+/// The focused card's ring, the idle card's edge, and the keycap plate
+/// (white @ 0.5 in Figma; linear blending wants less).
+const SOURCE_RING: u32 = 0xff9d00;
+const SOURCE_EDGE: u32 = 0x151719;
+const SOURCE_KEYCAP: [f32; 4] = [1.0, 1.0, 1.0, 0.3];
 /// Sources card variables: surface, selected, border, ink, secondary, subtle.
 const SOURCE_SURFACE: u32 = 0x11151b;
 const SOURCE_SELECTED: u32 = 0x0d1b2b;
@@ -5413,6 +5481,44 @@ mod tests {
         app.fullscreen = false;
         app.show_ui = false;
         assert!(!app.titlebar_background(600.0, 20.0));
+    }
+
+    /// The header's sidebar toggle (Figma 278:573) hides the Sources rail:
+    /// the canvas takes the width, the rail's own controls go with it, the
+    /// shared selector stays put, and the state survives a mode switch.
+    #[test]
+    fn sidebar_toggle_hides_the_source_rail_and_survives_mode_switches() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 2);
+        app.vp = (1280.0, 800.0);
+        let tabs = app.header_tabs();
+        assert_eq!(app.workspace().rail, 280.0);
+        assert!(app.controls().iter().any(|c| matches!(c.action, Action::ToggleSources) && c.selected));
+        let r = app.sidebar_toggle();
+        assert!(r.x + r.w <= tabs.x, "the toggle sits before the selector");
+        app.mouse_down(r.x + 16.0, r.y + 14.0);
+        app.mouse_up();
+        assert!(!app.show_sources);
+        let l = app.workspace();
+        assert_eq!((l.rail, l.canvas.x, l.canvas.w, l.list.w, l.inspector.h), (0.0, 0.0, 1280.0, 0.0, 0.0));
+        assert!(app.controls().iter().all(|c| !matches!(c.action, Action::Duplicate | Action::OpenFiles)));
+        assert!(app.controls().iter().any(|c| matches!(c.action, Action::ToggleSources) && !c.selected));
+        let t = app.header_tabs();
+        assert_eq!((t.x, t.y, t.w, t.h), (tabs.x, tabs.y, tabs.w, tabs.h));
+        // Clicking where a card used to be reaches the canvas, not a clip.
+        app.mouse_down(60.0, HEADER_H + 80.0);
+        app.mouse_up();
+        assert_eq!(app.active, 0);
+        app.key(Key::Char('m'));
+        assert!(app.mask_mode);
+        assert_eq!(app.workspace().rail, 0.0);
+        app.mouse_down(r.x + 16.0, r.y + 14.0);
+        app.mouse_up();
+        assert!(app.show_sources && app.mask_mode);
+        assert_eq!(app.workspace().rail, 280.0);
+        let card = app.source_row(0);
+        assert_eq!((card.y, card.h), (HEADER_H + 14.0, 157.0));
+        assert_eq!(app.source_row(1).y - card.y, SOURCE_H);
     }
 
     #[test]

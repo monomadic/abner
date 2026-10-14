@@ -3,6 +3,27 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-14 — Sources rail from the Timeline Edit prototype
+
+The source rail now follows the "Abner — Timeline Edit" Figma file's
+`Main.dc.html` (278:584): the list starts 14px under the header with no
+heading or count chip, each card is 157px — cover-fitted live media with a
+white 24px keycap, the filename in JetBrains Mono Medium 13, then codec ·
+height and fps · duration in Regular 11 — with a 2px orange ring on the
+focused clip and a navy surface on the others (the ACTIVE pill is gone; the
+ring says it). The inspector's path line moved to the design's 190px. The
+header's segmented selector takes 122:441's look (a #151515 housing, the
+selected segment lifted to #ededec with dark type) and moves right to make
+room for the Finder-style sidebar toggle at x=78 (278:573): it hides the rail
+in every mode that has one, the state is remembered across mode switches, and
+`--no-sources` reaches the hidden state for captures. The app's own
+Duplicate / Add files row and the footer line, which the design does not
+have, take their own strips so they no longer sit over the inspector.
+
+Not built: the rail inside cut mode and the right-hand Timeline-inspector
+toggle the same component describes, and the 200 ms slide the design notes
+ask for (the panel snaps).
+
 ## 2026-10-14 — avoid RGBA work far before a cold seek target
 
 A cold exact seek still decodes from the preceding keyframe, but converting

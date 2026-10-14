@@ -4,6 +4,16 @@ How to turn a Figma design into abner code (and back) through the Figma MCP.
 Read this before implementing anything from Figma. CLAUDE.md has the wider
 architecture; this file is only the design ↔ code contract.
 
+**The Sources rail, header and timeline now come from a second file:**
+[Abner — Timeline Edit](https://www.figma.com/design/YV0duGxqSLOKfiQsdD746T)
+(file key `YV0duGxqSLOKfiQsdD746T`): `Main.dc.html` 12:2 is the current shell
+(header 12:5 with the segmented selector 122:441 and the sidebar toggles
+278:573, Sources sidebar 278:584), `Sources — sidebar hidden` 280:3785 the
+hidden state. Its JetBrains Mono IS the app's bundled header/regular faces,
+so card type copies 1:1. The tokens there (`sources/panel` #050506 =
+`WORKSPACE_PANEL`, `ink`/`secondary`/`selected` = `SOURCE_*`, the ring
+#ff9d00 = `SOURCE_RING`) follow the same rules as below.
+
 **The Figma file:** [Abner — Screens](https://www.figma.com/design/a5aV8WGfzSy9nWBea6Oqyb)
 (file key `a5aV8WGfzSy9nWBea6Oqyb`). Sections: *Launch window (Splash)*,
 *Workspace* (Single, Side by side, Difference, Mask, Crop), *Components, tokens

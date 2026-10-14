@@ -25,8 +25,8 @@ from one to the other, keeping its number.
   hidden title, and `FullSizeContentView` so the wgpu surface runs UNDER the strip —
   a transparent bar alone shows the default system grey, not the app's clear, so the
   only way to match exactly is to let the same GPU clear paint it. The traffic lights
-  stay, floating over the content; the workspace toolbar starts at x=100 to clear
-  them (x=16 in borderless fullscreen).
+  stay, floating over the content; the header's sidebar toggle starts at x=78 to
+  clear them and the mode selector 54px after it (x=14 in borderless fullscreen).
   The title is still SET, just hidden, so anything reading it sees the clip names.
   The Dock icon for the BARE binary is `include_bytes!`'d from `assets/app-icon.png`
   (the icon SLOT — `packaging/build-app.sh` renders the bundle's `.icns` from the same
@@ -153,6 +153,17 @@ from one to the other, keeping its number.
   `base_rect` fits within the canvas (or an individual side-by-side cell); every
   gesture and crop/mask transform uses that same rect. Shell clicks cannot paint.
   `Item::Clip` scissors video and overlays to the canvas/cell, including when zoomed.
+  **The rail is the Figma "Abner — Timeline Edit" Sources sidebar (278:584,
+  2026-10-14)**: 157px preview cards on a 12px gap (`SOURCE_H` 169) — cover-fitted
+  live media with a white keycap, filename, codec · height / fps · duration — a 2px
+  orange ring (`SOURCE_RING`) on the focused clip and a navy surface on the rest, then
+  the 216px focused inspector. The header's **sidebar toggle** (`draw_sidebar_toggle`,
+  Figma 278:573, `Action::ToggleSources`, `--no-sources` for captures) hides the rail
+  in Sources/Mask/Crop; `show_sources` survives mode switches and opening a clip never
+  forces it open. Cut mode has no rail yet (the design's Timeline frames carry one,
+  and a right toggle for the Timeline inspector — neither built). The Duplicate / Add
+  files row and the footer line are the app's own and take their own strips
+  (`RAIL_ACTIONS_H`, `RAIL_FOOTER_H`) so nothing overlaps the inspector.
   Source badges use numbers and nine distinct colors; keyboard selection scrolls
   the rail to keep the selected row visible. Text truncation uses measured font
   advances (`TextItem::max_width`), not character counts. Transport glyphs remain
