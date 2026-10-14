@@ -166,8 +166,14 @@ from one to the other, keeping its number.
   (`rail_slide`, `RAIL_SLIDE_S`): `Workspace::rail` is the width the layout grants this
   frame and `Workspace::panel` the panel's own, with `list`/`inspector` starting at
   `rail - panel` — anchor rail content on `list.x`/`panel`, never on 0/`rail`, or it
-  squashes mid-slide. The design's right toggle for the Timeline inspector is not
-  built. The Duplicate / Add files row and the footer line are the
+  squashes mid-slide. The **right toggle** (`inspector_toggle`, timeline only, 43px in
+  from the edge, drawn only at ≥1000px wide) slides the cut inspector off the right
+  edge the same way (`show_inspector`/`side_slide`): `Workspace::side` keeps
+  `CUT_SIDE_W` and overhangs the window while the canvas reclaims the inside part;
+  hidden = zero-width. Export and the ready lamp step left of it. `--no-inspector`
+  for captures. The **focused inspector** (278:609) is the clip's keycap + name as a
+  title row on a #0f0f0f ground, five mono rows between two dashed hairlines, and the
+  directory in `INSPECTOR_PATH` blue. The Duplicate / Add files row and the footer line are the
   app's own and take their own strips (`RAIL_ACTIONS_H`, `RAIL_FOOTER_H`) so nothing
   overlaps the inspector; checkboxes and Clear are Sources-only (`batch_ui`).
   **The header strip never reaches AppKit as a titlebar**: `ab_pin_content_view`

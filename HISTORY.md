@@ -3,6 +3,21 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-14 — the timeline's inspector toggle; the inspector per Figma
+
+The right-hand sidebar toggle from the same Figma component now sits 43px in
+from the header's right edge in timeline mode and slides the cut inspector
+off the right edge over the same 200 ms, independently of the rail: the
+panel keeps its width and overhangs the window while the canvas reclaims the
+inside part. Export and the ready lamp step left to make room;
+`--no-inspector` reaches the hidden state for captures.
+
+The focused inspector follows the revised 278:609: the clip's keycap and name
+as a title row on a #0f0f0f ground, the five property rows in the mono face
+between two dashed hairlines, and the directory in the design's blue. (A
+commit from outside this session had already moved it most of the way; this
+replaces it with the design's numbers.)
+
 ## 2026-10-14 — the rail slides
 
 The sidebar toggle now runs the design's 200 ms slide instead of snapping.

@@ -255,6 +255,11 @@ pub struct App {
     /// layout follows it; the panel's CONTENT keeps its full width and
     /// slides left, so nothing squashes.
     rail_slide: f32,
+    /// The timeline's inspector (the right toggle of the same component):
+    /// independent of the rail, same 200 ms slide, this time off the
+    /// right edge.
+    show_inspector: bool,
+    side_slide: f32,
     /// Delta amplification.
     gain: f32,
     blend: f32,
@@ -607,6 +612,8 @@ impl App {
             show_ui: true,
             show_sources: true,
             rail_slide: 1.0,
+            show_inspector: true,
+            side_slide: 1.0,
             gain: cfg.compare.delta_gain,
             blend: cfg.compare.blend,
             checker_px: cfg.compare.checker_size,
@@ -2068,9 +2075,13 @@ impl App {
             self.started = self.videos.iter().all(|v| v.delivered || v.player.failed());
         }
         self.badge_flash = (self.badge_flash - dt).max(0.0);
-        let target = if self.show_sources { 1.0 } else { 0.0 };
         let step = dt / RAIL_SLIDE_S;
-        self.rail_slide = if self.rail_slide < target { (self.rail_slide + step).min(target) } else { (self.rail_slide - step).max(target) };
+        let toward = |cur: f32, shown: bool| {
+            let target = if shown { 1.0 } else { 0.0 };
+            if cur < target { (cur + step).min(target) } else { (cur - step).max(target) }
+        };
+        self.rail_slide = toward(self.rail_slide, self.show_sources);
+        self.side_slide = toward(self.side_slide, self.show_inspector);
         self.tick_cut_hot(dt);
 
         // ---- draw list ----
@@ -2176,7 +2187,7 @@ impl App {
     /// Shared layout for drawing and hit testing; the image transform is always
     /// relative to this canvas, including in mask/crop and side-by-side modes.
     fn workspace(&self) -> Workspace {
-        let mut w = Workspace::new(self.vp, self.show_ui, self.cut_mode, self.rail_slide);
+        let mut w = Workspace::new(self.vp, self.show_ui, self.cut_mode, self.rail_slide, self.side_slide);
         if self.show_ui && self.cut_mode {
             let extra = self.frame_detail_extra() + if self.cut_encode_rail() { 26.0 } else { 0.0 };
             w.canvas.h = (w.canvas.h - extra).max(1.0);
@@ -2299,6 +2310,9 @@ impl App {
         let mut out = self.mode_selector().controls();
         out.push(Control::new(self.sidebar_toggle(), "", self.show_sources, Action::ToggleSources));
         if self.cut_mode {
+            if self.vp.0 >= 1000.0 {
+                out.push(Control::new(self.inspector_toggle(), "", self.show_inspector, Action::ToggleInspector));
+            }
             self.cut_controls(&mut out);
             return out;
         }
@@ -2363,6 +2377,7 @@ impl App {
             Action::OpenFiles => self.cmds.push(Cmd::OpenFiles),
             Action::ClearSources => { for v in &mut self.videos { v.selected = false; } },
             Action::ToggleSources => self.show_sources = !self.show_sources,
+            Action::ToggleInspector => self.show_inspector = !self.show_inspector,
             Action::View(mode) => self.mode = mode,
             Action::Brush(up) => self.resize_brush(if up { 1.25 } else { 0.8 }),
             Action::Save => self.save_mask(),
@@ -2402,8 +2417,15 @@ impl App {
         self.rail_slide = if shown { 1.0 } else { 0.0 };
     }
 
+    /// `--no-inspector`: the timeline's inspector hidden, as its toggle leaves it.
+    pub fn set_inspector_visible(&mut self, shown: bool) {
+        self.show_inspector = shown;
+        self.side_slide = if shown { 1.0 } else { 0.0 };
+    }
+
     fn rail_sliding(&self) -> bool {
         self.rail_slide != if self.show_sources { 1.0 } else { 0.0 }
+            || self.side_slide != if self.show_inspector { 1.0 } else { 0.0 }
     }
 
     pub fn select_workspace_mode(&mut self, mode: usize) {
@@ -2417,6 +2439,12 @@ impl App {
     /// lights, so both slide to the outer padding.
     fn sidebar_toggle(&self) -> RectPx {
         RectPx { x: if self.fullscreen { 14.0 } else { 78.0 }, y: 8.0, w: 32.0, h: 28.0 }
+    }
+
+    /// The right toggle (12:5 puts it 43px in from the edge); timeline only,
+    /// and only when the window is wide enough to carry the inspector.
+    fn inspector_toggle(&self) -> RectPx {
+        RectPx { x: self.vp.0 - 43.0, y: 8.0, w: 32.0, h: 28.0 }
     }
 
     fn mode_selector(&self) -> ModeSelector {
@@ -2443,10 +2471,10 @@ impl App {
         }
         self.mode_selector().draw(items, self.cursor, self.cursor_inside);
         let toggle = self.sidebar_toggle();
-        draw_sidebar_toggle(items, toggle, self.show_sources, self.cursor_inside && contains(toggle, self.cursor.0, self.cursor.1));
+        draw_sidebar_toggle(items, toggle, false, self.show_sources, self.cursor_inside && contains(toggle, self.cursor.0, self.cursor.1));
         for control in self.controls() {
             let hovered = contains(control.r, self.cursor.0, self.cursor.1) && self.cursor_inside;
-            if matches!(control.action, Action::Tool(_) | Action::ToggleSources) {
+            if matches!(control.action, Action::Tool(_) | Action::ToggleSources | Action::ToggleInspector) {
                 continue;
             }
             let disabled = matches!(control.action, Action::Save) && self.mask_save.is_some()
@@ -2485,22 +2513,29 @@ impl App {
         self.build_transport(items);
     }
 
-    /// Focused inspector: numbered filename, two dividers, five facts and
-    /// the source directory, as in the Sources sidebar detail panel.
+    /// Focused inspector (278:609): on its own #0f0f0f ground under the
+    /// rule, the clip's keycap and name as a title row, the five property
+    /// rows between two dashed hairlines, and the directory in accent blue.
     fn build_inspector(&self, items: &mut Vec<Item>) {
         let l = self.workspace();
         if l.inspector.h > 0.0 {
             let v = &self.videos[self.active];
+            let (y, x0, x1) = (l.inspector.y, l.inspector.x + 16.0, l.inspector.x + l.panel - 16.0);
+            items.push(Item::Rect(RectItem::new(l.inspector, hex_color(INSPECTOR_BG))));
             items.push(Item::Rect(RectItem::new(RectPx { h: 1.0, ..l.inspector }, WORKSPACE_RULE)));
-            let (x0, x1) = (l.inspector.x + 16.0, l.inspector.x + l.panel - 16.0);
-            let badge = RectPx { x: x0, y: l.inspector.y + 18.0, w: 24.0, h: 24.0 };
-            items.push(Item::Rect(RectItem { radius: 12.0, ..RectItem::new(badge, hex_color(0x909090)) }));
-            items.push(Item::Text(TextItem { header: true, align: Align::Center, valign: VAlign::Middle,
-                ..TextItem::new(badge.x + 12.0, badge.y + 12.0, 15.0, hex_color(0x000000), (self.active + 1).to_string()) }));
-            items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(l.panel - 72.0),
-                ..TextItem::new(x0 + 32.0, l.inspector.y + 30.0, 12.0, WORKSPACE_TEXT, name_of(&v.info.path)) }));
-            for x in (0..((l.panel - 32.0) / 8.0) as usize).map(|i| x0 + i as f32 * 8.0) {
-                items.push(Item::Rect(RectItem::new(RectPx { x, y: l.inspector.y + 49.0, w: 4.0, h: 1.0 }, WORKSPACE_RULE)));
+            let cap = RectPx { x: x0, y: y + 16.0, w: 24.0, h: 24.0 };
+            items.push(Item::Rect(RectItem { radius: 12.0, ..RectItem::new(cap, mix(INSPECTOR_BG, 0xffffff, 0.5)) }));
+            items.push(Item::Text(TextItem { header: true, align: Align::Center, valign: VAlign::Middle, max_width: Some(22.0),
+                ..TextItem::new(cap.x + 12.0, cap.y + 12.0, 15.0, hex_color(0x000000), (self.active + 1).to_string()) }));
+            items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(l.panel - 80.0),
+                ..TextItem::new(x0 + 32.0, y + 28.0, 13.0, hex_color(SOURCE_INK), name_of(&v.info.path)) }));
+            // Dashed hairlines: rects, there is no line primitive.
+            for ry in [y + 49.0, y + 178.0] {
+                let mut x = x0;
+                while x < x1 {
+                    items.push(Item::Rect(RectItem::new(RectPx { x, y: ry, w: 3.0_f32.min(x1 - x), h: 1.0 }, hex_color(INSPECTOR_DASH))));
+                    x += 6.0;
+                }
             }
             for (i, (key, value)) in [
                 ("Format", format!("{} {}", v.info.codec, v.info.pix_fmt)),
@@ -2509,15 +2544,15 @@ impl App {
                 ("Bitrate", v.info.bit_rate.map(|b| format!("{:.2} Mb/s", b as f64 / 1e6)).unwrap_or_else(|| "—".into())),
                 ("Size", fmt_size(v.info.file_size)),
             ].into_iter().enumerate() {
-                let y = l.inspector.y + 70.0 + i as f32 * 23.0;
-                ui_label(items, x0, y, 11.0, WORKSPACE_DIM, key, Align::Left, 78.0);
-                ui_label(items, x1, y, 11.0, WORKSPACE_TEXT, value, Align::Right, l.panel - 110.0);
-            }
-            for x in (0..((l.panel - 32.0) / 8.0) as usize).map(|i| x0 + i as f32 * 8.0) {
-                items.push(Item::Rect(RectItem::new(RectPx { x, y: l.inspector.y + 185.0, w: 4.0, h: 1.0 }, WORKSPACE_RULE)));
+                let ry = y + 68.5 + i as f32 * 23.0;
+                items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(78.0),
+                    ..TextItem::new(x0, ry, 11.0, WORKSPACE_DIM, key) }));
+                items.push(Item::Text(TextItem { regular: true, align: Align::Right, valign: VAlign::Middle, max_width: Some(l.panel - 110.0),
+                    ..TextItem::new(x1, ry, 11.0, WORKSPACE_TEXT, value) }));
             }
             let dir = v.info.path.parent().unwrap_or_else(|| std::path::Path::new(""));
-            ui_label(items, x0, l.inspector.y + 202.0, 10.0, hex_color(0x249bff), dir.to_string_lossy(), Align::Left, l.panel - 32.0);
+            items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(l.panel - 32.0),
+                ..TextItem::new(x0, y + 195.0, 10.0, hex_color(INSPECTOR_PATH), dir.to_string_lossy()) }));
         }
     }
 
@@ -3284,7 +3319,8 @@ impl App {
         let mut push = |r: RectPx, label: &str, selected: bool, action: CutAction, hint: &'static str| {
             out.push(Control { hint, ..Control::new(r, label, selected, Action::Cut(action)) });
         };
-        push(RectPx { x: w - 115.0, y: 8.5, w: 101.0, h: 26.0 }, "Export", false, CutAction::Export, "");
+        let export_x = if w >= 1000.0 { w - 154.0 } else { w - 115.0 };
+        push(RectPx { x: export_x, y: 8.5, w: 101.0, h: 26.0 }, "Export", false, CutAction::Export, "");
         let video = self.cut_lanes().video;
         push(RectPx { x: self.workspace().timeline.x + 19.0, y: video.y + video.h / 2.0 - 12.0, w: 24.0, h: 24.0 },
             if self.cut_posters { "Hide clip previews" } else { "Show clip previews" }, self.cut_posters, CutAction::TogglePosters, "");
@@ -3992,8 +4028,10 @@ impl App {
         let r = self.header_tabs();
         self.mode_selector().draw(items, self.cursor, self.cursor_inside);
         let toggle = self.sidebar_toggle();
-        draw_sidebar_toggle(items, toggle, self.show_sources, self.cursor_inside && contains(toggle, self.cursor.0, self.cursor.1));
+        draw_sidebar_toggle(items, toggle, false, self.show_sources, self.cursor_inside && contains(toggle, self.cursor.0, self.cursor.1));
         if self.vp.0 >= 1000.0 {
+            let toggle = self.inspector_toggle();
+            draw_sidebar_toggle(items, toggle, true, self.show_inspector, self.cursor_inside && contains(toggle, self.cursor.0, self.cursor.1));
             let cut = self.cut.as_ref().unwrap();
             let (text, color) = if cut.encoding() {
                 ("ENCODING SPLIT GOPs…", hex_color(0xb68aff))
@@ -4002,8 +4040,8 @@ impl App {
                 ("READY · STREAM COPY", hex_color(CUT_LAMP))
             } else { ("SPLIT GOPs · ENCODING NEEDED", hex_color(0xb68aff)) };
             items.push(Item::Text(TextItem { align: Align::Right, valign: VAlign::Middle,
-                tracking: 0.63, max_width: Some((self.vp.0 - 139.0 - r.x - r.w).max(0.0)),
-                ..TextItem::new(self.vp.0 - 127.0, 21.5, 10.5, color, text) }));
+                tracking: 0.63, max_width: Some((self.vp.0 - 178.0 - r.x - r.w).max(0.0)),
+                ..TextItem::new(self.vp.0 - 166.0, 21.5, 10.5, color, text) }));
         }
     }
 
@@ -5124,16 +5162,15 @@ struct Workspace {
     side: RectPx,
 }
 impl Workspace {
-    fn new(vp: (f32, f32), visible: bool, cut: bool, slide: f32) -> Self {
+    fn new(vp: (f32, f32), visible: bool, cut: bool, slide: f32, side_slide: f32) -> Self {
         let (w, h) = vp;
         let none = RectPx { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
         // `rail` is what the layout gives the panel this frame; `panel` is
         // the panel's own width, and its rects start at `rail - panel` so
         // a half-open rail is the right-hand part of a whole one.
         let panel = if !visible || slide <= 0.0 { 0.0 } else if w < 900.0 { 210.0_f32.min(w * 0.3) } else { 280.0 };
-        let eased = slide.clamp(0.0, 1.0);
-        let eased = eased * eased * (3.0 - 2.0 * eased);
-        let rail = (panel * eased).round();
+        let ease = |t: f32| { let t = t.clamp(0.0, 1.0); t * t * (3.0 - 2.0 * t) };
+        let rail = (panel * ease(slide)).round();
         let ox = rail - panel;
         if visible && cut {
             // Timeline Edit (12:2): the source rail, the canvas and the
@@ -5142,7 +5179,11 @@ impl Workspace {
             // rail keeps its focused inspector; its action row stays in
             // Sources, where Duplicate / Add files live.
             let lanes = if h >= CUT_FULL_MIN_H { CUT_TIMELINE_H } else { CUT_TIMELINE_COMPACT_H };
-            let side = if w >= 1000.0 { CUT_SIDE_W } else { 0.0 };
+            // The inspector keeps its width and slides past the right edge;
+            // `side_in` is the part still inside, which the canvas reclaims.
+            let side_w = if w >= 1000.0 { CUT_SIDE_W } else { 0.0 };
+            let side_in = (side_w * ease(side_slide)).round();
+            let side = if side_in > 0.0 { side_w } else { 0.0 };
             let transport_y = h - STATUS_H - lanes - CUT_TOOLBAR_H;
             let top = (transport_y - CUT_HEADER_H).max(1.0);
             let inspector_h = if panel > 0.0 && h >= 800.0 { 216.0 } else { 0.0 };
@@ -5151,8 +5192,8 @@ impl Workspace {
             return Self {
                 rail, panel, inspector,
                 list: RectPx { x: ox, y: list_y, w: panel, h: (inspector.y - RAIL_FOOTER_H - list_y).max(SOURCE_H) },
-                canvas: RectPx { x: rail, y: CUT_HEADER_H, w: (w - side - rail).max(1.0), h: top },
-                side: RectPx { x: w - side, y: CUT_HEADER_H, w: side, h: top },
+                canvas: RectPx { x: rail, y: CUT_HEADER_H, w: (w - side_in - rail).max(1.0), h: top },
+                side: RectPx { x: w - side_in, y: CUT_HEADER_H, w: side, h: top },
                 transport: RectPx { x: 0.0, y: transport_y, w, h: CUT_TOOLBAR_H },
                 timeline: RectPx { x: 0.0, y: transport_y + CUT_TOOLBAR_H, w, h: lanes },
             };
@@ -5177,7 +5218,7 @@ impl Workspace {
 }
 
 #[derive(Clone, Copy)]
-enum Action { Duplicate, OpenFiles, ClearSources, ToggleSources, Tool(usize), View(Mode), Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
+enum Action { Duplicate, OpenFiles, ClearSources, ToggleSources, ToggleInspector, Tool(usize), View(Mode), Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
 #[derive(Clone, Copy, PartialEq)]
 enum CutAction { TogglePosters, FrameChanges(bool), TimeDisplay(bool), In, Out, Split, ToggleSplit, Apply, DeletePicked, Undo, Export, EncodeAll, Encode(f64), Snap(Snap), Play, Zoom(bool), Step(i32), Keyframe(i32), Chapter(i32) }
 /// `hint` is the key cap a cut-mode button carries ("" for none).
@@ -5224,16 +5265,18 @@ fn intersect(a: RectPx, b: RectPx) -> RectPx {
 /// rounded frame with a narrow leading pane of three dots — on a neutral
 /// #292929 plate while the panel is shown, bare while it is hidden. Rects
 /// only: the renderer has no path primitive.
-fn draw_sidebar_toggle(items: &mut Vec<Item>, r: RectPx, shown: bool, hovered: bool) {
+fn draw_sidebar_toggle(items: &mut Vec<Item>, r: RectPx, right: bool, shown: bool, hovered: bool) {
     if shown || hovered {
         items.push(Item::Rect(RectItem { radius: 5.0, ..RectItem::new(r, hex_color(if shown { 0x292929 } else { 0x1c1c1c })) }));
     }
     let ink = hex_color(if shown { 0xededec } else { 0x8f8f8f });
     let f = RectPx { x: r.x + 6.0, y: r.y + 6.0, w: 20.0, h: 16.0 };
     items.push(Item::Rect(RectItem { radius: 3.5, border_w: 1.5, border_color: ink, ..RectItem::new(f, [0.0; 4]) }));
-    items.push(Item::Rect(RectItem::new(RectPx { x: f.x + 6.5, y: f.y + 1.0, w: 1.5, h: f.h - 2.0 }, ink)));
+    // The pane sits on the side the panel lives on (Side=Right mirrors it).
+    let (bar, dots) = if right { (f.x + f.w - 8.0, f.x + f.w - 4.75) } else { (f.x + 6.5, f.x + 3.25) };
+    items.push(Item::Rect(RectItem::new(RectPx { x: bar, y: f.y + 1.0, w: 1.5, h: f.h - 2.0 }, ink)));
     for k in 0..3 {
-        items.push(Item::Rect(RectItem::new(RectPx { x: f.x + 3.25, y: f.y + 4.0 + k as f32 * 3.0, w: 1.5, h: 1.5 }, ink)));
+        items.push(Item::Rect(RectItem::new(RectPx { x: dots, y: f.y + 4.0 + k as f32 * 3.0, w: 1.5, h: 1.5 }, ink)));
     }
 }
 fn number_badge(items: &mut Vec<Item>, r: RectPx, index: usize) {
@@ -5264,6 +5307,10 @@ const SOURCE_RING: u32 = 0xff9d00;
 const SOURCE_EDGE: u32 = 0x444444;
 const SOURCE_EDGE_HOVER: u32 = 0x5c5c5c;
 const SOURCE_KEYCAP: [f32; 4] = [1.0, 1.0, 1.0, 0.3];
+/// Focused inspector (278:609): its ground, the dashed hairlines, the path.
+const INSPECTOR_BG: u32 = 0x0f0f0f;
+const INSPECTOR_DASH: u32 = 0x252525;
+const INSPECTOR_PATH: u32 = 0x3694eb;
 /// Sources card variables: surface, border, ink, secondary, subtle.
 const SOURCE_SURFACE: u32 = 0x11151b;
 const SOURCE_BORDER: u32 = 0x323b47;
@@ -5625,6 +5672,27 @@ mod tests {
         app.mouse_down(r.x + 16.0, r.y + 14.0);
         app.mouse_up();
         app.tick(RAIL_SLIDE_S, (1280.0, 1100.0), 2.0);
+        // The right toggle slides the timeline's inspector off the right
+        // edge, independently of the rail, and the canvas takes the width.
+        let t = app.inspector_toggle();
+        assert!(app.controls().iter().any(|c| matches!(c.action, Action::ToggleInspector) && c.selected));
+        assert!(app.controls().iter().all(|c| !matches!(c.action, Action::Cut(CutAction::Export)) || c.r.x + c.r.w <= t.x));
+        let before = app.workspace();
+        assert_eq!((before.side.x, before.side.w), (1280.0 - CUT_SIDE_W, CUT_SIDE_W));
+        app.mouse_down(t.x + 16.0, t.y + 14.0);
+        app.mouse_up();
+        app.tick(RAIL_SLIDE_S / 2.0, (1280.0, 1100.0), 2.0);
+        let mid = app.workspace();
+        assert!(mid.side.x > before.side.x && mid.side.x < 1280.0 && mid.side.w == CUT_SIDE_W);
+        assert_eq!(mid.canvas.x + mid.canvas.w, mid.side.x);
+        app.tick(RAIL_SLIDE_S, (1280.0, 1100.0), 2.0);
+        let l = app.workspace();
+        assert!(!app.show_inspector && app.show_sources);
+        assert_eq!((l.side.w, l.canvas.x + l.canvas.w, l.rail), (0.0, 1280.0, 280.0));
+        app.mouse_down(t.x + 16.0, t.y + 14.0);
+        app.mouse_up();
+        app.tick(RAIL_SLIDE_S, (1280.0, 1100.0), 2.0);
+        assert_eq!(app.workspace().side.x, before.side.x);
         app.set_cut_mode(false);
         let card = app.source_row(0);
         assert_eq!((card.y, card.h), (HEADER_H + 14.0, 157.0));

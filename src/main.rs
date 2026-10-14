@@ -39,7 +39,7 @@ use text::TextCtx;
 const USAGE: &str = "\
 abner — video comparison and editing workspace
 
-usage: abner [--config <file.toml>] [--no-video-splash] [--duplicate] [--no-sources] [--mask] [--crop [x,y,w,h]] [--cut [in,out]] [--view <overlay|sbs|delta|split|checker|blend>] [<video-a> [<video-b> [more...]]]
+usage: abner [--config <file.toml>] [--no-video-splash] [--duplicate] [--no-sources] [--no-inspector] [--mask] [--crop [x,y,w,h]] [--cut [in,out]] [--view <overlay|sbs|delta|split|checker|blend>] [<video-a> [<video-b> [more...]]]
 
 Run with no arguments (or launched from the .app bundle) to open the
 launch window, then drag clips onto it: one drop fills slot 1 and plays
@@ -111,6 +111,7 @@ fn main() -> anyhow::Result<()> {
     let mut mask_mode = false;
     // The Sources sidebar hidden, as the header toggle leaves it: for captures.
     let mut no_sources = false;
+    let mut no_inspector = false;
     let mut cut: Option<Vec<f64>> = None;
     let mut crop: Option<Option<[f32; 4]>> = None;
     let mut duplicate = false;
@@ -150,6 +151,8 @@ fn main() -> anyhow::Result<()> {
             duplicate = true;
         } else if a == "--no-sources" {
             no_sources = true;
+        } else if a == "--no-inspector" {
+            no_inspector = true;
         } else if a == "--mask" {
             mask_mode = true;
         } else if a == "--cut" {
@@ -250,6 +253,7 @@ fn main() -> anyhow::Result<()> {
     // their own tool, and two or more files stay in Sources.
     runner.app.set_cut_default(true);
     if no_sources { runner.app.set_sources_visible(false); }
+    if no_inspector { runner.app.set_inspector_visible(false); }
     if mask_mode { runner.app.key(Key::Char('m')); }
     if let Some(ranges) = cut { runner.app.start_cut(ranges); }
     if timeline_frames { runner.app.key(Key::Char('`')); }
