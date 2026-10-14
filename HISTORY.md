@@ -3,6 +3,21 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-14 — the rail in timeline mode; header double-clicks stay ours
+
+Timeline mode now carries the Sources rail as the Timeline Edit frame draws
+it: rail, canvas and cut inspector share the top, the transport and lanes run
+the full width beneath, and clicking a card re-cuts that clip (`select`
+already reopened the cut; the rail just reaches it now). The sidebar toggle
+works there too. Checkboxes and Clear stay in Sources.
+
+Double-clicking a header button or the sidebar toggle zoomed the window. With
+`FullSizeContentView` the GPU view lies under the titlebar strip, and a view
+that can move the window hands AppKit the strip's gestures, whatever sits
+above it in the hierarchy. `ab_pin_content_view` grafts a NO for
+`mouseDownCanMoveWindow` onto winit's view class; main.rs drags the window on
+a bare-strip press and zooms on its own double-click detection, as before.
+
 ## 2026-10-14 — Sources rail from the Timeline Edit prototype
 
 The source rail now follows the "Abner — Timeline Edit" Figma file's

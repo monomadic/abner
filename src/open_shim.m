@@ -142,6 +142,29 @@ void ab_titlebar_double_click(void *raw_view) {
     }
 }
 
+// With FullSizeContentView the GPU view lies under the titlebar strip, and a
+// view that can move the window hands AppKit the strip's gestures: a drag
+// moves the window (fine), a double-click zooms it — even on a painted
+// button, since the header input view above is not what NSThemeFrame hit
+// tests there. Grafting a NO onto winit's view class (never subclassing it)
+// takes both away; main.rs drags on a bare-strip press and zooms on its own
+// double-click detection. 1 = grafted, 2 = the class already answers.
+static BOOL ab_no_move(id self, SEL _cmd) { (void)self; (void)_cmd; return NO; }
+int ab_pin_content_view(void *raw_view) {
+    NSView *view = (__bridge NSView *)raw_view;
+    Class cls = object_getClass(view);
+    SEL sel = @selector(mouseDownCanMoveWindow);
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(cls, &count);
+    BOOL own = NO;
+    for (unsigned int i = 0; i < count; i++) {
+        if (method_getName(methods[i]) == sel) { own = YES; break; }
+    }
+    free(methods);
+    if (own) return 2;
+    return class_addMethod(cls, sel, (IMP)ab_no_move, "B@:") ? 1 : 0;
+}
+
 // The full-size GPU view paints beneath AppKit's titlebar. Native titlebar hit
 // testing can otherwise turn clicks on painted buttons into zoom/drag gestures.
 // Intercept only the actual controls; leave traffic lights and empty background

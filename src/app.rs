@@ -1671,11 +1671,11 @@ impl App {
                 self.activate(control.action);
                 return;
             }
-            if !self.cut_mode && contains(self.workspace().list, x, y) {
+            if contains(self.workspace().list, x, y) {
                 let first = self.source_first();
                 for idx in first..(first + self.source_capacity()).min(self.videos.len()) {
                     if contains(self.source_row(idx), x, y) {
-                        if !self.mask_mode && contains(self.source_checkbox(idx), x, y) {
+                        if self.batch_ui() && contains(self.source_checkbox(idx), x, y) {
                             self.videos[idx].selected ^= true;
                         } else { self.select(idx); }
                         break;
@@ -2273,6 +2273,12 @@ impl App {
         }).unwrap_or(self.videos.len())
     }
 
+    /// The batch affordances (checkboxes, Clear) belong to Sources: mask
+    /// paints one clip and the timeline cuts one.
+    fn batch_ui(&self) -> bool {
+        !self.mask_mode && !self.cut_mode
+    }
+
     fn source_checkbox(&self, index: usize) -> RectPx {
         let r = self.source_row(index);
         RectPx { x: r.x + r.w - 39.0, y: r.y + 81.0, w: 20.0, h: 20.0 }
@@ -2281,6 +2287,7 @@ impl App {
     fn controls(&self) -> Vec<Control> {
         let l = self.workspace();
         let mut out = self.mode_selector().controls();
+        out.push(Control::new(self.sidebar_toggle(), "", self.show_sources, Action::ToggleSources));
         if self.cut_mode {
             self.cut_controls(&mut out);
             return out;
@@ -2296,7 +2303,6 @@ impl App {
                     "Clear", false, Action::ClearSources));
             }
         }
-        out.push(Control::new(self.sidebar_toggle(), "", self.show_sources, Action::ToggleSources));
         let mut x = l.rail + 12.0;
         let y = HEADER_H + 6.0;
         if !self.mask_mode {
@@ -2460,6 +2466,14 @@ impl App {
         }
 
         self.build_sources(items);
+        self.build_inspector(items);
+        self.build_transport(items);
+    }
+
+    /// Focused inspector (278:609): the rule, INSPECTOR: n, five rows at
+    /// 23px, the directory on its own line.
+    fn build_inspector(&self, items: &mut Vec<Item>) {
+        let l = self.workspace();
         if l.inspector.h > 0.0 {
             let v = &self.videos[self.active];
             items.push(Item::Rect(RectItem::new(RectPx { h: 1.0, ..l.inspector }, WORKSPACE_RULE)));
@@ -2479,7 +2493,6 @@ impl App {
             let dir = v.info.path.parent().unwrap_or_else(|| std::path::Path::new(""));
             ui_label(items, 16.0, l.inspector.y + 190.0, 10.0, WORKSPACE_MUTED, dir.to_string_lossy(), Align::Left, l.rail - 32.0);
         }
-        self.build_transport(items);
     }
 
     /// Sources sidebar (Abner — Timeline Edit, 278:584): a stack of
@@ -2527,7 +2540,7 @@ impl App {
                 ui_label(items, chip.x + 6.0, chip.y + 11.5, 10.0, secondary,
                     if shared > 1 { format!("Shared · {shared} items") } else { "Linked copy".into() }, Align::Left, chip.w - 12.0);
             }
-            if !self.mask_mode && (hover || v.selected) {
+            if self.batch_ui() && (hover || v.selected) {
                 let check = self.source_checkbox(i);
                 items.push(Item::Rect(RectItem { radius: 4.0, border_w: 1.0,
                     border_color: if v.selected { hex_color(CUT_HEADER_BLUE) } else { secondary },
@@ -3951,6 +3964,8 @@ impl App {
     fn build_cut_header(&self, items: &mut Vec<Item>) {
         let r = self.header_tabs();
         self.mode_selector().draw(items, self.cursor, self.cursor_inside);
+        let toggle = self.sidebar_toggle();
+        draw_sidebar_toggle(items, toggle, self.show_sources, self.cursor_inside && contains(toggle, self.cursor.0, self.cursor.1));
         if self.vp.0 >= 1000.0 {
             let cut = self.cut.as_ref().unwrap();
             let (text, color) = if cut.encoding() {
@@ -3974,11 +3989,15 @@ impl App {
         items.push(Item::Rect(RectItem::new(l.transport, hex_color(CUT_BAR))));
         items.push(Item::Rect(RectItem::new(l.timeline, hex_color(CUT_TL))));
         items.push(Item::Rect(RectItem::new(l.side, hex_color(CUT_BG))));
+        items.push(Item::Rect(RectItem::new(RectPx { x: 0.0, y: CUT_HEADER_H, w: l.rail, h: l.transport.y - CUT_HEADER_H }, WORKSPACE_PANEL)));
         for r in [RectPx { x: 0.0, y: CUT_HEADER_H - 1.0, w: vp.0, h: 1.0 },
             RectPx { h: 1.0, ..l.transport }, RectPx { h: 1.0, ..l.timeline },
-            RectPx { w: if l.side.w > 0.0 { 1.0 } else { 0.0 }, ..l.side }] {
+            RectPx { w: if l.side.w > 0.0 { 1.0 } else { 0.0 }, ..l.side },
+            RectPx { x: l.rail - 1.0, y: CUT_HEADER_H, w: if l.rail > 0.0 { 1.0 } else { 0.0 }, h: l.transport.y - CUT_HEADER_H }] {
             items.push(Item::Rect(RectItem::new(r, rule)));
         }
+        self.build_sources(items);
+        self.build_inspector(items);
 
         // ---- Figma timeline header ----
         let controls = self.controls();
@@ -5076,22 +5095,29 @@ impl Workspace {
     fn new(vp: (f32, f32), visible: bool, cut: bool, sources: bool) -> Self {
         let (w, h) = vp;
         let none = RectPx { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
+        let rail = if !visible || !sources { 0.0 } else if w < 900.0 { 210.0_f32.min(w * 0.3) } else { 280.0 };
         if visible && cut {
-            // One clip: no source rail. Canvas and inspector share the top,
-            // then the transport, then the lanes (compact on short windows).
+            // Timeline Edit (12:2): the source rail, the canvas and the
+            // inspector share the top; the transport and the lanes run the
+            // full width underneath (compact lanes on short windows). The
+            // rail keeps its focused inspector; its action row stays in
+            // Sources, where Duplicate / Add files live.
             let lanes = if h >= CUT_FULL_MIN_H { CUT_TIMELINE_H } else { CUT_TIMELINE_COMPACT_H };
             let side = if w >= 1000.0 { CUT_SIDE_W } else { 0.0 };
             let transport_y = h - STATUS_H - lanes - CUT_TOOLBAR_H;
             let top = (transport_y - CUT_HEADER_H).max(1.0);
+            let inspector_h = if rail > 0.0 && h >= 800.0 { 216.0 } else { 0.0 };
+            let inspector = RectPx { x: 0.0, y: transport_y - inspector_h, w: rail, h: inspector_h };
+            let list_y = HEADER_H + 14.0;
             return Self {
-                rail: 0.0, list: none, inspector: none,
-                canvas: RectPx { x: 0.0, y: CUT_HEADER_H, w: (w - side).max(1.0), h: top },
+                rail, inspector,
+                list: RectPx { x: 0.0, y: list_y, w: rail, h: (inspector.y - RAIL_FOOTER_H - list_y).max(SOURCE_H) },
+                canvas: RectPx { x: rail, y: CUT_HEADER_H, w: (w - side - rail).max(1.0), h: top },
                 side: RectPx { x: w - side, y: CUT_HEADER_H, w: side, h: top },
                 transport: RectPx { x: 0.0, y: transport_y, w, h: CUT_TOOLBAR_H },
                 timeline: RectPx { x: 0.0, y: transport_y + CUT_TOOLBAR_H, w, h: lanes },
             };
         }
-        let rail = if !visible || !sources { 0.0 } else if w < 900.0 { 210.0_f32.min(w * 0.3) } else { 280.0 };
         let header = if visible { HEADER_H + CONTEXT_H } else { 0.0 };
         let bottom = if visible { TRANSPORT_H + STATUS_H } else { 0.0 };
         let canvas = RectPx { x: rail, y: header, w: (w - rail).max(1.0), h: (h - header - bottom).max(1.0) };
@@ -5522,6 +5548,29 @@ mod tests {
         app.mouse_up();
         assert!(app.show_sources && app.mask_mode);
         assert_eq!(app.workspace().rail, 280.0);
+        // Timeline mode keeps the rail beside the video and a click there
+        // re-cuts the chosen clip; the toggle hides it there too.
+        app.key(Key::Char('m'));
+        app.vp = (1280.0, 1100.0);
+        app.set_cut_mode(true);
+        assert!(app.cut_mode);
+        let l = app.workspace();
+        assert_eq!((l.rail, l.canvas.x, l.transport.x, l.timeline.x), (280.0, 280.0, 0.0, 0.0));
+        assert!(l.canvas.x + l.canvas.w <= l.side.x);
+        let second = app.source_row(1);
+        assert!(second.y + second.h <= l.list.y + l.list.h, "two cards fit at this height");
+        app.mouse_down(second.x + 60.0, second.y + 25.0);
+        app.mouse_up();
+        assert_eq!(app.active, 1);
+        assert!(app.cut_mode && app.cut_video == 1);
+        app.mouse_down(r.x + 16.0, r.y + 14.0);
+        app.mouse_up();
+        let l = app.workspace();
+        assert!(!app.show_sources && app.cut_mode);
+        assert_eq!((l.rail, l.canvas.x), (0.0, 0.0));
+        app.mouse_down(r.x + 16.0, r.y + 14.0);
+        app.mouse_up();
+        app.set_cut_mode(false);
         let card = app.source_row(0);
         assert_eq!((card.y, card.h), (HEADER_H + 14.0, 157.0));
         // The preview is a cover crop in uv CORNERS: never mirrored, never

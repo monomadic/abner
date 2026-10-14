@@ -159,11 +159,19 @@ from one to the other, keeping its number.
   orange ring (`SOURCE_RING`) on the focused clip and a navy surface on the rest, then
   the 216px focused inspector. The header's **sidebar toggle** (`draw_sidebar_toggle`,
   Figma 278:573, `Action::ToggleSources`, `--no-sources` for captures) hides the rail
-  in Sources/Mask/Crop; `show_sources` survives mode switches and opening a clip never
-  forces it open. Cut mode has no rail yet (the design's Timeline frames carry one,
-  and a right toggle for the Timeline inspector — neither built). The Duplicate / Add
-  files row and the footer line are the app's own and take their own strips
-  (`RAIL_ACTIONS_H`, `RAIL_FOOTER_H`) so nothing overlaps the inspector.
+  in EVERY mode, the timeline included (there the rail, canvas and cut inspector share
+  the top and the transport + lanes run full width, as 12:2 draws it; a click on a card
+  re-cuts that clip through `select`); `show_sources` survives mode switches and
+  opening a clip never forces it open. The design's right toggle for the Timeline
+  inspector is not built. The Duplicate / Add files row and the footer line are the
+  app's own and take their own strips (`RAIL_ACTIONS_H`, `RAIL_FOOTER_H`) so nothing
+  overlaps the inspector; checkboxes and Clear are Sources-only (`batch_ui`).
+  **The header strip never reaches AppKit as a titlebar**: `ab_pin_content_view`
+  (open_shim.m) grafts `mouseDownCanMoveWindow = NO` onto winit's view class, because
+  with `FullSizeContentView` a movable content view hands the strip's gestures to
+  AppKit — a double-click on a painted header button zoomed the window, the header
+  input view above notwithstanding. main.rs now drags the window itself on a bare-strip
+  press (`drag_window`) and zooms on its own double-click detection.
   Source badges use numbers and nine distinct colors; keyboard selection scrolls
   the rail to keep the selected row visible. Text truncation uses measured font
   advances (`TextItem::max_width`), not character counts. Transport glyphs remain

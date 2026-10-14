@@ -599,8 +599,14 @@ fn set_titlebar_glass(w: &Window) {
         // saves/restores the whole mask around simple fullscreen, so this
         // bit comes back with it.
         window.setStyleMask(window.styleMask() | NSWindowStyleMask::FullSizeContentView);
-        unsafe extern "C" { fn ab_install_header_input(view: *mut std::ffi::c_void); }
+        unsafe extern "C" {
+            fn ab_install_header_input(view: *mut std::ffi::c_void);
+            fn ab_pin_content_view(view: *mut std::ffi::c_void) -> i32;
+        }
         unsafe { ab_install_header_input(h.ns_view.as_ptr()); }
+        if unsafe { ab_pin_content_view(h.ns_view.as_ptr()) } != 1 {
+            log::warn!("content view already answers mouseDownCanMoveWindow; header double-clicks may zoom the window");
+        }
     }
 }
 
@@ -819,6 +825,11 @@ impl ApplicationHandler for Runner {
                         if self.app.titlebar_background(x, y) {
                             if self.header_click.press(Instant::now(), (x, y), titlebar_click_interval()) {
                                 if let Some(w) = &self.window { titlebar_double_click(w); }
+                            } else if let Some(w) = &self.window {
+                                // The content view no longer moves the window
+                                // on its own (ab_pin_content_view), so the bare
+                                // header strip drags it from here.
+                                let _ = w.drag_window();
                             }
                         } else {
                             self.header_click.0 = None;
