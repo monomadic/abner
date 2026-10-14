@@ -20,6 +20,12 @@ in every mode that has one, the state is remembered across mode switches, and
 Duplicate / Add files row and the footer line, which the design does not
 have, take their own strips so they no longer sit over the inspector.
 
+The cover crop handed the renderer an origin and size where its uv slot
+takes CORNERS, so landscape previews stretched and tall clips drew upside
+down (the cut inspector's picture shared the bug). `cover_uv` builds the
+corners once for both; a test holds the crop centred, unmirrored and in the
+box's proportion.
+
 Not built: the rail inside cut mode and the right-hand Timeline-inspector
 toggle the same component describes, and the 200 ms slide the design notes
 ask for (the panel snaps).

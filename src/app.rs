@@ -2512,11 +2512,8 @@ impl App {
             let quad = RectPx { h: thumb.h + 6.0, ..thumb };
             items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(quad, WORKSPACE_PANEL) }));
             if v.delivered {
-                let aspect = v.info.width as f32 / v.info.height.max(1) as f32;
-                let box_aspect = quad.w / quad.h;
-                let (uw, uh) = if aspect > box_aspect { (box_aspect / aspect, 1.0) } else { (1.0, aspect / box_aspect) };
-                items.push(Item::Video { a: i, b: i, r: quad,
-                    uv: [(1.0-uw)/2.0, (1.0-uh)/2.0, uw, uh], mode: VideoMode::Tex, p0: 6.0, p1: 0.0 });
+                items.push(Item::Video { a: i, b: i, r: quad, uv: cover_uv(&v.info, quad),
+                    mode: VideoMode::Tex, p0: 6.0, p1: 0.0 });
             }
             items.push(Item::Clip(Some(l.list)));
             let badge = RectPx { x: thumb.x + 7.0, y: thumb.y + 7.0, w: 24.0, h: 24.0 };
@@ -4163,11 +4160,8 @@ impl App {
         let pic = RectPx { x: g.summary.x, y: g.summary.y, w: 93.0, h: 54.0 };
         items.push(Item::Rect(RectItem { radius: 4.0, ..RectItem::new(pic, hex_color(CUT_FILM)) }));
         if source.delivered {
-            let aspect = source.info.width as f32 / source.info.height.max(1) as f32;
-            let ratio = pic.w / pic.h;
-            let (uw, uh) = if aspect > ratio { (ratio / aspect, 1.0) } else { (1.0, aspect / ratio) };
-            items.push(Item::Video { a: self.active, b: self.active, r: pic,
-                uv: [(1.0-uw)/2.0, (1.0-uh)/2.0, uw, uh], mode: VideoMode::Tex, p0: 4.0, p1: 0.0 });
+            items.push(Item::Video { a: self.active, b: self.active, r: pic, uv: cover_uv(&source.info, pic),
+                mode: VideoMode::Tex, p0: 4.0, p1: 0.0 });
         }
         items.push(Item::Rect(RectItem { radius: 4.0, border_w: 3.0, border_color: hex_color(0xffffff),
             ..RectItem::new(pic, [0.0; 4]) }));
@@ -5146,6 +5140,16 @@ fn clip_color(index: usize) -> [f32; 4] {
     const COLORS: [u32; 9] = [0x61b5ee, 0xe6ac69, 0xb89ae8, 0x6dc7aa, 0xe88891, 0xc9c970, 0x70c8d2, 0xdb9bc6, 0xa4b9d4];
     hex_color(COLORS[index % COLORS.len()])
 }
+/// The texture window that fills `r` edge to edge at the clip's own
+/// proportions (CSS `object-fit: cover`), as the renderer's uv CORNERS
+/// `[u0, v0, u1, v1]` — not an origin and size: handing it a size put v1
+/// below v0 on tall clips and drew them upside down.
+fn cover_uv(info: &crate::probe::VideoInfo, r: RectPx) -> [f32; 4] {
+    let aspect = info.width.max(1) as f32 / info.height.max(1) as f32;
+    let (uw, uh) = if aspect > r.w / r.h.max(1.0) { (r.w / r.h.max(1.0) / aspect, 1.0) } else { (1.0, aspect * r.h / r.w.max(1.0)) };
+    let (u0, v0) = ((1.0 - uw) / 2.0, (1.0 - uh) / 2.0);
+    [u0, v0, u0 + uw, v0 + uh]
+}
 fn intersect(a: RectPx, b: RectPx) -> RectPx {
     let (x0, y0) = (a.x.max(b.x), a.y.max(b.y));
     let (x1, y1) = ((a.x + a.w).min(b.x + b.w), (a.y + a.h).min(b.y + b.h));
@@ -5520,6 +5524,20 @@ mod tests {
         assert_eq!(app.workspace().rail, 280.0);
         let card = app.source_row(0);
         assert_eq!((card.y, card.h), (HEADER_H + 14.0, 157.0));
+        // The preview is a cover crop in uv CORNERS: never mirrored, never
+        // stretched, centred on the picture.
+        let wide = crate::probe::VideoInfo { width: 2880, height: 720, ..app.videos[0].info.clone() };
+        let tall = crate::probe::VideoInfo { width: 720, height: 1280, ..app.videos[0].info.clone() };
+        let r = RectPx { x: 0.0, y: 0.0, w: 252.0, h: 106.0 };
+        for info in [&wide, &tall] {
+            let [u0, v0, u1, v1] = cover_uv(info, r);
+            assert!(u1 > u0 && v1 > v0, "{:?}", (u0, v0, u1, v1));
+            assert!((u0 + u1 - 1.0).abs() < 1e-6 && (v0 + v1 - 1.0).abs() < 1e-6);
+            let shown = (u1 - u0) * info.width as f32 / ((v1 - v0) * info.height as f32);
+            assert!((shown - r.w / r.h).abs() < 1e-3, "crop keeps the box's proportion: {shown}");
+        }
+        assert_eq!(cover_uv(&wide, r)[1], 0.0, "a wide clip gives up width, not height");
+        assert_eq!(cover_uv(&tall, r)[0], 0.0, "a tall clip gives up height, not width");
         assert_eq!(app.source_row(1).y - card.y, SOURCE_H);
     }
 
