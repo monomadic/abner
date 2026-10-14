@@ -3,6 +3,15 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-14 — hide frames from superseded timeline seeks
+
+When a timeline click or short scrub queued a newer target behind a seek still
+decoding, `tick` could upload the older seek's frame just before dispatching
+the new target. The playhead was already at the new position, so this looked
+like two jumps from one gesture. While a newer target is queued, the app waits
+for the old seek to settle without displaying its frame, then dispatches the
+new target. The coalescing test checks that no intermediate frame is uploaded.
+
 ## 2026-10-14 — seek cache gap safety and AV1 fallback
 
 Cached spans can be disjoint after seeks. Playback now takes frames only from

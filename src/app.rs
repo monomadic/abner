@@ -1997,10 +1997,15 @@ impl App {
         let t = self.t;
         let active = self.active;
         let capture = self.mask_mode;
+        let superseded_seek = self.queued_seek.is_some();
         let mut adopt = None;
         for (i, v) in self.videos.iter_mut().enumerate() {
             let was_pending = v.pending;
-            let got = if v.pending {
+            // A newer pointer target is waiting for this seek to settle.
+            // Its intermediate frame must never reach the screen.
+            let got = if superseded_seek {
+                None
+            } else if v.pending {
                 let g = v.player.take_next();
                 if g.is_some() {
                     v.pending = false;
@@ -6039,7 +6044,8 @@ mod tests {
         assert_eq!(app.t, 1.8, "the clock moves at once");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while app.queued_seek.is_some() && std::time::Instant::now() < deadline {
-            app.tick(0.016, vp, 1.0);
+            let frame = app.tick(0.016, vp, 1.0);
+            assert!(frame.uploads.is_empty(), "superseded seek must not flash an intermediate frame");
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(app.queued_seek.is_none(), "the queued seek dispatches once the first lands");
