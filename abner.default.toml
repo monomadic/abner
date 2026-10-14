@@ -27,10 +27,11 @@ view = "overlay"
 start_paused = true
 # Seconds jumped by ← / →.
 seek_step = 1.0
-# Decoded-frame cache per clip, in MB. Every frame the decoder produces is
-# kept (the whole GOP on screen, then the next one), evicting the frames
-# farthest from the playhead, so seeks and scrubs inside the cached span
-# never touch the decoder. 1080p is ~8 MB a frame, 4K ~33 MB.
+# Decoded-frame cache per clip, in MB. Nearby frames are retained and
+# farther frames evicted. On a cold long-GOP seek, distant pre-target frames
+# are decoded without RGBA conversion; a nearby rewind window is retained.
+# Seeks inside a cached span never touch the decoder. 1080p is ~8 MB a frame,
+# 4K ~33 MB.
 frame_cache_mb = 1024
 
 [compare]

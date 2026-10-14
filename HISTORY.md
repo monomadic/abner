@@ -3,6 +3,23 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-14 — avoid RGBA work far before a cold seek target
+
+A cold exact seek still decodes from the preceding keyframe, but converting
+every intervening frame to full-resolution RGBA made long-GOP seeks slow and
+filled the cache with frames far from the requested position. The reader now
+skips RGBA conversion outside a rewind window sized from the per-clip budget
+(at most about one second). It verifies the first decoded frame at or after the
+target so exact landing remains valid even when earlier frames were skipped.
+Nearby pre-target frames remain cached for quick backward scrubbing.
+
+On the opt-in three-player 4K software-decoded fixture with a four-second GOP,
+the cold exact seek to 3.5 s took 1.10 s versus 1.56 s with full pre-target
+conversion. Cached backward seeking stayed immediate; retained RGBA fell from
+759 MiB to 538 MiB. A long-GOP regression checks the exact landing and nearby
+backward hit. These fixture timings do not establish the speed of a user's
+particular file or VideoToolbox path.
+
 ## 2026-10-14 — hide frames from superseded timeline seeks
 
 When a timeline click or short scrub queued a newer target behind a seek still

@@ -69,13 +69,16 @@ from one to the other, keeping its number.
   per-player pacing, and a FRAME CACHE instead of a queue** (2026-10-14). The app
   owns ONE master clock and drains each player with `take_upto(t)` (pop all due,
   newest wins). Sync is by construction, pause is "stop advancing t", EOF parks the
-  reader until a seek. The reader never throws a decoded frame away: every frame —
-  the pre-target frames of an exact seek included — goes into a pts-keyed cache
+  reader until a seek. Nearby decoded frames go into a pts-keyed cache
   bounded by `playback.frame_cache_mb` per clip, evicting the frame farthest from
-  the position; the reader keeps decoding ahead while there is budget (the GOP on
-  screen stays resident, the next one gets warm), and `seek` serves a target whose
-  span is resident on the CALLER's thread without touching the decoder. The cache
-  IS the queue (`take_upto`/`take_next` read it; `buffered()` counts deliverable
+  the position; the reader keeps decoding ahead while there is budget (nearby
+  frames stay resident, and the next span gets warm), and `seek` serves a target whose
+  span is resident on the CALLER's thread without touching the decoder. On a cold
+  jump within a long GOP, the reader decodes distant pre-target frames for codec
+  references without converting them to RGBA; a budget-sized rewind window before
+  the target is cached, and the first frame at/after the target is verified by the
+  decoder. The cache IS the queue (`take_upto`/`take_next` read it;
+  `buffered()` counts deliverable
   frames; `buffered() > 0` after `seek()` means it landed). `Cache::runs` tracks
   contiguous spans so "first cached frame ≥ t" is trusted only when nothing
   undecoded lies between; decoding that runs into cached frames merges spans and

@@ -11,15 +11,18 @@
 //!
 //! And abner is frame-precise: every seek from the pointer is EXACT, so
 //! the bounded read-ahead queue became a **frame cache** (2026-10-14). The
-//! reader never throws a decoded frame away: every frame it produces —
-//! the pre-target frames of an exact seek included — goes into a
+//! reader retains every frame near the playhead, including nearby
+//! pre-target frames of an exact seek, in a
 //! pts-keyed cache bounded by a byte budget (`playback.frame_cache_mb`),
-//! evicting the frame farthest from the current position. With the GOP
-//! on screen resident, a scrub inside it never touches the decoder
+//! evicting the frame farthest from the current position. With nearby frames
+//! resident, a scrub inside that span never touches the decoder
 //! (`seek` serves it on the caller's thread); with budget left the reader
 //! keeps decoding ahead, so the NEXT GOP is warm by the time the playhead
 //! gets there. The cache IS the queue: `take_upto`/`take_next` read from
-//! it, and backpressure is the budget around the position.
+//! it, and backpressure is the budget around the position. On a cold
+//! long-GOP jump, distant pre-target frames are decoded for reference
+//! continuity but not converted to RGBA; the target and a nearby rewind
+//! window are still cached.
 //!
 //! Decode is at NATIVE resolution: this is a comparison tool, pixels are
 //! the product. Hardware-decoded frames download via
@@ -81,6 +84,10 @@ struct Cache {
     /// at or after it, once the span containing that frame is known to
     /// reach back to the target.
     pending: Option<i64>,
+    /// First frame at/after `pending` reached by decoding from its seek
+    /// point. This proves the exact landing when older RGBA frames were
+    /// deliberately not materialized during a cold seek.
+    pending_verified: Option<i64>,
     /// A keyframe seek in flight: the reader's next frame becomes the
     /// position and the pending target both.
     landing: bool,
@@ -109,6 +116,8 @@ impl Cache {
     /// otherwise the first frame past the position.
     fn next_key(&self) -> Option<i64> {
         match self.pending {
+            Some(_) if self.pending_verified.is_some() => self.pending_verified
+                .filter(|k| self.frames.contains_key(k)),
             Some(t) => self
                 .frames
                 .range(t - SAME_FRAME_US..)
@@ -122,6 +131,13 @@ impl Cache {
     /// Newest deliverable key ≤ `t_us`.
     fn upto_key(&self, t_us: i64) -> Option<i64> {
         match self.pending {
+            Some(_) if self.pending_verified.is_some() => {
+                let first = self.pending_verified?;
+                if t_us < first { return None; }
+                self.frames.range(first..=t_us).rev()
+                    .map(|(k, _)| *k)
+                    .find(|&k| self.run_of(k) == self.run_of(first))
+            }
             Some(t) => {
                 let lo = t - SAME_FRAME_US;
                 if t_us < lo {
@@ -155,6 +171,7 @@ impl Cache {
     fn took(&mut self, key: i64) {
         self.position = key;
         self.pending = None;
+        self.pending_verified = None;
         self.landing = false;
         self.gap_refill = false;
     }
@@ -326,6 +343,7 @@ impl Player {
                 budget: cache_bytes.max(frame_bytes * 6),
                 position: i64::MIN,
                 pending: None,
+                pending_verified: None,
                 landing: false,
                 last_key: i64::MIN,
                 broken: true,
@@ -383,6 +401,7 @@ impl Player {
         let mut c = self.shared.cache.lock().unwrap();
         c.position = key;
         c.gap_refill = false;
+        c.pending_verified = None;
         self.shared.set_position(key);
         let cached = exact
             && c
@@ -423,6 +442,7 @@ impl Player {
                 {
                     let target = c.position.saturating_add(SAME_FRAME_US + 1);
                     c.pending = Some(target);
+                    c.pending_verified = None;
                     c.gap_refill = true;
                     *self.shared.cmd.lock().unwrap() = Some((target as f64 * 1e-6, true, false));
                     self.shared.space.notify_all();
@@ -609,6 +629,12 @@ struct Pump<'a> {
     /// reaches it with every reference intact (and caches the frames on
     /// the way), where a re-seek would restart the GOP.
     last_pts: i64,
+    /// Exact target currently being decoded, distinct from a newer seek
+    /// the caller may have queued while this decoder was working.
+    active_target: Option<i64>,
+    /// True once decode has shown that no frame between the preceding
+    /// keyframe and the exact target was omitted by the demux seek.
+    active_seen_before_target: bool,
 }
 
 /// Clamp libav's stderr chatter (the benign "No accelerated colorspace
@@ -729,6 +755,8 @@ unsafe fn reader(shared: &Shared, cfg: &ReaderCfg) -> Result<(), String> {
             transfer: FramePtr(ffi::av_frame_alloc()),
             filtered: FramePtr(ffi::av_frame_alloc()),
             last_pts: i64::MIN,
+            active_target: None,
+            active_seen_before_target: false,
         };
         let mut at_eof = false;
 
@@ -758,6 +786,8 @@ unsafe fn reader(shared: &Shared, cfg: &ReaderCfg) -> Result<(), String> {
                 return Ok(());
             }
             if let Some((target, exact, forward)) = shared.cmd.lock().unwrap().take() {
+                pump.active_target = exact.then(|| us(target));
+                pump.active_seen_before_target = false;
                 // A seek that fails (transient SMB fault, stale handle)
                 // must not be silent: the reader would carry on from
                 // wherever it was while the other streams land on the
@@ -778,6 +808,7 @@ unsafe fn reader(shared: &Shared, cfg: &ReaderCfg) -> Result<(), String> {
                     && key_entry(ts) >= 0
                     && key_entry(ts) == key_entry(pump.last_pts);
                 if extend {
+                    pump.active_seen_before_target = true;
                     continue;
                 }
                 if !seek_to(target, forward) {
@@ -857,6 +888,9 @@ impl Pump<'_> {
             if pts != ffi::AV_NOPTS_VALUE {
                 self.last_pts = pts;
             }
+            if self.active_target.is_some_and(|t| us(pts_s) < t - SAME_FRAME_US) {
+                self.active_seen_before_target = true;
+            }
             // Already cached (decoding ran back into resident frames after
             // a seek): join the spans, skip the download and convert.
             {
@@ -864,11 +898,22 @@ impl Pump<'_> {
                 let key = us(pts_s);
                 if c.frames.contains_key(&key) {
                     c.note_run(key);
+                    self.verify_target(&mut c, key);
                     let landed = self.land(&mut c, key);
                     drop(c);
                     if landed {
                         self.wake();
                     }
+                    ffi::av_frame_unref(frame);
+                    return Flow::Continue;
+                }
+                // Decoding the GOP is necessary for an exact target, but
+                // turning every distant pre-target frame into full RGBA is
+                // not. Keep a budget-sized rewind neighborhood instead.
+                if self.active_target.is_some_and(|t| c.pending == Some(t)
+                    && key < t.saturating_sub(self.rewind_us(c.budget)))
+                {
+                    c.broken = true;
                     ffi::av_frame_unref(frame);
                     return Flow::Continue;
                 }
@@ -947,6 +992,21 @@ impl Pump<'_> {
         dry && c.deliverable() > 0
     }
 
+    fn rewind_us(&self, budget: usize) -> i64 {
+        let frame = self.cfg.w as usize * self.cfg.h as usize * 4;
+        let frames = (budget / frame).saturating_sub(2).min(30);
+        frames as i64 * 33_333
+    }
+
+    fn verify_target(&self, c: &mut Cache, key: i64) {
+        if self.active_target.is_some_and(|t| c.pending == Some(t)
+            && key >= t - SAME_FRAME_US && c.pending_verified.is_none()
+            && (self.active_seen_before_target || key <= t + SAME_FRAME_US || t == 0))
+        {
+            c.pending_verified = Some(key);
+        }
+    }
+
     fn wake(&self) {
         if let Some(f) = &*self.shared.notify.lock().unwrap() {
             f();
@@ -1015,6 +1075,7 @@ impl Pump<'_> {
             c.bytes += buf.len();
             c.frames.insert(key, Arc::new(buf));
             c.note_run(key);
+            self.verify_target(&mut c, key);
             if c.landing {
                 c.landing = false;
                 c.position = key;
@@ -1165,7 +1226,7 @@ mod tests {
     fn pending_seek_uses_its_covered_run_even_with_a_later_cached_run() {
         let mut c = Cache {
             frames: BTreeMap::new(), runs: vec![(100_000, 120_000), (200_000, 220_000)],
-            bytes: 0, budget: 1024, position: 105_000, pending: Some(105_000),
+            bytes: 0, budget: 1024, position: 105_000, pending: Some(105_000), pending_verified: None,
             landing: false, last_key: 220_000, broken: false, gap_refill: false,
         };
         for key in [100_000, 110_000, 120_000, 200_000, 210_000, 220_000] {
@@ -1187,16 +1248,16 @@ mod tests {
         let clip = dir.join("source.mp4");
         let ok = Command::new("ffmpeg")
             .args(["-y", "-v", "error", "-f", "lavfi", "-i",
-                "testsrc2=duration=2:size=3840x2160:rate=24",
+                "testsrc2=duration=4:size=3840x2160:rate=24",
                 "-c:v", "libx264", "-preset", "ultrafast", "-threads", "4",
-                "-pix_fmt", "yuv420p", "-g", "48"])
+                "-pix_fmt", "yuv420p", "-g", "96"])
             .arg(&clip).status().unwrap().success();
         assert!(ok, "4K fixture encode failed");
         let players: Vec<_> = (0..3).map(|_| {
             Player::spawn(&clip, 3840, 2160, true, None, 256 << 20).unwrap()
         }).collect();
         let cold = Instant::now();
-        for p in &players { p.seek(1.5, true); }
+        for p in &players { p.seek(3.5, true); }
         for p in &players {
             assert!(wait_buffered(p, 1, Duration::from_secs(30)), "cold 4K seek stalled");
         }
@@ -1204,7 +1265,7 @@ mod tests {
         let landed: Vec<_> = players.iter().map(|p| p.take_next().unwrap().0).collect();
         assert!(landed.iter().all(|&pts| (pts - landed[0]).abs() < 1.0 / 24.0));
         let cached = Instant::now();
-        for p in &players { p.seek(1.42, true); }
+        for p in &players { p.seek(3.42, true); }
         let cached_pts: Vec<_> = players.iter().map(|p| p.take_next().expect("cache hit").0).collect();
         assert!(cached_pts.iter().all(|&pts| pts < landed[0]), "cache seek should move to an earlier frame");
         let cached_us = cached.elapsed().as_micros();
@@ -1264,10 +1325,9 @@ mod tests {
         assert!(!p.failed());
     }
 
-    /// Decoded frames stay resident: after an exact seek into a GOP every
-    /// frame of it is cached (the pre-target ones included), so seeks
-    /// inside it deliver without the decoder — instantly, on the caller's
-    /// thread — and the reader has read the next GOP ahead meanwhile.
+    /// Nearby decoded frames stay resident after an exact seek, including
+    /// the pre-target rewind window, so nearby seeks deliver instantly on
+    /// the caller's thread while the reader decodes ahead.
     #[test]
     fn exact_seeks_inside_a_cached_gop_are_served_without_the_decoder() {
         let Some(clip) = test_clip("cache.mp4", 4) else { return };
@@ -1279,13 +1339,36 @@ mod tests {
         // Let the read-ahead fill the budget (64MB = 290 frames at 320x180,
         // more than the 120 in the clip).
         thread::sleep(Duration::from_millis(800));
-        // The pre-target half of the GOP and the next GOP are resident.
+        // The nearby pre-target frames and the next GOP are resident.
         for target in [1.0, 1.2, 1.47, 2.3, 2.9, 1.05] {
             p.seek(target, true);
             let got = p.take_next();
             let (pts, _) = got.unwrap_or_else(|| panic!("{target}: not served from cache"));
             assert!((target - 1e-3..=target + 1.0 / 30.0).contains(&pts), "{target}: landed {pts}");
         }
+        assert!(!p.failed());
+    }
+
+    #[test]
+    fn cold_long_gop_seek_skips_distant_rgba_but_lands_exact() {
+        let Some(source) = test_clip("long-gop-source.mp4", 4) else { return };
+        let clip = source.with_file_name("long-gop.mp4");
+        let ok = Command::new("ffmpeg")
+            .args(["-y", "-v", "error", "-i"])
+            .arg(&source)
+            .args(["-c:v", "libx264", "-preset", "ultrafast", "-g", "120", "-sc_threshold", "0"])
+            .arg(&clip).status().unwrap().success();
+        assert!(ok, "long-GOP fixture encode failed");
+        let frame = 320 * 180 * 4;
+        let p = Player::spawn(&clip, 320, 180, false, None, frame * 12).unwrap();
+        p.seek(3.5, true);
+        assert!(wait_buffered(&p, 1, Duration::from_secs(5)), "cold seek did not land");
+        let (pts, _) = p.take_next().unwrap();
+        assert!((3.48..=3.54).contains(&pts), "landed {pts}");
+        p.seek(3.4, true);
+        let (back, _) = p.take_next().expect("nearby pre-target frame is cached");
+        assert!((3.38..=3.44).contains(&back), "backward landed {back}");
+        assert!(p.cached_bytes() <= frame * 12);
         assert!(!p.failed());
     }
 
