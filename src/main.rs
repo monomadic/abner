@@ -475,6 +475,17 @@ impl Runner {
         for cmd in self.app.take_cmds() {
             match cmd {
                 Cmd::OpenFiles => open::choose_files(),
+                Cmd::OpenDirectory(path) => {
+                    #[cfg(target_os = "macos")]
+                    let opener = "open";
+                    #[cfg(target_os = "linux")]
+                    let opener = "xdg-open";
+                    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+                    let opener = "explorer";
+                    if let Err(err) = std::process::Command::new(opener).arg(&path).spawn() {
+                        log::warn!("could not open {}: {err}", path.display());
+                    }
+                }
                 Cmd::Quit => event_loop.exit(),
                 Cmd::ToggleFullscreen => {
                     if let Some(w) = &self.window {

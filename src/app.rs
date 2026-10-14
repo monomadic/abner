@@ -68,7 +68,7 @@ pub enum Key {
     KeyRight,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum Cmd {
     Quit,
     ToggleFullscreen,
@@ -79,6 +79,7 @@ pub enum Cmd {
     /// runner loads it through the drop path, so it is recorded again.
     OpenRecent(usize),
     OpenFiles,
+    OpenDirectory(std::path::PathBuf),
 }
 
 /// What a press on the crop marquee took hold of.
@@ -773,6 +774,9 @@ impl App {
     pub fn crop_cursor(&self) -> Option<CropCursor> {
         if !self.ready() {
             return (self.cursor_inside && self.recent.hover.is_some()).then_some(CropCursor::Pointer);
+        }
+        if self.inspector_path_hit(self.cursor.0, self.cursor.1) {
+            return Some(CropCursor::Pointer);
         }
         if self.cut_mode && self.show_ui && self.cursor_inside {
             if self.split_tool && self.cut_clip_at(self.cursor.0, self.cursor.1).is_some() { return Some(CropCursor::Pointer); }
@@ -1679,6 +1683,12 @@ impl App {
         }
         self.cursor = (x, y);
         self.cursor_inside = true;
+        if self.inspector_path_hit(x, y) {
+            if let Some(dir) = self.videos[self.active].info.path.parent() {
+                self.cmds.push(Cmd::OpenDirectory(dir.to_path_buf()));
+            }
+            return;
+        }
         if self.show_ui {
             if let Some(control) = self.controls().into_iter().find(|c| contains(c.r, x, y)) {
                 self.activate(control.action);
@@ -2551,9 +2561,25 @@ impl App {
                     ..TextItem::new(x1, ry, 11.0, WORKSPACE_TEXT, value) }));
             }
             let dir = v.info.path.parent().unwrap_or_else(|| std::path::Path::new(""));
-            items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(l.panel - 32.0),
-                ..TextItem::new(x0, y + 195.0, 10.0, hex_color(INSPECTOR_PATH), dir.to_string_lossy()) }));
+            let color = hex_color(INSPECTOR_PATH);
+            // Folder outline, drawn as geometry so it works with the mono font.
+            let folder = RectPx { x: x0, y: y + 189.0, w: 13.0, h: 10.0 };
+            items.push(Item::Rect(RectItem { radius: 1.0, border_w: 1.3, border_color: color,
+                ..RectItem::new(folder, [0.0; 4]) }));
+            items.push(Item::Rect(RectItem { radius: 0.5, ..RectItem::new(
+                RectPx { x: x0, y: y + 186.5, w: 5.0, h: 2.5 }, color) }));
+            items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(l.panel - 55.0),
+                ..TextItem::new(x0 + 19.0, y + 195.0, 10.0, color, dir.to_string_lossy()) }));
         }
+    }
+
+    fn inspector_path_hit(&self, x: f32, y: f32) -> bool {
+        if !self.ready() || !self.show_ui || !self.cursor_inside { return false; }
+        let l = self.workspace();
+        let row = RectPx { x: l.inspector.x + 16.0, y: l.inspector.y + 183.0,
+            w: (l.panel - 32.0).max(0.0), h: 24.0 };
+        l.inspector.h > 0.0 && x < l.rail && contains(row, x, y)
+            && self.videos[self.active].info.path.parent().is_some()
     }
 
     /// Sources sidebar (Abner — Timeline Edit, 278:584): a stack of
@@ -5431,6 +5457,23 @@ mod tests {
         let r = app.content_rect(app.active);
         let v = &app.videos[app.active];
         app.cursor_moved(r.x + x * r.w / v.info.width as f32, r.y + y * r.h / v.info.height as f32);
+    }
+
+    #[test]
+    fn inspector_directory_has_pointer_and_opens_the_focused_path() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        app.vp = (1280.0, 800.0);
+        let inspector = app.workspace().inspector;
+        let (x, y) = (inspector.x + 24.0, inspector.y + 195.0);
+        app.cursor_moved(x, y);
+        assert!(matches!(app.crop_cursor(), Some(CropCursor::Pointer)));
+        app.mouse_down(x, y);
+        assert!(app.take_cmds().iter().any(|cmd| matches!(cmd,
+            Cmd::OpenDirectory(path) if Some(path.as_path()) == clip.parent())));
+        app.set_sources_visible(false);
+        app.cursor_moved(x, y);
+        assert!(!matches!(app.crop_cursor(), Some(CropCursor::Pointer)));
     }
 
     #[test]
