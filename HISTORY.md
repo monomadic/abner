@@ -3,6 +3,16 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-14 — the rail slides
+
+The sidebar toggle now runs the design's 200 ms slide instead of snapping.
+`rail_slide` eases toward `show_sources` in `tick` and keeps the loop hot
+while it moves; `Workspace` carries both the width the layout grants this
+frame (`rail`, which the canvas reclaims as it shrinks) and the panel's own
+width (`panel`), with the list and inspector starting at `rail - panel`, so
+the cards keep their size and slide off the left edge rather than squashing.
+`--no-sources` still lands on the hidden state instantly for captures.
+
 ## 2026-10-14 — the rail in timeline mode; header double-clicks stay ours
 
 Timeline mode now carries the Sources rail as the Timeline Edit frame draws
@@ -41,9 +51,9 @@ down (the cut inspector's picture shared the bug). `cover_uv` builds the
 corners once for both; a test holds the crop centred, unmirrored and in the
 box's proportion.
 
-Not built: the rail inside cut mode and the right-hand Timeline-inspector
-toggle the same component describes, and the 200 ms slide the design notes
-ask for (the panel snaps).
+Not built at the time: the rail inside cut mode, the right-hand
+Timeline-inspector toggle the same component describes, and the 200 ms slide
+(the rail and the slide landed later the same day; the right toggle has not).
 
 ## 2026-10-14 — avoid RGBA work far before a cold seek target
 

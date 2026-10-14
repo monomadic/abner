@@ -250,6 +250,11 @@ pub struct App {
     /// has one. Remembered across mode switches; opening a clip never
     /// forces a hidden rail open.
     show_sources: bool,
+    /// How far the rail is in, 0..1: the design's 200 ms slide
+    /// (`RAIL_SLIDE_S`) toward `show_sources`. The panel's width in the
+    /// layout follows it; the panel's CONTENT keeps its full width and
+    /// slides left, so nothing squashes.
+    rail_slide: f32,
     /// Delta amplification.
     gain: f32,
     blend: f32,
@@ -601,6 +606,7 @@ impl App {
             start_paused: cfg.playback.start_paused,
             show_ui: true,
             show_sources: true,
+            rail_slide: 1.0,
             gain: cfg.compare.delta_gain,
             blend: cfg.compare.blend,
             checker_px: cfg.compare.checker_size,
@@ -2062,6 +2068,9 @@ impl App {
             self.started = self.videos.iter().all(|v| v.delivered || v.player.failed());
         }
         self.badge_flash = (self.badge_flash - dt).max(0.0);
+        let target = if self.show_sources { 1.0 } else { 0.0 };
+        let step = dt / RAIL_SLIDE_S;
+        self.rail_slide = if self.rail_slide < target { (self.rail_slide + step).min(target) } else { (self.rail_slide - step).max(target) };
         self.tick_cut_hot(dt);
 
         // ---- draw list ----
@@ -2146,7 +2155,8 @@ impl App {
         }
 
         let animating =
-            self.playing || self.badge_flash > 0.0 || !self.started || self.cut_thumb.play.is_some() || self.cut_hot_animating();
+            self.playing || self.badge_flash > 0.0 || !self.started || self.cut_thumb.play.is_some() || self.cut_hot_animating()
+            || self.rail_sliding();
         FrameDesc {
             clear: FRAME_BG,
             uploads,
@@ -2166,7 +2176,7 @@ impl App {
     /// Shared layout for drawing and hit testing; the image transform is always
     /// relative to this canvas, including in mask/crop and side-by-side modes.
     fn workspace(&self) -> Workspace {
-        let mut w = Workspace::new(self.vp, self.show_ui, self.cut_mode, self.show_sources);
+        let mut w = Workspace::new(self.vp, self.show_ui, self.cut_mode, self.rail_slide);
         if self.show_ui && self.cut_mode {
             let extra = self.frame_detail_extra() + if self.cut_encode_rail() { 26.0 } else { 0.0 };
             w.canvas.h = (w.canvas.h - extra).max(1.0);
@@ -2261,8 +2271,8 @@ impl App {
 
     fn source_row(&self, index: usize) -> RectPx {
         let l = self.workspace();
-        RectPx { x: 12.0, y: l.list.y + (index - self.source_first()) as f32 * SOURCE_H,
-            w: l.rail - 24.0, h: SOURCE_H - 12.0 }
+        RectPx { x: l.list.x + 12.0, y: l.list.y + (index - self.source_first()) as f32 * SOURCE_H,
+            w: l.panel - 24.0, h: SOURCE_H - 12.0 }
     }
 
     fn source_drop_index(&self, y: f32) -> usize {
@@ -2293,13 +2303,13 @@ impl App {
             return out;
         }
         if l.rail > 0.0 && !self.mask_mode {
-            let w = (l.rail - 32.0) / 2.0;
-            for (x, label, action) in [(12.0, "Duplicate", Action::Duplicate),
-                (20.0 + w, "+ Add files", Action::OpenFiles)] {
+            let w = (l.panel - 32.0) / 2.0;
+            for (x, label, action) in [(l.list.x + 12.0, "Duplicate", Action::Duplicate),
+                (l.list.x + 20.0 + w, "+ Add files", Action::OpenFiles)] {
                 out.push(Control::new(RectPx { x, y: self.vp.1 - STATUS_H - 34.0, w, h: 28.0 }, label, false, action));
             }
             if self.videos.iter().any(|v| v.selected) {
-                out.push(Control::new(RectPx { x: l.rail - 64.0, y: l.list.y + l.list.h + 4.0, w: 52.0, h: 24.0 },
+                out.push(Control::new(RectPx { x: l.list.x + l.panel - 64.0, y: l.list.y + l.list.h + 4.0, w: 52.0, h: 24.0 },
                     "Clear", false, Action::ClearSources));
             }
         }
@@ -2389,6 +2399,11 @@ impl App {
     /// `--no-sources`: the rail hidden, as the header toggle leaves it.
     pub fn set_sources_visible(&mut self, shown: bool) {
         self.show_sources = shown;
+        self.rail_slide = if shown { 1.0 } else { 0.0 };
+    }
+
+    fn rail_sliding(&self) -> bool {
+        self.rail_slide != if self.show_sources { 1.0 } else { 0.0 }
     }
 
     pub fn select_workspace_mode(&mut self, mode: usize) {
@@ -2477,8 +2492,9 @@ impl App {
         if l.inspector.h > 0.0 {
             let v = &self.videos[self.active];
             items.push(Item::Rect(RectItem::new(RectPx { h: 1.0, ..l.inspector }, WORKSPACE_RULE)));
-            ui_label(items, 16.0, l.inspector.y + 24.0, 10.0, WORKSPACE_MUTED,
-                format!("INSPECTOR: {}", self.active + 1), Align::Left, l.rail - 32.0);
+            let (x0, x1) = (l.inspector.x + 16.0, l.inspector.x + l.panel - 16.0);
+            ui_label(items, x0, l.inspector.y + 24.0, 10.0, WORKSPACE_MUTED,
+                format!("INSPECTOR: {}", self.active + 1), Align::Left, l.panel - 32.0);
             for (i, (key, value)) in [
                 ("Format", format!("{} {}", v.info.codec, v.info.pix_fmt)),
                 ("Resolution", format!("{}×{}", v.info.width, v.info.height)),
@@ -2487,11 +2503,11 @@ impl App {
                 ("Size", fmt_size(v.info.file_size)),
             ].into_iter().enumerate() {
                 let y = l.inspector.y + 52.0 + i as f32 * 23.0;
-                ui_label(items, 16.0, y, 11.0, WORKSPACE_DIM, key, Align::Left, 78.0);
-                ui_label(items, l.rail - 16.0, y, 11.0, WORKSPACE_TEXT, value, Align::Right, l.rail - 110.0);
+                ui_label(items, x0, y, 11.0, WORKSPACE_DIM, key, Align::Left, 78.0);
+                ui_label(items, x1, y, 11.0, WORKSPACE_TEXT, value, Align::Right, l.panel - 110.0);
             }
             let dir = v.info.path.parent().unwrap_or_else(|| std::path::Path::new(""));
-            ui_label(items, 16.0, l.inspector.y + 190.0, 10.0, WORKSPACE_MUTED, dir.to_string_lossy(), Align::Left, l.rail - 32.0);
+            ui_label(items, x0, l.inspector.y + 190.0, 10.0, WORKSPACE_MUTED, dir.to_string_lossy(), Align::Left, l.panel - 32.0);
         }
     }
 
@@ -2506,7 +2522,8 @@ impl App {
         if l.rail <= 0.0 { return; }
         let ink = hex_color(SOURCE_INK);
         let secondary = hex_color(SOURCE_SECONDARY);
-        items.push(Item::Clip(Some(l.list)));
+        let visible = RectPx { x: 0.0, y: l.list.y, w: l.rail, h: l.list.h };
+        items.push(Item::Clip(Some(visible)));
         let first = self.source_first();
         for i in first..(first + self.source_capacity()).min(self.videos.len()) {
             let v = &self.videos[i];
@@ -2521,14 +2538,14 @@ impl App {
             // its top corners rounded: the quad runs 6px past the clip so
             // the bottom radius never shows.
             let thumb = RectPx { x: r.x + 4.0, y: r.y + 4.0, w: r.w - 8.0, h: SOURCE_THUMB_H };
-            items.push(Item::Clip(Some(intersect(thumb, l.list))));
+            items.push(Item::Clip(Some(intersect(thumb, visible))));
             let quad = RectPx { h: thumb.h + 6.0, ..thumb };
             items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(quad, WORKSPACE_PANEL) }));
             if v.delivered {
                 items.push(Item::Video { a: i, b: i, r: quad, uv: cover_uv(&v.info, quad),
                     mode: VideoMode::Tex, p0: 6.0, p1: 0.0 });
             }
-            items.push(Item::Clip(Some(l.list)));
+            items.push(Item::Clip(Some(visible)));
             let badge = RectPx { x: thumb.x + 7.0, y: thumb.y + 7.0, w: 24.0, h: 24.0 };
             items.push(Item::Rect(RectItem { radius: 12.0, ..RectItem::new(badge, SOURCE_KEYCAP) }));
             items.push(Item::Text(TextItem { header: true, align: Align::Center, valign: VAlign::Middle, max_width: Some(22.0),
@@ -2562,7 +2579,7 @@ impl App {
             let meta_y = thumb.y + thumb.h + 33.0;
             let left = format!("{codec} · {}p", v.info.height);
             let right = format!("{}fps · {}:{:02}", v.info.fps, seconds / 60, seconds % 60);
-            if l.rail >= 280.0 {
+            if l.panel >= 280.0 {
                 items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(tw - 112.0),
                     ..TextItem::new(tx, meta_y, 11.0, secondary, left) }));
                 items.push(Item::Text(TextItem { regular: true, align: Align::Right, valign: VAlign::Middle, max_width: Some(108.0),
@@ -2577,12 +2594,12 @@ impl App {
         }
         items.push(Item::Clip(None));
         let n = self.videos.iter().filter(|v| v.selected).count();
-        ui_label(items, 12.0, l.list.y + l.list.h + 16.0, 11.0, hex_color(SOURCE_SUBTLE),
+        ui_label(items, l.list.x + 12.0, l.list.y + l.list.h + 16.0, 11.0, hex_color(SOURCE_SUBTLE),
             if n > 0 { format!("{n} checked · X toggles") }
             else if !self.source_status.is_empty() { self.source_status.clone() }
             else if self.videos.len() > self.source_capacity() { format!("{}–{} / {} · scroll", first+1, (first+self.source_capacity()).min(self.videos.len()), self.videos.len()) }
             else if self.source_file_count() < self.videos.len() { format!("{} files · 1–9 select", self.source_file_count()) }
-            else { "1–9  Select a clip".into() }, Align::Left, l.rail - if n > 0 { 82.0 } else { 24.0 });
+            else { "1–9  Select a clip".into() }, Align::Left, l.panel - if n > 0 { 82.0 } else { 24.0 });
     }
 
     /// Step back, play / pause, step on: shared by Input's transport and
@@ -5081,7 +5098,12 @@ const CUT_LAMP: u32 = 0x20c45f;
 
 #[derive(Clone, Copy)]
 struct Workspace {
+    /// The width the source panel occupies this frame (0 while hidden,
+    /// in between while it slides).
     rail: f32,
+    /// The panel's own width; `list` and `inspector` are this wide and
+    /// start at `rail - panel`.
+    panel: f32,
     canvas: RectPx,
     list: RectPx,
     inspector: RectPx,
@@ -5092,10 +5114,17 @@ struct Workspace {
     side: RectPx,
 }
 impl Workspace {
-    fn new(vp: (f32, f32), visible: bool, cut: bool, sources: bool) -> Self {
+    fn new(vp: (f32, f32), visible: bool, cut: bool, slide: f32) -> Self {
         let (w, h) = vp;
         let none = RectPx { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
-        let rail = if !visible || !sources { 0.0 } else if w < 900.0 { 210.0_f32.min(w * 0.3) } else { 280.0 };
+        // `rail` is what the layout gives the panel this frame; `panel` is
+        // the panel's own width, and its rects start at `rail - panel` so
+        // a half-open rail is the right-hand part of a whole one.
+        let panel = if !visible || slide <= 0.0 { 0.0 } else if w < 900.0 { 210.0_f32.min(w * 0.3) } else { 280.0 };
+        let eased = slide.clamp(0.0, 1.0);
+        let eased = eased * eased * (3.0 - 2.0 * eased);
+        let rail = (panel * eased).round();
+        let ox = rail - panel;
         if visible && cut {
             // Timeline Edit (12:2): the source rail, the canvas and the
             // inspector share the top; the transport and the lanes run the
@@ -5106,12 +5135,12 @@ impl Workspace {
             let side = if w >= 1000.0 { CUT_SIDE_W } else { 0.0 };
             let transport_y = h - STATUS_H - lanes - CUT_TOOLBAR_H;
             let top = (transport_y - CUT_HEADER_H).max(1.0);
-            let inspector_h = if rail > 0.0 && h >= 800.0 { 216.0 } else { 0.0 };
-            let inspector = RectPx { x: 0.0, y: transport_y - inspector_h, w: rail, h: inspector_h };
+            let inspector_h = if panel > 0.0 && h >= 800.0 { 216.0 } else { 0.0 };
+            let inspector = RectPx { x: ox, y: transport_y - inspector_h, w: panel, h: inspector_h };
             let list_y = HEADER_H + 14.0;
             return Self {
-                rail, inspector,
-                list: RectPx { x: 0.0, y: list_y, w: rail, h: (inspector.y - RAIL_FOOTER_H - list_y).max(SOURCE_H) },
+                rail, panel, inspector,
+                list: RectPx { x: ox, y: list_y, w: panel, h: (inspector.y - RAIL_FOOTER_H - list_y).max(SOURCE_H) },
                 canvas: RectPx { x: rail, y: CUT_HEADER_H, w: (w - side - rail).max(1.0), h: top },
                 side: RectPx { x: w - side, y: CUT_HEADER_H, w: side, h: top },
                 transport: RectPx { x: 0.0, y: transport_y, w, h: CUT_TOOLBAR_H },
@@ -5126,12 +5155,12 @@ impl Workspace {
         // footer line above the inspector and the Duplicate / Add files
         // buttons under it — are not in the design and take their own
         // strips, so nothing overlaps the inspector's path line.
-        let inspector_h = if rail > 0.0 && h >= 800.0 { 216.0 } else { 0.0 };
-        let inspector = RectPx { x: 0.0, y: h - STATUS_H - RAIL_ACTIONS_H - inspector_h, w: rail, h: inspector_h };
+        let inspector_h = if panel > 0.0 && h >= 800.0 { 216.0 } else { 0.0 };
+        let inspector = RectPx { x: ox, y: h - STATUS_H - RAIL_ACTIONS_H - inspector_h, w: panel, h: inspector_h };
         let list_y = HEADER_H + 14.0;
         Self {
-            rail, canvas, inspector, timeline: none, side: none,
-            list: RectPx { x: 0.0, y: list_y, w: rail, h: (inspector.y - RAIL_FOOTER_H - list_y).max(SOURCE_H) },
+            rail, panel, canvas, inspector, timeline: none, side: none,
+            list: RectPx { x: ox, y: list_y, w: panel, h: (inspector.y - RAIL_FOOTER_H - list_y).max(SOURCE_H) },
             transport: RectPx { x: rail, y: h - STATUS_H - TRANSPORT_H, w: w - rail, h: TRANSPORT_H },
         }
     }
@@ -5215,6 +5244,8 @@ const SOURCE_THUMB_H: f32 = 100.0;
 /// The app's rows the design leaves out: the footer line above the
 /// inspector and the Duplicate / Add files buttons under it.
 const RAIL_FOOTER_H: f32 = 36.0;
+/// The sidebar's slide, seconds (the design's "panels slide outward over 200 ms").
+const RAIL_SLIDE_S: f32 = 0.2;
 const RAIL_ACTIONS_H: f32 = 40.0;
 /// The focused card's ring, the idle card's grey edge (as the design's
 /// card renders, #444444), and the keycap plate (white @ 0.5 in Figma;
@@ -5531,6 +5562,17 @@ mod tests {
         app.mouse_down(r.x + 16.0, r.y + 14.0);
         app.mouse_up();
         assert!(!app.show_sources);
+        // The panel slides out over RAIL_SLIDE_S: half-way the layout has
+        // given the canvas part of the width while the cards keep theirs
+        // and sit partly off-screen; settled, the rail is gone.
+        app.tick(RAIL_SLIDE_S / 2.0, (1280.0, 800.0), 2.0);
+        let mid = app.workspace();
+        assert!(mid.rail > 0.0 && mid.rail < 280.0, "{}", mid.rail);
+        assert_eq!((mid.panel, mid.canvas.x, mid.list.w), (280.0, mid.rail, 280.0));
+        assert_eq!(app.source_row(0).w, 256.0);
+        assert!(app.source_row(0).x < 12.0);
+        let desc = app.tick(RAIL_SLIDE_S, (1280.0, 800.0), 2.0);
+        assert!(!desc.animating || app.playing);
         let l = app.workspace();
         assert_eq!((l.rail, l.canvas.x, l.canvas.w, l.list.w, l.inspector.h), (0.0, 0.0, 1280.0, 0.0, 0.0));
         assert!(app.controls().iter().all(|c| !matches!(c.action, Action::Duplicate | Action::OpenFiles)));
@@ -5547,6 +5589,7 @@ mod tests {
         app.mouse_down(r.x + 16.0, r.y + 14.0);
         app.mouse_up();
         assert!(app.show_sources && app.mask_mode);
+        app.tick(RAIL_SLIDE_S, (1280.0, 800.0), 2.0);
         assert_eq!(app.workspace().rail, 280.0);
         // Timeline mode keeps the rail beside the video and a click there
         // re-cuts the chosen clip; the toggle hides it there too.
@@ -5565,11 +5608,13 @@ mod tests {
         assert!(app.cut_mode && app.cut_video == 1);
         app.mouse_down(r.x + 16.0, r.y + 14.0);
         app.mouse_up();
+        app.tick(RAIL_SLIDE_S, (1280.0, 1100.0), 2.0);
         let l = app.workspace();
         assert!(!app.show_sources && app.cut_mode);
         assert_eq!((l.rail, l.canvas.x), (0.0, 0.0));
         app.mouse_down(r.x + 16.0, r.y + 14.0);
         app.mouse_up();
+        app.tick(RAIL_SLIDE_S, (1280.0, 1100.0), 2.0);
         app.set_cut_mode(false);
         let card = app.source_row(0);
         assert_eq!((card.y, card.h), (HEADER_H + 14.0, 157.0));

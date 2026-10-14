@@ -162,8 +162,12 @@ from one to the other, keeping its number.
   in EVERY mode, the timeline included (there the rail, canvas and cut inspector share
   the top and the transport + lanes run full width, as 12:2 draws it; a click on a card
   re-cuts that clip through `select`); `show_sources` survives mode switches and
-  opening a clip never forces it open. The design's right toggle for the Timeline
-  inspector is not built. The Duplicate / Add files row and the footer line are the
+  opening a clip never forces it open. The toggle SLIDES the panel over 200 ms
+  (`rail_slide`, `RAIL_SLIDE_S`): `Workspace::rail` is the width the layout grants this
+  frame and `Workspace::panel` the panel's own, with `list`/`inspector` starting at
+  `rail - panel` — anchor rail content on `list.x`/`panel`, never on 0/`rail`, or it
+  squashes mid-slide. The design's right toggle for the Timeline inspector is not
+  built. The Duplicate / Add files row and the footer line are the
   app's own and take their own strips (`RAIL_ACTIONS_H`, `RAIL_FOOTER_H`) so nothing
   overlaps the inspector; checkboxes and Clear are Sources-only (`batch_ui`).
   **The header strip never reaches AppKit as a titlebar**: `ab_pin_content_view`
