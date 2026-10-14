@@ -10,8 +10,8 @@ The source rail now follows the "Abner — Timeline Edit" Figma file's
 heading or count chip, each card is 157px — cover-fitted live media with a
 white 24px keycap, the filename in JetBrains Mono Medium 13, then codec ·
 height and fps · duration in Regular 11 — with a 2px orange ring on the
-focused clip and a navy surface on the others (the ACTIVE pill is gone; the
-ring says it). The inspector's path line moved to the design's 190px. The
+focused clip and a grey edge on the others, each with the design's 2px dark
+rim between edge and picture (the ACTIVE pill is gone; the ring says it). The inspector's path line moved to the design's 190px. The
 header's segmented selector takes 122:441's look (a #151515 housing, the
 selected segment lifted to #ededec with dark type) and moves right to make
 room for the Finder-style sidebar toggle at x=78 (278:573): it hides the rail

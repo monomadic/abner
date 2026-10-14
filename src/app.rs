@@ -2501,12 +2501,13 @@ impl App {
             let active = i == self.active;
             let hover = self.cursor_inside && contains(r, self.cursor.0, self.cursor.1);
             items.push(Item::Rect(RectItem { radius: 10.0, border_w: 2.0,
-                border_color: hex_color(if active { SOURCE_RING } else if hover { SOURCE_BORDER } else { SOURCE_EDGE }),
-                ..RectItem::new(r, if active { WORKSPACE_PANEL } else { hex_color(SOURCE_SELECTED) }) }));
-            // The preview fills the card inside its ring with only its top
-            // corners rounded: the quad runs 6px past the clip so the
-            // bottom radius never shows.
-            let thumb = RectPx { x: r.x + 2.0, y: r.y + 2.0, w: r.w - 4.0, h: SOURCE_THUMB_H };
+                border_color: hex_color(if active { SOURCE_RING } else if hover { SOURCE_EDGE_HOVER } else { SOURCE_EDGE }),
+                ..RectItem::new(r, if active { WORKSPACE_PANEL } else { hex_color(0x000000) }) }));
+            // The preview sits inside the ring AND the card's 2px padding —
+            // the deliberate dark rim between ring and picture — with only
+            // its top corners rounded: the quad runs 6px past the clip so
+            // the bottom radius never shows.
+            let thumb = RectPx { x: r.x + 4.0, y: r.y + 4.0, w: r.w - 8.0, h: SOURCE_THUMB_H };
             items.push(Item::Clip(Some(intersect(thumb, l.list))));
             let quad = RectPx { h: thumb.h + 6.0, ..thumb };
             items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(quad, WORKSPACE_PANEL) }));
@@ -5185,14 +5186,15 @@ const SOURCE_THUMB_H: f32 = 100.0;
 /// inspector and the Duplicate / Add files buttons under it.
 const RAIL_FOOTER_H: f32 = 36.0;
 const RAIL_ACTIONS_H: f32 = 40.0;
-/// The focused card's ring, the idle card's edge, and the keycap plate
-/// (white @ 0.5 in Figma; linear blending wants less).
+/// The focused card's ring, the idle card's grey edge (as the design's
+/// card renders, #444444), and the keycap plate (white @ 0.5 in Figma;
+/// linear blending wants less).
 const SOURCE_RING: u32 = 0xff9d00;
-const SOURCE_EDGE: u32 = 0x151719;
+const SOURCE_EDGE: u32 = 0x444444;
+const SOURCE_EDGE_HOVER: u32 = 0x5c5c5c;
 const SOURCE_KEYCAP: [f32; 4] = [1.0, 1.0, 1.0, 0.3];
-/// Sources card variables: surface, selected, border, ink, secondary, subtle.
+/// Sources card variables: surface, border, ink, secondary, subtle.
 const SOURCE_SURFACE: u32 = 0x11151b;
-const SOURCE_SELECTED: u32 = 0x0d1b2b;
 const SOURCE_BORDER: u32 = 0x323b47;
 const SOURCE_INK: u32 = 0xf0f3f7;
 const SOURCE_SECONDARY: u32 = 0xb3bdc9;
