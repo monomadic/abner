@@ -2485,16 +2485,23 @@ impl App {
         self.build_transport(items);
     }
 
-    /// Focused inspector (278:609): the rule, INSPECTOR: n, five rows at
-    /// 23px, the directory on its own line.
+    /// Focused inspector: numbered filename, two dividers, five facts and
+    /// the source directory, as in the Sources sidebar detail panel.
     fn build_inspector(&self, items: &mut Vec<Item>) {
         let l = self.workspace();
         if l.inspector.h > 0.0 {
             let v = &self.videos[self.active];
             items.push(Item::Rect(RectItem::new(RectPx { h: 1.0, ..l.inspector }, WORKSPACE_RULE)));
             let (x0, x1) = (l.inspector.x + 16.0, l.inspector.x + l.panel - 16.0);
-            ui_label(items, x0, l.inspector.y + 24.0, 10.0, WORKSPACE_MUTED,
-                format!("INSPECTOR: {}", self.active + 1), Align::Left, l.panel - 32.0);
+            let badge = RectPx { x: x0, y: l.inspector.y + 18.0, w: 24.0, h: 24.0 };
+            items.push(Item::Rect(RectItem { radius: 12.0, ..RectItem::new(badge, hex_color(0x909090)) }));
+            items.push(Item::Text(TextItem { header: true, align: Align::Center, valign: VAlign::Middle,
+                ..TextItem::new(badge.x + 12.0, badge.y + 12.0, 15.0, hex_color(0x000000), (self.active + 1).to_string()) }));
+            items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(l.panel - 72.0),
+                ..TextItem::new(x0 + 32.0, l.inspector.y + 30.0, 12.0, WORKSPACE_TEXT, name_of(&v.info.path)) }));
+            for x in (0..((l.panel - 32.0) / 8.0) as usize).map(|i| x0 + i as f32 * 8.0) {
+                items.push(Item::Rect(RectItem::new(RectPx { x, y: l.inspector.y + 49.0, w: 4.0, h: 1.0 }, WORKSPACE_RULE)));
+            }
             for (i, (key, value)) in [
                 ("Format", format!("{} {}", v.info.codec, v.info.pix_fmt)),
                 ("Resolution", format!("{}×{}", v.info.width, v.info.height)),
@@ -2502,12 +2509,15 @@ impl App {
                 ("Bitrate", v.info.bit_rate.map(|b| format!("{:.2} Mb/s", b as f64 / 1e6)).unwrap_or_else(|| "—".into())),
                 ("Size", fmt_size(v.info.file_size)),
             ].into_iter().enumerate() {
-                let y = l.inspector.y + 52.0 + i as f32 * 23.0;
+                let y = l.inspector.y + 70.0 + i as f32 * 23.0;
                 ui_label(items, x0, y, 11.0, WORKSPACE_DIM, key, Align::Left, 78.0);
                 ui_label(items, x1, y, 11.0, WORKSPACE_TEXT, value, Align::Right, l.panel - 110.0);
             }
+            for x in (0..((l.panel - 32.0) / 8.0) as usize).map(|i| x0 + i as f32 * 8.0) {
+                items.push(Item::Rect(RectItem::new(RectPx { x, y: l.inspector.y + 185.0, w: 4.0, h: 1.0 }, WORKSPACE_RULE)));
+            }
             let dir = v.info.path.parent().unwrap_or_else(|| std::path::Path::new(""));
-            ui_label(items, x0, l.inspector.y + 190.0, 10.0, WORKSPACE_MUTED, dir.to_string_lossy(), Align::Left, l.panel - 32.0);
+            ui_label(items, x0, l.inspector.y + 202.0, 10.0, hex_color(0x249bff), dir.to_string_lossy(), Align::Left, l.panel - 32.0);
         }
     }
 
