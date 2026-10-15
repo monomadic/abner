@@ -2809,13 +2809,12 @@ impl App {
     }
 
     fn build_status_line(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
-        let height = if self.cut_mode { CUT_STATUS_H } else { STATUS_H };
-        let y = vp.1 - height;
-        items.push(Item::Rect(RectItem::new(RectPx { x: 0.0, y, w: vp.0, h: height }, WORKSPACE_PANEL)));
+        let y = vp.1 - STATUS_H;
+        items.push(Item::Rect(RectItem::new(RectPx { x: 0.0, y, w: vp.0, h: STATUS_H }, WORKSPACE_PANEL)));
         items.push(Item::Rect(RectItem::new(RectPx { x: 0.0, y, w: vp.0, h: 1.0 }, WORKSPACE_RULE)));
         if self.cut_mode {
-            ui_label(items, 16.0, y + height / 2.0, 10.0, ACCENT, "TIMELINE", Align::Left, 76.0);
-            if let Some(split) = self.controls().iter().find(|c| matches!(c.action, Action::Cut(CutAction::Split))) {
+            ui_label(items, 16.0, y + STATUS_H / 2.0, 10.0, ACCENT, "TIMELINE", Align::Left, 76.0);
+            if let Some(split) = self.controls().iter().find(|c| matches!(c.action, Action::Cut(CutAction::Split)) && c.r.y >= y) {
                 self.draw_cut_control(items, split);
             }
             return;
@@ -3485,6 +3484,10 @@ impl App {
             push(RectPx { x, y: cy - 16.0, w: 32.0, h: 32.0 }, label, matches!(action, CutAction::Snap(_)) && keyframe, action, hint);
             x += 38.0;
         }
+        if self.cut_clock_x() - x >= 138.0 {
+            push(RectPx { x, y: cy - 18.0, w: 130.0, h: 36.0 }, "Split", false, CutAction::Split, "S");
+            x += 138.0;
+        }
         let r = if w >= 1000.0 {
             RectPx { x: export_x - 118.0, y: 8.5, w: 108.0, h: 26.0 }
         } else if self.cut_clock_x() - x >= 120.0 {
@@ -3494,7 +3497,7 @@ impl App {
             RectPx { x: export_x - 118.0, y: 8.5, w: 108.0, h: 26.0 }
         };
         push(r, "Render", false, CutAction::EncodeAll, "⌘R");
-        push(RectPx { x: 100.0, y: self.vp.1 - CUT_STATUS_H + 6.0, w: 130.0, h: CUT_STATUS_H - 12.0 },
+        push(RectPx { x: 100.0, y: self.vp.1 - STATUS_H + 1.0, w: 108.0, h: 26.0 },
             "Split", false, CutAction::Split, "S");
         if bar.w >= 900.0 {
             let zoom = self.cut_zoom_bar();
@@ -4339,7 +4342,7 @@ impl App {
         self.build_cut_inspector(items);
         self.build_cut_timeline(items);
         for control in &controls {
-            if !matches!(control.action, Action::Cut(CutAction::Split)) {
+            if control.r.y < vp.1 - STATUS_H {
                 self.draw_cut_control(items, control);
             }
         }
@@ -4393,11 +4396,16 @@ impl App {
                 items.push(Item::Rect(RectItem { radius: 8.0, border_w: 1.0, border_color: outline,
                     ..RectItem::new(r, hex_color(0x050506)) }));
                 let ink = hex_color(if hovered { 0xffffff } else { 0xc8c8c8 });
-                draw_icon(items, Icon::Split, r.x + 20.0, cy, ink);
-                ui_label(items, r.x + 37.0, cy, 14.0, ink, &control.label, Align::Left, r.w - 77.0);
-                let key = RectPx { x: r.x + r.w - 32.0, y: cy - 12.0, w: 25.0, h: 24.0 };
+                let compact = r.h <= 26.0;
+                draw_icon(items, Icon::Split, r.x + if compact { 13.0 } else { 20.0 }, cy, ink);
+                ui_label(items, r.x + if compact { 28.0 } else { 37.0 }, cy,
+                    if compact { 12.0 } else { 14.0 }, ink, &control.label, Align::Left,
+                    if compact { 40.0 } else { r.w - 77.0 });
+                let key = RectPx { x: r.x + r.w - if compact { 29.0 } else { 32.0 },
+                    y: cy - if compact { 9.0 } else { 12.0 },
+                    w: if compact { 23.0 } else { 25.0 }, h: if compact { 18.0 } else { 24.0 } };
                 items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(key, hex_color(0x1b1b1b)) }));
-                ui_label(items, key.x + key.w / 2.0, cy, 12.0, ink, control.hint, Align::Center, key.w);
+                ui_label(items, key.x + key.w / 2.0, cy, if compact { 10.0 } else { 12.0 }, ink, control.hint, Align::Center, key.w);
             }
             CutAction::EncodeAll => {
                 let disabled = cut.encoding() || cut.scanning() || cut.exporting() || cut.pending_gops().is_empty();
@@ -5453,7 +5461,7 @@ impl Workspace {
             let side_w = if w >= 1000.0 { CUT_SIDE_W } else { 0.0 };
             let side_in = (side_w * ease(side_slide)).round();
             let side = if side_in > 0.0 { side_w } else { 0.0 };
-            let transport_y = h - CUT_STATUS_H - lanes - CUT_TOOLBAR_H;
+            let transport_y = h - STATUS_H - lanes - CUT_TOOLBAR_H;
             let top = (transport_y - CUT_HEADER_H).max(1.0);
             let (grip, inspector) = Self::detail(ox, panel, h, transport_y, detail_slide);
             let list_y = HEADER_H + 14.0;
@@ -6551,8 +6559,8 @@ mod tests {
         assert!(!app.playing);
 
         assert_eq!(app.controls().iter().filter(|c| matches!(c.action,
-            Action::Cut(CutAction::Split | CutAction::ToggleSplit))).count(), 2,
-            "the footer splits once while the toolbar arms the persistent tool");
+            Action::Cut(CutAction::Split | CutAction::ToggleSplit))).count(), 3,
+            "the two one-shot buttons complement the persistent split tool");
         // The toolbar arms the tool; clicking uses its preview and shares undo.
         app.seek_all(1.0, true);
         press(&mut app, CutAction::ToggleSplit);
@@ -6567,21 +6575,31 @@ mod tests {
         assert!(!app.split_tool);
         app.cut_action(CutAction::Undo);
         assert!(app.cut.as_ref().unwrap().splits().is_empty());
-        let footer = app.controls().into_iter().find(|c| matches!(c.action, Action::Cut(CutAction::Split))).unwrap();
+        let splits: Vec<_> = app.controls().into_iter().filter(|c| matches!(c.action, Action::Cut(CutAction::Split))).collect();
+        assert_eq!(splits.len(), 2);
+        let toolbar = splits.iter().find(|c| c.r.y < app.vp.1 - STATUS_H).unwrap();
+        let footer = splits.iter().find(|c| c.r.y >= app.vp.1 - STATUS_H).unwrap();
         assert_eq!(footer.label, "Split");
         assert_eq!(footer.hint, "S");
-        assert!(footer.r.y >= app.vp.1 - CUT_STATUS_H && footer.r.y + footer.r.h <= app.vp.1);
+        assert_eq!(footer.r.h, 26.0);
+        assert_eq!(toolbar.r.h, 36.0);
+        assert!(footer.r.y + footer.r.h <= app.vp.1);
         let frame = app.tick(0.0, app.vp, 2.0);
-        let footer_y = app.vp.1 - CUT_STATUS_H;
+        let footer_y = app.vp.1 - STATUS_H;
         let background = frame.items.iter().rposition(|item| matches!(item, Item::Rect(r)
-            if r.r.y == footer_y && r.r.h == CUT_STATUS_H)).unwrap();
+            if r.r.y == footer_y && r.r.h == STATUS_H)).unwrap();
         let split_label = frame.items.iter().rposition(|item| matches!(item, Item::Text(t) if t.text == "Split")).unwrap();
         assert!(split_label > background, "the footer must be painted before its button");
         let footer_text: Vec<_> = frame.items.iter().filter_map(|item| match item {
             Item::Text(t) if t.y >= footer_y => Some(t.text.as_str()), _ => None,
         }).collect();
         assert_eq!(footer_text, ["TIMELINE", "Split", "S"]);
-        press(&mut app, CutAction::Split);
+        app.mouse_down(toolbar.r.x + toolbar.r.w / 2.0, toolbar.r.y + toolbar.r.h / 2.0);
+        app.mouse_up();
+        assert_eq!(app.cut.as_ref().unwrap().splits(), &[1.0]);
+        app.cut_action(CutAction::Undo);
+        app.mouse_down(footer.r.x + footer.r.w / 2.0, footer.r.y + footer.r.h / 2.0);
+        app.mouse_up();
         assert_eq!(app.cut.as_ref().unwrap().splits(), &[1.0]);
         app.cut_action(CutAction::Undo);
 
@@ -7762,8 +7780,6 @@ const CROP_LABEL_MIN: (f32, f32) = (130.0, 24.0);
 const TRANSPORT_H: f32 = 60.0;
 /// Persistent footer for tool, selection, zoom, export results and shortcut hints.
 const STATUS_H: f32 = 28.0;
-/// Timeline-only footer: room for the Split action and its keycap.
-const CUT_STATUS_H: f32 = 48.0;
 /// Extra grab margin above/below the 5px seek track.
 const SEEK_GRAB: f32 = 9.0;
 /// Advance width of the monospace UI font, in em — used only to step

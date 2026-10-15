@@ -354,10 +354,11 @@ At close zoom, pending regions occupy a separate strip below the frame cells.
 The pending-GOP action is labelled Render, with a ⌘R keycap and an outlined
 header button beside Export. At narrower widths it moves into the scrub toolbar
 when there is room. Drawing and pointer handling share all control/region geometry.
-The Timeline bottom status bar is 48px tall and carries TIMELINE followed by an
-outlined Split button with an S keycap. The former status and shortcut text are
-removed there; the button invokes the same one-shot split as S, while the scrub
-toolbar's split icon still arms the persistent tool.
+The Timeline bottom status bar carries TIMELINE followed by a compact outlined
+Split button with an S keycap. A larger version follows the edit icons in the
+scrub toolbar when width permits. Both invoke the same one-shot split as S;
+the scrub toolbar's split icon still arms the persistent tool. The former
+footer status and shortcut text remain removed.
 
 ### GOP thumbnails and frame icons (2026-10-12)
 
