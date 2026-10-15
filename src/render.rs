@@ -351,6 +351,9 @@ pub enum Item {
     /// Scissor subsequent items to this logical rectangle; None restores the surface.
     Clip(Option<RectPx>),
     Rect(RectItem),
+    /// Soft rectangular shadow. Inner shades the canvas edge; outer sits
+    /// behind a fitted video rectangle. Both use logical pixel widths.
+    Shadow { r: RectPx, inner: bool, blur: f32, alpha: f32 },
     Video {
         a: usize,
         b: usize,
@@ -1203,6 +1206,19 @@ impl Gpu {
                     clip = rect.map(|r| scissor(r, scale, self.config.width, self.config.height));
                 }
                 Item::Rect(ri) => push(&mut data, &mut batches, clip, None, rect_inst(ri)),
+                Item::Shadow { r, inner, blur, alpha } => {
+                    let spread = if *inner { 0.0 } else { blur * 1.5 };
+                    push(&mut data, &mut batches, clip, None, Instance {
+                        pos: [r.x - spread, r.y - spread],
+                        size: [r.w + 2.0 * spread, r.h + 2.0 * spread],
+                        uv: [0.0; 4],
+                        color: [0.0, 0.0, 0.0, *alpha],
+                        mode: 16.0,
+                        p0: spread,
+                        p1: *blur,
+                        pad: if *inner { 1.0 } else { 0.0 },
+                    });
+                }
                 Item::Video { a, b, r, uv, mode, p0, p1 } => {
                     let key = self.pair_bg(*a, *b);
                     push(&mut data, &mut batches, clip, Some(key), Instance {

@@ -130,6 +130,7 @@ fn ui_color(c: vec4<f32>) -> vec4<f32> {
 // 13 launch overlays: p0 0 radial vignette in color, 1 scanlines in color
 // 14 recent-file thumbnail (tex_t * color.a), clipped to a p0-radius rounded box
 // 15 diagonal hatch in a p0-radius rounded box: color / uv slot alternate every p1/2 px along 135°
+// 16 rectangular shadow: p0 quad spread, p1 softness, pad 1 inner / 0 outer
 
 @fragment
 fn fs_main(in: Out) -> @location(0) vec4<f32> {
@@ -141,6 +142,21 @@ fn fs_main(in: Out) -> @location(0) vec4<f32> {
     let pl = textureSample(tex_p, samp, in.uv);
     let th = textureSample(tex_t, samp, in.uv);
     switch in.mode {
+        case 16u: {
+            let edge = min(min(in.local.x, in.local.y),
+                           min(in.size.x - in.local.x, in.size.y - in.local.y));
+            let softness = max(in.p1, 1.0);
+            var alpha: f32;
+            if in.pad > 0.5 {
+                // Only the inside edge of the document canvas is shaded.
+                alpha = 1.0 - smoothstep(0.0, softness, edge);
+            } else {
+                let half = in.size * 0.5 - vec2<f32>(in.p0);
+                let d = sd_round_box(in.local - in.size * 0.5, half, 0.0);
+                alpha = (1.0 - smoothstep(0.0, softness, d)) * (1.0 - cov(d));
+            }
+            return vec4<f32>(0.0, 0.0, 0.0, in.color.a * alpha);
+        }
         case 0u: {
             let half = in.size * 0.5;
             let r = clamp(in.p0, 0.0, min(half.x, half.y));

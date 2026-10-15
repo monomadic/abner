@@ -2111,6 +2111,17 @@ impl App {
         let canvas = self.workspace().canvas;
         if self.show_ui { items.push(Item::Rect(RectItem::new(canvas, if self.cut_mode { hex_color(CUT_CANVAS) } else { CANVAS_BG }))); }
         items.push(Item::Clip(Some(canvas)));
+        // Keep the lifted picture attached to its zoomed bounds, while the
+        // recessed document edge stays attached to the canvas itself.
+        if self.show_ui {
+            if mode == Mode::SideBySide {
+                for i in 0..n {
+                    items.push(Item::Shadow { r: self.content_rect(i), inner: false, blur: 18.0, alpha: 0.42 });
+                }
+            } else {
+                items.push(Item::Shadow { r: self.content_rect(a), inner: false, blur: 18.0, alpha: 0.42 });
+            }
+        }
         match mode {
             Mode::Overlay => items.push(Item::Video {
                 a,
@@ -2159,6 +2170,9 @@ impl App {
         items.push(Item::Clip(Some(canvas)));
         if self.mask_mode { self.build_mask_layer(&mut items); }
         if self.cut_mode && self.show_ui { self.build_cut_chips(&mut items); }
+        if self.show_ui {
+            items.push(Item::Shadow { r: canvas, inner: true, blur: 16.0, alpha: 0.28 });
+        }
         items.push(Item::Clip(None));
         if !self.cut_mode && (self.show_ui || self.badge_flash > 0.0) {
             for i in 0..if mode == Mode::SideBySide { n } else { 1 } {
