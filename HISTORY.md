@@ -3,6 +3,17 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-15 — the rail's focused inspector folds from its grip
+
+The detail panel under the source cards now carries a 14px grip strip along
+its top edge (three dots, brighter under the pointer). A click folds the panel
+down behind the Duplicate / Add files row over 150 ms and the card list takes
+the room; the grip rides the edge down and stays, so a second click brings the
+panel back. The layout keeps the inspector's full 216px content anchored at the
+top and clips it to the visible part, so nothing squashes mid-slide, and the
+directory row stops answering once it is out of view. `--no-detail` reaches the
+folded state for captures.
+
 ## 2026-10-14 — the timeline's inspector toggle; the inspector per Figma
 
 The right-hand sidebar toggle from the same Figma component now sits 43px in

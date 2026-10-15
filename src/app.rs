@@ -261,6 +261,12 @@ pub struct App {
     /// right edge.
     show_inspector: bool,
     side_slide: f32,
+    /// The rail's focused inspector (the detail panel under the cards):
+    /// the grip strip along its top edge folds it down behind the action
+    /// row and back, over `DETAIL_SLIDE_S`. The grip stays, so it can be
+    /// reopened.
+    show_detail: bool,
+    detail_slide: f32,
     /// Delta amplification.
     gain: f32,
     blend: f32,
@@ -615,6 +621,8 @@ impl App {
             rail_slide: 1.0,
             show_inspector: true,
             side_slide: 1.0,
+            show_detail: true,
+            detail_slide: 1.0,
             gain: cfg.compare.delta_gain,
             blend: cfg.compare.blend,
             checker_px: cfg.compare.checker_size,
@@ -776,6 +784,9 @@ impl App {
             return (self.cursor_inside && self.recent.hover.is_some()).then_some(CropCursor::Pointer);
         }
         if self.inspector_path_hit(self.cursor.0, self.cursor.1) {
+            return Some(CropCursor::Pointer);
+        }
+        if self.show_ui && self.cursor_inside && contains(self.workspace().grip, self.cursor.0, self.cursor.1) {
             return Some(CropCursor::Pointer);
         }
         if self.cut_mode && self.show_ui && self.cursor_inside {
@@ -2092,6 +2103,12 @@ impl App {
         };
         self.rail_slide = toward(self.rail_slide, self.show_sources);
         self.side_slide = toward(self.side_slide, self.show_inspector);
+        let step = dt / DETAIL_SLIDE_S;
+        let toward = |cur: f32, shown: bool| {
+            let target = if shown { 1.0 } else { 0.0 };
+            if cur < target { (cur + step).min(target) } else { (cur - step).max(target) }
+        };
+        self.detail_slide = toward(self.detail_slide, self.show_detail);
         self.tick_cut_hot(dt);
 
         // ---- draw list ----
@@ -2211,7 +2228,7 @@ impl App {
     /// Shared layout for drawing and hit testing; the image transform is always
     /// relative to this canvas, including in mask/crop and side-by-side modes.
     fn workspace(&self) -> Workspace {
-        let mut w = Workspace::new(self.vp, self.show_ui, self.cut_mode, self.rail_slide, self.side_slide);
+        let mut w = Workspace::new(self.vp, self.show_ui, self.cut_mode, self.rail_slide, self.side_slide, self.detail_slide);
         if self.show_ui && self.cut_mode {
             let extra = self.frame_detail_extra() + if self.cut_encode_rail() { 26.0 } else { 0.0 };
             w.canvas.h = (w.canvas.h - extra).max(1.0);
@@ -2333,6 +2350,9 @@ impl App {
         let l = self.workspace();
         let mut out = self.mode_selector().controls();
         out.push(Control::new(self.sidebar_toggle(), "", self.show_sources, Action::ToggleSources));
+        if l.grip.h > 0.0 {
+            out.push(Control::new(l.grip, "", self.show_detail, Action::ToggleDetail));
+        }
         if self.cut_mode {
             if self.vp.0 >= 1000.0 {
                 out.push(Control::new(self.inspector_toggle(), "", self.show_inspector, Action::ToggleInspector));
@@ -2402,6 +2422,7 @@ impl App {
             Action::ClearSources => { for v in &mut self.videos { v.selected = false; } },
             Action::ToggleSources => self.show_sources = !self.show_sources,
             Action::ToggleInspector => self.show_inspector = !self.show_inspector,
+            Action::ToggleDetail => self.show_detail = !self.show_detail,
             Action::View(mode) => self.mode = mode,
             Action::Brush(up) => self.resize_brush(if up { 1.25 } else { 0.8 }),
             Action::Save => self.save_mask(),
@@ -2447,9 +2468,16 @@ impl App {
         self.side_slide = if shown { 1.0 } else { 0.0 };
     }
 
+    /// `--no-detail`: the rail's focused inspector folded, as its grip leaves it.
+    pub fn set_detail_visible(&mut self, shown: bool) {
+        self.show_detail = shown;
+        self.detail_slide = if shown { 1.0 } else { 0.0 };
+    }
+
     fn rail_sliding(&self) -> bool {
         self.rail_slide != if self.show_sources { 1.0 } else { 0.0 }
             || self.side_slide != if self.show_inspector { 1.0 } else { 0.0 }
+            || self.detail_slide != if self.show_detail { 1.0 } else { 0.0 }
     }
 
     pub fn select_workspace_mode(&mut self, mode: usize) {
@@ -2498,7 +2526,7 @@ impl App {
         draw_sidebar_toggle(items, toggle, false, self.show_sources, self.cursor_inside && contains(toggle, self.cursor.0, self.cursor.1));
         for control in self.controls() {
             let hovered = contains(control.r, self.cursor.0, self.cursor.1) && self.cursor_inside;
-            if matches!(control.action, Action::Tool(_) | Action::ToggleSources | Action::ToggleInspector) {
+            if matches!(control.action, Action::Tool(_) | Action::ToggleSources | Action::ToggleInspector | Action::ToggleDetail) {
                 continue;
             }
             let disabled = matches!(control.action, Action::Save) && self.mask_save.is_some()
@@ -2542,10 +2570,26 @@ impl App {
     /// rows between two dashed hairlines, and the directory in accent blue.
     fn build_inspector(&self, items: &mut Vec<Item>) {
         let l = self.workspace();
+        if l.grip.h > 0.0 {
+            // The grip strip along the inspector's top edge: three dots on
+            // the rail's ground, brighter under the pointer. A click folds
+            // the panel down behind the action row and back.
+            let hover = self.cursor_inside && contains(l.grip, self.cursor.0, self.cursor.1);
+            items.push(Item::Rect(RectItem::new(l.grip, hex_color(if hover { RAIL_GRIP_HOVER_BG } else { RAIL_GRIP_BG }))));
+            let ink = hex_color(if hover { SOURCE_INK } else { SOURCE_SUBTLE });
+            let cx = l.grip.x + l.panel / 2.0;
+            for k in -1..=1 {
+                let dot = RectPx { x: cx - 1.5 + k as f32 * 6.0, y: l.grip.y + l.grip.h / 2.0 - 1.5, w: 3.0, h: 3.0 };
+                items.push(Item::Rect(RectItem { radius: 1.5, ..RectItem::new(dot, ink) }));
+            }
+        }
         if l.inspector.h > 0.0 {
             let v = &self.videos[self.active];
             let (y, x0, x1) = (l.inspector.y, l.inspector.x + 16.0, l.inspector.x + l.panel - 16.0);
-            items.push(Item::Rect(RectItem::new(l.inspector, hex_color(INSPECTOR_BG))));
+            // The content keeps its full layout, anchored at the top, and
+            // the visible rect clips it while the panel folds.
+            items.push(Item::Clip(Some(RectPx { x: 0.0, y: l.inspector.y, w: l.rail, h: l.inspector.h })));
+            items.push(Item::Rect(RectItem::new(RectPx { h: RAIL_INSPECTOR_H, ..l.inspector }, hex_color(INSPECTOR_BG))));
             items.push(Item::Rect(RectItem::new(RectPx { h: 1.0, ..l.inspector }, WORKSPACE_RULE)));
             let cap = RectPx { x: x0, y: y + 16.0, w: 24.0, h: 24.0 };
             items.push(Item::Rect(RectItem { radius: 12.0, ..RectItem::new(cap, mix(INSPECTOR_BG, 0xffffff, 0.5)) }));
@@ -2584,6 +2628,7 @@ impl App {
                 RectPx { x: x0, y: y + 186.5, w: 5.0, h: 2.5 }, color) }));
             items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(l.panel - 55.0),
                 ..TextItem::new(x0 + 19.0, y + 195.0, 10.0, color, dir.to_string_lossy()) }));
+            items.push(Item::Clip(None));
         }
     }
 
@@ -2592,7 +2637,7 @@ impl App {
         let l = self.workspace();
         let row = RectPx { x: l.inspector.x + 16.0, y: l.inspector.y + 183.0,
             w: (l.panel - 32.0).max(0.0), h: 24.0 };
-        l.inspector.h > 0.0 && x < l.rail && contains(row, x, y)
+        l.inspector.h > 0.0 && x < l.rail && contains(row, x, y) && y < l.inspector.y + l.inspector.h
             && self.videos[self.active].info.path.parent().is_some()
     }
 
@@ -5194,7 +5239,12 @@ struct Workspace {
     panel: f32,
     canvas: RectPx,
     list: RectPx,
+    /// The visible part of the focused inspector (its content is
+    /// `RAIL_INSPECTOR_H` tall, anchored at the top, clipped to this).
     inspector: RectPx,
+    /// The grip strip along the inspector's top edge; zero-sized when
+    /// the rail has no inspector at all.
+    grip: RectPx,
     transport: RectPx,
     /// Cut mode only (zero-sized otherwise): the lanes panel under the
     /// transport and the inspector column right of the canvas.
@@ -5202,7 +5252,7 @@ struct Workspace {
     side: RectPx,
 }
 impl Workspace {
-    fn new(vp: (f32, f32), visible: bool, cut: bool, slide: f32, side_slide: f32) -> Self {
+    fn new(vp: (f32, f32), visible: bool, cut: bool, slide: f32, side_slide: f32, detail_slide: f32) -> Self {
         let (w, h) = vp;
         let none = RectPx { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
         // `rail` is what the layout gives the panel this frame; `panel` is
@@ -5226,12 +5276,11 @@ impl Workspace {
             let side = if side_in > 0.0 { side_w } else { 0.0 };
             let transport_y = h - STATUS_H - lanes - CUT_TOOLBAR_H;
             let top = (transport_y - CUT_HEADER_H).max(1.0);
-            let inspector_h = if panel > 0.0 && h >= 800.0 { 216.0 } else { 0.0 };
-            let inspector = RectPx { x: ox, y: transport_y - inspector_h, w: panel, h: inspector_h };
+            let (grip, inspector) = Self::detail(ox, panel, h, transport_y, detail_slide);
             let list_y = HEADER_H + 14.0;
             return Self {
-                rail, panel, inspector,
-                list: RectPx { x: ox, y: list_y, w: panel, h: (inspector.y - RAIL_FOOTER_H - list_y).max(SOURCE_H) },
+                rail, panel, inspector, grip,
+                list: RectPx { x: ox, y: list_y, w: panel, h: (grip.y - RAIL_FOOTER_H - list_y).max(SOURCE_H) },
                 canvas: RectPx { x: rail, y: CUT_HEADER_H, w: (w - side_in - rail).max(1.0), h: top },
                 side: RectPx { x: w - side_in, y: CUT_HEADER_H, w: side, h: top },
                 transport: RectPx { x: 0.0, y: transport_y, w, h: CUT_TOOLBAR_H },
@@ -5246,19 +5295,31 @@ impl Workspace {
         // footer line above the inspector and the Duplicate / Add files
         // buttons under it — are not in the design and take their own
         // strips, so nothing overlaps the inspector's path line.
-        let inspector_h = if panel > 0.0 && h >= 800.0 { 216.0 } else { 0.0 };
-        let inspector = RectPx { x: ox, y: h - STATUS_H - RAIL_ACTIONS_H - inspector_h, w: panel, h: inspector_h };
+        let (grip, inspector) = Self::detail(ox, panel, h, h - STATUS_H - RAIL_ACTIONS_H, detail_slide);
         let list_y = HEADER_H + 14.0;
         Self {
-            rail, panel, canvas, inspector, timeline: none, side: none,
-            list: RectPx { x: ox, y: list_y, w: panel, h: (inspector.y - RAIL_FOOTER_H - list_y).max(SOURCE_H) },
+            rail, panel, canvas, inspector, grip, timeline: none, side: none,
+            list: RectPx { x: ox, y: list_y, w: panel, h: (grip.y - RAIL_FOOTER_H - list_y).max(SOURCE_H) },
             transport: RectPx { x: rail, y: h - STATUS_H - TRANSPORT_H, w: w - rail, h: TRANSPORT_H },
         }
+    }
+
+    /// The grip strip and the visible part of the focused inspector above
+    /// `bottom`: the inspector folds down behind what is under it as
+    /// `detail_slide` goes to 0, the grip riding on its top edge.
+    fn detail(ox: f32, panel: f32, h: f32, bottom: f32, detail_slide: f32) -> (RectPx, RectPx) {
+        let none = RectPx { x: ox, y: bottom, w: panel, h: 0.0 };
+        if panel <= 0.0 || h < 800.0 { return (none, none); }
+        let ease = |t: f32| { let t = t.clamp(0.0, 1.0); t * t * (3.0 - 2.0 * t) };
+        let shown = (RAIL_INSPECTOR_H * ease(detail_slide)).round();
+        let inspector = RectPx { x: ox, y: bottom - shown, w: panel, h: shown };
+        let grip = RectPx { x: ox, y: inspector.y - RAIL_GRIP_H, w: panel, h: RAIL_GRIP_H };
+        (grip, inspector)
     }
 }
 
 #[derive(Clone, Copy)]
-enum Action { Duplicate, OpenFiles, ClearSources, ToggleSources, ToggleInspector, Tool(usize), View(Mode), Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
+enum Action { Duplicate, OpenFiles, ClearSources, ToggleSources, ToggleInspector, ToggleDetail, Tool(usize), View(Mode), Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
 #[derive(Clone, Copy, PartialEq)]
 enum CutAction { TogglePosters, FrameChanges(bool), TimeDisplay(bool), In, Out, Split, ToggleSplit, Apply, DeletePicked, Undo, Export, EncodeAll, Encode(f64), Snap(Snap), Play, Zoom(bool), Step(i32), Keyframe(i32), Chapter(i32) }
 /// `hint` is the key cap a cut-mode button carries ("" for none).
@@ -5340,6 +5401,14 @@ const RAIL_FOOTER_H: f32 = 36.0;
 /// The sidebar's slide, seconds (the design's "panels slide outward over 200 ms").
 const RAIL_SLIDE_S: f32 = 0.2;
 const RAIL_ACTIONS_H: f32 = 40.0;
+/// The focused inspector (278:609) is 216px; the grip strip along its top
+/// edge folds it away over `DETAIL_SLIDE_S` — quicker than the rail, it
+/// moves less.
+const RAIL_INSPECTOR_H: f32 = 216.0;
+const RAIL_GRIP_H: f32 = 14.0;
+const DETAIL_SLIDE_S: f32 = 0.15;
+const RAIL_GRIP_BG: u32 = 0x161616;
+const RAIL_GRIP_HOVER_BG: u32 = 0x222222;
 /// The focused card's ring, the idle card's grey edge (as the design's
 /// card renders, #444444), and the keycap plate (white @ 0.5 in Figma;
 /// linear blending wants less).
@@ -5658,6 +5727,48 @@ mod tests {
         app.fullscreen = false;
         app.show_ui = false;
         assert!(!app.titlebar_background(600.0, 20.0));
+    }
+
+    /// The grip strip along the top edge of the rail's focused inspector
+    /// folds the panel down behind the action row over DETAIL_SLIDE_S and
+    /// back; the list takes the room, the grip stays reachable, and the
+    /// directory row stops answering while the panel is away.
+    #[test]
+    fn inspector_grip_folds_the_detail_panel_and_the_list_takes_the_room() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 2);
+        app.vp = (1280.0, 900.0);
+        let open = app.workspace();
+        assert_eq!((open.inspector.h, open.grip.h), (RAIL_INSPECTOR_H, RAIL_GRIP_H));
+        assert_eq!(open.grip.y + open.grip.h, open.inspector.y);
+        assert!(open.list.y + open.list.h + RAIL_FOOTER_H <= open.grip.y);
+        assert!(app.controls().iter().any(|c| matches!(c.action, Action::ToggleDetail) && c.selected));
+        app.cursor_moved(open.grip.x + 140.0, open.grip.y + 7.0);
+        assert!(matches!(app.crop_cursor(), Some(CropCursor::Pointer)));
+        app.mouse_down(open.grip.x + 140.0, open.grip.y + 7.0);
+        app.mouse_up();
+        assert!(!app.show_detail);
+        let desc = app.tick(DETAIL_SLIDE_S / 2.0, (1280.0, 900.0), 2.0);
+        assert!(desc.animating);
+        let mid = app.workspace();
+        assert!(mid.inspector.h > 0.0 && mid.inspector.h < RAIL_INSPECTOR_H, "{}", mid.inspector.h);
+        assert!(mid.inspector.y > open.inspector.y && mid.list.h > open.list.h);
+        assert!(!app.inspector_path_hit(mid.inspector.x + 24.0, mid.inspector.y + 195.0));
+        app.tick(DETAIL_SLIDE_S, (1280.0, 900.0), 2.0);
+        let shut = app.workspace();
+        assert_eq!(shut.inspector.h, 0.0);
+        assert_eq!(shut.grip.y + shut.grip.h, open.inspector.y + RAIL_INSPECTOR_H);
+        assert_eq!(shut.list.h, open.list.h + RAIL_INSPECTOR_H);
+        assert!(app.controls().iter().any(|c| matches!(c.action, Action::ToggleDetail) && !c.selected));
+        // The grip rode down with the edge; a click there brings it back.
+        app.mouse_down(shut.grip.x + 140.0, shut.grip.y + 7.0);
+        app.mouse_up();
+        app.tick(DETAIL_SLIDE_S, (1280.0, 900.0), 2.0);
+        let back = app.workspace();
+        assert_eq!((back.inspector.y, back.inspector.h, back.list.h), (open.inspector.y, RAIL_INSPECTOR_H, open.list.h));
+        // Hiding the rail takes the grip with it.
+        app.set_sources_visible(false);
+        assert_eq!(app.workspace().grip.h, 0.0);
     }
 
     /// The header's sidebar toggle (Figma 278:573) hides the Sources rail:

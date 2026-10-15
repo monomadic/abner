@@ -171,7 +171,12 @@ from one to the other, keeping its number.
   edge the same way (`show_inspector`/`side_slide`): `Workspace::side` keeps
   `CUT_SIDE_W` and overhangs the window while the canvas reclaims the inside part;
   hidden = zero-width. Export and the ready lamp step left of it. `--no-inspector`
-  for captures. The **focused inspector** (278:609) is the clip's keycap + name as a
+  for captures. The **rail's focused inspector folds** (2026-10-15): a 14px grip
+  strip of three dots rides its top edge (`Workspace::grip`, `Action::ToggleDetail`);
+  a click slides the panel down behind the action row over `DETAIL_SLIDE_S` (150 ms)
+  and the list takes the room. `Workspace::inspector` is the VISIBLE part — the content
+  keeps its 216px layout anchored at the top and is clipped to it. The grip stays while
+  folded, so it reopens; `--no-detail` for captures. The **focused inspector** (278:609) is the clip's keycap + name as a
   title row on a #0f0f0f ground, five mono rows between two dashed hairlines, and the
   directory in `INSPECTOR_PATH` blue. The Duplicate / Add files row and the footer line are the
   app's own and take their own strips (`RAIL_ACTIONS_H`, `RAIL_FOOTER_H`) so nothing
