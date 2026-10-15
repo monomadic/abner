@@ -2821,7 +2821,7 @@ impl App {
             if let Some(split) = self.controls().iter().find(|c| matches!(c.action, Action::Cut(CutAction::Split)) && c.r.y >= y) {
                 self.draw_cut_control(items, split);
             }
-            draw_cut_footer_button(items, self.cut_footer_join(), "Join", "J", false, true);
+            draw_cut_footer_button(items, self.cut_footer_join(), "Join", "J", false, false, true);
             return;
         }
         let mode = if !self.mask_mode { "SOURCES" } else if self.crop.is_some() { "CROP" } else { "MASK" };
@@ -4405,14 +4405,14 @@ impl App {
             }
             CutAction::Split => {
                 if r.h <= 26.0 {
-                    draw_cut_footer_button(items, r, &control.label, control.hint, hovered, false);
+                    draw_cut_footer_button(items, r, &control.label, control.hint, true, hovered, false);
                     return;
                 }
                 let outline = hex_color(if hovered { 0x555555 } else { 0x303030 });
                 items.push(Item::Rect(RectItem { radius: 8.0, border_w: 1.0, border_color: outline,
                     ..RectItem::new(r, hex_color(0x050506)) }));
                 let ink = hex_color(if hovered { 0xffffff } else { 0xc8c8c8 });
-                draw_icon(items, Icon::Split, r.x + 20.0, cy, ink);
+                draw_split_icon(items, r.x + 20.0, cy, ink, 0.75);
                 ui_label(items, r.x + 37.0, cy, 14.0, ink, &control.label, Align::Left, r.w - 77.0);
                 let key = RectPx { x: r.x + r.w - 32.0, y: cy - 12.0, w: 25.0, h: 24.0 };
                 items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(key, hex_color(0x1b1b1b)) }));
@@ -5165,6 +5165,18 @@ fn draw_frame_marker(items: &mut Vec<Item>, r: RectPx, kind: char, key: bool, in
     }
 }
 
+fn draw_split_icon(items: &mut Vec<Item>, cx: f32, cy: f32, color: [f32; 4], scale: f32) {
+    for y in [-8.0, -2.0, 4.0] {
+        items.push(Item::Rect(RectItem { radius: 0.75 * scale,
+            ..RectItem::new(RectPx { x: cx - 0.75 * scale, y: cy + y * scale,
+                w: 1.5 * scale, h: 4.0 * scale }, color) }));
+    }
+    for (x, left) in [(-8.0, true), (3.0, false)] {
+        items.push(Item::Triangle { r: RectPx { x: cx + x * scale, y: cy - 4.0 * scale,
+            w: 5.0 * scale, h: 8.0 * scale }, color, left, radius: 0.0 });
+    }
+}
+
 fn draw_icon(items: &mut Vec<Item>, icon: Icon, cx: f32, cy: f32, color: [f32; 4]) {
     let bar = |items: &mut Vec<Item>, x: f32, y: f32, w: f32, h: f32| {
         items.push(Item::Rect(RectItem { radius: 0.75, ..RectItem::new(RectPx { x: cx + x, y: cy + y, w, h }, color) }));
@@ -5224,12 +5236,7 @@ fn draw_icon(items: &mut Vec<Item>, icon: Icon, cx: f32, cy: f32, color: [f32; 4
             stroke(items, (-1.5 * m, 0.0), (-5.0 * m, 3.5));
         }
         // Two outward arrows around a dashed playhead, matching the supplied icon.
-        Icon::Split => {
-            for y in [-8.0, -2.0, 4.0] { bar(items, -0.75, y, 1.5, 4.0); }
-            for (x, left) in [(-8.0, true), (3.0, false)] {
-                items.push(Item::Triangle { r: RectPx { x: cx + x, y: cy - 4.0, w: 5.0, h: 8.0 }, color, left, radius: 0.0 });
-            }
-        }
+        Icon::Split => draw_split_icon(items, cx, cy, color, 1.0),
         Icon::Trash => {
             stroke(items, (-5.5, -5.5), (5.5, 5.5));
             stroke(items, (5.5, -5.5), (-5.5, 5.5));
@@ -5538,13 +5545,15 @@ fn ui_label(items: &mut Vec<Item>, x: f32, y: f32, px: f32, color: [f32; 4], tex
     items.push(Item::Text(TextItem { interface: true, align, valign: VAlign::Middle, max_width: Some(width.max(0.0)),
         ..TextItem::new(x, y, px, color, text) }));
 }
-fn draw_cut_footer_button(items: &mut Vec<Item>, r: RectPx, label: &str, key_label: &str, hovered: bool, disabled: bool) {
+fn draw_cut_footer_button(items: &mut Vec<Item>, r: RectPx, label: &str, key_label: &str, icon: bool, hovered: bool, disabled: bool) {
     let border = if disabled { 0x252525 } else if hovered { 0x555555 } else { 0x303030 };
     let ink = hex_color(if disabled { 0x686868 } else if hovered { 0xffffff } else { 0xc8c8c8 });
     let cy = r.y + r.h / 2.0;
     items.push(Item::Rect(RectItem { radius: 7.0, border_w: 1.0, border_color: hex_color(border),
         ..RectItem::new(r, hex_color(0x050506)) }));
-    ui_label(items, r.x + 10.0, cy, 12.0, ink, label, Align::Left, r.w - 43.0);
+    if icon { draw_split_icon(items, r.x + 13.0, cy, ink, 0.6); }
+    ui_label(items, r.x + if icon { 28.0 } else { 10.0 }, cy, 12.0, ink, label, Align::Left,
+        r.w - if icon { 60.0 } else { 43.0 });
     let key = RectPx { x: r.x + r.w - 29.0, y: cy - 9.0, w: 23.0, h: 18.0 };
     items.push(Item::Rect(RectItem { radius: 5.0, ..RectItem::new(key, hex_color(if disabled { 0x151515 } else { 0x1b1b1b })) }));
     ui_label(items, key.x + key.w / 2.0, cy, 10.0, ink, key_label, Align::Center, key.w);
