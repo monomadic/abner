@@ -2600,19 +2600,6 @@ impl App {
     /// rows between two dashed hairlines, and the directory in accent blue.
     fn build_inspector(&self, items: &mut Vec<Item>) {
         let l = self.workspace();
-        if l.grip.h > 0.0 {
-            // The grip strip along the inspector's top edge: three dots on
-            // the rail's ground, brighter under the pointer. A click folds
-            // the panel down behind the action row and back.
-            let hover = self.cursor_inside && contains(l.grip, self.cursor.0, self.cursor.1);
-            items.push(Item::Rect(RectItem::new(l.grip, hex_color(if hover { RAIL_GRIP_HOVER_BG } else { RAIL_GRIP_BG }))));
-            let ink = hex_color(if hover { SOURCE_INK } else { SOURCE_SUBTLE });
-            let cx = l.grip.x + l.panel / 2.0;
-            for k in -1..=1 {
-                let dot = RectPx { x: cx - 1.5 + k as f32 * 6.0, y: l.grip.y + l.grip.h / 2.0 - 1.5, w: 3.0, h: 3.0 };
-                items.push(Item::Rect(RectItem { radius: 1.5, ..RectItem::new(dot, ink) }));
-            }
-        }
         if l.inspector.h > 0.0 {
             let v = &self.videos[self.active];
             let (y, x0, x1) = (l.inspector.y, l.inspector.x + 16.0, l.inspector.x + l.panel - 16.0);
@@ -2620,7 +2607,6 @@ impl App {
             // the visible rect clips it while the panel folds.
             items.push(Item::Clip(Some(RectPx { x: 0.0, y: l.inspector.y, w: l.rail, h: l.inspector.h })));
             items.push(Item::Rect(RectItem::new(RectPx { h: RAIL_INSPECTOR_H, ..l.inspector }, hex_color(INSPECTOR_BG))));
-            items.push(Item::Rect(RectItem::new(RectPx { h: 1.0, ..l.inspector }, WORKSPACE_RULE)));
             let cap = RectPx { x: x0, y: y + 16.0, w: 24.0, h: 24.0 };
             items.push(Item::Rect(RectItem { radius: 12.0, ..RectItem::new(cap, mix(INSPECTOR_BG, 0xffffff, 0.5)) }));
             items.push(Item::Text(TextItem { header: true, align: Align::Center, valign: VAlign::Middle, max_width: Some(22.0),
@@ -2659,6 +2645,23 @@ impl App {
             items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(l.panel - 55.0),
                 ..TextItem::new(x0 + 19.0, y + 195.0, 10.0, color, dir.to_string_lossy()) }));
             items.push(Item::Clip(None));
+        }
+        if l.grip.h > 0.0 {
+            // The grip (Figma): the rule along the inspector's top edge with
+            // three hollow rings sitting on it, brighter under the pointer.
+            // The strip itself is the rail's ground; only the hit area is
+            // 14px. A click folds the panel down behind the action row.
+            let hover = self.cursor_inside && contains(l.grip, self.cursor.0, self.cursor.1);
+            let edge = l.grip.y + l.grip.h;
+            items.push(Item::Rect(RectItem::new(RectPx { x: l.grip.x, y: edge - 1.0, w: l.panel, h: 1.0 }, WORKSPACE_RULE)));
+            let ring = hex_color(if hover { SOURCE_SUBTLE } else { RAIL_GRIP_RING });
+            let cx = l.grip.x + l.panel / 2.0;
+            for k in -1..=1 {
+                let d = RAIL_GRIP_DOT;
+                let dot = RectPx { x: cx - d / 2.0 + k as f32 * (d + 2.0), y: edge - 1.0 - d / 2.0, w: d, h: d };
+                items.push(Item::Rect(RectItem { radius: d / 2.0, border_w: 1.0, border_color: ring,
+                    ..RectItem::new(dot, hex_color(INSPECTOR_BG)) }));
+            }
         }
     }
 
@@ -5558,8 +5561,10 @@ const RAIL_ACTIONS_H: f32 = 40.0;
 const RAIL_INSPECTOR_H: f32 = 216.0;
 const RAIL_GRIP_H: f32 = 14.0;
 const DETAIL_SLIDE_S: f32 = 0.15;
-const RAIL_GRIP_BG: u32 = 0x161616;
-const RAIL_GRIP_HOVER_BG: u32 = 0x222222;
+/// The grip's rings: 8px, outlined in the design's #4a4a4a on the
+/// inspector's ground.
+const RAIL_GRIP_DOT: f32 = 8.0;
+const RAIL_GRIP_RING: u32 = 0x4a4a4a;
 /// The focused card's ring, the idle card's grey edge (as the design's
 /// card renders, #444444), and the keycap plate (white @ 0.5 in Figma;
 /// linear blending wants less).
@@ -5880,7 +5885,7 @@ mod tests {
         assert!(!app.titlebar_background(600.0, 20.0));
     }
 
-    /// The grip strip along the top edge of the rail's focused inspector
+    /// The grip along the top edge of the rail's focused inspector
     /// folds the panel down behind the action row over DETAIL_SLIDE_S and
     /// back; the list takes the room, the grip stays reachable, and the
     /// directory row stops answering while the panel is away.
