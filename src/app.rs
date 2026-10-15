@@ -2809,14 +2809,16 @@ impl App {
     }
 
     fn build_status_line(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
-        let y = vp.1 - STATUS_H;
-        items.push(Item::Rect(RectItem::new(RectPx { x: 0.0, y, w: vp.0, h: STATUS_H }, WORKSPACE_PANEL)));
+        let height = if self.cut_mode { CUT_STATUS_H } else { STATUS_H };
+        let y = vp.1 - height;
+        items.push(Item::Rect(RectItem::new(RectPx { x: 0.0, y, w: vp.0, h: height }, WORKSPACE_PANEL)));
         items.push(Item::Rect(RectItem::new(RectPx { x: 0.0, y, w: vp.0, h: 1.0 }, WORKSPACE_RULE)));
         if self.cut_mode {
-            ui_label(items, 16.0, y + STATUS_H / 2.0, 10.0, ACCENT, "TIMELINE", Align::Left, 76.0);
+            ui_label(items, 16.0, y + height / 2.0, 10.0, ACCENT, "TIMELINE", Align::Left, 68.0);
             if let Some(split) = self.controls().iter().find(|c| matches!(c.action, Action::Cut(CutAction::Split)) && c.r.y >= y) {
                 self.draw_cut_control(items, split);
             }
+            draw_cut_footer_button(items, self.cut_footer_join(), "Join", "J", false, true);
             return;
         }
         let mode = if !self.mask_mode { "SOURCES" } else if self.crop.is_some() { "CROP" } else { "MASK" };
@@ -3497,8 +3499,7 @@ impl App {
             RectPx { x: export_x - 118.0, y: 8.5, w: 108.0, h: 26.0 }
         };
         push(r, "Render", false, CutAction::EncodeAll, "⌘R");
-        push(RectPx { x: 100.0, y: self.vp.1 - STATUS_H + 1.0, w: 108.0, h: 26.0 },
-            "Split", false, CutAction::Split, "S");
+        push(self.cut_footer_split(), "Split", false, CutAction::Split, "S");
         if bar.w >= 900.0 {
             let zoom = self.cut_zoom_bar();
             push(RectPx { x: zoom.x - 28.0, y: cy - 12.0, w: 24.0, h: 24.0 }, "Zoom out", false, CutAction::Zoom(false), "");
@@ -3509,6 +3510,14 @@ impl App {
     /// Edit tools follow playback; the clock follows the five edit buttons.
     fn cut_tools_x(&self) -> f32 {
         self.workspace().transport.x + 254.0
+    }
+
+    fn cut_footer_split(&self) -> RectPx {
+        RectPx { x: 90.0, y: self.vp.1 - CUT_STATUS_H + 6.0, w: 108.0, h: 26.0 }
+    }
+
+    fn cut_footer_join(&self) -> RectPx {
+        RectPx { x: self.cut_footer_split().x + 116.0, ..self.cut_footer_split() }
     }
 
     /// The clock is right-aligned beside zoom, or the right edge on narrow windows.
@@ -4342,7 +4351,7 @@ impl App {
         self.build_cut_inspector(items);
         self.build_cut_timeline(items);
         for control in &controls {
-            if control.r.y < vp.1 - STATUS_H {
+            if control.r.y < vp.1 - CUT_STATUS_H {
                 self.draw_cut_control(items, control);
             }
         }
@@ -4392,20 +4401,19 @@ impl App {
                 draw_icon(items, Icon::SnapKeyframe, cx, cy, hex_color(if on { FRAME_KEY } else { 0xececec }));
             }
             CutAction::Split => {
+                if r.h <= 26.0 {
+                    draw_cut_footer_button(items, r, &control.label, control.hint, hovered, false);
+                    return;
+                }
                 let outline = hex_color(if hovered { 0x555555 } else { 0x303030 });
                 items.push(Item::Rect(RectItem { radius: 8.0, border_w: 1.0, border_color: outline,
                     ..RectItem::new(r, hex_color(0x050506)) }));
                 let ink = hex_color(if hovered { 0xffffff } else { 0xc8c8c8 });
-                let compact = r.h <= 26.0;
-                draw_icon(items, Icon::Split, r.x + if compact { 13.0 } else { 20.0 }, cy, ink);
-                ui_label(items, r.x + if compact { 28.0 } else { 37.0 }, cy,
-                    if compact { 12.0 } else { 14.0 }, ink, &control.label, Align::Left,
-                    if compact { 40.0 } else { r.w - 77.0 });
-                let key = RectPx { x: r.x + r.w - if compact { 29.0 } else { 32.0 },
-                    y: cy - if compact { 9.0 } else { 12.0 },
-                    w: if compact { 23.0 } else { 25.0 }, h: if compact { 18.0 } else { 24.0 } };
+                draw_icon(items, Icon::Split, r.x + 20.0, cy, ink);
+                ui_label(items, r.x + 37.0, cy, 14.0, ink, &control.label, Align::Left, r.w - 77.0);
+                let key = RectPx { x: r.x + r.w - 32.0, y: cy - 12.0, w: 25.0, h: 24.0 };
                 items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(key, hex_color(0x1b1b1b)) }));
-                ui_label(items, key.x + key.w / 2.0, cy, if compact { 10.0 } else { 12.0 }, ink, control.hint, Align::Center, key.w);
+                ui_label(items, key.x + key.w / 2.0, cy, 12.0, ink, control.hint, Align::Center, key.w);
             }
             CutAction::EncodeAll => {
                 let disabled = cut.encoding() || cut.scanning() || cut.exporting() || cut.pending_gops().is_empty();
@@ -5461,7 +5469,7 @@ impl Workspace {
             let side_w = if w >= 1000.0 { CUT_SIDE_W } else { 0.0 };
             let side_in = (side_w * ease(side_slide)).round();
             let side = if side_in > 0.0 { side_w } else { 0.0 };
-            let transport_y = h - STATUS_H - lanes - CUT_TOOLBAR_H;
+            let transport_y = h - CUT_STATUS_H - lanes - CUT_TOOLBAR_H;
             let top = (transport_y - CUT_HEADER_H).max(1.0);
             let (grip, inspector) = Self::detail(ox, panel, h, transport_y, detail_slide);
             let list_y = HEADER_H + 14.0;
@@ -5526,6 +5534,17 @@ fn inset_rect(r: RectPx, pad: f32) -> RectPx {
 fn ui_label(items: &mut Vec<Item>, x: f32, y: f32, px: f32, color: [f32; 4], text: impl Into<String>, align: Align, width: f32) {
     items.push(Item::Text(TextItem { interface: true, align, valign: VAlign::Middle, max_width: Some(width.max(0.0)),
         ..TextItem::new(x, y, px, color, text) }));
+}
+fn draw_cut_footer_button(items: &mut Vec<Item>, r: RectPx, label: &str, key_label: &str, hovered: bool, disabled: bool) {
+    let border = if disabled { 0x252525 } else if hovered { 0x555555 } else { 0x303030 };
+    let ink = hex_color(if disabled { 0x686868 } else if hovered { 0xffffff } else { 0xc8c8c8 });
+    let cy = r.y + r.h / 2.0;
+    items.push(Item::Rect(RectItem { radius: 7.0, border_w: 1.0, border_color: hex_color(border),
+        ..RectItem::new(r, hex_color(0x050506)) }));
+    ui_label(items, r.x + 10.0, cy, 12.0, ink, label, Align::Left, r.w - 43.0);
+    let key = RectPx { x: r.x + r.w - 29.0, y: cy - 9.0, w: 23.0, h: 18.0 };
+    items.push(Item::Rect(RectItem { radius: 5.0, ..RectItem::new(key, hex_color(if disabled { 0x151515 } else { 0x1b1b1b })) }));
+    ui_label(items, key.x + key.w / 2.0, cy, 10.0, ink, key_label, Align::Center, key.w);
 }
 fn hex_color(rgb: u32) -> [f32; 4] {
     [((rgb >> 16) & 255) as f32 / 255.0, ((rgb >> 8) & 255) as f32 / 255.0, (rgb & 255) as f32 / 255.0, 1.0]
@@ -6577,27 +6596,35 @@ mod tests {
         assert!(app.cut.as_ref().unwrap().splits().is_empty());
         let splits: Vec<_> = app.controls().into_iter().filter(|c| matches!(c.action, Action::Cut(CutAction::Split))).collect();
         assert_eq!(splits.len(), 2);
-        let toolbar = splits.iter().find(|c| c.r.y < app.vp.1 - STATUS_H).unwrap();
-        let footer = splits.iter().find(|c| c.r.y >= app.vp.1 - STATUS_H).unwrap();
+        let toolbar = splits.iter().find(|c| c.r.y < app.vp.1 - CUT_STATUS_H).unwrap();
+        let footer = splits.iter().find(|c| c.r.y >= app.vp.1 - CUT_STATUS_H).unwrap();
         assert_eq!(footer.label, "Split");
         assert_eq!(footer.hint, "S");
         assert_eq!(footer.r.h, 26.0);
         assert_eq!(toolbar.r.h, 36.0);
-        assert!(footer.r.y + footer.r.h <= app.vp.1);
+        assert_eq!(footer.r.x, 90.0);
+        assert_eq!(footer.r.y - (app.vp.1 - CUT_STATUS_H), 6.0);
+        assert_eq!(app.vp.1 - footer.r.y - footer.r.h, 6.0);
+        let join = app.cut_footer_join();
+        assert_eq!(join.x - footer.r.x - footer.r.w, 8.0);
         let frame = app.tick(0.0, app.vp, 2.0);
-        let footer_y = app.vp.1 - STATUS_H;
+        let footer_y = app.vp.1 - CUT_STATUS_H;
         let background = frame.items.iter().rposition(|item| matches!(item, Item::Rect(r)
-            if r.r.y == footer_y && r.r.h == STATUS_H)).unwrap();
+            if r.r.y == footer_y && r.r.h == CUT_STATUS_H)).unwrap();
         let split_label = frame.items.iter().rposition(|item| matches!(item, Item::Text(t) if t.text == "Split")).unwrap();
         assert!(split_label > background, "the footer must be painted before its button");
         let footer_text: Vec<_> = frame.items.iter().filter_map(|item| match item {
             Item::Text(t) if t.y >= footer_y => Some(t.text.as_str()), _ => None,
         }).collect();
-        assert_eq!(footer_text, ["TIMELINE", "Split", "S"]);
+        assert_eq!(footer_text, ["TIMELINE", "Split", "S", "Join", "J"]);
         app.mouse_down(toolbar.r.x + toolbar.r.w / 2.0, toolbar.r.y + toolbar.r.h / 2.0);
         app.mouse_up();
         assert_eq!(app.cut.as_ref().unwrap().splits(), &[1.0]);
         app.cut_action(CutAction::Undo);
+        app.mouse_down(join.x + join.w / 2.0, join.y + join.h / 2.0);
+        app.mouse_up();
+        app.key(Key::Char('j'));
+        assert!(app.cut.as_ref().unwrap().splits().is_empty(), "Join is disabled");
         app.mouse_down(footer.r.x + footer.r.w / 2.0, footer.r.y + footer.r.h / 2.0);
         app.mouse_up();
         assert_eq!(app.cut.as_ref().unwrap().splits(), &[1.0]);
@@ -7780,6 +7807,8 @@ const CROP_LABEL_MIN: (f32, f32) = (130.0, 24.0);
 const TRANSPORT_H: f32 = 60.0;
 /// Persistent footer for tool, selection, zoom, export results and shortcut hints.
 const STATUS_H: f32 = 28.0;
+/// Timeline footer: 6px around its compact action buttons.
+const CUT_STATUS_H: f32 = 38.0;
 /// Extra grab margin above/below the 5px seek track.
 const SEEK_GRAB: f32 = 9.0;
 /// Advance width of the monospace UI font, in em — used only to step
