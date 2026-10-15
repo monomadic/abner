@@ -2809,22 +2809,14 @@ impl App {
     }
 
     fn build_status_line(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
-        let y = vp.1 - STATUS_H;
-        items.push(Item::Rect(RectItem::new(RectPx { x: 0.0, y, w: vp.0, h: STATUS_H }, WORKSPACE_PANEL)));
+        let height = if self.cut_mode { CUT_STATUS_H } else { STATUS_H };
+        let y = vp.1 - height;
+        items.push(Item::Rect(RectItem::new(RectPx { x: 0.0, y, w: vp.0, h: height }, WORKSPACE_PANEL)));
         items.push(Item::Rect(RectItem::new(RectPx { x: 0.0, y, w: vp.0, h: 1.0 }, WORKSPACE_RULE)));
         if self.cut_mode {
-            let cut = self.cut.as_ref().unwrap();
-            ui_label(items, 16.0, y + STATUS_H / 2.0, 10.0, ACCENT, "TIMELINE", Align::Left, 76.0);
-            let status = if !cut.status.is_empty() { cut.status.clone() } else if cut.scanning() { "Scanning keyframes…".into() } else {
-                format!("{} · {} cut · snap to {} · {}", name_of(&cut.path), cut.cuts().len(),
-                    if cut.snap == Snap::Keyframe { "keyframes" } else { "frames" },
-                    if cut.copy_ready() { "ready to copy" } else { "encoding needed" })
-            };
-            let hint_width = if vp.0 >= 1000.0 { 440.0 } else { 0.0 };
-            ui_label(items, 98.0, y + STATUS_H / 2.0, 10.0, WORKSPACE_DIM, status, Align::Left, vp.0 - 118.0 - hint_width);
-            if hint_width > 0.0 {
-                ui_label(items, vp.0 - 16.0, y + STATUS_H / 2.0, 10.0, WORKSPACE_MUTED,
-                    "i in   o out   s split   x cut   u undo   k snap   e export   esc back", Align::Right, hint_width);
+            ui_label(items, 16.0, y + height / 2.0, 10.0, ACCENT, "TIMELINE", Align::Left, 76.0);
+            if let Some(split) = self.controls().iter().find(|c| matches!(c.action, Action::Cut(CutAction::Split))) {
+                self.draw_cut_control(items, split);
             }
             return;
         }
@@ -3502,6 +3494,8 @@ impl App {
             RectPx { x: export_x - 118.0, y: 8.5, w: 108.0, h: 26.0 }
         };
         push(r, "Render", false, CutAction::EncodeAll, "⌘R");
+        push(RectPx { x: 100.0, y: self.vp.1 - CUT_STATUS_H + 6.0, w: 130.0, h: CUT_STATUS_H - 12.0 },
+            "Split", false, CutAction::Split, "S");
         if bar.w >= 900.0 {
             let zoom = self.cut_zoom_bar();
             push(RectPx { x: zoom.x - 28.0, y: cy - 12.0, w: 24.0, h: 24.0 }, "Zoom out", false, CutAction::Zoom(false), "");
@@ -4345,10 +4339,12 @@ impl App {
         self.build_cut_inspector(items);
         self.build_cut_timeline(items);
         for control in &controls {
-            self.draw_cut_control(items, control);
+            if !matches!(control.action, Action::Cut(CutAction::Split)) {
+                self.draw_cut_control(items, control);
+            }
         }
         // Icon buttons carry no words, so the hovered one names itself.
-        if let Some(c) = controls.iter().find(|c| matches!(c.action, Action::Cut(a) if !matches!(a, CutAction::Undo | CutAction::Export))
+        if let Some(c) = controls.iter().find(|c| matches!(c.action, Action::Cut(a) if !matches!(a, CutAction::Undo | CutAction::Export | CutAction::Split))
             && contains(c.r, self.cursor.0, self.cursor.1) && self.cursor_inside) {
             let text = if c.hint.is_empty() { c.label.clone() } else { format!("{}  ·  {}", c.label, c.hint) };
             let right = c.r.x + c.r.w / 2.0 > vp.0 - 140.0;
@@ -4391,6 +4387,17 @@ impl App {
                             hex_color(if on { 0x082b16 } else { 0x17191b })) }));
                 }
                 draw_icon(items, Icon::SnapKeyframe, cx, cy, hex_color(if on { FRAME_KEY } else { 0xececec }));
+            }
+            CutAction::Split => {
+                let outline = hex_color(if hovered { 0x555555 } else { 0x303030 });
+                items.push(Item::Rect(RectItem { radius: 8.0, border_w: 1.0, border_color: outline,
+                    ..RectItem::new(r, hex_color(0x050506)) }));
+                let ink = hex_color(if hovered { 0xffffff } else { 0xc8c8c8 });
+                draw_icon(items, Icon::Split, r.x + 20.0, cy, ink);
+                ui_label(items, r.x + 37.0, cy, 14.0, ink, &control.label, Align::Left, r.w - 77.0);
+                let key = RectPx { x: r.x + r.w - 32.0, y: cy - 12.0, w: 25.0, h: 24.0 };
+                items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(key, hex_color(0x1b1b1b)) }));
+                ui_label(items, key.x + key.w / 2.0, cy, 12.0, ink, control.hint, Align::Center, key.w);
             }
             CutAction::EncodeAll => {
                 let disabled = cut.encoding() || cut.scanning() || cut.exporting() || cut.pending_gops().is_empty();
@@ -5446,7 +5453,7 @@ impl Workspace {
             let side_w = if w >= 1000.0 { CUT_SIDE_W } else { 0.0 };
             let side_in = (side_w * ease(side_slide)).round();
             let side = if side_in > 0.0 { side_w } else { 0.0 };
-            let transport_y = h - STATUS_H - lanes - CUT_TOOLBAR_H;
+            let transport_y = h - CUT_STATUS_H - lanes - CUT_TOOLBAR_H;
             let top = (transport_y - CUT_HEADER_H).max(1.0);
             let (grip, inspector) = Self::detail(ox, panel, h, transport_y, detail_slide);
             let list_y = HEADER_H + 14.0;
@@ -6544,8 +6551,8 @@ mod tests {
         assert!(!app.playing);
 
         assert_eq!(app.controls().iter().filter(|c| matches!(c.action,
-            Action::Cut(CutAction::Split | CutAction::ToggleSplit))).count(), 1,
-            "the split icon replaces the scissors rather than adding a second button");
+            Action::Cut(CutAction::Split | CutAction::ToggleSplit))).count(), 2,
+            "the footer splits once while the toolbar arms the persistent tool");
         // The toolbar arms the tool; clicking uses its preview and shares undo.
         app.seek_all(1.0, true);
         press(&mut app, CutAction::ToggleSplit);
@@ -6560,6 +6567,23 @@ mod tests {
         assert!(!app.split_tool);
         app.cut_action(CutAction::Undo);
         assert!(app.cut.as_ref().unwrap().splits().is_empty());
+        let footer = app.controls().into_iter().find(|c| matches!(c.action, Action::Cut(CutAction::Split))).unwrap();
+        assert_eq!(footer.label, "Split");
+        assert_eq!(footer.hint, "S");
+        assert!(footer.r.y >= app.vp.1 - CUT_STATUS_H && footer.r.y + footer.r.h <= app.vp.1);
+        let frame = app.tick(0.0, app.vp, 2.0);
+        let footer_y = app.vp.1 - CUT_STATUS_H;
+        let background = frame.items.iter().rposition(|item| matches!(item, Item::Rect(r)
+            if r.r.y == footer_y && r.r.h == CUT_STATUS_H)).unwrap();
+        let split_label = frame.items.iter().rposition(|item| matches!(item, Item::Text(t) if t.text == "Split")).unwrap();
+        assert!(split_label > background, "the footer must be painted before its button");
+        let footer_text: Vec<_> = frame.items.iter().filter_map(|item| match item {
+            Item::Text(t) if t.y >= footer_y => Some(t.text.as_str()), _ => None,
+        }).collect();
+        assert_eq!(footer_text, ["TIMELINE", "Split", "S"]);
+        press(&mut app, CutAction::Split);
+        assert_eq!(app.cut.as_ref().unwrap().splits(), &[1.0]);
+        app.cut_action(CutAction::Undo);
 
         // The time display changes representation without seeking or playing.
         let time = app.t;
@@ -7738,6 +7762,8 @@ const CROP_LABEL_MIN: (f32, f32) = (130.0, 24.0);
 const TRANSPORT_H: f32 = 60.0;
 /// Persistent footer for tool, selection, zoom, export results and shortcut hints.
 const STATUS_H: f32 = 28.0;
+/// Timeline-only footer: room for the Split action and its keycap.
+const CUT_STATUS_H: f32 = 48.0;
 /// Extra grab margin above/below the 5px seek track.
 const SEEK_GRAB: f32 = 9.0;
 /// Advance width of the monospace UI font, in em — used only to step
