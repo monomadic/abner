@@ -2647,20 +2647,23 @@ impl App {
             items.push(Item::Clip(None));
         }
         if l.grip.h > 0.0 {
-            // The grip (Figma): the rule along the inspector's top edge with
-            // three hollow rings sitting on it, brighter under the pointer.
-            // The strip itself is the rail's ground; only the hit area is
-            // 14px. A click folds the panel down behind the action row.
+            // The grip, as the Figma draws it: an 8px #151515 strip along
+            // the inspector's top edge under a 1px near-black line, with
+            // three 5×4 discs (a #2a2a2a fill in a hairline #020202 outline) on
+            // a 6px pitch centred in it. The strip sits at the bottom of the
+            // 14px hit area; the rest is the rail's ground. Under the
+            // pointer the discs lighten.
             let hover = self.cursor_inside && contains(l.grip, self.cursor.0, self.cursor.1);
-            let edge = l.grip.y + l.grip.h;
-            items.push(Item::Rect(RectItem::new(RectPx { x: l.grip.x, y: edge - 1.0, w: l.panel, h: 1.0 }, WORKSPACE_RULE)));
-            let ring = hex_color(if hover { SOURCE_SUBTLE } else { RAIL_GRIP_RING });
+            let strip = RectPx { x: l.grip.x, y: l.grip.y + l.grip.h - RAIL_GRIP_STRIP_H, w: l.panel, h: RAIL_GRIP_STRIP_H };
+            items.push(Item::Rect(RectItem::new(RectPx { y: strip.y - 1.0, h: 1.0, ..strip }, hex_color(RAIL_GRIP_LINE))));
+            items.push(Item::Rect(RectItem::new(strip, hex_color(RAIL_GRIP_BG))));
+            let fill = hex_color(if hover { SOURCE_SUBTLE } else { RAIL_GRIP_DOT_FILL });
             let cx = l.grip.x + l.panel / 2.0;
             for k in -1..=1 {
-                let d = RAIL_GRIP_DOT;
-                let dot = RectPx { x: cx - d / 2.0 + k as f32 * (d + 2.0), y: edge - 1.0 - d / 2.0, w: d, h: d };
-                items.push(Item::Rect(RectItem { radius: d / 2.0, border_w: 1.0, border_color: ring,
-                    ..RectItem::new(dot, hex_color(INSPECTOR_BG)) }));
+                let (dw, dh) = RAIL_GRIP_DOT;
+                let dot = RectPx { x: cx - dw / 2.0 + k as f32 * RAIL_GRIP_PITCH, y: strip.y + strip.h / 2.0 - dh / 2.0, w: dw, h: dh };
+                items.push(Item::Rect(RectItem { radius: dh / 2.0, border_w: 0.75, border_color: hex_color(RAIL_GRIP_LINE),
+                    ..RectItem::new(dot, fill) }));
             }
         }
     }
@@ -5561,10 +5564,15 @@ const RAIL_ACTIONS_H: f32 = 40.0;
 const RAIL_INSPECTOR_H: f32 = 216.0;
 const RAIL_GRIP_H: f32 = 14.0;
 const DETAIL_SLIDE_S: f32 = 0.15;
-/// The grip's rings: 8px, outlined in the design's #4a4a4a on the
-/// inspector's ground.
-const RAIL_GRIP_DOT: f32 = 8.0;
-const RAIL_GRIP_RING: u32 = 0x4a4a4a;
+/// The grip as measured off the Figma: an 8px #151515 strip under a 1px
+/// #060606 line, three 5×4 #2a2a2a discs outlined in near-black on a 6px
+/// pitch.
+const RAIL_GRIP_STRIP_H: f32 = 8.0;
+const RAIL_GRIP_BG: u32 = 0x151515;
+const RAIL_GRIP_LINE: u32 = 0x060606;
+const RAIL_GRIP_DOT: (f32, f32) = (5.0, 4.0);
+const RAIL_GRIP_PITCH: f32 = 6.0;
+const RAIL_GRIP_DOT_FILL: u32 = 0x2a2a2a;
 /// The focused card's ring, the idle card's grey edge (as the design's
 /// card renders, #444444), and the keycap plate (white @ 0.5 in Figma;
 /// linear blending wants less).
