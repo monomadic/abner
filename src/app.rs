@@ -4161,12 +4161,12 @@ impl App {
         let (x0, w) = (s.x + 16.0, s.w - 32.0);
         // No clip header here: the Sources rail already shows the clip in
         // timeline mode, so the icon tabs start at the top.
-        let tabs = RectPx { x: x0, y: s.y + 16.0, w, h: 32.0 };
+        let tabs = RectPx { x: x0, y: s.y + 16.0, w, h: 30.0 };
         let half = (w - 4.0) / 4.0;
-        let tab = [0, 1, 2, 3].map(|i| RectPx { x: x0 + 2.0 + i as f32 * half, y: tabs.y + 2.0, w: half, h: 28.0 });
-        let count_y = tabs.y + tabs.h + 14.0;
+        let tab = [0, 1, 2, 3].map(|i| RectPx { x: x0 + 2.0 + i as f32 * half, y: tabs.y + 2.0, w: half, h: tabs.h - 4.0 });
+        let count_y = tabs.y + tabs.h + 18.0;
         let toggle = RectPx { x: x0 + w - 58.0, y: count_y, w: 58.0, h: 26.0 };
-        let add_btn = RectPx { x: toggle.x - 34.0, y: toggle.y + 2.0, w: 26.0, h: 22.0 };
+        let add_btn = RectPx { x: toggle.x - 36.0, y: toggle.y + 1.0, w: 26.0, h: 24.0 };
         let list_btn = RectPx { x: toggle.x + 2.0, y: toggle.y + 2.0, w: 26.0, h: 22.0 };
         let grid_btn = RectPx { x: toggle.x + 30.0, ..list_btn };
         let footer_y = s.y + s.h - 56.0;
@@ -4495,13 +4495,24 @@ impl App {
         items.push(Item::Clip(Some(s)));
 
         // ---- the icon tabs: chapters, streams ----
-        items.push(Item::Rect(RectItem { radius: 9.0, ..RectItem::new(g.tabs, mix(CUT_BG, 0xffffff, 0.05)) }));
+        // A segmented control: a hairlined housing, the lit segment a
+        // solid accent block with a white glyph, the rest at half ink.
+        items.push(Item::Rect(RectItem { radius: 8.0, border_w: 1.0, border_color: hex_color(CUT_SEG_EDGE),
+            ..RectItem::new(g.tabs, hex_color(CUT_SEG_BG)) }));
         for (i, (r, icon)) in g.tab.iter().zip([Icon::Flag, Icon::Subtitle, Icon::Segments, Icon::Info]).enumerate() {
             let on = self.cut_tab == [0, 2, 3, 1][i];
             let hovered = self.cursor_inside && contains(*r, self.cursor.0, self.cursor.1);
-            if on { items.push(Item::Rect(RectItem { radius: 7.0, border_w: 1.0, border_color: mix(CUT_TOOL_ON, 0x0088ff, 0.35), ..RectItem::new(*r, hex_color(CUT_TOOL_ON)) })); }
-            draw_icon(items, icon, r.x + r.w / 2.0, r.y + r.h / 2.0, if on { ACCENT } else if hovered { ink } else { dim });
+            if on { items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(*r, ACCENT) })); }
+            draw_icon(items, icon, r.x + r.w / 2.0, r.y + r.h / 2.0, if on { hex_color(0xffffff) } else if hovered { ink } else { mix(CUT_BG, 0xffffff, 0.62) });
         }
+
+        // "Chapters 10": the name in mono ink, the count after it at half.
+        let heading = |items: &mut Vec<Item>, y: f32, name: &str, count: usize| {
+            items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle,
+                ..TextItem::new(x0, y, 13.0, ink, name) }));
+            items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle,
+                ..TextItem::new(x0 + (name.chars().count() + 1) as f32 * 13.0 * MONO_ADV, y, 13.0, mix(CUT_BG, 0xffffff, 0.48), count.to_string()) }));
+        };
 
         let kv = |items: &mut Vec<Item>, y: f32, key: &str, value: String, color: [f32; 4]| {
             inspector_label(items, x0, y, 11.5, dim, key, Align::Left, 110.0);
@@ -4512,17 +4523,18 @@ impl App {
         if self.cut_tab == 0 {
             // ---- chapters ----
             let cy = g.count_y + 13.0;
-            inspector_label(items, x0, cy, 11.0, ink, format!("Chapters {}", cut.chapters.len()), Align::Left, g.add_btn.x - x0 - 8.0);
+            heading(items, cy, "Chapters", cut.chapters.len());
             let plus_hot = self.cursor_inside && contains(g.add_btn, self.cursor.0, self.cursor.1);
-            items.push(Item::Rect(RectItem { radius: 7.0, ..RectItem::new(g.add_btn, mix(CUT_BG, 0xffffff, if plus_hot { 0.12 } else { 0.07 })) }));
+            items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(g.add_btn, mix(CUT_BG, 0xffffff, if plus_hot { 0.14 } else { 0.09 })) }));
             let (px, py) = (g.add_btn.x + g.add_btn.w / 2.0, g.add_btn.y + g.add_btn.h / 2.0);
-            let plus = if plus_hot { ink } else { dim };
-            items.push(Item::Rect(RectItem::new(RectPx { x: px - 5.0, y: py - 0.75, w: 10.0, h: 1.5 }, plus)));
-            items.push(Item::Rect(RectItem::new(RectPx { x: px - 0.75, y: py - 5.0, w: 1.5, h: 10.0 }, plus)));
-            items.push(Item::Rect(RectItem { radius: 7.0, ..RectItem::new(g.toggle, mix(CUT_BG, 0xffffff, 0.05)) }));
+            let plus = if plus_hot { ink } else { mix(CUT_BG, 0xffffff, 0.8) };
+            items.push(Item::Rect(RectItem::new(RectPx { x: px - 4.5, y: py - 0.75, w: 9.0, h: 1.5 }, plus)));
+            items.push(Item::Rect(RectItem::new(RectPx { x: px - 0.75, y: py - 4.5, w: 1.5, h: 9.0 }, plus)));
+            items.push(Item::Rect(RectItem { radius: 7.0, border_w: 1.0, border_color: hex_color(CUT_SEG_EDGE),
+                ..RectItem::new(g.toggle, hex_color(CUT_SEG_BG)) }));
             for (r, icon, on) in [(g.list_btn, Icon::List, !self.cut_thumbs), (g.grid_btn, Icon::Grid, self.cut_thumbs)] {
-                if on { items.push(Item::Rect(RectItem { radius: 5.0, border_w: 1.0, border_color: mix(CUT_TOOL_ON, 0x0088ff, 0.35), ..RectItem::new(r, hex_color(CUT_TOOL_ON)) })); }
-                draw_icon(items, icon, r.x + r.w / 2.0, r.y + r.h / 2.0, if on { ACCENT } else { dim });
+                if on { items.push(Item::Rect(RectItem { radius: 5.0, border_w: 1.0, border_color: mix(CUT_TOOL_ON, 0x1580de, 0.55), ..RectItem::new(r, hex_color(CUT_TOOL_ON)) })); }
+                draw_icon(items, icon, r.x + r.w / 2.0, r.y + r.h / 2.0, if on { ACCENT } else { mix(CUT_BG, 0xffffff, 0.62) });
             }
             let current = cut.chapters.iter().rposition(|c| c.start <= self.t + 1e-6);
             if cut.chapters.is_empty() {
@@ -4561,7 +4573,7 @@ impl App {
             }
         } else if self.cut_tab >= 2 {
             let (title, count) = if self.cut_tab == 2 { ("Subtitles", cut.cues.len()) } else { ("Segments", cut.segments().len()) };
-            inspector_label(items, x0, g.body.y + 10.0, 11.0, ink, format!("{title} {count}"), Align::Left, g.body.w);
+            heading(items, g.body.y + 10.0, title, count);
             if count == 0 {
                 inspector_label(items, x0, g.body.y + 42.0, 11.0, faint,
                     if cut.scanning() { "reading subtitles …" } else { "no text subtitles in this file" }, Align::Left, g.body.w);
@@ -5356,6 +5368,9 @@ const CUT_CHAPTER_TAG: u32 = 0xd00070;
 const CUT_BAR: u32 = 0x000000;
 /// The lit tab / toggle ground: the app's TOOL_BG.
 const CUT_TOOL_ON: u32 = 0x0b1926;
+/// The inspector's segmented controls: a hairlined housing on a near-black ground.
+const CUT_SEG_BG: u32 = 0x131313;
+const CUT_SEG_EDGE: u32 = 0x2d2d2d;
 const CUT_TL: u32 = 0x121212;
 /// The inspector's segment rows.
 const CUT_LANE: u32 = 0x151719;
