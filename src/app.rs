@@ -63,6 +63,8 @@ pub enum Key {
     CmdDigit(char),
     /// ⌘Z: cut mode's undo.
     Undo,
+    /// ⌘R: render pending split GOPs in the timeline.
+    Render,
     /// ⇧← / ⇧→: cut mode's previous / next keyframe. Plain arrows elsewhere.
     KeyLeft,
     KeyRight,
@@ -1560,7 +1562,7 @@ impl App {
                 }
             }
             Key::Backspace => self.speed = 1.0,
-            Key::Close | Key::CmdDigit(_) | Key::Undo | Key::KeyLeft | Key::KeyRight | Key::DuplicateSources | Key::SelectSources | Key::OpenFiles => {} // handled above
+            Key::Close | Key::CmdDigit(_) | Key::Undo | Key::Render | Key::KeyLeft | Key::KeyRight | Key::DuplicateSources | Key::SelectSources | Key::OpenFiles => {} // handled above
             Key::Char('V') => self.mode = self.mode.cycle(-1),
             Key::Char(c @ '1'..='9') => {
                 let idx = c as usize - '1' as usize;
@@ -3276,6 +3278,7 @@ impl App {
             Key::Backspace if !self.cut_picks.is_empty() => CutAction::DeletePicked,
             Key::Char('x' | 'X') => CutAction::Apply,
             Key::Char('e' | 'E') => CutAction::Export,
+            Key::Render => CutAction::EncodeAll,
             Key::Undo | Key::Char('u' | 'U') => CutAction::Undo,
             Key::Char('k' | 'K') => {
                 let snap = self.cut.as_ref().map(|c| c.snap);
@@ -3490,13 +3493,15 @@ impl App {
             push(RectPx { x, y: cy - 16.0, w: 32.0, h: 32.0 }, label, matches!(action, CutAction::Snap(_)) && keyframe, action, hint);
             x += 38.0;
         }
-        let r = if self.cut_clock_x() - x >= 108.0 {
-            RectPx { x, y: cy - 16.0, w: 100.0, h: 32.0 }
+        let r = if w >= 1000.0 {
+            RectPx { x: export_x - 118.0, y: 8.5, w: 108.0, h: 26.0 }
+        } else if self.cut_clock_x() - x >= 120.0 {
+            RectPx { x, y: cy - 16.0, w: 112.0, h: 32.0 }
         } else {
-            // Keep Encode all reachable without covering the clock on narrow windows.
-            RectPx { x: w - 209.0, y: 8.5, w: 84.0, h: 26.0 }
+            // Keep Render reachable without covering the clock on narrow windows.
+            RectPx { x: export_x - 118.0, y: 8.5, w: 108.0, h: 26.0 }
         };
-        push(r, if cut.encoding() { "Encoding…" } else { "Encode all" }, false, CutAction::EncodeAll, "Encode every split GOP");
+        push(r, "Render", false, CutAction::EncodeAll, "⌘R");
         if bar.w >= 900.0 {
             let zoom = self.cut_zoom_bar();
             push(RectPx { x: zoom.x - 28.0, y: cy - 12.0, w: 24.0, h: 24.0 }, "Zoom out", false, CutAction::Zoom(false), "");
@@ -4276,9 +4281,10 @@ impl App {
             } else if cut.copy_ready() {
                 ("READY · STREAM COPY", hex_color(CUT_LAMP))
             } else { ("SPLIT GOPs · ENCODING NEEDED", hex_color(0xb68aff)) };
+            let status_right = self.vp.0 - 285.0;
             items.push(Item::Text(TextItem { align: Align::Right, valign: VAlign::Middle,
-                tracking: 0.63, max_width: Some((self.vp.0 - 178.0 - r.x - r.w).max(0.0)),
-                ..TextItem::new(self.vp.0 - 166.0, 21.5, 10.5, color, text) }));
+                tracking: 0.63, max_width: Some((status_right - 12.0 - r.x - r.w).max(0.0)),
+                ..TextItem::new(status_right, 21.5, 10.5, color, text) }));
         }
     }
 
@@ -4386,7 +4392,18 @@ impl App {
                 }
                 draw_icon(items, Icon::SnapKeyframe, cx, cy, hex_color(if on { FRAME_KEY } else { 0xececec }));
             }
-            CutAction::EncodeAll | CutAction::Encode(_) => {
+            CutAction::EncodeAll => {
+                let disabled = cut.encoding() || cut.scanning() || cut.exporting() || cut.pending_gops().is_empty();
+                let border = if hovered && !disabled { 0x555555 } else { 0x303030 };
+                items.push(Item::Rect(RectItem { radius: 7.0, border_w: 1.0,
+                    border_color: hex_color(border), ..RectItem::new(r, hex_color(0x050506)) }));
+                let key = RectPx { x: r.x + r.w - 35.0, y: cy - 9.0, w: 29.0, h: 18.0 };
+                items.push(Item::Rect(RectItem { radius: 5.0, ..RectItem::new(key, hex_color(0x1b1b1b)) }));
+                let ink = hex_color(if disabled { 0x777777 } else { 0xc8c8c8 });
+                ui_label(items, r.x + 10.0, cy, 12.0, ink, &control.label, Align::Left, r.w - 48.0);
+                ui_label(items, key.x + key.w / 2.0, cy, 10.0, ink, control.hint, Align::Center, key.w);
+            }
+            CutAction::Encode(_) => {
                 let disabled = cut.encoding() || cut.scanning() || cut.exporting() || cut.pending_gops().is_empty();
                 items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(r,
                     hex_color(if disabled { 0x302839 } else if hovered { 0xd2b4ff } else { 0xb68aff })) }));
@@ -6991,9 +7008,11 @@ mod tests {
         let working = app.videos[0].info.path.clone();
         let controls = app.controls();
         let all = controls.iter().find(|c| matches!(c.action, Action::Cut(CutAction::EncodeAll))).unwrap();
-        assert!(all.r.x + all.r.w < app.cut_clock_x());
+        assert_eq!(all.label, "Render");
+        assert_eq!(all.hint, "⌘R");
+        assert!(all.r.y < HEADER_H);
         // Empty batch is a no-op, not another generation of the source.
-        app.mouse_down(all.r.x+2.0, all.r.y+2.0); app.mouse_up();
+        app.key(Key::Render);
         assert!(!app.cut.as_ref().unwrap().encoding());
         drop(app); std::fs::remove_file(working).unwrap();
     }

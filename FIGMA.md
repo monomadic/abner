@@ -351,8 +351,9 @@ Toolbar states follow 245:455: snap uses a green icon/border over #082b16.
 The re-encoding switch was removed after review. Pending regions and Encode
 controls remain available; lossless/lossy mode selection is deferred.
 At close zoom, pending regions occupy a separate strip below the frame cells.
-Encode all moves beside Export when the toolbar is too narrow for both it and
-the clock. Drawing and pointer handling share all control/region geometry.
+The pending-GOP action is labelled Render, with a ⌘R keycap and an outlined
+header button beside Export. At narrower widths it moves into the scrub toolbar
+when there is room. Drawing and pointer handling share all control/region geometry.
 
 ### GOP thumbnails and frame icons (2026-10-12)
 
