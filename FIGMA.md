@@ -356,6 +356,8 @@ header button beside Export. At narrower widths it moves into the scrub toolbar
 when there is room. Drawing and pointer handling share all control/region geometry.
 The Timeline bottom status bar carries TIMELINE followed by a compact outlined
 Split button with a small split icon and S keycap, then a disabled Join button with a J keycap. The
+footer also carries Save with a ⌘S keycap; it writes an editable `.abner.json`
+timeline beside the source and loads it when that source is reopened. The
 footer is 38px tall, leaving 6px around the buttons. A larger Split version
 with a slightly larger icon follows the edit icons in the
 scrub toolbar when width permits. Both invoke the same one-shot split as S;

@@ -65,6 +65,8 @@ pub enum Key {
     Undo,
     /// ⌘R: render pending split GOPs in the timeline.
     Render,
+    /// ⌘S: save timeline edits beside the source clip.
+    SaveProject,
     /// ⇧← / ⇧→: cut mode's previous / next keyframe. Plain arrows elsewhere.
     KeyLeft,
     KeyRight,
@@ -1562,7 +1564,7 @@ impl App {
                 }
             }
             Key::Backspace => self.speed = 1.0,
-            Key::Close | Key::CmdDigit(_) | Key::Undo | Key::Render | Key::KeyLeft | Key::KeyRight | Key::DuplicateSources | Key::SelectSources | Key::OpenFiles => {} // handled above
+            Key::Close | Key::CmdDigit(_) | Key::Undo | Key::Render | Key::SaveProject | Key::KeyLeft | Key::KeyRight | Key::DuplicateSources | Key::SelectSources | Key::OpenFiles => {} // handled above
             Key::Char('V') => self.mode = self.mode.cycle(-1),
             Key::Char(c @ '1'..='9') => {
                 let idx = c as usize - '1' as usize;
@@ -2822,6 +2824,9 @@ impl App {
                 self.draw_cut_control(items, split);
             }
             draw_cut_footer_button(items, self.cut_footer_join(), "Join", "J", false, false, true);
+            if let Some(save) = self.controls().iter().find(|c| matches!(c.action, Action::Cut(CutAction::SaveProject))) {
+                self.draw_cut_control(items, save);
+            }
             return;
         }
         let mode = if !self.mask_mode { "SOURCES" } else if self.crop.is_some() { "CROP" } else { "MASK" };
@@ -3275,6 +3280,7 @@ impl App {
             Key::Char('x' | 'X') => CutAction::Apply,
             Key::Char('e' | 'E') => CutAction::Export,
             Key::Render => CutAction::EncodeAll,
+            Key::SaveProject => CutAction::SaveProject,
             Key::Undo | Key::Char('u' | 'U') => CutAction::Undo,
             Key::Char('k' | 'K') => {
                 let snap = self.cut.as_ref().map(|c| c.snap);
@@ -3419,6 +3425,12 @@ impl App {
                 if !cut.undo() { cut.status = "Nothing to undo".into(); }
             }
             CutAction::Export => cut.start_export(),
+            CutAction::SaveProject => {
+                if let Err(error) = cut.save_project() {
+                    cut.status = format!("Save failed: {error}");
+                    log::error!("{}", cut.status);
+                }
+            }
             CutAction::EncodeAll => cut.start_encode(None),
             CutAction::Encode(t) => cut.start_encode(Some(t)),
             CutAction::Snap(snap) => cut.snap = snap,
@@ -3503,6 +3515,7 @@ impl App {
         };
         push(r, "Render", false, CutAction::EncodeAll, "⌘R");
         push(self.cut_footer_split(), "Split", false, CutAction::Split, "S");
+        push(self.cut_footer_save(), "Save", false, CutAction::SaveProject, "⌘S");
         if bar.w >= 900.0 {
             let zoom = self.cut_zoom_bar();
             push(RectPx { x: zoom.x - 28.0, y: cy - 12.0, w: 24.0, h: 24.0 }, "Zoom out", false, CutAction::Zoom(false), "");
@@ -3521,6 +3534,10 @@ impl App {
 
     fn cut_footer_join(&self) -> RectPx {
         RectPx { x: self.cut_footer_split().x + 116.0, ..self.cut_footer_split() }
+    }
+
+    fn cut_footer_save(&self) -> RectPx {
+        RectPx { x: self.cut_footer_join().x + 116.0, ..self.cut_footer_join() }
     }
 
     /// The clock is right-aligned beside zoom, or the right edge on narrow windows.
@@ -4359,7 +4376,7 @@ impl App {
             }
         }
         // Icon buttons carry no words, so the hovered one names itself.
-        if let Some(c) = controls.iter().find(|c| matches!(c.action, Action::Cut(a) if !matches!(a, CutAction::Undo | CutAction::Export | CutAction::Split))
+        if let Some(c) = controls.iter().find(|c| matches!(c.action, Action::Cut(a) if !matches!(a, CutAction::Undo | CutAction::Export | CutAction::Split | CutAction::SaveProject))
             && contains(c.r, self.cursor.0, self.cursor.1) && self.cursor_inside) {
             let text = if c.hint.is_empty() { c.label.clone() } else { format!("{}  ·  {}", c.label, c.hint) };
             let right = c.r.x + c.r.w / 2.0 > vp.0 - 140.0;
@@ -4418,6 +4435,7 @@ impl App {
                 items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(key, hex_color(0x1b1b1b)) }));
                 ui_label(items, key.x + key.w / 2.0, cy, 12.0, ink, control.hint, Align::Center, key.w);
             }
+            CutAction::SaveProject => draw_cut_footer_button(items, r, &control.label, control.hint, false, hovered, false),
             CutAction::EncodeAll => {
                 let disabled = cut.encoding() || cut.scanning() || cut.exporting() || cut.pending_gops().is_empty();
                 let border = if hovered && !disabled { 0x555555 } else { 0x303030 };
@@ -5526,7 +5544,7 @@ impl Workspace {
 #[derive(Clone, Copy)]
 enum Action { Duplicate, OpenFiles, ClearSources, ToggleSources, ToggleInspector, ToggleDetail, Tool(usize), View(Mode), Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
 #[derive(Clone, Copy, PartialEq)]
-enum CutAction { TogglePosters, FrameChanges(bool), TimeDisplay(bool), In, Out, Split, ToggleSplit, Apply, DeletePicked, Undo, Export, EncodeAll, Encode(f64), Snap(Snap), Play, Zoom(bool), Step(i32), Keyframe(i32), Chapter(i32) }
+enum CutAction { TogglePosters, FrameChanges(bool), TimeDisplay(bool), In, Out, Split, ToggleSplit, Apply, DeletePicked, Undo, Export, SaveProject, EncodeAll, Encode(f64), Snap(Snap), Play, Zoom(bool), Step(i32), Keyframe(i32), Chapter(i32) }
 /// `hint` is the key cap a cut-mode button carries ("" for none).
 struct Control { r: RectPx, label: String, selected: bool, action: Action, hint: &'static str }
 impl Control {
@@ -5552,9 +5570,10 @@ fn draw_cut_footer_button(items: &mut Vec<Item>, r: RectPx, label: &str, key_lab
     items.push(Item::Rect(RectItem { radius: 7.0, border_w: 1.0, border_color: hex_color(border),
         ..RectItem::new(r, hex_color(0x050506)) }));
     if icon { draw_split_icon(items, r.x + 13.0, cy, ink, 0.6); }
+    let key_w = if key_label.chars().count() > 1 { 29.0 } else { 23.0 };
     ui_label(items, r.x + if icon { 28.0 } else { 10.0 }, cy, 12.0, ink, label, Align::Left,
-        r.w - if icon { 60.0 } else { 43.0 });
-    let key = RectPx { x: r.x + r.w - 29.0, y: cy - 9.0, w: 23.0, h: 18.0 };
+        r.w - if icon { 37.0 + key_w } else { 20.0 + key_w });
+    let key = RectPx { x: r.x + r.w - key_w - 6.0, y: cy - 9.0, w: key_w, h: 18.0 };
     items.push(Item::Rect(RectItem { radius: 5.0, ..RectItem::new(key, hex_color(if disabled { 0x151515 } else { 0x1b1b1b })) }));
     ui_label(items, key.x + key.w / 2.0, cy, 10.0, ink, key_label, Align::Center, key.w);
 }
@@ -6628,7 +6647,7 @@ mod tests {
         let footer_text: Vec<_> = frame.items.iter().filter_map(|item| match item {
             Item::Text(t) if t.y >= footer_y => Some(t.text.as_str()), _ => None,
         }).collect();
-        assert_eq!(footer_text, ["TIMELINE", "Split", "S", "Join", "J"]);
+        assert_eq!(footer_text, ["TIMELINE", "Split", "S", "Join", "J", "Save", "⌘S"]);
         app.mouse_down(toolbar.r.x + toolbar.r.w / 2.0, toolbar.r.y + toolbar.r.h / 2.0);
         app.mouse_up();
         assert_eq!(app.cut.as_ref().unwrap().splits(), &[1.0]);

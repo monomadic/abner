@@ -18,6 +18,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
+use serde::{Deserialize, Serialize};
 
 /// Waveform resolution: peaks per second of audio.
 pub const WAVE_HZ: f64 = 20.0;
@@ -28,7 +29,7 @@ const EPS: f64 = 1e-3;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Snap {
     /// In/out land on keyframes: the export is a stream copy.
     Keyframe,
@@ -36,7 +37,7 @@ pub enum Snap {
     Frame,
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 struct Edit {
     /// Removed ranges, sorted, never touching or overlapping.
     cuts: Vec<(f64, f64)>,
@@ -53,10 +54,44 @@ pub struct Segment {
     pub number: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Chapter {
     pub start: f64,
     pub title: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CutProject {
+    version: u32,
+    duration: f64,
+    edit: Edit,
+    snap: Snap,
+    chapters: Vec<Chapter>,
+    chapters_edited: bool,
+}
+
+fn validate_project(project: &CutProject, duration: f64) -> anyhow::Result<()> {
+    anyhow::ensure!(project.version == 1, "unsupported timeline project version");
+    anyhow::ensure!(duration.is_finite() && duration > 0.0 &&
+        project.duration.is_finite() && (project.duration - duration).abs() <= 0.05,
+        "source duration changed");
+    let mut previous_end = 0.0;
+    for &(start, end) in &project.edit.cuts {
+        anyhow::ensure!(start.is_finite() && end.is_finite() && start >= previous_end &&
+            end > start + EPS && end <= duration + EPS, "invalid saved cut range");
+        previous_end = end;
+    }
+    let mut previous_split = 0.0;
+    for &at in &project.edit.splits {
+        anyhow::ensure!(at.is_finite() && at > previous_split + EPS && at < duration - EPS &&
+            !project.edit.cuts.iter().any(|&(start, end)| at > start - EPS && at < end + EPS),
+            "invalid saved split");
+        previous_split = at;
+    }
+    anyhow::ensure!(project.chapters.iter().all(|chapter| chapter.start.is_finite() &&
+        chapter.start >= 0.0 && chapter.start <= duration + EPS), "invalid saved chapter");
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -227,6 +262,10 @@ impl Cut {
     /// The model plus its three readers, each on a worker.
     pub fn open(path: &Path, duration: f64) -> Self {
         let mut cut = Self::new(path, duration);
+        if let Err(error) = cut.load_project() {
+            log::warn!("timeline project could not load: {error}");
+            cut.status = format!("Timeline project could not load: {error}");
+        }
         let (tx, rx) = channel();
         let p = path.to_path_buf();
         std::thread::spawn(move || {
@@ -248,6 +287,49 @@ impl Cut {
         cut.wave_rx = Some(rx);
         cut.start_frame_reader();
         cut
+    }
+
+    /// Sidecar for editable decisions. Export still writes the finished video.
+    pub fn project_path(&self) -> PathBuf {
+        let mut name = self.path.file_name().unwrap_or_default().to_os_string();
+        name.push(".abner.json");
+        self.path.with_file_name(name)
+    }
+
+    pub fn save_project(&mut self) -> anyhow::Result<PathBuf> {
+        let project = CutProject { version: 1, duration: self.duration, edit: self.edit.clone(),
+            snap: self.snap, chapters: self.chapters.clone(), chapters_edited: self.chapters_edited };
+        validate_project(&project, self.duration)?;
+        let path = self.project_path();
+        let mut temp_name = path.as_os_str().to_os_string();
+        temp_name.push(format!(".tmp.{}", std::process::id()));
+        let temp = PathBuf::from(temp_name);
+        let result = (|| -> anyhow::Result<()> {
+            std::fs::write(&temp, serde_json::to_vec_pretty(&project)?)?;
+            std::fs::rename(&temp, &path)?;
+            Ok(())
+        })();
+        if result.is_err() { let _ = std::fs::remove_file(&temp); }
+        result?;
+        self.status = format!("Saved {}", path.file_name().unwrap_or_default().to_string_lossy());
+        Ok(path)
+    }
+
+    fn load_project(&mut self) -> anyhow::Result<()> {
+        let path = self.project_path();
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        let project: CutProject = serde_json::from_slice(&bytes)?;
+        validate_project(&project, self.duration)?;
+        self.edit = project.edit;
+        self.snap = project.snap;
+        self.chapters = project.chapters;
+        self.chapters_edited = project.chapters_edited;
+        self.status = format!("Loaded {}", path.file_name().unwrap_or_default().to_string_lossy());
+        Ok(())
     }
 
     fn start_frame_reader(&mut self) {
@@ -1217,6 +1299,29 @@ pub fn export(source: &Path, dest: &Path, keeps: &[(f64, f64)], snap: Snap, chap
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn timeline_project_round_trips_and_rejects_changed_source() {
+        let dir = std::env::temp_dir().join(format!("abner_save_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join("source.mp4");
+        let mut cut = Cut::new(&clip, 10.0);
+        cut.edit.cuts = vec![(2.0, 3.0)];
+        cut.edit.splits = vec![1.0, 5.0];
+        cut.snap = Snap::Frame;
+        cut.chapters = vec![Chapter { start: 4.0, title: "Scene".into() }];
+        cut.chapters_edited = true;
+        let sidecar = cut.save_project().unwrap();
+        let mut reopened = Cut::new(&clip, 10.0);
+        reopened.load_project().unwrap();
+        assert_eq!(reopened.edit, cut.edit);
+        assert_eq!(reopened.snap, Snap::Frame);
+        assert_eq!(reopened.chapters[0].title, "Scene");
+        assert!(reopened.chapters_edited);
+        assert!(Cut::new(&clip, 12.0).load_project().is_err());
+        std::fs::remove_file(sidecar).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
+
     #[test]
     fn gop_selection_and_zoom_ceiling_do_not_expand_to_the_clip() {
         let mut c=Cut::new(Path::new("test.mp4"),0.1);

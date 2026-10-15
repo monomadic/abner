@@ -785,6 +785,11 @@ impl ApplicationHandler for Runner {
                     {
                         Some(Key::Render)
                     }
+                    WinitKey::Character(s)
+                        if self.mods.super_key() && s.eq_ignore_ascii_case("s") =>
+                    {
+                        Some(Key::SaveProject)
+                    }
                     // ⇧ + arrow: cut mode's keyframe step (a plain arrow elsewhere).
                     WinitKey::Named(NamedKey::ArrowLeft) if self.mods.shift_key() => Some(Key::KeyLeft),
                     WinitKey::Named(NamedKey::ArrowRight) if self.mods.shift_key() => Some(Key::KeyRight),
@@ -798,7 +803,7 @@ impl ApplicationHandler for Runner {
                     WinitKey::Character(s) => s.chars().next().map(Key::Char),
                     _ => None,
                 };
-                if event.repeat && matches!(key, Some(Key::Char('m' | 'M' | 's' | 'S') | Key::DuplicateSources | Key::OpenFiles | Key::SelectSources)) {
+                if event.repeat && matches!(key, Some(Key::Char('m' | 'M' | 's' | 'S') | Key::SaveProject | Key::DuplicateSources | Key::OpenFiles | Key::SelectSources)) {
                     return;
                 }
                 if let Some(key) = key {
