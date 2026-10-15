@@ -852,7 +852,7 @@ impl ApplicationHandler for Runner {
                             }
                         } else {
                             self.header_click.0 = None;
-                            self.app.mouse_down_with_alt(x, y, self.mods.alt_key());
+                            self.app.mouse_down_with_mods(x, y, self.mods.alt_key(), self.mods.super_key());
                         }
                     },
                     ElementState::Released => self.app.mouse_released(),

@@ -472,6 +472,12 @@ impl Cut {
         self.out_req = None;
     }
 
+    /// Drop the newest undo step so the edit it recorded rides the one
+    /// before it: several cuts made as one gesture undo as one.
+    pub fn merge_last_undo(&mut self) {
+        if self.undo.len() >= 2 { self.undo.pop(); }
+    }
+
     /// The selection is exactly a range already cut: `X` puts it back.
     pub fn selection_is_cut(&self) -> bool {
         self.selection().is_some_and(|(a, b)| {

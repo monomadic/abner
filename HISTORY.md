@@ -3,6 +3,22 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-15 — several clips at once on the timeline
+
+The pick is a set now (`App::cut_picks`, newest last). A plain click on a
+clip still replaces it and takes the playhead; ⌘-click toggles that clip in
+and out without moving the playhead (⌘ comes to `mouse_down_with_mods` from
+winit's modifier state, next to ⌥). A press on a vacant part of the lanes —
+the caption or keyframe rows, the sound row without a track, any clip-free
+stretch of the picture row — and a drag sweeps a rubber band
+(`CutDrag::Band`, an accent wash with a 1px edge): every kept clip it touches
+on the rows it crosses is picked, GOPs instead in frame detail, and ⌘ keeps
+the picks it started from. A press that never grows past 4px is still a click:
+it lets go of the picks and seeks on release, as before. Every pick wears the
+white outline; Backspace cuts the whole set as ONE undo step
+(`Cut::merge_last_undo`) and the context row says "Delete selected clips". The
+ruler and the clips themselves still scrub.
+
 ## 2026-10-15 — the rail's focused inspector folds from its grip
 
 The detail panel under the source cards now carries a 14px grip strip along

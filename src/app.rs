@@ -101,6 +101,10 @@ enum CutDrag {
     Edge(f64),
     /// On the zoom slider.
     Zoom,
+    /// A rubber band from a press on a vacant part of the lanes: every kept
+    /// clip (or GOP) it touches is picked. `add` = ⌘ held, so the picks it
+    /// started with (`cut_band_base`) stay in.
+    Band { x0: f32, y0: f32, add: bool },
 }
 
 /// The pointer shape the crop marquee wants under the cursor; main.rs maps it
@@ -209,7 +213,14 @@ pub struct App {
     cut_thumb: CutThumbs,
     split_preview: Option<SplitPreview>,
     /// The picture clip last clicked, by its (start, end): drawn outlined.
-    cut_pick: Option<(f64, f64, bool)>,
+    /// The picked clips (or GOPs, `cut_gop`): (start, end, sound row). A
+    /// plain click replaces the set, ⌘-click toggles one, a rubber band
+    /// sweeps many; the last entry is the most recent pick.
+    cut_picks: Vec<(f64, f64, bool)>,
+    /// The picks a ⌘-band started from.
+    cut_band_base: Vec<(f64, f64, bool)>,
+    /// ⌘ was down at the press that `mouse_down` is handling.
+    press_cmd: bool,
     cut_restore: Option<(f64, f64)>,
     split_tool: bool,
     /// Hover lift per kept clip, keyed by (start ms, sound lane): 0..1, eased
@@ -594,7 +605,9 @@ impl App {
             cut_posters: true,
             cut_thumb: CutThumbs::new(),
             split_preview: None,
-            cut_pick: None,
+            cut_picks: Vec::new(),
+            cut_band_base: Vec::new(),
+            press_cmd: false,
             cut_restore: None,
             split_tool: false,
             cut_hot: Vec::new(),
@@ -1633,8 +1646,9 @@ impl App {
             return;
         }
         if self.cut_drag.is_some() {
-            self.cut_drag_to(x);
+            // The band reads the pointer's y from `cursor`.
             self.cursor = (x, y);
+            self.cut_drag_to(x);
             return;
         }
         if self.mask_mode {
@@ -1659,6 +1673,13 @@ impl App {
     }
 
     pub fn mouse_down_with_alt(&mut self, x: f32, y: f32, alt: bool) {
+        self.mouse_down_with_mods(x, y, alt, false);
+    }
+
+    /// `cmd` = ⌘ held: on the timeline it adds a clip to the picks instead
+    /// of replacing them, and keeps a rubber band's starting picks.
+    pub fn mouse_down_with_mods(&mut self, x: f32, y: f32, alt: bool, cmd: bool) {
+        self.press_cmd = cmd;
         if alt && self.show_ui && !self.cut_mode && !self.mask_mode && contains(self.workspace().list, x, y) {
             let first = self.source_first();
             if let Some(idx) = (first..(first + self.source_capacity()).min(self.videos.len()))
@@ -1671,6 +1692,7 @@ impl App {
             }
         }
         self.mouse_down(x, y);
+        self.press_cmd = false;
     }
 
     pub fn mouse_released(&mut self) {
@@ -1769,7 +1791,15 @@ impl App {
 
     pub fn mouse_up(&mut self) {
         self.source_copy_drag = None;
-        if matches!(self.cut_drag, Some(CutDrag::Scrub)) && self.scrub_resume {
+        if let Some(CutDrag::Band { x0, add, .. }) = self.cut_drag {
+            if self.cut_band_rect().is_none() && !add {
+                // A plain click on the vacant lanes: the playhead goes there.
+                self.cut_drag = Some(CutDrag::Scrub);
+                self.cut_drag_to(x0);
+            }
+            self.cut_band_base.clear();
+        }
+        if matches!(self.cut_drag, Some(CutDrag::Scrub | CutDrag::Band { .. })) && self.scrub_resume {
             self.playing = true;
         }
         self.scrub_resume = false;
@@ -3238,7 +3268,7 @@ impl App {
             Key::Char('i' | 'I') => CutAction::In,
             Key::Char('o' | 'O') => CutAction::Out,
             Key::Char('s' | 'S') => CutAction::Split,
-            Key::Backspace if self.cut_pick.is_some() => CutAction::DeletePicked,
+            Key::Backspace if !self.cut_picks.is_empty() => CutAction::DeletePicked,
             Key::Char('x' | 'X') => CutAction::Apply,
             Key::Char('e' | 'E') => CutAction::Export,
             Key::Undo | Key::Char('u' | 'U') => CutAction::Undo,
@@ -3259,7 +3289,7 @@ impl App {
             }
             Key::Escape => {
                 if self.split_tool { self.split_tool = false; return true; }
-                if self.cut_pick.take().is_some() { return true; }
+                if !self.cut_picks.is_empty() { self.cut_picks.clear(); return true; }
                 if self.cut_restore.take().is_some() { return true; }
                 let cut = self.cut.as_mut().unwrap();
                 if cut.in_req.is_some() || cut.out_req.is_some() {
@@ -3286,7 +3316,7 @@ impl App {
         if let CutAction::TimeDisplay(frames) = action { self.cut_frames = frames; return; }
         if action == CutAction::ToggleSplit {
             self.split_tool = !self.split_tool;
-            self.cut_pick = None;
+            self.cut_picks.clear();
             return;
         }
         let t = self.t;
@@ -3331,17 +3361,31 @@ impl App {
                 if !cut.split(split_at) { cut.status = "No split here: already a boundary, or inside a cut".into(); }
             }
             CutAction::DeletePicked => {
-                if let Some((a, b, _)) = self.cut_pick.take() {
-                    if !self.cut_gop && !cut.segments().iter().any(|s| (s.start - a).abs() < 1e-6 && (s.end - b).abs() < 1e-6) { return; }
+                let picks = std::mem::take(&mut self.cut_picks);
+                if !picks.is_empty() {
+                    // The same range picked on both rows is one cut.
+                    let mut ranges: Vec<(f64, f64)> = Vec::new();
+                    for (a, b, _) in picks {
+                        if self.cut_gop || cut.segments().iter().any(|s| !s.cut && (s.start - a).abs() < 1e-6 && (s.end - b).abs() < 1e-6) {
+                            if !ranges.iter().any(|r| (r.0 - a).abs() < 1e-6 && (r.1 - b).abs() < 1e-6) { ranges.push((a, b)); }
+                        }
+                    }
+                    if ranges.is_empty() { return; }
                     // A picked piece is already bounded by edits; don't expand it
                     // if the snap mode has changed since those boundaries were made.
+                    // One undo step for the whole set.
                     let snap = cut.snap;
                     cut.snap = Snap::Frame;
-                    cut.in_req = Some(a);
-                    cut.out_req = Some(b);
-                    cut.cut_selection();
+                    let mut total = 0.0;
+                    for (i, (a, b)) in ranges.iter().enumerate() {
+                        cut.in_req = Some(*a);
+                        cut.out_req = Some(*b);
+                        cut.cut_selection();
+                        if i > 0 { cut.merge_last_undo(); }
+                        total += b - a;
+                    }
                     cut.snap = snap;
-                    cut.status = format!("Cut {:.2} s", b - a);
+                    cut.status = if ranges.len() == 1 { format!("Cut {total:.2} s") } else { format!("Cut {} clips, {total:.2} s", ranges.len()) };
                     return;
                 }
             }
@@ -3434,7 +3478,7 @@ impl App {
         for (label, action, hint) in [
             ("Set in", CutAction::In, "I"), ("Set out", CutAction::Out, "O"),
             ("Split tool", CutAction::ToggleSplit, "Esc to leave · S split"),
-            (if self.cut_pick.is_some() { if self.cut_gop { "Delete selected GOP" } else { "Delete selected clip" } } else if self.cut_restore.is_some() || cut.selection_is_cut() { "Restore selection" } else { "Cut selection" }, if self.cut_pick.is_some() { CutAction::DeletePicked } else { CutAction::Apply }, if self.cut_pick.is_some() { "Backspace" } else { "X" }),
+            (match (self.cut_picks.len(), self.cut_gop) { (0, _) => if self.cut_restore.is_some() || cut.selection_is_cut() { "Restore selection" } else { "Cut selection" }, (1, true) => "Delete selected GOP", (1, false) => "Delete selected clip", (_, true) => "Delete selected GOPs", (_, false) => "Delete selected clips" }, if !self.cut_picks.is_empty() { CutAction::DeletePicked } else { CutAction::Apply }, if !self.cut_picks.is_empty() { "Backspace" } else { "X" }),
             (if keyframe { "Snap to keyframes: on" } else { "Snap to keyframes: off" },
                 CutAction::Snap(if keyframe { Snap::Frame } else { Snap::Keyframe }), "K"),
         ] {
@@ -3632,24 +3676,46 @@ impl App {
                 self.cut_drag = Some(CutDrag::Edge(edge));
             } else if let Some((seg, audio)) = self.cut_clip_at(x, y) {
                 self.cut_restore = None;
-                // A picture or sound clip: pick it (outlined), and still take the playhead there.
-                self.cut_gop = self.frame_detail() && !audio;
-                let range = if self.cut_gop { self.cut.as_ref().unwrap().gop_at(self.cut_time_at(x)) } else { None };
-                self.cut_gop = range.is_some();
+                // A picture or sound clip: pick it (outlined), and still take the
+                // playhead there. ⌘ toggles it in the set and leaves the playhead.
+                let gop = self.frame_detail() && !audio;
+                let range = if gop { self.cut.as_ref().unwrap().gop_at(self.cut_time_at(x)) } else { None };
+                let gop = range.is_some();
                 let (a, b) = range.unwrap_or((seg.start, seg.end));
-                self.cut_pick = Some((a, b, audio));
-                self.begin_cut_scrub();
-                self.cut_drag_to(x);
+                let pick = (a, b, audio);
+                if self.press_cmd && gop == self.cut_gop {
+                    if let Some(i) = self.cut_picks.iter().position(|p| Self::same_pick(*p, pick)) {
+                        self.cut_picks.remove(i);
+                    } else {
+                        self.cut_picks.push(pick);
+                    }
+                } else {
+                    self.cut_gop = gop;
+                    self.cut_picks = vec![pick];
+                    self.begin_cut_scrub();
+                    self.cut_drag_to(x);
+                }
             } else if let Some(seg) = self.cut_ghost_at(x, y) {
                 // A removed clip is a selection: X restores it.
-                self.cut_pick = None;
+                self.cut_picks.clear();
                 let cut = self.cut.as_mut().unwrap();
                 self.cut_restore = Some((seg.start, seg.end));
                 cut.status.clear();
+            } else if self.cut_band_rows().is_some_and(|r| contains(r, x, y)) {
+                // A vacant part of the lanes: a rubber band. ⌘ adds to the
+                // picks; otherwise a plain click here lets go of them and
+                // takes the playhead (`mouse_up`, when the band never grew).
+                self.cut_restore = None;
+                let add = self.press_cmd;
+                if !add { self.cut_picks.clear(); }
+                self.cut_band_base = self.cut_picks.clone();
+                self.scrub_resume = self.playing;
+                self.playing = false;
+                self.cut_drag = Some(CutDrag::Band { x0: x, y0: y, add });
             } else if x >= self.cut_lanes().video.x - 4.0 {
                 self.cut_restore = None;
                 // Anywhere else on the timeline lets go of the pick.
-                self.cut_pick = None;
+                self.cut_picks.clear();
                 self.begin_cut_scrub();
                 self.cut_drag_to(x);
             }
@@ -3702,7 +3768,7 @@ impl App {
         let v = self.cut_lanes().video;
         let x_of = |t: f64| v.x + ((t - cut.t0) * cut.pps) as f32;
         items.push(Item::Rect(RectItem::new(v, hex_color(0x0d0f10))));
-        let selected = self.cut_pick.filter(|_| self.cut_gop);
+        let selected: &[(f64, f64, bool)] = if self.cut_gop { &self.cut_picks } else { &[] };
         let lo = cut.keys.partition_point(|t| *t < cut.t0).saturating_sub(1);
         let hi = cut.keys.partition_point(|t| *t < cut.t0 + cut.span(v.w));
         for i in lo..hi {
@@ -3711,7 +3777,7 @@ impl App {
             let left = x_of(a).max(v.x);
             let right = x_of(b).min(v.x+v.w);
             if right <= left { continue; }
-            let on = selected.is_some_and(|(s,e,_)| (s-a).abs()<1e-6 && (e-b).abs()<1e-6);
+            let on = selected.iter().any(|(s,e,_)| (s-a).abs()<1e-6 && (e-b).abs()<1e-6);
             let r = RectPx { x: left, y:v.y, w:right-left, h:v.h };
             items.push(Item::Rect(RectItem { radius:8.0, ..RectItem::new(r, hex_color(if on {0x202326} else {0x111313})) }));
             ui_label(items, left+8.0, v.y+11.0, 11.0, hex_color(if on {0xeeeeee} else {0x969da5}),
@@ -3752,16 +3818,23 @@ impl App {
                     if self.cut_thumb.failed.contains(&tk) {"Unavailable"} else {"…"},Align::Center,box_r.w);
             }
         }
-        if let Some((a,b,_))=selected {
+        for (a,b,_) in selected.iter().copied() {
             let left=x_of(a).max(v.x);let right=x_of(b).min(v.x+v.w);
             if right>left {items.push(Item::Rect(RectItem{radius:8.0,border_w:2.0,border_color:hex_color(0xeeeeee),
                 ..RectItem::new(RectPx{x:left,y:v.y,w:right-left,h:v.h},[0.0;4])}));}
+        }
+        if let Some(b)=self.cut_band_rect() {
+            items.push(Item::Rect(RectItem::new(b,[ACCENT[0],ACCENT[1],ACCENT[2],0.18])));
+            items.push(Item::Rect(RectItem{border_w:1.0,border_color:ACCENT,..RectItem::new(b,[0.0;4])}));
         }
         items.push(Item::Clip(Some(column)));
         let keys=self.cut_lanes().keys;
         let r=RectPx{x:v.x,y:keys.y+keys.h+3.0,w:v.w,h:36.0};
         items.push(Item::Rect(RectItem{radius:6.0,..RectItem::new(r,hex_color(0x1b1f22))}));
-        let label=if let Some((a,b,_))=selected {
+        let label=if selected.len()>1 {
+            let total:f64=selected.iter().map(|(a,b,_)| b-a).sum();
+            format!("{} GOPs selected  ·  {:.2} s  ·  Backspace deletes them", selected.len(), total)
+        } else if let Some((a,b,_))=selected.last().copied() {
             let n=cut.keys.partition_point(|t| *t<=a);
             let lo=cut.frame_info.partition_point(|f| f.pts<a);
             let hi=cut.frame_info.partition_point(|f| f.pts<b);
@@ -3966,6 +4039,78 @@ impl App {
         self.cut.as_ref()?.segments().into_iter().find(|g| g.cut && at >= g.start && at < g.end)
     }
 
+    fn same_pick(a: (f64, f64, bool), b: (f64, f64, bool)) -> bool {
+        a.2 == b.2 && (a.0 - b.0).abs() < 1e-3 && (a.1 - b.1).abs() < 1e-3
+    }
+
+    /// The block a rubber band can start on and sweep: the picture row down
+    /// to the foot of the keyframe row, across the lanes' width — a fitted
+    /// clip fills its own row, so the sound, caption and keyframe rows are
+    /// where a band usually begins. The ruler above stays a scrub. None
+    /// without a timeline, or before the first draw fitted it (no scale =
+    /// no time under the pointer).
+    fn cut_band_rows(&self) -> Option<RectPx> {
+        let lanes = self.cut_lanes();
+        self.cut.as_ref().filter(|c| c.pps > 0.0)?;
+        let bottom = lanes.keys.y + lanes.keys.h;
+        Some(RectPx { x: lanes.video.x, y: lanes.video.y, w: lanes.video.w, h: bottom - lanes.video.y })
+    }
+
+    /// The band's rectangle while one is being dragged, clamped to the rows
+    /// it sweeps; None once it is still too small to count as a drag.
+    fn cut_band_rect(&self) -> Option<RectPx> {
+        let Some(CutDrag::Band { x0, y0, .. }) = self.cut_drag else { return None };
+        let rows = self.cut_band_rows()?;
+        let (x1, y1) = self.cursor;
+        if (x1 - x0).abs() < BAND_MIN && (y1 - y0).abs() < BAND_MIN { return None; }
+        let (l, r) = (x0.min(x1).max(rows.x), x0.max(x1).min(rows.x + rows.w));
+        let (t, b) = (y0.min(y1).max(rows.y), y0.max(y1).min(rows.y + rows.h));
+        Some(RectPx { x: l, y: t, w: (r - l).max(0.0), h: (b - t).max(0.0) })
+    }
+
+    /// Re-pick from the band: every kept clip (or GOP, in frame detail)
+    /// whose rect the band touches, on each row it crosses.
+    fn cut_band_pick(&mut self) {
+        let Some(CutDrag::Band { add, .. }) = self.cut_drag else { return };
+        let Some(band) = self.cut_band_rect() else {
+            self.cut_picks = self.cut_band_base.clone();
+            return;
+        };
+        let lanes = self.cut_lanes();
+        let Some(cut) = self.cut.as_ref() else { return };
+        let sound = lanes.audio.filter(|_| !(cut.wave.is_empty() && !cut.reading_wave()));
+        let (t0, t1) = (self.cut_time_at(band.x), self.cut_time_at(band.x + band.w));
+        let crosses = |row: RectPx| band.y < row.y + row.h && band.y + band.h > row.y;
+        let gop = self.frame_detail();
+        let segs = cut.segments();
+        let mut hits: Vec<(f64, f64, bool)> = Vec::new();
+        for (row, audio) in [(Some(lanes.video), false), (sound, true)] {
+            let Some(row) = row else { continue };
+            if !crosses(row) { continue; }
+            if gop && !audio {
+                let lo = cut.keys.partition_point(|k| *k <= t0).saturating_sub(1);
+                for i in lo..cut.keys.len() {
+                    let a = cut.keys[i];
+                    let b = cut.keys.get(i + 1).copied().unwrap_or(cut.duration);
+                    if a >= t1 { break; }
+                    if b > t0 && a < t1 && !segs.iter().any(|s| s.cut && s.start <= a + 1e-6 && s.end >= b - 1e-6) {
+                        hits.push((a, b, false));
+                    }
+                }
+            } else {
+                for g in segs.iter().filter(|g| !g.cut && g.end > t0 && g.start < t1) {
+                    hits.push((g.start, g.end, audio));
+                }
+            }
+        }
+        let mut picks = if add && gop == self.cut_gop { self.cut_band_base.clone() } else { Vec::new() };
+        for h in hits {
+            if !picks.iter().any(|p| Self::same_pick(*p, h)) { picks.push(h); }
+        }
+        self.cut_gop = gop;
+        self.cut_picks = picks;
+    }
+
     fn cut_drag_to(&mut self, x: f32) {
         let lane = self.cut_lanes().video;
         let zoom = self.cut_zoom_bar();
@@ -3993,6 +4138,7 @@ impl App {
                 let anchor = if px >= 0.0 && px <= lane.w { px } else { lane.w / 2.0 };
                 cut.set_zoom_fraction(((x - zoom.x) / zoom.w).clamp(0.0, 1.0) as f64, anchor, lane.w);
             }
+            Some(CutDrag::Band { .. }) => self.cut_band_pick(),
             None => {}
         }
     }
@@ -4278,7 +4424,7 @@ impl App {
                 draw_icon(items, if zoom_in { Icon::ZoomIn } else { Icon::ZoomOut }, cx, cy, color);
             }
             _ => {
-                let dead = action == CutAction::Apply && cut.selection().is_none() && self.cut_pick.is_none() && self.cut_restore.is_none();
+                let dead = action == CutAction::Apply && cut.selection().is_none() && self.cut_picks.is_empty() && self.cut_restore.is_none();
                 let selected = action == CutAction::ToggleSplit && self.split_tool;
                 let fill = if selected { hex_color(CUT_TOOL_ON) } else if hovered && !dead { mix(CUT_BAR, 0xffffff, 0.07) } else { [0.0; 4] };
                 if selected || (hovered && !dead) {
@@ -4599,9 +4745,9 @@ impl App {
         // The kept clip under the pointer, picture or sound: a slight lift,
         // eased in and out by `tick_cut_hot`.
         let ease = |l: f32| l * l * (3.0 - 2.0 * l);
-        // Draw the picked clip's outline last, inside the timeline column so
+        // Draw the picked clips' outlines last, inside the timeline column so
         // a scrolled clip cannot paint over the track-label gutter.
-        let mut picked: Option<RectPx> = None;
+        let mut picked: Vec<RectPx> = Vec::new();
         // A removed clip's (or a missing track's) dashed outline: straight dashes
         // between the corners, and each corner an arc cut from a rounded border by
         // a quadrant scissor — there is no line or arc primitive.
@@ -4661,7 +4807,7 @@ impl App {
                 } else if g.cut {
                     dashes(items, r, mix(CUT_TL, 0xffffff, 0.3));
                     if self.cut_restore.is_some_and(|(a,b)| (a-g.start).abs() < 1e-6 && (b-g.end).abs() < 1e-6) {
-                        picked = Some(r);
+                        picked.push(r);
                     }
                 } else if audio {
                     let hot = ease(self.cut_hot_level(g.start, true));
@@ -4671,8 +4817,8 @@ impl App {
                     items.push(Item::Rect(RectItem { radius: 7.0, fade_down: true, ..RectItem::new(r, hex_color(CUT_SOUND_TOP)) }));
                     items.push(Item::Rect(RectItem { radius: 7.0, border_w: 1.0, border_color: mix(CUT_TL, 0x1580de, 0.6 + 0.15 * hot),
                         ..RectItem::new(r, [0.0; 4]) }));
-                    if self.cut_pick.is_some_and(|(a, b, snd)| snd && (a - g.start).abs() < 1e-3 && (b - g.end).abs() < 1e-3) {
-                        picked = Some(r);
+                    if self.cut_picks.iter().any(|(a, b, snd)| *snd && (a - g.start).abs() < 1e-3 && (b - g.end).abs() < 1e-3) {
+                        picked.push(r);
                     }
                 } else {
                     // The film ground: the board's 135° stripes (#2a2d30 / #202326, 14px).
@@ -4703,8 +4849,8 @@ impl App {
                     items.push(Item::Rect(RectItem { radius: 7.0, border_w: 1.0, border_color: mix(CUT_TL, 0xffffff, 0.2 + 0.06 * hot),
                         ..RectItem::new(r, [1.0, 1.0, 1.0, 0.01 * hot]) }));
                     // The picked clip gets an inset outline after all clip contents.
-                    if !self.cut_gop && self.cut_pick.is_some_and(|(a, b, snd)| !snd && (a - g.start).abs() < 1e-3 && (b - g.end).abs() < 1e-3) {
-                        picked = Some(r);
+                    if !self.cut_gop && self.cut_picks.iter().any(|(a, b, snd)| !snd && (a - g.start).abs() < 1e-3 && (b - g.end).abs() < 1e-3) {
+                        picked.push(r);
                     }
                     // Keyframes: a hairline through the picture, a short bright
                     // foot at the bottom edge, and the two the selection snapped
@@ -4906,10 +5052,15 @@ impl App {
         items.push(Item::Text(TextItem { align: Align::Center, valign: VAlign::Middle,
             bg: Some(TextBg { radius: 5.0, pad_x: 7.0, pad_y: 1.5, ..TextBg::new(hex_color(0xffffff)) }),
             ..TextItem::new(cx, lanes.keys.y + 5.5, 10.5, hex_color(0x000000), chip) }));
-        if let Some(r) = picked {
+        for r in picked {
             // The renderer places the band inside this shape. Keeping the clip's
             // own bounds prevents the gutter and neighbouring clips cutting it off.
             items.push(Item::Rect(RectItem { radius: 7.0, border_w: 2.0, border_color: hex_color(0xffffff), ..RectItem::new(r, [0.0; 4]) }));
+        }
+        // The rubber band: a faint accent wash with a 1px accent edge.
+        if let Some(b) = self.cut_band_rect() {
+            items.push(Item::Rect(RectItem::new(b, [ACCENT[0], ACCENT[1], ACCENT[2], 0.18])));
+            items.push(Item::Rect(RectItem { border_w: 1.0, border_color: ACCENT, ..RectItem::new(b, [0.0; 4]) }));
         }
         items.push(Item::Clip(None));
     }
@@ -5455,7 +5606,7 @@ mod tests {
         app.mouse_down(tile.x+tile.w/2.0,tile.y+tile.h/2.0);app.mouse_up();
         assert!(app.cut_gop);
         assert!((app.t-app.cut.as_ref().unwrap().frames[2]).abs()<1e-6,"clicking a card seeks that frame, not the next one");
-        assert_eq!(app.cut_pick, Some((expected.0,expected.1,false)));
+        assert_eq!(app.cut_picks, vec![(expected.0,expected.1,false)]);
         assert!(expected.1 < app.cut.as_ref().unwrap().duration);
         app.key(Key::Backspace);
         assert!(app.cut.as_ref().unwrap().segments().iter().any(|s| s.cut && s.start==expected.0 && s.end==expected.1));
@@ -6447,23 +6598,23 @@ mod tests {
         let v = app.cut_lanes().video;
         app.mouse_down(v.x + v.w * 0.1, v.y + 10.0);
         app.mouse_up();
-        assert_eq!(app.cut_pick, Some((0.0, 4.0, false)));
+        assert_eq!(app.cut_picks, vec![(0.0, 4.0, false)]);
         let r = app.cut_lanes().ruler;
         app.mouse_down(v.x + v.w * 0.1, r.y + 4.0);
         app.mouse_up();
-        assert_eq!(app.cut_pick, None);
+        assert!(app.cut_picks.is_empty());
         app.mouse_down(v.x + v.w * 0.1, v.y + 10.0);
         app.mouse_up();
-        assert!(app.cut_pick.is_some());
+        assert!(!app.cut_picks.is_empty());
         app.key(Key::Escape);
-        assert!(app.cut_pick.is_none() && app.cut_mode, "Esc lets go of the pick before it leaves Cut mode");
+        assert!(app.cut_picks.is_empty() && app.cut_mode, "Esc lets go of the pick before it leaves Cut mode");
 
         // Backspace removes the picked piece, clears the pick, and is undoable.
         app.mouse_down(v.x + v.w * 0.1, v.y + 10.0);
         app.mouse_up();
         app.key(Key::Backspace);
         assert_eq!(app.cut.as_ref().unwrap().cuts(), &[(0.0, 4.0)]);
-        assert!(app.cut_pick.is_none());
+        assert!(app.cut_picks.is_empty());
         app.key(Key::Backspace);
         assert_eq!(app.cut.as_ref().unwrap().cuts(), &[(0.0, 4.0)], "repeat must not restore a deleted piece");
         app.key(Key::Undo);
@@ -6587,14 +6738,14 @@ mod tests {
         let (v, a) = (l.video, l.audio.expect("a sound lane"));
         app.mouse_down(v.x + v.w * 0.4, a.y + a.h / 2.0);
         app.mouse_up();
-        assert_eq!(app.cut_pick, Some((0.0, 4.0, true)), "the sound clip is picked");
+        assert_eq!(app.cut_picks, vec![(0.0, 4.0, true)], "the sound clip is picked");
         app.mouse_down(v.x + v.w * 0.4, v.y + v.h / 2.0);
         app.mouse_up();
-        assert_eq!(app.cut_pick, Some((0.0, 4.0, false)), "and the picture clip replaces it");
+        assert_eq!(app.cut_picks, vec![(0.0, 4.0, false)], "and the picture clip replaces it");
         // A selected piece scrolled under the gutter keeps its outline clipped.
         app.cut.as_mut().unwrap().t0 = 1.0;
         for audio in [false, true] {
-            app.cut_pick = Some((0.0, 4.0, audio));
+            app.cut_picks = vec![(0.0, 4.0, audio)];
             let mut items = Vec::new();
             app.build_cut_timeline(&mut items);
             let mut clip = None;
@@ -6868,6 +7019,76 @@ mod tests {
         assert_eq!(app.cut_video, 1, "even identical linked paths have independent edits");
     }
 
+    /// ⌘-click adds a clip to the picks (and takes one out again) without
+    /// moving the playhead; a drag from a vacant row sweeps a rubber band
+    /// over every clip it touches; Backspace cuts the whole set as one undo
+    /// step; a plain click on a vacant row lets go and seeks.
+    #[test]
+    fn cmd_click_and_rubber_band_pick_several_clips() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        assert!(tick_until(&mut app, Duration::from_secs(5), |a| a.started));
+        app.key(Key::Char('t'));
+        assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.cut.as_ref().is_some_and(|c| !c.scanning() && c.pps > 0.0)));
+        app.playing = false;
+        for t in [1.0, 2.0, 3.0] { assert!(app.cut.as_mut().unwrap().split(t)); }
+        assert_eq!(app.cut.as_ref().unwrap().segments().len(), 4);
+        let lanes = app.cut_lanes();
+        let v = lanes.video;
+        let x_of = |app: &App, t: f64| { let c = app.cut.as_ref().unwrap(); v.x + ((t - c.t0) * c.pps) as f32 };
+
+        app.mouse_down(x_of(&app, 0.5), v.y + v.h / 2.0);
+        app.mouse_up();
+        assert_eq!(app.cut_picks, vec![(0.0, 1.0, false)]);
+        let held = app.t;
+        app.mouse_down_with_mods(x_of(&app, 2.5), v.y + v.h / 2.0, false, true);
+        app.mouse_up();
+        assert_eq!(app.cut_picks, vec![(0.0, 1.0, false), (2.0, 3.0, false)], "⌘-click adds");
+        assert_eq!(app.t, held, "⌘-click leaves the playhead");
+        app.mouse_down_with_mods(x_of(&app, 2.5), v.y + v.h / 2.0, false, true);
+        app.mouse_up();
+        assert_eq!(app.cut_picks, vec![(0.0, 1.0, false)], "⌘-click again takes it out");
+
+        // The band: from the caption row up across the picture row.
+        let band_rows = app.cut_band_rows().unwrap();
+        assert!(contains(band_rows, x_of(&app, 0.5), lanes.subs.y + 2.0));
+        app.mouse_down(x_of(&app, 1.5), lanes.subs.y + 2.0);
+        assert!(matches!(app.cut_drag, Some(CutDrag::Band { add: false, .. })));
+        assert!(app.cut_picks.is_empty(), "a plain band starts from nothing");
+        app.cursor_moved(x_of(&app, 3.5), v.y + v.h / 2.0);
+        assert_eq!(app.cut_picks, vec![(1.0, 2.0, false), (2.0, 3.0, false), (3.0, 4.0, false)]);
+        let mut items = Vec::new();
+        app.build_cut_timeline(&mut items);
+        assert!(items.iter().any(|i| matches!(i, Item::Rect(r) if r.border_w == 1.0 && r.border_color == ACCENT)), "the band is drawn");
+        app.cursor_moved(x_of(&app, 2.5), v.y + v.h / 2.0);
+        assert_eq!(app.cut_picks, vec![(1.0, 2.0, false), (2.0, 3.0, false)], "shrinking the band drops clips again");
+        app.mouse_up();
+        assert_eq!(app.cut_picks.len(), 2, "the picks outlive the band");
+        assert_eq!(app.t, held, "a band does not move the playhead");
+
+        // ⌘-band keeps what was picked.
+        app.cut_picks = vec![(0.0, 1.0, false)];
+        app.mouse_down_with_mods(x_of(&app, 2.5), lanes.subs.y + 2.0, false, true);
+        app.cursor_moved(x_of(&app, 3.5), v.y + v.h / 2.0);
+        app.mouse_up();
+        assert_eq!(app.cut_picks, vec![(0.0, 1.0, false), (2.0, 3.0, false), (3.0, 4.0, false)]);
+
+        // Backspace cuts them all; one undo brings them all back.
+        app.key(Key::Backspace);
+        assert_eq!(app.cut.as_ref().unwrap().cuts(), &[(0.0, 1.0), (2.0, 4.0)]);
+        assert!(app.cut_picks.is_empty());
+        app.key(Key::Undo);
+        assert!(app.cut.as_ref().unwrap().cuts().is_empty(), "the set undoes as one step");
+
+        // A click (no drag) on a vacant row lets go and takes the playhead.
+        app.cut_picks = vec![(0.0, 1.0, false)];
+        app.mouse_down(x_of(&app, 2.5), lanes.subs.y + 2.0);
+        app.mouse_up();
+        assert!(app.cut_picks.is_empty());
+        assert!((app.t - 2.5).abs() < 0.1, "clicked at 2.5, playhead at {}", app.t);
+        assert!(app.cut_drag.is_none());
+    }
+
     #[test]
     fn pointer_seek_stays_exact_as_decoded_frames_arrive() {
         let Some(clip) = test_clip() else { return };
@@ -7048,7 +7269,7 @@ mod tests {
         app.key(Key::Char('x'));
         // The click on the lanes picked a clip: the first Esc lets go of it.
         app.key(Key::Escape);
-        assert!(app.cut_mode && app.cut_pick.is_none());
+        assert!(app.cut_mode && app.cut_picks.is_empty());
         app.key(Key::Escape);
         assert!(!app.cut_mode && app.cut.is_some());
         app.key(Key::Close);
@@ -7349,6 +7570,8 @@ const ASPECTS: [(&str, Option<f32>); 6] = [
 ];
 
 const ACCENT: [f32; 4] = [0.082, 0.502, 0.871, 1.0];
+/// A rubber band smaller than this on both axes is still a click.
+const BAND_MIN: f32 = 4.0;
 /// Frame background / ink on the accent (#050506). Opaque: the window
 /// no longer lets the desktop through.
 const FRAME_BG: [f32; 4] = [0.0196, 0.0196, 0.0235, 1.0];

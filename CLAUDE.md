@@ -233,7 +233,11 @@ from one to the other, keeping its number.
   board's variation A, "clips on tracks": one clip per kept piece with working grips
   (`Cut::move_edge` — nearest keyframe, one undo per drag), a dashed ghost per cut, a
   razor line under the pointer that is where `S` splits, icon-only tools that name
-  themselves on hover. Icons are rects and triangles (`draw_icon`): there is no path
+  themselves on hover. **Picks are a set** (`cut_picks`, 2026-10-15): click
+  replaces, ⌘-click toggles (no playhead move), a drag from a vacant part of
+  the lanes (caption/keyframe rows, clip-free stretches) is a rubber band
+  (`CutDrag::Band`; under 4px it is still a click = let go + seek on release),
+  Backspace cuts the set as one undo step (`Cut::merge_last_undo`). Icons are rects and triangles (`draw_icon`): there is no path
   primitive, and `Item::TriangleDown` exists for the playhead's pin. The design's translucent tokens are baked opaque with `mix()`
   over their known ground — linear blending makes the raw alphas read far too bright.
   Not built yet: clip thumbnails, scene detection, the other three boards.
