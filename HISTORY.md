@@ -30,6 +30,13 @@ top and clips it to the visible part, so nothing squashes mid-slide, and the
 directory row stops answering once it is out of view. `--no-detail` reaches the
 folded state for captures.
 
+## 2026-10-15 — the cut inspector drops its clip header
+
+With the Sources rail showing the clip in timeline mode, the cut inspector's
+own header (thumbnail, name, resolution · fps · duration, and the rule under
+it) said the same thing twice. It is gone; the icon tabs now start 16px
+under the top edge and everything below moves up with them.
+
 ## 2026-10-14 — the timeline's inspector toggle; the inspector per Figma
 
 The right-hand sidebar toggle from the same Figma component now sits 43px in

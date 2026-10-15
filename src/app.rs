@@ -3187,7 +3187,6 @@ impl ModeSelector {
 struct CutSide {
     tabs: RectPx,
     tab: [RectPx; 4],
-    summary: RectPx,
     count_y: f32,
     toggle: RectPx,
     add_btn: RectPx,
@@ -4155,8 +4154,9 @@ impl App {
     fn cut_side(&self) -> CutSide {
         let s = self.workspace().side;
         let (x0, w) = (s.x + 16.0, s.w - 32.0);
-        let summary = RectPx { x: x0, y: s.y + 16.0, w, h: 54.0 };
-        let tabs = RectPx { x: x0, y: summary.y + summary.h + 28.0, w, h: 32.0 };
+        // No clip header here: the Sources rail already shows the clip in
+        // timeline mode, so the icon tabs start at the top.
+        let tabs = RectPx { x: x0, y: s.y + 16.0, w, h: 32.0 };
         let half = (w - 4.0) / 4.0;
         let tab = [0, 1, 2, 3].map(|i| RectPx { x: x0 + 2.0 + i as f32 * half, y: tabs.y + 2.0, w: half, h: 28.0 });
         let count_y = tabs.y + tabs.h + 14.0;
@@ -4170,7 +4170,7 @@ impl App {
         let warning_y = footer_y - 10.0 - warning_h;
         let body_top = if self.cut_tab == 0 { count_y + 24.0 + 10.0 } else { tabs.y + tabs.h + 16.0 };
         let body_bottom = if warning.is_empty() { footer_y - 10.0 } else { warning_y - 8.0 };
-        CutSide { tabs, tab, summary, count_y, toggle, add_btn, list_btn, grid_btn, footer_y, warning, warning_y, warning_h,
+        CutSide { tabs, tab, count_y, toggle, add_btn, list_btn, grid_btn, footer_y, warning, warning_y, warning_h,
             body: RectPx { x: x0, y: body_top, w, h: (body_bottom - body_top).max(0.0) } }
     }
 
@@ -4476,23 +4476,6 @@ impl App {
         let green = hex_color(CUT_GREEN_INK);
         let chip_bg = mix(CUT_BG, 0xffffff, 0.07);
         items.push(Item::Clip(Some(s)));
-
-        let source = &self.videos[self.active];
-        let pic = RectPx { x: g.summary.x, y: g.summary.y, w: 93.0, h: 54.0 };
-        items.push(Item::Rect(RectItem { radius: 4.0, ..RectItem::new(pic, hex_color(CUT_FILM)) }));
-        if source.delivered {
-            items.push(Item::Video { a: self.active, b: self.active, r: pic, uv: cover_uv(&source.info, pic),
-                mode: VideoMode::Tex, p0: 4.0, p1: 0.0 });
-        }
-        items.push(Item::Rect(RectItem { radius: 4.0, border_w: 3.0, border_color: hex_color(0xffffff),
-            ..RectItem::new(pic, [0.0; 4]) }));
-        items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(g.summary.w - 100.0),
-            ..TextItem::new(pic.x + 100.0, pic.y + 9.0, 12.0, hex_color(SOURCE_INK), name_of(&source.info.path)) }));
-        let fps = format!("{:.3}", source.info.fps).trim_end_matches('0').trim_end_matches('.').to_string();
-        items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(g.summary.w - 100.0),
-            ..TextItem::new(pic.x + 100.0, pic.y + 25.5, 10.0, hex_color(SOURCE_SECONDARY),
-                format!("{}p · {fps} fps · {}", source.info.height, fmt_span(source.info.duration))) }));
-        items.push(Item::Rect(RectItem::new(RectPx { x: x0, y: g.tabs.y - 14.0, w: x1-x0, h: 1.0 }, mix(CUT_BG, 0xffffff, 0.2))));
 
         // ---- the icon tabs: chapters, streams ----
         items.push(Item::Rect(RectItem { radius: 9.0, ..RectItem::new(g.tabs, mix(CUT_BG, 0xffffff, 0.05)) }));
