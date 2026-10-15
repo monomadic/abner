@@ -2762,12 +2762,15 @@ impl App {
         }
         items.push(Item::Clip(None));
         let n = self.videos.iter().filter(|v| v.selected).count();
-        ui_label(items, l.list.x + 12.0, l.list.y + l.list.h + 16.0, 11.0, hex_color(SOURCE_SUBTLE),
-            if n > 0 { format!("{n} checked · X toggles") }
+        let footer = if n > 0 { format!("{n} checked · X toggles") }
             else if !self.source_status.is_empty() { self.source_status.clone() }
             else if self.videos.len() > self.source_capacity() { format!("{}–{} / {} · scroll", first+1, (first+self.source_capacity()).min(self.videos.len()), self.videos.len()) }
-            else if self.source_file_count() < self.videos.len() { format!("{} files · 1–9 select", self.source_file_count()) }
-            else { "1–9  Select a clip".into() }, Align::Left, l.panel - if n > 0 { 82.0 } else { 24.0 });
+            else if self.source_file_count() < self.videos.len() { format!("{} files", self.source_file_count()) }
+            else { String::new() };
+        if !footer.is_empty() {
+            ui_label(items, l.list.x + 12.0, l.list.y + l.list.h + 16.0, 11.0, hex_color(SOURCE_SUBTLE),
+                footer, Align::Left, l.panel - if n > 0 { 82.0 } else { 24.0 });
+        }
     }
 
     /// Step back, play / pause, step on: shared by Input's transport and
