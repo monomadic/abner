@@ -162,7 +162,13 @@ from one to the other, keeping its number.
   in EVERY mode, the timeline included (there the rail, canvas and cut inspector share
   the top and the transport + lanes run full width, as 12:2 draws it; a click on a card
   re-cuts that clip through `select`); `show_sources` survives mode switches and
-  opening a clip never forces it open. The toggle SLIDES the panel over 200 ms
+  opening a clip never forces it open. **The toggle lives in the rail, not the
+  header** (2026-10-16): a 36px heading strip (`RAIL_HEAD_H`) under the header
+  carries "Sources N" and the toggle at its right end; the mode selector starts at
+  x=78. Collapsed, the rail is a 44px **mini strip** (`RAIL_MINI_W`,
+  `Workspace::mini`): the toggle over one keycap per clip (`mini_row`, 40px pitch),
+  `list`/`source_row`/`source_capacity` describe the keycaps while it is up, so
+  clicks, scroll and keep-visible need no second path. The toggle SLIDES the panel over 200 ms
   (`rail_slide`, `RAIL_SLIDE_S`): `Workspace::rail` is the width the layout grants this
   frame and `Workspace::panel` the panel's own, with `list`/`inspector` starting at
   `rail - panel` — anchor rail content on `list.x`/`panel`, never on 0/`rail`, or it

@@ -3,6 +3,21 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-16 — a "Sources" heading, and the rail collapses to a mini strip
+
+The rail now carries its own 36px heading strip under the header (`RAIL_HEAD_H`):
+"Sources" and the clip count on the left, anchored on the panel so they slide
+out with the cards, and the sidebar toggle on its right end — it has moved out
+of the header, so the mode selector starts at x=78 (14 in fullscreen) where the
+toggle used to be. Collapsing no longer removes the rail: it settles to a 44px
+strip (`RAIL_MINI_W`, `Workspace::mini`) with the toggle at the top and one
+keycap per clip on a 40px pitch, the focused one in the orange ring; a click
+on a keycap is `select`, and the mini strip is what `list`/`source_row` describe
+while collapsed, so scrolling and keep-visible work unchanged. The keycaps fade
+in over the sliding cards (`1 − rail_slide`), so the two states cross over
+instead of popping. The canvas starts at the strip's edge in every mode,
+timeline included.
+
 ## 2026-10-15 — several clips at once on the timeline
 
 The pick is a set now (`App::cut_picks`, newest last). A plain click on a

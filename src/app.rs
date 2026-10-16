@@ -1684,7 +1684,7 @@ impl App {
     /// of replacing them, and keeps a rubber band's starting picks.
     pub fn mouse_down_with_mods(&mut self, x: f32, y: f32, alt: bool, cmd: bool) {
         self.press_cmd = cmd;
-        if alt && self.show_ui && !self.cut_mode && !self.mask_mode && contains(self.workspace().list, x, y) {
+        if alt && self.show_ui && !self.cut_mode && !self.mask_mode && !self.workspace().mini && contains(self.workspace().list, x, y) {
             let first = self.source_first();
             if let Some(idx) = (first..(first + self.source_capacity()).min(self.videos.len()))
                 .find(|&i| contains(self.source_row(i), x, y) && !contains(self.source_checkbox(i), x, y)) {
@@ -2348,7 +2348,14 @@ impl App {
     }
 
     fn source_capacity(&self) -> usize {
-        (self.workspace().list.h / SOURCE_H).floor().max(1.0) as usize
+        let l = self.workspace();
+        (l.list.h / if l.mini { RAIL_MINI_PITCH } else { SOURCE_H }).floor().max(1.0) as usize
+    }
+
+    /// The collapsed rail's keycap for the `k`th visible clip.
+    fn mini_row(&self, k: usize) -> RectPx {
+        let l = self.workspace();
+        RectPx { x: (RAIL_MINI_W - 32.0) / 2.0, y: l.list.y + k as f32 * RAIL_MINI_PITCH, w: 32.0, h: 32.0 }
     }
 
     fn source_first(&self) -> usize {
@@ -2357,6 +2364,7 @@ impl App {
 
     fn source_row(&self, index: usize) -> RectPx {
         let l = self.workspace();
+        if l.mini { return self.mini_row(index - self.source_first()); }
         RectPx { x: l.list.x + 12.0, y: l.list.y + (index - self.source_first()) as f32 * SOURCE_H,
             w: l.panel - 24.0, h: SOURCE_H - 12.0 }
     }
@@ -2383,7 +2391,9 @@ impl App {
     fn controls(&self) -> Vec<Control> {
         let l = self.workspace();
         let mut out = self.mode_selector().controls();
-        out.push(Control::new(self.sidebar_toggle(), "", self.show_sources, Action::ToggleSources));
+        if l.rail > 0.0 {
+            out.push(Control::new(self.sidebar_toggle(), "", self.show_sources, Action::ToggleSources));
+        }
         if l.grip.h > 0.0 {
             out.push(Control::new(l.grip, "", self.show_detail, Action::ToggleDetail));
         }
@@ -2394,7 +2404,7 @@ impl App {
             self.cut_controls(&mut out);
             return out;
         }
-        if l.rail > 0.0 && !self.mask_mode {
+        if l.panel > 0.0 && !self.mask_mode {
             let w = (l.panel - 32.0) / 2.0;
             for (x, label, action) in [(l.list.x + 12.0, "Duplicate", Action::Duplicate),
                 (l.list.x + 20.0 + w, "+ Add files", Action::OpenFiles)] {
@@ -2520,11 +2530,16 @@ impl App {
         }
     }
 
-    /// Header (12:5): the sidebar toggle sits at x=78, clear of the traffic
-    /// lights, and the mode selector 22px after it. Fullscreen has no
-    /// lights, so both slide to the outer padding.
+    /// Header (12:5): the mode selector starts at x=78, clear of the traffic
+    /// lights; fullscreen has no lights, so it slides to the outer padding.
+    fn header_left(&self) -> f32 {
+        if self.fullscreen { 14.0 } else { 78.0 }
+    }
+
+    /// The sidebar toggle rides the right end of the rail's heading strip,
+    /// so it slides with the panel and lands at the top of the mini strip.
     fn sidebar_toggle(&self) -> RectPx {
-        RectPx { x: if self.fullscreen { 14.0 } else { 78.0 }, y: 8.0, w: 32.0, h: 28.0 }
+        RectPx { x: self.workspace().rail - 38.0, y: HEADER_H + (RAIL_HEAD_H - 28.0) / 2.0, w: 32.0, h: 28.0 }
     }
 
     /// The right toggle (12:5 puts it 43px in from the edge); timeline only,
@@ -2535,7 +2550,7 @@ impl App {
 
     fn mode_selector(&self) -> ModeSelector {
         ModeSelector {
-            rect: RectPx { x: self.sidebar_toggle().x + 54.0, y: 8.0, w: 385.0, h: 28.0 },
+            rect: RectPx { x: self.header_left(), y: 8.0, w: 385.0, h: 28.0 },
             active: self.workspace_mode(),
         }
     }
@@ -2556,8 +2571,6 @@ impl App {
             items.push(Item::Rect(RectItem::new(r, WORKSPACE_RULE)));
         }
         self.mode_selector().draw(items, self.cursor, self.cursor_inside);
-        let toggle = self.sidebar_toggle();
-        draw_sidebar_toggle(items, toggle, false, self.show_sources, self.cursor_inside && contains(toggle, self.cursor.0, self.cursor.1));
         for control in self.controls() {
             let hovered = contains(control.r, self.cursor.0, self.cursor.1) && self.cursor_inside;
             if matches!(control.action, Action::Tool(_) | Action::ToggleSources | Action::ToggleInspector | Action::ToggleDetail) {
@@ -2692,9 +2705,48 @@ impl App {
         if l.rail <= 0.0 { return; }
         let ink = hex_color(SOURCE_INK);
         let secondary = hex_color(SOURCE_SECONDARY);
+        let first = self.source_first();
+        // Heading strip: "Sources N" anchored on the panel (it slides out
+        // with the cards) and the toggle on the rail's right end.
+        items.push(Item::Clip(Some(RectPx { x: 0.0, y: HEADER_H, w: l.rail, h: RAIL_HEAD_H })));
+        if l.panel > 0.0 {
+            let (hx, hy) = (l.list.x + 14.0, HEADER_H + RAIL_HEAD_H / 2.0);
+            items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(l.panel - 110.0),
+                ..TextItem::new(hx, hy, 13.0, ink, "Sources") }));
+            items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(40.0),
+                ..TextItem::new(hx + 8.0 * 13.0 * MONO_ADV, hy, 13.0, secondary, self.videos.len().to_string()) }));
+        }
+        let toggle = self.sidebar_toggle();
+        draw_sidebar_toggle(items, toggle, false, self.show_sources, self.cursor_inside && contains(toggle, self.cursor.0, self.cursor.1));
+        items.push(Item::Clip(None));
+        // The mini strip: one keycap per clip, ringed on the focused one.
+        // It fades in as the panel slides out (the cards keep drawing
+        // underneath until they are gone), so the two cross over.
+        if l.mini || self.rail_slide < 1.0 {
+            let alpha = if l.mini { 1.0 } else { 1.0 - self.rail_slide };
+            let fade = |c: [f32; 4]| [c[0], c[1], c[2], c[3] * alpha];
+            let column = RectPx { x: 0.0, y: l.list.y, w: RAIL_MINI_W, h: l.list.h };
+            items.push(Item::Clip(Some(column)));
+            let capacity = (column.h / RAIL_MINI_PITCH).floor().max(1.0) as usize;
+            for (k, i) in (first..(first + capacity).min(self.videos.len())).enumerate() {
+                let r = self.mini_row(k);
+                let active = i == self.active;
+                let hover = l.mini && self.cursor_inside && contains(r, self.cursor.0, self.cursor.1);
+                if active || hover {
+                    items.push(Item::Rect(RectItem { radius: 16.0, border_w: 2.0,
+                        border_color: fade(hex_color(if active { SOURCE_RING } else { SOURCE_EDGE_HOVER })),
+                        ..RectItem::new(r, [0.0; 4]) }));
+                }
+                let cap = inset_rect(r, 4.0);
+                items.push(Item::Rect(RectItem { radius: 12.0, ..RectItem::new(cap, fade(mix(INSPECTOR_BG, 0xffffff, 0.5))) }));
+                items.push(Item::Text(TextItem { header: true, align: Align::Center, valign: VAlign::Middle, max_width: Some(22.0),
+                    ..TextItem::new(cap.x + 12.0, cap.y + 12.0, 15.0, fade(hex_color(0x000000)), (i + 1).to_string()) }));
+            }
+            items.push(Item::Clip(None));
+        }
+        if l.panel <= 0.0 { return; }
         let visible = RectPx { x: 0.0, y: l.list.y, w: l.rail, h: l.list.h };
         items.push(Item::Clip(Some(visible)));
-        let first = self.source_first();
         for i in first..(first + self.source_capacity()).min(self.videos.len()) {
             let v = &self.videos[i];
             let r = self.source_row(i);
@@ -4295,8 +4347,6 @@ impl App {
     fn build_cut_header(&self, items: &mut Vec<Item>) {
         let r = self.header_tabs();
         self.mode_selector().draw(items, self.cursor, self.cursor_inside);
-        let toggle = self.sidebar_toggle();
-        draw_sidebar_toggle(items, toggle, false, self.show_sources, self.cursor_inside && contains(toggle, self.cursor.0, self.cursor.1));
         if self.vp.0 >= 1000.0 {
             let toggle = self.inspector_toggle();
             draw_sidebar_toggle(items, toggle, true, self.show_inspector, self.cursor_inside && contains(toggle, self.cursor.0, self.cursor.1));
@@ -5460,6 +5510,9 @@ struct Workspace {
     /// The panel's own width; `list` and `inspector` are this wide and
     /// start at `rail - panel`.
     panel: f32,
+    /// The rail is the collapsed strip (`RAIL_MINI_W`): `list` is then the
+    /// keycap column and `source_row` a keycap, not a card.
+    mini: bool,
     canvas: RectPx,
     list: RectPx,
     /// The visible part of the focused inspector (its content is
@@ -5481,10 +5534,20 @@ impl Workspace {
         // `rail` is what the layout gives the panel this frame; `panel` is
         // the panel's own width, and its rects start at `rail - panel` so
         // a half-open rail is the right-hand part of a whole one.
-        let panel = if !visible || slide <= 0.0 { 0.0 } else if w < 900.0 { 210.0_f32.min(w * 0.3) } else { 280.0 };
+        let full = if w < 900.0 { 210.0_f32.min(w * 0.3) } else { 280.0 };
+        let panel = if !visible || slide <= 0.0 { 0.0 } else { full };
         let ease = |t: f32| { let t = t.clamp(0.0, 1.0); t * t * (3.0 - 2.0 * t) };
-        let rail = (panel * ease(slide)).round();
+        // Hidden, the rail is still the mini strip: the toggle and one
+        // keycap per clip, so the sources stay one click away.
+        let rail = if !visible { 0.0 } else { (RAIL_MINI_W + (full - RAIL_MINI_W) * ease(slide)).round() };
+        let mini = visible && panel <= 0.0;
         let ox = rail - panel;
+        let list_y = HEADER_H + RAIL_HEAD_H + 10.0;
+        let list_of = |bottom: f32, grip_y: f32| if mini {
+            RectPx { x: 0.0, y: list_y, w: RAIL_MINI_W, h: (bottom - list_y).max(RAIL_MINI_PITCH) }
+        } else {
+            RectPx { x: ox, y: list_y, w: panel, h: (grip_y - RAIL_FOOTER_H - list_y).max(SOURCE_H) }
+        };
         if visible && cut {
             // Timeline Edit (12:2): the source rail, the canvas and the
             // inspector share the top; the transport and the lanes run the
@@ -5500,10 +5563,9 @@ impl Workspace {
             let transport_y = h - CUT_STATUS_H - lanes - CUT_TOOLBAR_H;
             let top = (transport_y - CUT_HEADER_H).max(1.0);
             let (grip, inspector) = Self::detail(ox, panel, h, transport_y, detail_slide);
-            let list_y = HEADER_H + 14.0;
             return Self {
-                rail, panel, inspector, grip,
-                list: RectPx { x: ox, y: list_y, w: panel, h: (grip.y - RAIL_FOOTER_H - list_y).max(SOURCE_H) },
+                rail, panel, mini, inspector, grip,
+                list: list_of(transport_y, grip.y),
                 canvas: RectPx { x: rail, y: CUT_HEADER_H, w: (w - side_in - rail).max(1.0), h: top },
                 side: RectPx { x: w - side_in, y: CUT_HEADER_H, w: side, h: top },
                 transport: RectPx { x: 0.0, y: transport_y, w, h: CUT_TOOLBAR_H },
@@ -5519,10 +5581,9 @@ impl Workspace {
         // buttons under it — are not in the design and take their own
         // strips, so nothing overlaps the inspector's path line.
         let (grip, inspector) = Self::detail(ox, panel, h, h - STATUS_H - RAIL_ACTIONS_H, detail_slide);
-        let list_y = HEADER_H + 14.0;
         Self {
-            rail, panel, canvas, inspector, grip, timeline: none, side: none,
-            list: RectPx { x: ox, y: list_y, w: panel, h: (grip.y - RAIL_FOOTER_H - list_y).max(SOURCE_H) },
+            rail, panel, mini, canvas, inspector, grip, timeline: none, side: none,
+            list: list_of(h - STATUS_H, grip.y),
             transport: RectPx { x: rail, y: h - STATUS_H - TRANSPORT_H, w: w - rail, h: TRANSPORT_H },
         }
     }
@@ -5637,6 +5698,12 @@ const SOURCE_THUMB_H: f32 = 100.0;
 const RAIL_FOOTER_H: f32 = 36.0;
 /// The sidebar's slide, seconds (the design's "panels slide outward over 200 ms").
 const RAIL_SLIDE_S: f32 = 0.2;
+/// The rail's heading strip under the header: "Sources N" and the sidebar
+/// toggle, which lives in the rail rather than the header.
+const RAIL_HEAD_H: f32 = 36.0;
+/// Collapsed, the rail is this strip: the toggle over one keycap per clip.
+const RAIL_MINI_W: f32 = 44.0;
+const RAIL_MINI_PITCH: f32 = 40.0;
 const RAIL_ACTIONS_H: f32 = 40.0;
 /// The focused inspector (278:609) is 216px; the grip strip along its top
 /// edge folds it away over `DETAIL_SLIDE_S` — quicker than the rail, it
@@ -6027,7 +6094,8 @@ mod tests {
         assert_eq!(app.workspace().rail, 280.0);
         assert!(app.controls().iter().any(|c| matches!(c.action, Action::ToggleSources) && c.selected));
         let r = app.sidebar_toggle();
-        assert!(r.x + r.w <= tabs.x, "the toggle sits before the selector");
+        assert!(r.x + r.w <= 280.0 && r.y >= HEADER_H && r.y + r.h <= HEADER_H + RAIL_HEAD_H, "the toggle rides the rail's heading strip");
+        assert_eq!(tabs.x, 78.0, "the selector starts where the toggle used to");
         app.mouse_down(r.x + 16.0, r.y + 14.0);
         app.mouse_up();
         assert!(!app.show_sources);
@@ -6043,19 +6111,31 @@ mod tests {
         let desc = app.tick(RAIL_SLIDE_S, (1280.0, 800.0), 2.0);
         assert!(!desc.animating || app.playing);
         let l = app.workspace();
-        assert_eq!((l.rail, l.canvas.x, l.canvas.w, l.list.w, l.inspector.h), (0.0, 0.0, 1280.0, 0.0, 0.0));
+        // Settled, the rail is the mini strip: the toggle at its top and a
+        // keycap per clip, the cards and their controls gone.
+        assert!(l.mini);
+        assert_eq!((l.rail, l.canvas.x, l.canvas.w, l.panel, l.inspector.h), (RAIL_MINI_W, RAIL_MINI_W, 1280.0 - RAIL_MINI_W, 0.0, 0.0));
         assert!(app.controls().iter().all(|c| !matches!(c.action, Action::Duplicate | Action::OpenFiles)));
         assert!(app.controls().iter().any(|c| matches!(c.action, Action::ToggleSources) && !c.selected));
         let t = app.header_tabs();
         assert_eq!((t.x, t.y, t.w, t.h), (tabs.x, tabs.y, tabs.w, tabs.h));
-        // Clicking where a card used to be reaches the canvas, not a clip.
+        let mini = app.sidebar_toggle();
+        assert!(mini.x >= 0.0 && mini.x + mini.w <= RAIL_MINI_W && mini.y == r.y);
+        // Clicking where a card used to be reaches the canvas, not a clip;
+        // a keycap in the strip still picks its clip.
         app.mouse_down(60.0, HEADER_H + 80.0);
         app.mouse_up();
         assert_eq!(app.active, 0);
+        let cap = app.source_row(1);
+        assert!(cap.x >= 0.0 && cap.x + cap.w <= RAIL_MINI_W && cap.y == app.source_row(0).y + RAIL_MINI_PITCH);
+        app.mouse_down(cap.x + 16.0, cap.y + 16.0);
+        app.mouse_up();
+        assert_eq!(app.active, 1);
+        app.key(Key::Char('1'));
         app.key(Key::Char('m'));
         assert!(app.mask_mode);
-        assert_eq!(app.workspace().rail, 0.0);
-        app.mouse_down(r.x + 16.0, r.y + 14.0);
+        assert_eq!(app.workspace().rail, RAIL_MINI_W);
+        app.mouse_down(mini.x + 16.0, mini.y + 14.0);
         app.mouse_up();
         assert!(app.show_sources && app.mask_mode);
         app.tick(RAIL_SLIDE_S, (1280.0, 800.0), 2.0);
@@ -6080,8 +6160,8 @@ mod tests {
         app.tick(RAIL_SLIDE_S, (1280.0, 1100.0), 2.0);
         let l = app.workspace();
         assert!(!app.show_sources && app.cut_mode);
-        assert_eq!((l.rail, l.canvas.x), (0.0, 0.0));
-        app.mouse_down(r.x + 16.0, r.y + 14.0);
+        assert_eq!((l.rail, l.canvas.x), (RAIL_MINI_W, RAIL_MINI_W));
+        app.mouse_down(mini.x + 16.0, mini.y + 14.0);
         app.mouse_up();
         app.tick(RAIL_SLIDE_S, (1280.0, 1100.0), 2.0);
         // The right toggle slides the timeline's inspector off the right
@@ -6107,7 +6187,7 @@ mod tests {
         assert_eq!(app.workspace().side.x, before.side.x);
         app.set_cut_mode(false);
         let card = app.source_row(0);
-        assert_eq!((card.y, card.h), (HEADER_H + 14.0, 157.0));
+        assert_eq!((card.y, card.h), (HEADER_H + RAIL_HEAD_H + 10.0, 157.0));
         // The preview is a cover crop in uv CORNERS: never mirrored, never
         // stretched, centred on the picture.
         let wide = crate::probe::VideoInfo { width: 2880, height: 720, ..app.videos[0].info.clone() };
