@@ -3,6 +3,14 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-17 — the rubber band starts from the chapter row too
+
+`cut_band_rows` began at the picture row, so a drag from the chapter row just
+under the ruler fell through to the scrub — which made the band look like it only
+worked from the bottom of the lanes. The block now runs from the chapter row (when
+the window is tall enough to have one) to the foot of the keyframe row. The ruler
+is still the scrub.
+
 ## 2026-10-17 — ⇧-click picks a run of clips
 
 Shift reaches `mouse_down_with_mods` from the loop's modifier state alongside ⌥

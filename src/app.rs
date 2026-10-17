@@ -4172,17 +4172,18 @@ impl App {
         a.2 == b.2 && (a.0 - b.0).abs() < 1e-3 && (a.1 - b.1).abs() < 1e-3
     }
 
-    /// The block a rubber band can start on and sweep: the picture row down
-    /// to the foot of the keyframe row, across the lanes' width — a fitted
-    /// clip fills its own row, so the sound, caption and keyframe rows are
-    /// where a band usually begins. The ruler above stays a scrub. None
-    /// without a timeline, or before the first draw fitted it (no scale =
-    /// no time under the pointer).
+    /// The block a rubber band can start on and sweep: the chapter row
+    /// (when there is one) down to the foot of the keyframe row, across the
+    /// lanes' width — a fitted clip fills its own row, so the chapter, sound,
+    /// caption and keyframe rows are where a band usually begins. The ruler
+    /// above stays a scrub. None without a timeline, or before the first
+    /// draw fitted it (no scale = no time under the pointer).
     fn cut_band_rows(&self) -> Option<RectPx> {
         let lanes = self.cut_lanes();
         self.cut.as_ref().filter(|c| c.pps > 0.0)?;
+        let top = lanes.chapters.map_or(lanes.video.y, |c| c.y);
         let bottom = lanes.keys.y + lanes.keys.h;
-        Some(RectPx { x: lanes.video.x, y: lanes.video.y, w: lanes.video.w, h: bottom - lanes.video.y })
+        Some(RectPx { x: lanes.video.x, y: top, w: lanes.video.w, h: bottom - top })
     }
 
     /// The band's rectangle while one is being dragged, clamped to the rows
@@ -7338,6 +7339,20 @@ mod tests {
         app.mouse_up();
         assert_eq!(app.cut_picks.len(), 2, "the picks outlive the band");
         assert_eq!(app.t, held, "a band does not move the playhead");
+
+        // The band also starts from the chapter row above the picture.
+        let chapters = lanes.chapters.expect("the test window is tall enough for a chapter row");
+        app.cut_picks.clear();
+        app.mouse_down(x_of(&app, 0.5), chapters.y + chapters.h / 2.0);
+        assert!(matches!(app.cut_drag, Some(CutDrag::Band { .. })), "a drag from the chapter row is a band");
+        app.cursor_moved(x_of(&app, 2.5), v.y + v.h / 2.0);
+        assert_eq!(app.cut_picks, vec![(0.0, 1.0, false), (1.0, 2.0, false), (2.0, 3.0, false)]);
+        app.mouse_up();
+        assert_eq!(app.t, held, "a band from the top does not move the playhead either");
+        app.mouse_down(x_of(&app, 0.5), lanes.ruler.y + 4.0);
+        assert!(!matches!(app.cut_drag, Some(CutDrag::Band { .. })), "the ruler is still a scrub");
+        app.mouse_up();
+        app.seek_all(held, true);
 
         // ⌘-band keeps what was picked.
         app.cut_picks = vec![(0.0, 1.0, false)];
