@@ -298,7 +298,7 @@ and mask state. No file is copied, renamed or written. The master time and playb
 state survive insertion; shifted slots are exact-seeked and uploaded again.
 Add files / Cmd-O opens the macOS multi-file picker through the existing open queue.
 `--duplicate` makes the linked-copy state reachable for targeted window captures.
-Topaz/edit-stack controls remain proposals; this change implements the source rail.
+Processor/edit-stack controls remain proposals; this change implements the source rail.
 
 The compact timeline uses Figma 73:162 track offsets (2/20/48/108/156/180px)
 inside a 198px content area, trimming the obsolete empty bottom margin. Short

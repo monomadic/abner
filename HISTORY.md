@@ -3,6 +3,15 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-17 — generic build-time processor entry point
+
+Expose the application as a library accepting a processor registry. The ordinary
+launcher uses an empty registry. An experimental shared CPU RGB16 API and generic
+headless listing/synthetic-check commands allow independently generated launchers
+to validate composition before GUI/export integration. No external implementation
+identities or dependencies are committed to the host. This is not yet a processor
+export workflow or the full preview/scheduling API.
+
 ## 2026-10-16 — a "Sources" heading, and the rail collapses to a mini strip
 
 The rail now carries its own 36px heading strip under the header (`RAIL_HEAD_H`):
@@ -649,7 +658,7 @@ media on disk. Copies have independent decoder/mask state; paused and playing
 insertion preserve master time and re-deliver shifted texture slots. X toggles the
 viewed checkbox, Cmd-A selects/clears all and Clear resets batch scope. Add files /
 Cmd-O uses a non-modal native multi-file picker through the Open With queue.
-`--duplicate` exposes the state for visual review. Topaz and batch processing remain
+`--duplicate` exposes the state for visual review. Processor integration and batch processing remain
 Figma proposals. All 65 tests pass, including new selection, resize, paused/batch
 and playing duplicate-sync coverage. Targeted window captures verified the Sources
 rail at 1440×900 and 720×480; the compact view keeps the viewed copy visible.

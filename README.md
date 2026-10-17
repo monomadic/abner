@@ -206,3 +206,18 @@ the HUD rather than silently drifting out of sync.
 ## License
 
 MIT
+
+## Build-time composition
+
+The library entry point `abner::run(registry)` accepts an external processor
+registry; the ordinary executable supplies an empty one. The experimental API
+is in `crates/processor-api`. A separately generated launcher can depend on
+independent processor crates and register their factories before calling `run`.
+
+Keep that generated project outside this repository. Committed host files must
+not identify, document or depend on external processors (generic examples and
+builtins excepted). Runtime descriptors and settings may contain full processor
+information. `--list-processors` prints descriptors; `--check-processor ID
+SETTINGS_JSON` processes four synthetic frames without opening a window. These
+are composition probes, not a processor export UI. The initial contract supports
+only one-input/one-output CPU RGB16 SDR frames and completed-frame progress.

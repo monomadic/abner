@@ -23,6 +23,7 @@ name = "abner"
 version = "0.1.0"
 dependencies = [
  "ab_glyph",
+ "abner-processor-api",
  "anyhow",
  "bytemuck",
  "cc",
@@ -41,6 +42,14 @@ dependencies = [
  "toml",
  "wgpu",
  "winit",
+]
+
+[[package]]
+name = "abner-processor-api"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

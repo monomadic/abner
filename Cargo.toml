@@ -4,7 +4,12 @@ version = "0.1.0"
 edition = "2024"
 description = "A/B video comparison player — play N videos in sync, flip between them."
 
+[package.metadata.abner-host]
+api = "crates/processor-api"
+version = 1
+
 [dependencies]
+abner-processor-api = { path = "crates/processor-api" }
 anyhow = "1"
 log = "0.4"
 env_logger = "0.11"

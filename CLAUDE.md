@@ -408,3 +408,15 @@ the "VIDEO QUALITY TESTING TOOLKIT" line that used to be a second text run.
   `screencapture -x -l "$(swift scripts/window-id.swift | head -1)" shot.png`.
   `ffmpeg -f lavfi -i testsrc2=size=1280x720:rate=30 -t 6 -g 30 a.mp4` makes a clip
   (vary `eq=brightness` for a B that actually differs).
+
+## External processor boundary (firm rule)
+
+Committed Abner files must not name, depend on, document, or contain implementation
+knowledge about external processors or their repositories. Generic examples and
+builtins may be exceptions. Runtime registries may retain and expose complete
+processor information. Generated composition manifests, launcher source, lockfiles
+and provenance containing external processor identities live outside this repository.
+The normal executable supplies an empty registry to the library's `run` entry point.
+The generic API lives in `crates/processor-api`; processor implementations and
+composition tooling are maintained independently. `src/lib.rs` now owns the former
+main module tree and window loop; `src/main.rs` is only the default launcher.
