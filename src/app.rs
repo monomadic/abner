@@ -225,6 +225,7 @@ pub struct App {
     cut_band_base: Vec<(f64, f64, bool)>,
     /// ⌘ was down at the press that `mouse_down` is handling.
     press_cmd: bool,
+    press_shift: bool,
     cut_restore: Option<(f64, f64)>,
     split_tool: bool,
     /// Hover lift per kept clip, keyed by (start ms, sound lane): 0..1, eased
@@ -611,7 +612,7 @@ impl App {
             split_preview: None,
             cut_picks: Vec::new(),
             cut_band_base: Vec::new(),
-            press_cmd: false,
+            press_cmd: false, press_shift: false,
             cut_restore: None,
             split_tool: false,
             cut_hot: Vec::new(),
@@ -1677,13 +1678,16 @@ impl App {
     }
 
     pub fn mouse_down_with_alt(&mut self, x: f32, y: f32, alt: bool) {
-        self.mouse_down_with_mods(x, y, alt, false);
+        self.mouse_down_with_mods(x, y, alt, false, false);
     }
 
     /// `cmd` = ⌘ held: on the timeline it adds a clip to the picks instead
-    /// of replacing them, and keeps a rubber band's starting picks.
-    pub fn mouse_down_with_mods(&mut self, x: f32, y: f32, alt: bool, cmd: bool) {
+    /// of replacing them, and keeps a rubber band's starting picks. `shift`
+    /// = ⇧ held: a clip click picks every clip from the newest pick through
+    /// the clicked one.
+    pub fn mouse_down_with_mods(&mut self, x: f32, y: f32, alt: bool, cmd: bool, shift: bool) {
         self.press_cmd = cmd;
+        self.press_shift = shift;
         if alt && self.show_ui && !self.cut_mode && !self.mask_mode && !self.workspace().mini && contains(self.workspace().list, x, y) {
             let first = self.source_first();
             if let Some(idx) = (first..(first + self.source_capacity()).min(self.videos.len()))
@@ -1697,6 +1701,7 @@ impl App {
         }
         self.mouse_down(x, y);
         self.press_cmd = false;
+        self.press_shift = false;
     }
 
     pub fn mouse_released(&mut self) {
@@ -3777,13 +3782,24 @@ impl App {
             } else if let Some((seg, audio)) = self.cut_clip_at(x, y) {
                 self.cut_restore = None;
                 // A picture or sound clip: pick it (outlined), and still take the
-                // playhead there. ⌘ toggles it in the set and leaves the playhead.
+                // playhead there. ⌘ toggles it in the set and leaves the playhead;
+                // ⇧ picks the run of clips from the newest pick through this one,
+                // whatever lies between, and leaves the playhead too.
                 let gop = self.frame_detail() && !audio;
                 let range = if gop { self.cut.as_ref().unwrap().gop_at(self.cut_time_at(x)) } else { None };
                 let gop = range.is_some();
                 let (a, b) = range.unwrap_or((seg.start, seg.end));
                 let pick = (a, b, audio);
-                if self.press_cmd && gop == self.cut_gop {
+                let anchor = self.cut_picks.last().copied().filter(|_| self.press_shift && !gop && !self.cut_gop);
+                if let Some(anchor) = anchor {
+                    let (lo, hi) = (anchor.0.min(a), anchor.1.max(b));
+                    let run: Vec<(f64, f64, bool)> = self.cut.as_ref().unwrap().segments().into_iter()
+                        .filter(|s| !s.cut && s.start >= lo - 1e-6 && s.end <= hi + 1e-6)
+                        .map(|s| (s.start, s.end, audio)).collect();
+                    for p in run {
+                        if !self.cut_picks.iter().any(|q| Self::same_pick(*q, p)) { self.cut_picks.push(p); }
+                    }
+                } else if self.press_cmd && gop == self.cut_gop {
                     if let Some(i) = self.cut_picks.iter().position(|p| Self::same_pick(*p, pick)) {
                         self.cut_picks.remove(i);
                     } else {
@@ -7280,13 +7296,31 @@ mod tests {
         app.mouse_up();
         assert_eq!(app.cut_picks, vec![(0.0, 1.0, false)]);
         let held = app.t;
-        app.mouse_down_with_mods(x_of(&app, 2.5), v.y + v.h / 2.0, false, true);
+        app.mouse_down_with_mods(x_of(&app, 2.5), v.y + v.h / 2.0, false, true, false);
         app.mouse_up();
         assert_eq!(app.cut_picks, vec![(0.0, 1.0, false), (2.0, 3.0, false)], "⌘-click adds");
         assert_eq!(app.t, held, "⌘-click leaves the playhead");
-        app.mouse_down_with_mods(x_of(&app, 2.5), v.y + v.h / 2.0, false, true);
+        app.mouse_down_with_mods(x_of(&app, 2.5), v.y + v.h / 2.0, false, true, false);
         app.mouse_up();
         assert_eq!(app.cut_picks, vec![(0.0, 1.0, false)], "⌘-click again takes it out");
+
+        // ⇧-click picks the run from the newest pick through the clicked clip.
+        app.mouse_down_with_mods(x_of(&app, 3.5), v.y + v.h / 2.0, false, false, true);
+        app.mouse_up();
+        assert_eq!(app.cut_picks, vec![(0.0, 1.0, false), (1.0, 2.0, false), (2.0, 3.0, false), (3.0, 4.0, false)], "⇧-click picks what lies between");
+        assert_eq!(app.t, held, "⇧-click leaves the playhead");
+        assert!(app.join_picks().is_some(), "and the run is joinable");
+        app.cut_picks = vec![(2.0, 3.0, false)];
+        app.mouse_down_with_mods(x_of(&app, 0.5), v.y + v.h / 2.0, false, false, true);
+        app.mouse_up();
+        assert_eq!(app.cut_picks, vec![(2.0, 3.0, false), (0.0, 1.0, false), (1.0, 2.0, false)], "⇧-click runs leftward too");
+        app.cut_picks.clear();
+        app.mouse_down_with_mods(x_of(&app, 2.5), v.y + v.h / 2.0, false, false, true);
+        app.mouse_up();
+        assert_eq!(app.cut_picks, vec![(2.0, 3.0, false)], "with nothing picked ⇧-click is a click");
+        app.mouse_down(x_of(&app, 0.5), v.y + v.h / 2.0);
+        app.mouse_up();
+        assert_eq!(app.cut_picks, vec![(0.0, 1.0, false)]);
 
         // The band: from the caption row up across the picture row.
         let band_rows = app.cut_band_rows().unwrap();
@@ -7307,7 +7341,7 @@ mod tests {
 
         // ⌘-band keeps what was picked.
         app.cut_picks = vec![(0.0, 1.0, false)];
-        app.mouse_down_with_mods(x_of(&app, 2.5), lanes.subs.y + 2.0, false, true);
+        app.mouse_down_with_mods(x_of(&app, 2.5), lanes.subs.y + 2.0, false, true, false);
         app.cursor_moved(x_of(&app, 3.5), v.y + v.h / 2.0);
         app.mouse_up();
         assert_eq!(app.cut_picks, vec![(0.0, 1.0, false), (2.0, 3.0, false), (3.0, 4.0, false)]);

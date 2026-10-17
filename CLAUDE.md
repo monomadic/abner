@@ -240,7 +240,9 @@ from one to the other, keeping its number.
   (`Cut::move_edge` — nearest keyframe, one undo per drag), a dashed ghost per cut, a
   razor line under the pointer that is where `S` splits, icon-only tools that name
   themselves on hover. **Picks are a set** (`cut_picks`, 2026-10-15): click
-  replaces, ⌘-click toggles (no playhead move), a drag from a vacant part of
+  replaces, ⌘-click toggles (no playhead move), ⇧-click picks the run of kept clips from the
+  newest pick through the clicked one (whatever lies between; no playhead move; a plain
+  click with nothing picked), a drag from a vacant part of
   the lanes (caption/keyframe rows, clip-free stretches) is a rubber band
   (`CutDrag::Band`; under 4px it is still a click = let go + seek on release),
   Backspace cuts the set as one undo step (`Cut::merge_last_undo`), and `J` (the footer's Join button, `CutAction::Join`) makes two or more picked clips ONE clip by dropping the splits between them (`Cut::joinable`/`Cut::join`, one undo step; the joined clip stays picked). Join is dead unless the picks are adjacent kept pieces: an unpicked clip or a cut between any two of them refuses it with a status line, and GOP picks are not clips. Icons are rects and triangles (`draw_icon`): there is no path

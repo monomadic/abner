@@ -3,6 +3,14 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-17 — ⇧-click picks a run of clips
+
+Shift reaches `mouse_down_with_mods` from the loop's modifier state alongside ⌥
+and ⌘. On a picture or sound clip, ⇧-click picks every kept clip from the newest
+pick through the clicked one — whatever lies between — adds them to the set and
+leaves the playhead, so a run is two clicks and Join is one key away. With nothing
+picked, or on GOP picks, it is a plain click.
+
 ## 2026-10-17 — dragging a split no longer wipes the others
 
 `Cut::move_edge` dropped a dragged split that landed on a neighbour by keeping
