@@ -684,10 +684,16 @@ impl Cut {
             self.edit.cuts.retain(|c| c.1 - c.0 > EPS);
             return to;
         }
-        if let Some(s) = self.edit.splits.iter_mut().find(|s| (**s - edge).abs() < EPS) {
-            // A split dragged onto a neighbour is that neighbour: drop it.
-            *s = to;
-            self.edit.splits.retain(|s| *s - lo > EPS && hi - *s > EPS);
+        if let Some(i) = self.edit.splits.iter().position(|s| (*s - edge).abs() < EPS) {
+            // A split dragged onto a neighbour is that neighbour: drop it —
+            // and only it (by index: the neighbour may be a split too, and
+            // the other splits are not in this drag).
+            if to - lo <= EPS || hi - to <= EPS {
+                self.edit.splits.remove(i);
+            } else {
+                self.edit.splits[i] = to;
+                self.edit.splits.sort_by(f64::total_cmp);
+            }
             return to;
         }
         if i == 0 && to > EPS {
@@ -1536,6 +1542,17 @@ mod tests {
         assert!(!cut.split(32.0), "inside a cut");
         assert_eq!(cut.segments().len(), 4);
         assert_eq!(cut.keeps(), [(0.0, 30.0), (34.0, 60.0)], "a split does not break the export's ranges");
+    }
+
+    #[test]
+    fn dragging_one_split_leaves_the_others_alone() {
+        let mut cut = model();
+        assert!(cut.split(10.0) && cut.split(20.0) && cut.split(30.0));
+        cut.begin_trim();
+        assert_eq!(cut.move_edge(20.0, 23.0), 22.0, "snaps to the nearest keyframe");
+        assert_eq!(cut.splits(), [10.0, 22.0, 30.0], "the other splits survive the drag");
+        assert_eq!(cut.move_edge(22.0, 31.0), 30.0, "clamped to its neighbour");
+        assert_eq!(cut.splits(), [10.0, 30.0], "only the dragged split merges into its neighbour");
     }
 
     #[test]

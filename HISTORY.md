@@ -3,6 +3,14 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-17 — dragging a split no longer wipes the others
+
+`Cut::move_edge` dropped a dragged split that landed on a neighbour by keeping
+only the splits strictly inside the dragged split's own neighbour bounds — which
+is every OTHER split gone, every drag, so trimming one of several clips joined
+all the rest. It now moves or removes the dragged split by index and leaves the
+others alone (`dragging_one_split_leaves_the_others_alone`).
+
 ## 2026-10-17 — Join: adjacent picked clips become one
 
 The footer's Join button was a placeholder; it now works. With two or more clips
