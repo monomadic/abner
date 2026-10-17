@@ -220,4 +220,11 @@ builtins excepted). Runtime descriptors and settings may contain full processor
 information. `--list-processors` prints descriptors; `--check-processor ID
 SETTINGS_JSON` processes four synthetic frames without opening a window. These
 are composition probes, not a processor export UI. The initial contract supports
-only one-input/one-output CPU RGB16 SDR frames and completed-frame progress.
+streaming CPU RGB16 SDR frames, built-in processor presets, cancellation and
+completed-frame progress. API 0.2 allows buffered output and an explicit end-of-stream
+flush. Create a fresh session for each contiguous timeline segment or preview seek.
+
+
+The processing workspace is intended as an ordered experiment/editing workflow,
+never a user-editable node canvas. Compression and re-encoding choices stay visible;
+preserve original media and avoid unnecessary encoding generations.

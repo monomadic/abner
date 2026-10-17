@@ -1,12 +1,39 @@
-//! Experimental in-process CPU frame contract. No implementation dependencies.
+//! Experimental streaming CPU frame contract. No implementation dependencies.
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+/// Clone this handle before processing to request cancellation from another thread.
+/// In-flight device work need not be interruptible; implementations check between jobs.
+#[derive(Clone, Default)]
+pub struct Cancellation(Arc<AtomicBool>);
+impl Cancellation {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+    pub fn check(&self) -> Result<()> {
+        if self.0.load(Ordering::Relaxed) {
+            Err("processor cancelled".into())
+        } else {
+            Ok(())
+        }
+    }
+}
+#[derive(Clone, Serialize)]
+pub struct Preset {
+    pub id: String,
+    pub name: String,
+    pub settings: serde_json::Value,
+}
 pub type Result<T> = std::result::Result<T, String>;
 #[derive(Clone, Serialize)]
 pub struct Descriptor {
     pub id: String,
     pub name: String,
     pub settings_schema: serde_json::Value,
+    pub presets: Vec<Preset>,
 }
 /// Packed full-range RGB16, SDR Rec.709; no alpha. Other formats must be rejected
 /// or explicitly converted by the host before using this prototype interface.
@@ -43,10 +70,18 @@ pub struct Progress {
     pub completed: u64,
     pub total: Option<u64>,
 }
-/// One input/one output prototype only. No interpolation, lookahead, GPU handles,
-/// masks or asynchronous previews are promised by API 0.1.
+/// Ordered streaming frames. Calls may emit zero or several outputs. After EOF,
+/// call finish once and consume all returned frames. Drop/recreate a session at
+/// cuts, seeks or configuration changes: recurrent history must not cross them.
+/// Construct and use on one thread; only the cancellation handle is thread-safe.
+/// Errors are terminal: discard this session and any unpublished job output.
+/// CPU RGB16 only; this contract does not yet negotiate GPU/color/auxiliary inputs.
 pub trait Session {
-    fn process(&mut self, input: Frame) -> Result<Frame>;
+    fn process(&mut self, input: Frame) -> Result<Vec<Frame>>;
+    fn finish(&mut self) -> Result<Vec<Frame>>;
+    fn output_dimensions(&self) -> [usize; 2];
+    fn cancellation(&self) -> Cancellation;
+    /// Completed output frames; the host owns timeline totals and job-wide progress.
     fn progress(&self) -> Progress;
 }
 pub trait Factory {
@@ -89,6 +124,7 @@ mod tests {
                 id: "example.identity".into(),
                 name: "Example".into(),
                 settings_schema: serde_json::json!({}),
+                presets: vec![],
             }
         }
         fn create(&self, _: usize, _: usize, _: &serde_json::Value) -> Result<Box<dyn Session>> {

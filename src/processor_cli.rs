@@ -13,7 +13,7 @@ pub fn handle(registry: &Registry) -> anyhow::Result<bool> {
             let mut session = factory
                 .create(64, 64, &settings)
                 .map_err(anyhow::Error::msg)?;
-            let mut frames = Vec::new();
+            let mut outputs = Vec::new();
             for i in 0..4 {
                 let input = Frame {
                     width: 64,
@@ -25,7 +25,15 @@ pub fn handle(registry: &Registry) -> anyhow::Result<bool> {
                     duration: 1,
                     time_base: [1, 24],
                 };
-                let out = session.process(input).map_err(anyhow::Error::msg)?;
+                outputs.extend(session.process(input).map_err(anyhow::Error::msg)?);
+            }
+            outputs.extend(session.finish().map_err(anyhow::Error::msg)?);
+            anyhow::ensure!(
+                outputs.len() == 4,
+                "processor changed frame count in this one-to-one probe"
+            );
+            let mut frames = Vec::new();
+            for (i, out) in outputs.into_iter().enumerate() {
                 out.validate().map_err(anyhow::Error::msg)?;
                 anyhow::ensure!(
                     out.pts == i as i64 && out.duration == 1 && out.time_base == [1, 24],

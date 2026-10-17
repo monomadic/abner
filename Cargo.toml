@@ -6,7 +6,7 @@ description = "A/B video comparison player — play N videos in sync, flip betwe
 
 [package.metadata.abner-host]
 api = "crates/processor-api"
-version = 1
+version = 2
 
 [dependencies]
 abner-processor-api = { path = "crates/processor-api" }

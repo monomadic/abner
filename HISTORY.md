@@ -3,6 +3,15 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-18 — streaming processor contract
+
+The independent processor API now supports zero or several output frames per input,
+an end-of-stream flush, output dimensions, cancellation handles and declarative
+built-in presets. The generic synthetic probe drains delayed frames and checks
+one-to-one output timing. Host/composer contract version is 2 (SDK 0.2).
+Implementations remain outside this repository; graph UI and media rendering are
+not connected yet. Existing host tests pass (107 passed, one ignored).
+
 ## 2026-10-17 — the rubber band starts from the chapter row too
 
 `cut_band_rows` began at the picture row, so a drag from the chapter row just

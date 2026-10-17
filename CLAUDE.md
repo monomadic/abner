@@ -422,3 +422,12 @@ The normal executable supplies an empty registry to the library's `run` entry po
 The generic API lives in `crates/processor-api`; processor implementations and
 composition tooling are maintained independently. `src/lib.rs` now owns the former
 main module tree and window loop; `src/main.rs` is only the default launcher.
+
+## Product boundary: experiment workspace
+
+Never introduce a user-editable node canvas. This app is a fast, powerful,
+extensible notepad for video experiments and clean editing. An ordered processing
+strip may show sequence and open editors, but it is not a free-form graph editor.
+Keep edits non-destructive wherever possible; expose compression, stream-copy and
+re-encoding decisions directly rather than hiding their consequences. Users are
+expected to understand video compression.
