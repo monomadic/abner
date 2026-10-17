@@ -355,7 +355,7 @@ The pending-GOP action is labelled Render, with a ⌘R keycap and an outlined
 header button beside Export. At narrower widths it moves into the scrub toolbar
 when there is room. Drawing and pointer handling share all control/region geometry.
 The Timeline bottom status bar carries TIMELINE followed by a compact outlined
-Split button with a small split icon and S keycap, then a disabled Join button with a J keycap. The
+Split button with a small split icon and S keycap, then a Join button with a J keycap, drawn disabled unless two or more adjacent clips are picked. The
 footer also carries Save with a ⌘S keycap; it writes an editable `.abner.json`
 timeline beside the source and loads it when that source is reopened. The
 footer is 38px tall, leaving 6px around the buttons. A larger Split version

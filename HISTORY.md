@@ -3,6 +3,17 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-17 — Join: adjacent picked clips become one
+
+The footer's Join button was a placeholder; it now works. With two or more clips
+picked (click, ⌘-click or the rubber band), `J` or the button drops the splits
+between them (`Cut::join`, one undo step) and leaves the joined clip picked.
+`Cut::joinable` is the rule: every pick must be a kept piece as it stands, and
+they must run back to back — an unpicked clip or a cut between any two of them
+means they are not adjacent, and Join stays dead (dimmed button, a status line
+on the key). GOP picks are not clips, so Join is dead in that mode too. The same
+range picked on the picture and the sound row counts once.
+
 ## 2026-10-17 — generic build-time processor entry point
 
 Expose the application as a library accepting a processor registry. The ordinary

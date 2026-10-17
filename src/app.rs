@@ -2875,7 +2875,9 @@ impl App {
             if let Some(split) = self.controls().iter().find(|c| matches!(c.action, Action::Cut(CutAction::Split)) && c.r.y >= y) {
                 self.draw_cut_control(items, split);
             }
-            draw_cut_footer_button(items, self.cut_footer_join(), "Join", "J", false, false, true);
+            if let Some(join) = self.controls().iter().find(|c| matches!(c.action, Action::Cut(CutAction::Join))) {
+                self.draw_cut_control(items, join);
+            }
             if let Some(save) = self.controls().iter().find(|c| matches!(c.action, Action::Cut(CutAction::SaveProject))) {
                 self.draw_cut_control(items, save);
             }
@@ -3328,6 +3330,7 @@ impl App {
             Key::Char('i' | 'I') => CutAction::In,
             Key::Char('o' | 'O') => CutAction::Out,
             Key::Char('s' | 'S') => CutAction::Split,
+            Key::Char('j' | 'J') => CutAction::Join,
             Key::Backspace if !self.cut_picks.is_empty() => CutAction::DeletePicked,
             Key::Char('x' | 'X') => CutAction::Apply,
             Key::Char('e' | 'E') => CutAction::Export,
@@ -3408,9 +3411,17 @@ impl App {
             }
             return;
         }
+        let join = if action == CutAction::Join { self.join_picks() } else { None };
         let Some(cut) = self.cut.as_mut() else { return };
         cut.status.clear();
         match action {
+            CutAction::Join => {
+                match join.and_then(|ranges| cut.join(&ranges)) {
+                    Some((a, b)) => self.cut_picks = vec![(a, b, false)],
+                    None => cut.status = if self.cut_picks.len() < 2 { "Join needs two or more clips picked".into() }
+                        else { "Join needs adjacent clips: something lies between the picked ones".into() },
+                }
+            }
             CutAction::Step(_) | CutAction::Keyframe(_) | CutAction::Chapter(_) => {}
             CutAction::Play | CutAction::TimeDisplay(_) | CutAction::FrameChanges(_) | CutAction::ToggleSplit | CutAction::TogglePosters => {}
             CutAction::Zoom(zoom_in) => {
@@ -3567,6 +3578,7 @@ impl App {
         };
         push(r, "Render", false, CutAction::EncodeAll, "⌘R");
         push(self.cut_footer_split(), "Split", false, CutAction::Split, "S");
+        push(self.cut_footer_join(), "Join", false, CutAction::Join, "J");
         push(self.cut_footer_save(), "Save", false, CutAction::SaveProject, "⌘S");
         if bar.w >= 900.0 {
             let zoom = self.cut_zoom_bar();
@@ -4127,6 +4139,19 @@ impl App {
         self.cut.as_ref()?.segments().into_iter().find(|g| g.cut && at >= g.start && at < g.end)
     }
 
+    /// The picked clips as the ranges `Cut::join` takes, when they can be
+    /// joined: two or more kept pieces (the same range picked on the picture
+    /// and the sound row is one piece) running back to back. GOP picks are
+    /// not clips. None = Join is dead.
+    fn join_picks(&self) -> Option<Vec<(f64, f64)>> {
+        if self.cut_gop { return None; }
+        let mut ranges: Vec<(f64, f64)> = Vec::new();
+        for (a, b, _) in &self.cut_picks {
+            if !ranges.iter().any(|r| (r.0 - a).abs() < 1e-6 && (r.1 - b).abs() < 1e-6) { ranges.push((*a, *b)); }
+        }
+        self.cut.as_ref()?.joinable(&ranges).map(|_| ranges)
+    }
+
     fn same_pick(a: (f64, f64, bool), b: (f64, f64, bool)) -> bool {
         a.2 == b.2 && (a.0 - b.0).abs() < 1e-3 && (a.1 - b.1).abs() < 1e-3
     }
@@ -4426,7 +4451,7 @@ impl App {
             }
         }
         // Icon buttons carry no words, so the hovered one names itself.
-        if let Some(c) = controls.iter().find(|c| matches!(c.action, Action::Cut(a) if !matches!(a, CutAction::Undo | CutAction::Export | CutAction::Split | CutAction::SaveProject))
+        if let Some(c) = controls.iter().find(|c| matches!(c.action, Action::Cut(a) if !matches!(a, CutAction::Undo | CutAction::Export | CutAction::Split | CutAction::Join | CutAction::SaveProject))
             && contains(c.r, self.cursor.0, self.cursor.1) && self.cursor_inside) {
             let text = if c.hint.is_empty() { c.label.clone() } else { format!("{}  ·  {}", c.label, c.hint) };
             let right = c.r.x + c.r.w / 2.0 > vp.0 - 140.0;
@@ -4486,6 +4511,10 @@ impl App {
                 ui_label(items, key.x + key.w / 2.0, cy, 12.0, ink, control.hint, Align::Center, key.w);
             }
             CutAction::SaveProject => draw_cut_footer_button(items, r, &control.label, control.hint, false, hovered, false),
+            CutAction::Join => {
+                let dead = self.join_picks().is_none();
+                draw_cut_footer_button(items, r, &control.label, control.hint, false, hovered && !dead, dead);
+            }
             CutAction::EncodeAll => {
                 let disabled = cut.encoding() || cut.scanning() || cut.exporting() || cut.pending_gops().is_empty();
                 let border = if hovered && !disabled { 0x555555 } else { 0x303030 };
@@ -5605,7 +5634,7 @@ impl Workspace {
 #[derive(Clone, Copy)]
 enum Action { Duplicate, OpenFiles, ClearSources, ToggleSources, ToggleInspector, ToggleDetail, Tool(usize), View(Mode), Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
 #[derive(Clone, Copy, PartialEq)]
-enum CutAction { TogglePosters, FrameChanges(bool), TimeDisplay(bool), In, Out, Split, ToggleSplit, Apply, DeletePicked, Undo, Export, SaveProject, EncodeAll, Encode(f64), Snap(Snap), Play, Zoom(bool), Step(i32), Keyframe(i32), Chapter(i32) }
+enum CutAction { TogglePosters, FrameChanges(bool), TimeDisplay(bool), In, Out, Split, ToggleSplit, Join, Apply, DeletePicked, Undo, Export, SaveProject, EncodeAll, Encode(f64), Snap(Snap), Play, Zoom(bool), Step(i32), Keyframe(i32), Chapter(i32) }
 /// `hint` is the key cap a cut-mode button carries ("" for none).
 struct Control { r: RectPx, label: String, selected: bool, action: Action, hint: &'static str }
 impl Control {
@@ -7282,6 +7311,27 @@ mod tests {
         app.cursor_moved(x_of(&app, 3.5), v.y + v.h / 2.0);
         app.mouse_up();
         assert_eq!(app.cut_picks, vec![(0.0, 1.0, false), (2.0, 3.0, false), (3.0, 4.0, false)]);
+
+        // J joins adjacent picks into one clip; with an unpicked clip between
+        // them it is dead — on the key and on the footer button alike.
+        let join = app.controls().into_iter().find(|c| matches!(c.action, Action::Cut(CutAction::Join))).expect("Join is a control");
+        assert_eq!((join.label.as_str(), join.hint), ("Join", "J"));
+        assert!(app.join_picks().is_none(), "0–1 and 2–3 have 1–2 between them");
+        app.key(Key::Char('j'));
+        assert_eq!(app.cut.as_ref().unwrap().splits(), &[1.0, 2.0, 3.0], "a dead Join changes nothing");
+        assert!(app.cut.as_ref().unwrap().status.contains("adjacent"));
+        assert_eq!(app.cut_picks.len(), 3, "and keeps the picks");
+        app.cut_picks = vec![(2.0, 3.0, false), (3.0, 4.0, false), (3.0, 4.0, true)];
+        assert_eq!(app.join_picks(), Some(vec![(2.0, 3.0), (3.0, 4.0)]), "sound and picture rows are one clip");
+        app.mouse_down(join.r.x + join.r.w / 2.0, join.r.y + join.r.h / 2.0);
+        app.mouse_up();
+        assert_eq!(app.cut.as_ref().unwrap().splits(), &[1.0, 2.0]);
+        assert_eq!(app.cut_picks, vec![(2.0, 4.0, false)], "the joined clip stays picked");
+        app.key(Key::Char('j'));
+        assert!(app.cut.as_ref().unwrap().status.contains("two or more"));
+        app.key(Key::Undo);
+        assert_eq!(app.cut.as_ref().unwrap().splits(), &[1.0, 2.0, 3.0]);
+        app.cut_picks = vec![(0.0, 1.0, false), (2.0, 3.0, false), (3.0, 4.0, false)];
 
         // Backspace cuts them all; one undo brings them all back.
         app.key(Key::Backspace);

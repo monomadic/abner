@@ -608,6 +608,38 @@ impl Cut {
         true
     }
 
+    /// The boundaries that joining `ranges` (kept pieces, as `segments`
+    /// reports them) would remove: the splits where each piece ends and the
+    /// next begins. None unless there are at least two pieces, every one is
+    /// a kept piece as it stands, and they run back to back — a kept piece
+    /// that was not picked, or a cut, between two of them makes the set not
+    /// adjacent, and there is nothing to join.
+    pub fn joinable(&self, ranges: &[(f64, f64)]) -> Option<Vec<f64>> {
+        if ranges.len() < 2 { return None; }
+        let keeps: Vec<Segment> = self.segments().into_iter().filter(|s| !s.cut).collect();
+        let mut picked: Vec<usize> = ranges.iter().map(|(a, b)| {
+            keeps.iter().position(|s| (s.start - a).abs() < EPS && (s.end - b).abs() < EPS)
+        }).collect::<Option<Vec<_>>>()?;
+        picked.sort_unstable();
+        picked.dedup();
+        if picked.len() < 2 || picked.windows(2).any(|w| w[1] != w[0] + 1) { return None; }
+        // Neighbours in the kept list still leave room for a cut between:
+        // a seam is where one piece ends exactly as the next begins.
+        if picked.windows(2).any(|w| (keeps[w[0]].end - keeps[w[1]].start).abs() > EPS) { return None; }
+        Some(picked.windows(2).map(|w| keeps[w[0]].end).collect())
+    }
+
+    /// Make the picked, adjacent kept pieces one clip: the splits between
+    /// them go, as one undo step. Returns the joined range.
+    pub fn join(&mut self, ranges: &[(f64, f64)]) -> Option<(f64, f64)> {
+        let seams = self.joinable(ranges)?;
+        self.undo.push(self.edit.clone());
+        self.edit.splits.retain(|s| !seams.iter().any(|t| (s - t).abs() < EPS));
+        let a = ranges.iter().map(|r| r.0).fold(f64::INFINITY, f64::min);
+        let b = ranges.iter().map(|r| r.1).fold(f64::NEG_INFINITY, f64::max);
+        Some((a, b))
+    }
+
     /// Where a dragged edge lands: the nearest keyframe, or as asked.
     fn snap_near(&self, t: f64) -> f64 {
         if self.snap == Snap::Frame { return self.next_frame(t); }
@@ -1504,6 +1536,30 @@ mod tests {
         assert!(!cut.split(32.0), "inside a cut");
         assert_eq!(cut.segments().len(), 4);
         assert_eq!(cut.keeps(), [(0.0, 30.0), (34.0, 60.0)], "a split does not break the export's ranges");
+    }
+
+    #[test]
+    fn join_merges_adjacent_pieces_and_refuses_gaps() {
+        let mut cut = model();
+        assert!(cut.split(20.0) && cut.split(40.0) && cut.split(50.0));
+        let keeps = |cut: &Cut| cut.segments().into_iter().filter(|s| !s.cut).map(|s| (s.start, s.end)).collect::<Vec<_>>();
+        assert_eq!(keeps(&cut), [(0.0, 20.0), (20.0, 40.0), (40.0, 50.0), (50.0, 60.0)]);
+        assert!(cut.joinable(&[(0.0, 20.0)]).is_none(), "one piece is nothing to join");
+        assert!(cut.joinable(&[(0.0, 20.0), (40.0, 50.0)]).is_none(), "an unpicked clip lies between");
+        assert!(cut.joinable(&[(0.0, 20.0), (21.0, 40.0)]).is_none(), "not a clip as it stands");
+        assert_eq!(cut.joinable(&[(40.0, 50.0), (0.0, 20.0), (20.0, 40.0)]), Some(vec![20.0, 40.0]), "order does not matter");
+        assert_eq!(cut.join(&[(20.0, 40.0), (40.0, 50.0)]), Some((20.0, 50.0)));
+        assert_eq!(cut.splits(), [20.0, 50.0]);
+        assert_eq!(keeps(&cut), [(0.0, 20.0), (20.0, 50.0), (50.0, 60.0)]);
+        assert!(cut.undo());
+        assert_eq!(cut.splits(), [20.0, 40.0, 50.0], "one undo step");
+        cut.set_in(40.0);
+        cut.set_out(50.0);
+        cut.cut_selection();
+        assert_eq!(keeps(&cut), [(0.0, 20.0), (20.0, 40.0), (50.0, 60.0)]);
+        assert!(cut.joinable(&[(20.0, 40.0), (50.0, 60.0)]).is_none(), "a cut between them is a gap, not a seam");
+        assert!(cut.join(&[(20.0, 40.0), (50.0, 60.0)]).is_none());
+        assert_eq!(cut.keeps(), [(0.0, 40.0), (50.0, 60.0)], "a refused join changes nothing");
     }
 
     #[test]
