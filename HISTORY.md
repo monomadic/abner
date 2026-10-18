@@ -3,6 +3,16 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-18 — no clip number over the canvas
+
+The old 24px number badge still sat in the top-left of the video in Sources mode
+(every cell in side by side), a leftover from the 2a HUD that the rail's keycaps
+and the focused inspector made redundant. The badge, its `number_badge` helper,
+the per-clip `clip_color` palette (nothing else coloured by clip index) and the
+`badge_flash` timer that kept it up for 1.2 s after a selection are gone; the
+rail's white keycap is the only clip number. FIGMA.md's Badge and Clip palette
+rows record the retirement.
+
 ## 2026-10-18 — streaming processor contract
 
 The independent processor API now supports zero or several output frames per input,
