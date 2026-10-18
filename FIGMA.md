@@ -46,7 +46,7 @@ rebuilt every frame in `src/app.rs` and drawn by a single wgpu pipeline
 | Kind | Code (source of truth) | Figma |
 |---|---|---|
 | Colours | `const NAME: [f32; 4]` at the bottom of `src/app.rs` (workspace block ~`HEADER_H`…`TOOL_BG`; launch block `LAUNCH_BG`…`FORMATS`; crop `CROP_*`) | Variable collection **Abner** (mode *Dark*): `shell/*`, `text/*`, `accent`, `mask-red`, `transport/track`, `crop/*`, `mask/*`, `launch/*`, `clip/1–9` |
-| Clip palette | `clip_color()` in `src/app.rs` (9 hex values, cycles) | `clip/1` … `clip/9` |
+| Clip palette | Retired with the canvas badge (2026-10-18); nothing in `src/app.rs` colours by clip index | `clip/1` … `clip/9` |
 | Type | `ui_label(items, x, y, px, color, text, align, max_width)`; sizes 9/10/11/13 | Text styles `mono/13`, `mono/11`, `mono/11 medium`, `mono/10`, `mono/10 tracked`, `mono/9` |
 | Metrics | `HEADER_H 44`, `CONTEXT_H 40`, `SOURCE_H 196`, `TRANSPORT_H 60`, `STATUS_H 28`, `TITLEBAR_H 28`, `CROP_*`, `SEEK_GRAB` | Resolved geometry in the frames |
 | Behavioural defaults | `abner.default.toml` (window size, view, gain, blend, checker, brush) | — |
@@ -94,7 +94,7 @@ by hand.
 
 | Figma component (Components board) | Code |
 |---|---|
-| **Badge** (`Clip=1…9`) | `number_badge()` — fill `clip × 0.17 + 0.04`, 1px border clip @0.12, r5 |
+| **Badge** (`Clip=1…9`) | Removed from the canvas (2026-10-18); the rail's white keycap (`SOURCE_KEYCAP`) is the only clip number |
 | **Tool tab** (`Selected`/`Idle`) | `controls()` → `Action::Tool`, drawn by `draw_tool_control`; `CUT_HEADER_BLUE` + white when selected |
 | **Segment** (`Selected`/`Idle`/`Disabled`) | `controls()` → `Action::View/Brush/Save/Export/Param`; `CONTROL_BG` r7 selected, r6 hover; `WORKSPACE_MUTED` while its worker runs |
 | **Source row** | the rail loop in `build_hud` (`source_row()`, `SOURCE_H`) |

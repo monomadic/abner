@@ -287,9 +287,6 @@ pub struct App {
     gain: f32,
     blend: f32,
     checker_px: f32,
-    /// Seconds left on the small clip-number flash (shown after Tab
-    /// when the UI is hidden — switchblade's skip-bar-flash pattern).
-    badge_flash: f32,
     fullscreen: bool,
     cursor: (f32, f32),
     /// Last pointer position while a drag-pan is held.
@@ -644,7 +641,6 @@ impl App {
             gain: cfg.compare.delta_gain,
             blend: cfg.compare.blend,
             checker_px: cfg.compare.checker_size,
-            badge_flash: 0.0,
             fullscreen: false,
             cursor: (0.0, 0.0),
             drag: None,
@@ -1345,7 +1341,6 @@ impl App {
         }
         self.active = idx.min(self.videos.len() - 1);
         self.reveal_source();
-        self.badge_flash = 1.2;
         self.fps = Self::fps_of(&self.videos);
         self.wrap = Self::wrap_of(&self.videos);
         let max = if self.wrap.is_finite() { (self.wrap - 0.05).max(0.0) } else { f64::MAX };
@@ -1614,7 +1609,6 @@ impl App {
         self.active = idx;
         if reopen_cut { self.cut_mode = false; self.set_cut_mode(true); }
         self.reveal_source();
-        self.badge_flash = 1.2;
         self.mouse_up();
         if self.mask_mode {
             self.ensure_mask();
@@ -2134,7 +2128,6 @@ impl App {
         if !self.started {
             self.started = self.videos.iter().all(|v| v.delivered || v.player.failed());
         }
-        self.badge_flash = (self.badge_flash - dt).max(0.0);
         let step = dt / RAIL_SLIDE_S;
         let toward = |cur: f32, shown: bool| {
             let target = if shown { 1.0 } else { 0.0 };
@@ -2230,23 +2223,13 @@ impl App {
             items.push(Item::Shadow { r: canvas, inner: true, blur: 16.0, alpha: 0.28 });
         }
         items.push(Item::Clip(None));
-        if !self.cut_mode && (self.show_ui || self.badge_flash > 0.0) {
-            for i in 0..if mode == Mode::SideBySide { n } else { 1 } {
-                let idx = if mode == Mode::SideBySide { i } else { a };
-                let cell = if mode == Mode::SideBySide { self.video_cell(idx) } else { self.workspace().canvas };
-                let image = self.content_rect(idx);
-                items.push(Item::Clip(Some(cell)));
-                number_badge(&mut items, RectPx { x: image.x.max(cell.x) + 14.0, y: image.y.max(cell.y) + 14.0, w: 24.0, h: 24.0 }, idx);
-                items.push(Item::Clip(None));
-            }
-        }
         if self.show_ui {
             if self.cut_mode { self.build_cut_hud(&mut items, vp); } else { self.build_hud(&mut items, vp); }
             self.build_status_line(&mut items, vp);
         }
 
         let animating =
-            self.playing || self.badge_flash > 0.0 || !self.started || self.cut_thumb.play.is_some() || self.cut_hot_animating()
+            self.playing || !self.started || self.cut_thumb.play.is_some() || self.cut_hot_animating()
             || self.rail_sliding();
         FrameDesc {
             clear: FRAME_BG,
@@ -5687,10 +5670,6 @@ fn draw_cut_footer_button(items: &mut Vec<Item>, r: RectPx, label: &str, key_lab
 fn hex_color(rgb: u32) -> [f32; 4] {
     [((rgb >> 16) & 255) as f32 / 255.0, ((rgb >> 8) & 255) as f32 / 255.0, (rgb & 255) as f32 / 255.0, 1.0]
 }
-fn clip_color(index: usize) -> [f32; 4] {
-    const COLORS: [u32; 9] = [0x61b5ee, 0xe6ac69, 0xb89ae8, 0x6dc7aa, 0xe88891, 0xc9c970, 0x70c8d2, 0xdb9bc6, 0xa4b9d4];
-    hex_color(COLORS[index % COLORS.len()])
-}
 /// The texture window that fills `r` edge to edge at the clip's own
 /// proportions (CSS `object-fit: cover`), as the renderer's uv CORNERS
 /// `[u0, v0, u1, v1]` — not an origin and size: handing it a size put v1
@@ -5723,13 +5702,6 @@ fn draw_sidebar_toggle(items: &mut Vec<Item>, r: RectPx, right: bool, shown: boo
     for k in 0..3 {
         items.push(Item::Rect(RectItem::new(RectPx { x: dots, y: f.y + 4.0 + k as f32 * 3.0, w: 1.5, h: 1.5 }, ink)));
     }
-}
-fn number_badge(items: &mut Vec<Item>, r: RectPx, index: usize) {
-    let color = clip_color(index);
-    let bg = [color[0] * 0.17 + 0.04, color[1] * 0.17 + 0.04, color[2] * 0.17 + 0.04, 1.0];
-    items.push(Item::Rect(RectItem { radius: 5.0, border_w: 1.0,
-        border_color: [color[0], color[1], color[2], 0.12], ..RectItem::new(r, bg) }));
-    ui_label(items, r.x + r.w / 2.0, r.y + r.h / 2.0, 11.0, color, (index + 1).to_string(), Align::Center, r.w - 4.0);
 }
 /// Timeline Edit / Header (12:5): 44px shell with a blue selected tab.
 const CUT_HEADER_H: f32 = 44.0;
