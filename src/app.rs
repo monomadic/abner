@@ -2858,6 +2858,9 @@ impl App {
         let y = vp.1 - height;
         items.push(Item::Rect(RectItem::new(RectPx { x: 0.0, y, w: vp.0, h: height }, WORKSPACE_PANEL)));
         items.push(Item::Rect(RectItem::new(RectPx { x: 0.0, y, w: vp.0, h: 1.0 }, WORKSPACE_RULE)));
+        // The build stamp sits in the corner in every mode, as it does on the
+        // launch window, so any capture says which build it is.
+        let build_w = status_build_width();
         if self.cut_mode {
             ui_label(items, 16.0, y + height / 2.0, 10.0, ACCENT, "TIMELINE", Align::Left, 68.0);
             if let Some(split) = self.controls().iter().find(|c| matches!(c.action, Action::Cut(CutAction::Split)) && c.r.y >= y) {
@@ -2869,6 +2872,7 @@ impl App {
             if let Some(save) = self.controls().iter().find(|c| matches!(c.action, Action::Cut(CutAction::SaveProject))) {
                 self.draw_cut_control(items, save);
             }
+            status_build_label(items, vp, y + height / 2.0);
             return;
         }
         let mode = if !self.mask_mode { "SOURCES" } else if self.crop.is_some() { "CROP" } else { "MASK" };
@@ -2879,11 +2883,12 @@ impl App {
                 format!("a {}   drag move / resize   s save   e export", ASPECTS[self.aspect].0)
             } else { "drag paint   [ ] brush   s save".into() } }
             else { "1–9 clip   space play   < > step   [ ] speed".into() };
-        let hint_width = if vp.0 >= 1000.0 { 440.0 } else { 0.0 };
-        ui_label(items, 98.0, y + STATUS_H / 2.0, 10.0, WORKSPACE_DIM, status, Align::Left, vp.0 - 118.0 - hint_width);
+        let hint_width = if vp.0 >= 1000.0 + build_w { 440.0 } else { 0.0 };
+        ui_label(items, 98.0, y + STATUS_H / 2.0, 10.0, WORKSPACE_DIM, status, Align::Left, vp.0 - 118.0 - hint_width - build_w);
         if hint_width > 0.0 {
-            ui_label(items, vp.0 - 16.0, y + STATUS_H / 2.0, 10.0, WORKSPACE_MUTED, hint, Align::Right, hint_width);
+            ui_label(items, vp.0 - 16.0 - build_w, y + STATUS_H / 2.0, 10.0, WORKSPACE_MUTED, hint, Align::Right, hint_width);
         }
+        status_build_label(items, vp, y + STATUS_H / 2.0);
     }
 
     /// The launch window: the brand's grid-floor plate, the mark
@@ -6745,7 +6750,8 @@ mod tests {
         let footer_text: Vec<_> = frame.items.iter().filter_map(|item| match item {
             Item::Text(t) if t.y >= footer_y => Some(t.text.as_str()), _ => None,
         }).collect();
-        assert_eq!(footer_text, ["TIMELINE", "Split", "S", "Join", "J", "Save", "⌘S"]);
+        assert_eq!(footer_text[..7], ["TIMELINE", "Split", "S", "Join", "J", "Save", "⌘S"]);
+        assert!(footer_text[7].starts_with("build "), "the build stamp closes the footer");
         app.mouse_down(toolbar.r.x + toolbar.r.w / 2.0, toolbar.r.y + toolbar.r.h / 2.0);
         app.mouse_up();
         assert_eq!(app.cut.as_ref().unwrap().splits(), &[1.0]);
@@ -7958,6 +7964,18 @@ fn build_label(w: f32, h: f32) -> Item {
 }
 
 const INK_FAINT: [f32; 4] = [0.478, 0.525, 0.580, 1.0];
+
+/// The same stamp at the right end of the workspace status line. Its own
+/// placement is measured by the renderer (one right-aligned run);
+/// `status_build_width` is the `MONO_ADV` estimate of the room it takes,
+/// plus its gap, so the hint beside it steps left.
+fn status_build_label(items: &mut Vec<Item>, vp: (f32, f32), cy: f32) {
+    items.push(Item::Text(TextItem { interface: true, align: Align::Right, valign: VAlign::Middle, tracking: 0.4,
+        ..TextItem::new(vp.0 - 16.0, cy, 9.5, INK_FAINT, format!("build {BUILD}")) }));
+}
+fn status_build_width() -> f32 {
+    (6 + BUILD.chars().count()) as f32 * 9.5 * MONO_ADV + 16.0
+}
 
 // Crop marquee. The dimmer runs high for the reason the HUD's panels do
 // (see shader.wgsl): linear-space blending means a modest alpha barely
