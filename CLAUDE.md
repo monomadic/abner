@@ -67,7 +67,9 @@ from one to the other, keeping its number.
   2026-10-21 (`src/fc.rs` is switchblade's bridge: pure-Rust demux and decode, VideoToolbox
   for h264/hevc/vp9/av1 chosen by FilmCraft per stream with its software decoders as the
   fallback, the container's sync-sample table for keyframe landings, a one-pass fixed-point
-  Y'CbCr→RGBA at native size; content-relative time, drop-wakes-the-parked-reader). **Key difference: no
+  Y'CbCr→RGBA at native size; content-relative time, drop-wakes-the-parked-reader). Codec
+  coverage is FilmCraft's (h264 / hevc / vp9 / av1 / prores / dnxhd / mpeg-2 / mjpeg in mp4,
+  mov, mkv, webm, mxf, ts, avi): no FFV1, no libav long tail — a test fixture wants H.264. **Key difference: no
   per-player pacing, and a FRAME CACHE instead of a queue** (2026-10-14). The app
   owns ONE master clock and drains each player with `take_upto(t)` (pop all due,
   newest wins). Sync is by construction, pause is "stop advancing t", EOF parks the

@@ -1341,8 +1341,13 @@ mod tests {
                 "testsrc2=size=64x64:rate=24000/1001",
                 "-frames:v",
                 "6",
+                // lossless H.264 (FFV1 is not a codec the FilmCraft player decodes)
                 "-c:v",
-                "ffv1",
+                "libx264",
+                "-qp",
+                "0",
+                "-pix_fmt",
+                "yuv420p",
             ])
             .arg(&path)
             .status()

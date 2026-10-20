@@ -99,7 +99,10 @@ bit-exact with its software decoders (the fallback), and the pictures match ffmp
 decode bit for bit on every codec the harness checks. Exact seeks decode a rewind window
 before the target from the preceding keyframe (the container's own sync-sample table, MP4
 sample tables or Matroska cues); same-GOP targets extend the current run as before.
-Y'CbCr→RGBA at native size is one fixed-point pass. What it buys: no ffmpeg 8 pin, no
+Y'CbCr→RGBA at native size is one fixed-point pass. Codec coverage is FilmCraft's: h264,
+hevc, vp9, av1, prores, dnxhd, mpeg-2, mjpeg and the containers mp4/mov, mkv/webm, mxf, mpeg-ts,
+avi; FFV1 and other libav-only codecs no longer play (the processor preview test's synthetic
+source moved from FFV1 to lossless H.264 for that reason). What it buys: no ffmpeg 8 pin, no
 pkg-config, no `.cargo/config.toml`, no dylibs in the bundle, and a decoder that returns the
 right frame on exact seeks into open-GOP HEVC, where libav returned the CRA picture for the
 leading frames before it — for an A/B tool that is a correctness fix. Decided on the numbers

@@ -366,9 +366,10 @@ fn fused_decimate_rgba(frame: &VideoFrame, n: usize, out: &mut Vec<u8>) -> Optio
     let clamp8 = |v: i64| -> u8 { ((v + round) >> 16).clamp(0, 255) as u8 };
     let (yp, up, vp) = (&planes[0], &planes[1], &planes[2]);
     out.resize(ow * oh * 4, 0);
-    out.par_chunks_mut(ow * 4)
-        .enumerate()
-        .for_each(|(oy, row)| {
+    // Rows fan out over rayon for big pictures; a small one (thumbnails, test clips) is cheaper
+    // on the calling thread than as a few hundred pool tasks contending with other players.
+    let parallel = ow * oh >= 512 * 1024;
+    let convert_row = |(oy, row): (usize, &mut [u8])| {
             if n == 1 {
                 // Native size: one luma sample per pixel, chroma shared by 2×2 (nearest, as the
                 // direct display conversion in `VideoFrame::to_rgba8`).
@@ -444,7 +445,12 @@ fn fused_decimate_rgba(frame: &VideoFrame, n: usize, out: &mut Vec<u8>) -> Optio
                 o[2] = clamp8(yy + k_bu * u);
                 o[3] = 255;
             }
-        });
+    };
+    if parallel {
+        out.par_chunks_mut(ow * 4).enumerate().for_each(convert_row);
+    } else {
+        out.chunks_mut(ow * 4).enumerate().for_each(convert_row);
+    }
     Some((ow, oh))
 }
 
