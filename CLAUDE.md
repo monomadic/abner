@@ -148,8 +148,14 @@ from one to the other, keeping its number.
   The **workspace** (`Workspace`, `controls`, `build_hud`) shares geometry between
   drawing and pointer hit testing: a numbered source rail, focused inspector,
   Sources/Timeline/Crop/Mask toolbar, contextual controls, canvas, persistent transport and
-  status line. The rail is 280px (210 below 900px wide), the inspector hides below
-  600px high, and the minimum window is 720×480. `Enter` (config `keys.fullscreen_video`) hides the whole shell AND goes fullscreen; `Tab` (`keys.next_source`) flips clips. Bindings resolve in `App::key` before the mode-specific keys.
+  status line. The rail is 280px (210 below 900px wide), the minimum window is 720×480, and
+  the rail's focused inspector exists only when the rail has room for one source
+  card + footer + grip + inspector above its end (`Workspace::detail`) — the list
+  never shrinks below a card, and cut mode's rail ends at the transport, so a
+  window that fits Input's inspector may not fit cut mode's; `build_sources` clips
+  the list to the rail's real end as well, and cut mode paints the transport and
+  lanes grounds AFTER the rail. Cut mode's lanes lift (frame detail, encode rail)
+  is a `Workspace::new` input, so the rail is laid out against the raised transport. `Enter` (config `keys.fullscreen_video`) hides the whole shell AND goes fullscreen; `Tab` (`keys.next_source`) flips clips. Bindings resolve in `App::key` before the mode-specific keys.
   `base_rect` fits within the canvas (or an individual side-by-side cell); every
   gesture and crop/mask transform uses that same rect. Shell clicks cannot paint.
   `Item::Clip` scissors video and overlays to the canvas/cell, including when zoomed.

@@ -2335,14 +2335,12 @@ impl App {
     /// Shared layout for drawing and hit testing; the image transform is always
     /// relative to this canvas, including in mask/crop and side-by-side modes.
     fn workspace(&self) -> Workspace {
-        let mut w = Workspace::new(self.vp, self.show_ui, self.cut_mode, self.rail_slide, self.side_slide, self.detail_slide);
-        if self.show_ui && self.cut_mode {
-            let extra = self.frame_detail_extra() + if self.cut_encode_rail() { 26.0 } else { 0.0 };
-            w.canvas.h = (w.canvas.h - extra).max(1.0);
-            w.side.h = (w.side.h - extra).max(1.0);
-            w.transport.y -= extra; w.timeline.y -= extra; w.timeline.h += extra;
-        }
-        w
+        // Frame detail and the encode rail grow the lanes upward; the
+        // transport, the canvas AND the rail are laid out against that.
+        let lift = if self.show_ui && self.cut_mode {
+            self.frame_detail_extra() + if self.cut_encode_rail() { 26.0 } else { 0.0 }
+        } else { 0.0 };
+        Workspace::new(self.vp, self.show_ui, self.cut_mode, lift, self.rail_slide, self.side_slide, self.detail_slide)
     }
 
     fn cut_frame_cells(&self) -> bool {
@@ -2818,7 +2816,12 @@ impl App {
             items.push(Item::Clip(None));
         }
         if l.panel <= 0.0 { return; }
-        let visible = RectPx { x: 0.0, y: l.list.y, w: l.rail, h: l.list.h };
+        // The list never shrinks below one card, so on a rail too short
+        // for even that it reaches past what is under it (cut mode's
+        // transport, Input's status line): clip to the rail's real end
+        // and drop the footer line when there is no room for it.
+        let end = if self.cut_mode { l.transport.y } else { self.vp.1 - STATUS_H };
+        let visible = RectPx { x: 0.0, y: l.list.y, w: l.rail, h: l.list.h.min(end - l.list.y).max(0.0) };
         items.push(Item::Clip(Some(visible)));
         for i in first..(first + self.source_capacity()).min(self.videos.len()) {
             let v = &self.videos[i];
@@ -2894,7 +2897,7 @@ impl App {
             else if self.videos.len() > self.source_capacity() { format!("{}–{} / {} · scroll", first+1, (first+self.source_capacity()).min(self.videos.len()), self.videos.len()) }
             else if self.source_file_count() < self.videos.len() { format!("{} files", self.source_file_count()) }
             else { String::new() };
-        if !footer.is_empty() {
+        if !footer.is_empty() && l.list.y + l.list.h + RAIL_FOOTER_H <= end {
             ui_label(items, l.list.x + 12.0, l.list.y + l.list.h + 16.0, 11.0, hex_color(SOURCE_SUBTLE),
                 footer, Align::Left, l.panel - if n > 0 { 82.0 } else { 24.0 });
         }
@@ -4486,18 +4489,22 @@ impl App {
         let rule = mix(0x050506, 0xffffff, 0.06);
         // Opaque shell surfaces, as in Input.
         items.push(Item::Rect(RectItem::new(RectPx { x: 0.0, y: 0.0, w: vp.0, h: CUT_HEADER_H }, WORKSPACE_PANEL)));
-        items.push(Item::Rect(RectItem::new(l.transport, hex_color(CUT_BAR))));
-        items.push(Item::Rect(RectItem::new(l.timeline, hex_color(CUT_TL))));
         items.push(Item::Rect(RectItem::new(l.side, hex_color(CUT_BG))));
         items.push(Item::Rect(RectItem::new(RectPx { x: 0.0, y: CUT_HEADER_H, w: l.rail, h: l.transport.y - CUT_HEADER_H }, WORKSPACE_PANEL)));
         for r in [RectPx { x: 0.0, y: CUT_HEADER_H - 1.0, w: vp.0, h: 1.0 },
-            RectPx { h: 1.0, ..l.transport }, RectPx { h: 1.0, ..l.timeline },
             RectPx { w: if l.side.w > 0.0 { 1.0 } else { 0.0 }, ..l.side },
             RectPx { x: l.rail - 1.0, y: CUT_HEADER_H, w: if l.rail > 0.0 { 1.0 } else { 0.0 }, h: l.transport.y - CUT_HEADER_H }] {
             items.push(Item::Rect(RectItem::new(r, rule)));
         }
         self.build_sources(items);
         self.build_inspector(items);
+        // The transport and the lanes are opaque grounds painted AFTER
+        // the rail, so nothing the rail overran shows through them.
+        items.push(Item::Rect(RectItem::new(l.transport, hex_color(CUT_BAR))));
+        items.push(Item::Rect(RectItem::new(l.timeline, hex_color(CUT_TL))));
+        for r in [RectPx { h: 1.0, ..l.transport }, RectPx { h: 1.0, ..l.timeline }] {
+            items.push(Item::Rect(RectItem::new(r, rule)));
+        }
 
         // ---- Figma timeline header ----
         let controls = self.controls();
@@ -5648,7 +5655,9 @@ struct Workspace {
     side: RectPx,
 }
 impl Workspace {
-    fn new(vp: (f32, f32), visible: bool, cut: bool, slide: f32, side_slide: f32, detail_slide: f32) -> Self {
+    /// `lift` is how far cut mode's lanes grow upward past their base
+    /// height (frame detail, the encode rail); everything above moves with it.
+    fn new(vp: (f32, f32), visible: bool, cut: bool, lift: f32, slide: f32, side_slide: f32, detail_slide: f32) -> Self {
         let (w, h) = vp;
         let none = RectPx { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
         // `rail` is what the layout gives the panel this frame; `panel` is
@@ -5674,7 +5683,7 @@ impl Workspace {
             // full width underneath (compact lanes on short windows). The
             // rail keeps its focused inspector; its action row stays in
             // Sources, where Duplicate / Add files live.
-            let lanes = if h >= CUT_FULL_MIN_H { CUT_TIMELINE_H } else { CUT_TIMELINE_COMPACT_H };
+            let lanes = if h >= CUT_FULL_MIN_H { CUT_TIMELINE_H } else { CUT_TIMELINE_COMPACT_H } + lift;
             // The inspector keeps its width and slides past the right edge;
             // `side_in` is the part still inside, which the canvas reclaims.
             let side_w = if w >= 1000.0 { CUT_SIDE_W } else { 0.0 };
@@ -5682,7 +5691,7 @@ impl Workspace {
             let side = if side_in > 0.0 { side_w } else { 0.0 };
             let transport_y = h - CUT_STATUS_H - lanes - CUT_TOOLBAR_H;
             let top = (transport_y - CUT_HEADER_H).max(1.0);
-            let (grip, inspector) = Self::detail(ox, panel, h, transport_y, detail_slide);
+            let (grip, inspector) = Self::detail(ox, panel, h, list_y, transport_y, detail_slide);
             return Self {
                 rail, panel, mini, inspector, grip,
                 list: list_of(transport_y, grip.y),
@@ -5700,7 +5709,7 @@ impl Workspace {
         // footer line above the inspector and the Duplicate / Add files
         // buttons under it — are not in the design and take their own
         // strips, so nothing overlaps the inspector's path line.
-        let (grip, inspector) = Self::detail(ox, panel, h, h - STATUS_H - RAIL_ACTIONS_H, detail_slide);
+        let (grip, inspector) = Self::detail(ox, panel, h, list_y, h - STATUS_H - RAIL_ACTIONS_H, detail_slide);
         Self {
             rail, panel, mini, canvas, inspector, grip, timeline: none, side: none,
             list: list_of(h - STATUS_H, grip.y),
@@ -5710,10 +5719,15 @@ impl Workspace {
 
     /// The grip strip and the visible part of the focused inspector above
     /// `bottom`: the inspector folds down behind what is under it as
-    /// `detail_slide` goes to 0, the grip riding on its top edge.
-    fn detail(ox: f32, panel: f32, h: f32, bottom: f32, detail_slide: f32) -> (RectPx, RectPx) {
+    /// `detail_slide` goes to 0, the grip riding on its top edge. There is
+    /// no inspector at all unless the rail between `list_y` and `bottom`
+    /// holds one source card, the footer, the grip and the panel: the
+    /// list never shrinks below a card, so on a shorter rail (cut mode's
+    /// ends at the transport) the panel would ride over what is under it.
+    fn detail(ox: f32, panel: f32, h: f32, list_y: f32, bottom: f32, detail_slide: f32) -> (RectPx, RectPx) {
         let none = RectPx { x: ox, y: bottom, w: panel, h: 0.0 };
-        if panel <= 0.0 || h < 800.0 { return (none, none); }
+        let needed = SOURCE_H + RAIL_FOOTER_H + RAIL_GRIP_H + RAIL_INSPECTOR_H;
+        if panel <= 0.0 || h < 800.0 || bottom - list_y < needed { return (none, none); }
         let ease = |t: f32| { let t = t.clamp(0.0, 1.0); t * t * (3.0 - 2.0 * t) };
         let shown = (RAIL_INSPECTOR_H * ease(detail_slide)).round();
         let inspector = RectPx { x: ox, y: bottom - shown, w: panel, h: shown };
@@ -6189,6 +6203,25 @@ mod tests {
         // Hiding the rail takes the grip with it.
         app.set_sources_visible(false);
         assert_eq!(app.workspace().grip.h, 0.0);
+    }
+
+    /// A rail too short for a source card plus the focused inspector has
+    /// no inspector at all (cut mode's rail ends at the transport, so a
+    /// window that fits Input's inspector need not fit cut mode's), and
+    /// the list, however short, never reaches past the transport.
+    #[test]
+    fn short_rail_drops_the_inspector_instead_of_overlapping_the_transport() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        app.vp = (1280.0, 800.0);
+        let input = app.workspace();
+        assert_eq!(input.inspector.h, RAIL_INSPECTOR_H);
+        app.set_cut_default(true);
+        let cut = app.workspace();
+        assert_eq!((cut.inspector.h, cut.grip.h), (0.0, 0.0));
+        assert!(cut.list.y + cut.list.h + RAIL_FOOTER_H <= cut.transport.y);
+        app.vp = (1280.0, 1000.0);
+        assert_eq!(app.workspace().inspector.h, RAIL_INSPECTOR_H);
     }
 
     /// The header's sidebar toggle (Figma 278:573) hides the Sources rail:
