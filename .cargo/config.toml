@@ -1,0 +1,10 @@
+# `cargo build-with-plugins [cargo build flags]`: discover the crates in the
+# gitignored plugins/ directory, generate a launcher that registers them, and
+# build it into target/ (tools/build-with-plugins/src/main.rs). An alias can
+# only name a cargo subcommand, so it runs that helper; the helper's own
+# artifacts land in target/ too. Run it from the repository root.
+#
+# This file once also set PKG_CONFIG_PATH for the ffmpeg@8 dev libraries; the
+# FilmCraft player (2026-10-21) dropped that, so the alias is all that is left.
+[alias]
+build-with-plugins = "run --quiet --manifest-path tools/build-with-plugins/Cargo.toml --target-dir target --"
