@@ -115,11 +115,16 @@ from one to the other, keeping its number.
 - `src/probe.rs` — one ffprobe per input at startup, synchronous on the main thread
   before any window exists, so it runs under a hard deadline (`run_deadlined`): a child
   stuck on a dead volume otherwise looks exactly like a crash.
-- `src/recent.rs` — the launch window's recent files: `~/.config/abner/recent`
-  (written by main.rs on every load, never by `App` — tests must not touch it) and the
-  per-file thumbnail workers (probe + one `ffmpeg` frame, no cache). `App::RecentRow`
+- `src/recent.rs` — the launch window's recent entries: `~/.config/abner/recent`
+  (written by lib.rs on every load, never by `App` — tests must not touch it) and the
+  per-file thumbnail workers (probe + one `ffmpeg` frame, no cache). **An entry is a
+  GROUP** (2026-10-20): the whole clip list as it stood after a load, one group a
+  line, paths tab-separated, so a comparison comes back as one tile that reopens it
+  whole; the tile is a stack of up to `STACK` (3) frames, each tile owns `STACK`
+  atlas cells, and the hovered tile scales up 8% over 150 ms (`RecentRow::lift`,
+  `animate`; the hit rect never scales). `App::RecentRow`
   owns the tiles, the atlas-cell bookkeeping and hit testing; the renderer's `thumbs`
-  atlas (binding 8, mode 14) holds the frames. See HISTORY 2026-09-30.
+  atlas (binding 8, mode 14) holds the frames. See HISTORY 2026-09-30 and 2026-10-20.
 - `src/app.rs` — master clock, modes, input, UI overlay. **Zoom** is photo-style: one
   shared `(zoom, center)` where `center` is the content point (0..1) held mid-view —
   every video applies it to its own fit rect, so pan/zoom position stays synced across

@@ -225,7 +225,8 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
 
     let title = title_for(&videos);
 
-    // Clips named on the command line count as opened, like a drop.
+    // Clips named on the command line count as opened, like a drop: the
+    // set is one recent entry.
     recent::record(videos.iter().map(|v| v.info.path.as_path()));
 
     let mut app = App::new(videos, &config);
@@ -476,9 +477,12 @@ impl Runner {
             videos.len(),
             if replace { "replace" } else { "add" }
         );
-        recent::record(videos.iter().map(|v| v.info.path.as_path()));
-        self.app.set_recent(recent::load());
         self.app.add_videos(videos, replace);
+        // The recent entry is what is open NOW — the pair, not the one
+        // clip just added to it — so the launch window brings the
+        // comparison back whole.
+        recent::record(self.app.videos.iter().map(|v| v.info.path.as_path()));
+        self.app.set_recent(recent::load());
         self.sync_videos();
     }
 
@@ -505,8 +509,8 @@ impl Runner {
                     }
                 }
                 Cmd::OpenRecent(n) => {
-                    if let Some(path) = self.app.recent_path(n) {
-                        self.files_dropped(vec![path], false);
+                    if let Some(paths) = self.app.recent_group(n) {
+                        self.files_dropped(paths, false);
                         self.animating = true;
                         if let Some(w) = &self.window {
                             w.request_redraw();

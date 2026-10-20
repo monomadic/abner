@@ -1,17 +1,23 @@
-//! The launch window's recent files: the clips abner last opened, most
-//! recent first, and a thumbnail of each.
+//! The launch window's recent entries: the SETS of clips abner last had
+//! open, most recent first, and a thumbnail of each clip.
 //!
-//! The list is one plain-text file, an absolute path per line
-//! (`~/.config/abner/recent`, next to the config overlay). It is written
-//! by the runner when clips load — never by `App`, so the test suite
-//! can't touch the user's list — and read back at startup and whenever
-//! the launch window comes up again.
+//! An entry is a group — the whole clip list as it stood after a load,
+//! so a pair being compared comes back as one tile that reopens the
+//! pair (2026-10-20; before that the list was single files, and a
+//! comparison had to be rebuilt by hand). A lone clip is a group of one.
+//!
+//! The list is one plain-text file, an entry per line with its absolute
+//! paths tab-separated (`~/.config/abner/recent`, next to the config
+//! overlay; the old one-path-per-line file reads as groups of one). It
+//! is written by the runner when clips load — never by `App`, so the
+//! test suite can't touch the user's list — and read back at startup
+//! and whenever the launch window comes up again.
 //!
 //! Thumbnails are not cached (abner keeps no cache): each launch window
 //! probes the files again and pulls one frame from each with an ffmpeg
 //! child, on worker threads, under the probe's deadline. A file that has
-//! moved, or sits on a volume that has gone away, simply drops out of
-//! the row.
+//! moved, or sits on a volume that has gone away, drops out of its
+//! group's stack; a group with no file left drops out of the row.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -20,14 +26,20 @@ use std::time::Duration;
 
 use crate::probe::{self, VideoInfo};
 
-/// How many paths the file keeps. More than the row shows, so a file
-/// that has gone missing still leaves the row full.
+/// How many entries the file keeps. More than the row shows, so a group
+/// whose files have all gone missing still leaves the row full.
 const KEEP: usize = 12;
 /// Tiles on the launch window (and ⌘1–4).
 pub const SHOWN: usize = 4;
+/// How many of a group's clips a tile stacks: the front one and the
+/// cards peeking out behind it. The rest still open with the group.
+pub const STACK: usize = 3;
+/// A group's paths on one line of the list file. A tab can't start an
+/// absolute path, and a filename with one in it is a thing nobody has.
+const SEP: char = '\t';
 /// The thumbnail atlas: `ATLAS_COLS` cells a row, `ATLAS` in all. The
-/// launch row uses the first `SHOWN`; cut mode's clip and chapter posters
-/// use the lot.
+/// launch row uses the first `SHOWN * STACK`; cut mode's clip and
+/// chapter posters use the lot.
 pub const ATLAS_COLS: usize = 4;
 pub const ATLAS: usize = 64;
 /// One thumbnail's pixel size: a 16:9 cover crop, about 2.4× the tile's
@@ -44,42 +56,57 @@ fn list_path() -> Option<PathBuf> {
     Some(PathBuf::from(home).join(".config/abner/recent"))
 }
 
-/// The recent paths, most recent first. A missing or unreadable file is
+/// One recent entry: the clips that were open together, in slot order.
+/// Never empty.
+pub type Group = Vec<PathBuf>;
+
+/// The recent groups, most recent first. A missing or unreadable file is
 /// an empty list, never an error: it is a convenience.
-pub fn load() -> Vec<PathBuf> {
+pub fn load() -> Vec<Group> {
     let Some(file) = list_path() else { return Vec::new() };
     parse(&std::fs::read_to_string(file).unwrap_or_default())
 }
 
-fn parse(text: &str) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
-    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        let p = PathBuf::from(line);
-        if p.is_absolute() && !out.contains(&p) {
-            out.push(p);
+fn parse(text: &str) -> Vec<Group> {
+    let mut out: Vec<Group> = Vec::new();
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let mut group: Group = Vec::new();
+        for p in line.split(SEP).map(str::trim).filter(|p| !p.is_empty()).map(PathBuf::from) {
+            if p.is_absolute() && !group.contains(&p) {
+                group.push(p);
+            }
+        }
+        if !group.is_empty() && !out.contains(&group) {
+            out.push(group);
         }
     }
     out.truncate(KEEP);
     out
 }
 
-/// `paths` were just opened: move them to the front (the first of them
-/// first), drop duplicates, keep `KEEP`. Written atomically so a crash
-/// mid-write can't leave half a list.
+/// `paths` are the clips open now, in slot order: put that group at the
+/// front, drop an earlier copy of it, keep `KEEP`. Written atomically so
+/// a crash mid-write can't leave half a list.
 pub fn record<'a>(paths: impl IntoIterator<Item = &'a Path>) {
     let Some(file) = list_path() else { return };
-    let opened: Vec<PathBuf> = paths
-        .into_iter()
+    let mut opened: Group = Vec::new();
+    for p in paths {
         // Absolute but NOT canonical: resolving symlinks would touch the
         // disk (this runs on the event loop) and turn /tmp into
         // /private/tmp, so the same file would be listed twice.
-        .map(|p| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()))
-        .collect();
+        let p = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+        if !opened.contains(&p) {
+            opened.push(p);
+        }
+    }
     if opened.is_empty() {
         return;
     }
     let merged = merge(&opened, &load());
-    let text: String = merged.iter().map(|p| format!("{}\n", p.display())).collect();
+    let text: String = merged
+        .iter()
+        .map(|g| g.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(&SEP.to_string()) + "\n")
+        .collect();
     let write = || -> std::io::Result<()> {
         if let Some(dir) = file.parent() {
             std::fs::create_dir_all(dir)?;
@@ -93,11 +120,17 @@ pub fn record<'a>(paths: impl IntoIterator<Item = &'a Path>) {
     }
 }
 
-fn merge(opened: &[PathBuf], old: &[PathBuf]) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
-    for p in opened.iter().chain(old) {
-        if !out.contains(p) {
-            out.push(p.clone());
+/// The same clips in a different slot order are the same group: a
+/// comparison swapped with Tab is not a new entry.
+fn same_group(a: &[PathBuf], b: &[PathBuf]) -> bool {
+    a.len() == b.len() && a.iter().all(|p| b.contains(p))
+}
+
+fn merge(opened: &Group, old: &[Group]) -> Vec<Group> {
+    let mut out: Vec<Group> = vec![opened.clone()];
+    for g in old {
+        if !out.iter().any(|o| same_group(o, g)) {
+            out.push(g.clone());
         }
     }
     out.truncate(KEEP);
@@ -249,22 +282,35 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn parse_keeps_absolute_unique_paths_in_order() {
-        let got = parse("/a.mov\n\nrelative.mp4\n/b.mkv\n/a.mov\n");
-        assert_eq!(got, vec![PathBuf::from("/a.mov"), PathBuf::from("/b.mkv")]);
+    fn g(paths: &[&str]) -> Group {
+        paths.iter().map(PathBuf::from).collect()
     }
 
     #[test]
-    fn merge_puts_the_opened_first_and_caps() {
-        let old: Vec<PathBuf> = (0..KEEP).map(|i| PathBuf::from(format!("/{i}.mov"))).collect();
-        let opened = vec![PathBuf::from("/new.mov"), PathBuf::from("/3.mov")];
+    fn parse_keeps_absolute_unique_groups_in_order() {
+        // The old file (a path per line) reads as groups of one; a line
+        // with tabs is one group.
+        let got = parse("/a.mov\n\nrelative.mp4\n/b.mkv\t/c.mkv\t/b.mkv\n/a.mov\n");
+        assert_eq!(got, vec![g(&["/a.mov"]), g(&["/b.mkv", "/c.mkv"])]);
+    }
+
+    #[test]
+    fn merge_puts_the_opened_group_first_and_caps() {
+        let old: Vec<Group> = (0..KEEP).map(|i| g(&[&format!("/{i}.mov")])).collect();
+        let opened = g(&["/new.mov", "/3.mov"]);
         let got = merge(&opened, &old);
         assert_eq!(got.len(), KEEP);
-        assert_eq!(got[0], PathBuf::from("/new.mov"));
-        assert_eq!(got[1], PathBuf::from("/3.mov"));
-        assert_eq!(got[2], PathBuf::from("/0.mov"));
-        assert_eq!(got.iter().filter(|p| **p == PathBuf::from("/3.mov")).count(), 1);
+        assert_eq!(got[0], opened);
+        // A pair is its own entry: the lone /3.mov stays listed too.
+        assert_eq!(got[1], g(&["/0.mov"]));
+        assert!(got.contains(&g(&["/3.mov"])));
+    }
+
+    #[test]
+    fn merge_drops_the_same_group_in_another_order() {
+        let old = vec![g(&["/a.mov", "/b.mov"]), g(&["/c.mov"])];
+        let got = merge(&g(&["/b.mov", "/a.mov"]), &old);
+        assert_eq!(got, vec![g(&["/b.mov", "/a.mov"]), g(&["/c.mov"])]);
     }
 
     #[test]

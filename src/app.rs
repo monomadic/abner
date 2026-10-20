@@ -336,12 +336,42 @@ pub struct App {
 
 /// One recent file on its way to (or on) the launch window.
 struct RecentTile {
-    path: std::path::PathBuf,
+    /// The group's clips in slot order; `clips[i]` is `paths[i]`'s.
+    paths: recent::Group,
+    clips: Vec<RecentClip>,
+}
+
+/// One clip of a recent group, as its thumbnail worker reports it.
+struct RecentClip {
     /// Filled in by the thumbnail worker, with the frame.
     info: Option<VideoInfo>,
     rgba: Option<Vec<u8>>,
-    /// The worker gave up (moved, deleted, unreadable): the tile drops out.
+    /// The worker gave up (moved, deleted, unreadable): the clip drops
+    /// out of the stack, and the tile once every clip has.
     failed: bool,
+}
+
+impl RecentTile {
+    fn failed(&self) -> bool {
+        self.clips.iter().all(|c| c.failed)
+    }
+
+    /// The clips the tile stacks — the first `STACK` that are still
+    /// there, front first — as indices into `clips`.
+    fn stack(&self) -> Vec<usize> {
+        self.clips.iter().enumerate().filter(|(_, c)| !c.failed).map(|(i, _)| i).take(recent::STACK).collect()
+    }
+
+    /// The paths that still open: a file that has gone missing is
+    /// skipped rather than failing the group.
+    fn live_paths(&self) -> Vec<std::path::PathBuf> {
+        self.paths.iter().zip(&self.clips).filter(|(_, c)| !c.failed).map(|(p, _)| p.clone()).collect()
+    }
+
+    /// How many of the group's clips are still there.
+    fn live(&self) -> usize {
+        self.clips.iter().filter(|c| !c.failed).count()
+    }
 }
 
 /// The recent row: candidates in recency order, the thumbnail workers
@@ -352,20 +382,40 @@ struct RecentTile {
 struct RecentRow {
     /// The list as last read (`set_recent`); `stale` until the launch
     /// window picks it up.
-    paths: Vec<std::path::PathBuf>,
+    groups: Vec<recent::Group>,
     stale: bool,
     tiles: Vec<RecentTile>,
     workers: Vec<std::sync::mpsc::Receiver<recent::ThumbResult>>,
-    /// Which tile's frame each atlas cell holds, so a cell is uploaded
-    /// only when what it shows changes.
-    atlas: [Option<std::path::PathBuf>; recent::SHOWN],
+    /// Which clip's frame each atlas cell holds (tile `slot` owns cells
+    /// `slot * STACK..`), so a cell is uploaded only when what it shows
+    /// changes.
+    atlas: Vec<Option<std::path::PathBuf>>,
     /// Tile rects from the last launch frame, for hit testing — indexed
     /// like `shown()`.
     hits: Vec<RectPx>,
     hover: Option<usize>,
+    /// Each slot's hover lift, 0..1, eased toward `hover` over
+    /// `TILE_LIFT_S` by `tick`: the tile scales up about its centre as
+    /// it rises. Indexed like `shown()`.
+    lift: Vec<f32>,
 }
 
 impl RecentRow {
+    /// Advance every slot's lift toward its target. True while any is
+    /// still moving, so the launch loop keeps redrawing.
+    fn animate(&mut self, dt: f32) -> bool {
+        self.lift.resize(recent::SHOWN, 0.0);
+        let step = dt / TILE_LIFT_S;
+        let mut moving = false;
+        for (slot, l) in self.lift.iter_mut().enumerate() {
+            let target = if self.hover == Some(slot) { 1.0 } else { 0.0 };
+            let next = if *l < target { (*l + step).min(target) } else { (*l - step).max(target) };
+            moving |= next != *l;
+            *l = next;
+        }
+        moving
+    }
+
     /// How many candidates get probed for the four tiles.
     const PROBED: usize = recent::SHOWN * 2;
 
@@ -373,7 +423,7 @@ impl RecentRow {
     /// haven't failed. A pending one keeps its place (as an empty well),
     /// so tiles don't reshuffle as workers finish in their own order.
     fn shown(&self) -> Vec<usize> {
-        self.tiles.iter().enumerate().filter(|(_, t)| !t.failed).map(|(i, _)| i).take(recent::SHOWN).collect()
+        self.tiles.iter().enumerate().filter(|(_, t)| !t.failed()).map(|(i, _)| i).take(recent::SHOWN).collect()
     }
 
     fn pending(&self) -> bool {
@@ -385,13 +435,29 @@ impl RecentRow {
     fn refresh(&mut self) {
         self.stale = false;
         let mut old = std::mem::take(&mut self.tiles);
-        let mut fresh = Vec::new();
-        for p in self.paths.iter().take(Self::PROBED) {
-            match old.iter().position(|t| &t.path == p) {
+        // Probed once per FILE: a clip in two groups shares the job, and
+        // the result lands in every tile that lists it.
+        let mut fresh: Vec<std::path::PathBuf> = Vec::new();
+        for g in self.groups.iter().take(Self::PROBED) {
+            match old.iter().position(|t| &t.paths == g) {
                 Some(i) => self.tiles.push(old.swap_remove(i)),
                 None => {
-                    fresh.push(p.clone());
-                    self.tiles.push(RecentTile { path: p.clone(), info: None, rgba: None, failed: false });
+                    let clips = g.iter().map(|p| {
+                        // A clip already probed for another tile keeps
+                        // its frame instead of going out again.
+                        match old.iter().chain(&self.tiles).find_map(|t| {
+                            t.paths.iter().position(|q| q == p).map(|i| &t.clips[i])
+                        }) {
+                            Some(c) if c.failed || c.rgba.is_some() => RecentClip {
+                                info: c.info.clone(), rgba: c.rgba.clone(), failed: c.failed,
+                            },
+                            _ => {
+                                if !fresh.contains(p) { fresh.push(p.clone()); }
+                                RecentClip { info: None, rgba: None, failed: false }
+                            }
+                        }
+                    }).collect();
+                    self.tiles.push(RecentTile { paths: g.clone(), clips });
                 }
             }
         }
@@ -412,15 +478,17 @@ impl RecentRow {
             }
         });
         for (path, result) in done {
-            let Some(t) = self.tiles.iter_mut().find(|t| t.path == path) else { continue };
-            match result {
-                Ok(th) => {
-                    t.info = Some(th.info);
-                    t.rgba = Some(th.rgba);
-                }
-                Err(e) => {
-                    log::info!("recent {}: {e}", path.display());
-                    t.failed = true;
+            let result = result.map_err(|e| {
+                log::info!("recent {}: {e}", path.display());
+            });
+            for t in &mut self.tiles {
+                let Some(i) = t.paths.iter().position(|p| *p == path) else { continue };
+                match &result {
+                    Ok(th) => {
+                        t.clips[i].info = Some(th.info.clone());
+                        t.clips[i].rgba = Some(th.rgba.clone());
+                    }
+                    Err(()) => t.clips[i].failed = true,
                 }
             }
         }
@@ -430,12 +498,16 @@ impl RecentRow {
     /// filled.
     fn uploads(&mut self) -> Vec<ThumbUpload> {
         let mut out = Vec::new();
+        self.atlas.resize(recent::SHOWN * recent::STACK, None);
         for (slot, i) in self.shown().into_iter().enumerate() {
             let t = &self.tiles[i];
-            let Some(rgba) = &t.rgba else { continue };
-            if self.atlas[slot].as_ref() != Some(&t.path) {
-                out.push(ThumbUpload { slot, buf: rgba.clone() });
-                self.atlas[slot] = Some(t.path.clone());
+            for (depth, c) in t.stack().into_iter().enumerate() {
+                let Some(rgba) = &t.clips[c].rgba else { continue };
+                let cell = slot * recent::STACK + depth;
+                if self.atlas[cell].as_ref() != Some(&t.paths[c]) {
+                    out.push(ThumbUpload { slot: cell, buf: rgba.clone() });
+                    self.atlas[cell] = Some(t.paths[c].clone());
+                }
             }
         }
         out
@@ -1100,17 +1172,18 @@ impl App {
         self.plate_horizon = horizon;
     }
 
-    /// The recent-files list (`recent::load`), most recent first. The
-    /// launch window re-reads it the next time it draws.
-    pub fn set_recent(&mut self, paths: Vec<std::path::PathBuf>) {
-        self.recent.paths = paths;
+    /// The recent list (`recent::load`), most recent first. The launch
+    /// window re-reads it the next time it draws.
+    pub fn set_recent(&mut self, groups: Vec<recent::Group>) {
+        self.recent.groups = groups;
         self.recent.stale = true;
     }
 
-    /// The file behind the launch window's nth recent tile.
-    pub fn recent_path(&self, n: usize) -> Option<std::path::PathBuf> {
+    /// The files behind the launch window's nth recent tile, in slot
+    /// order, less any that have gone missing.
+    pub fn recent_group(&self, n: usize) -> Option<Vec<std::path::PathBuf>> {
         let i = *self.recent.shown().get(n)?;
-        Some(self.recent.tiles[i].path.clone())
+        Some(self.recent.tiles[i].live_paths())
     }
 
     fn open_recent(&mut self, n: usize) {
@@ -2116,6 +2189,7 @@ impl App {
                 }
                 self.recent.drain();
             }
+            let lifting = self.recent.animate(dt);
             let mut desc = self.launch_frame(vp);
             desc.thumbs = self.recent.uploads();
             // The floor moves at the clip's own rate: wake for its next
@@ -2128,6 +2202,11 @@ impl App {
             // moving floor to pace the loop.
             if self.recent.pending() {
                 let soon = Instant::now() + std::time::Duration::from_millis(100);
+                desc.redraw_at = Some(desc.redraw_at.map_or(soon, |t| t.min(soon)));
+            }
+            // A tile mid-lift: run at the display's pace until it settles.
+            if lifting {
+                let soon = Instant::now() + std::time::Duration::from_millis(8);
                 desc.redraw_at = Some(desc.redraw_at.map_or(soon, |t| t.min(soon)));
             }
             desc.plate = plate;
@@ -3177,16 +3256,19 @@ impl App {
 }
 
 impl App {
-    /// The launch window's recent files: a header (`RECENT`, `⌘1–n`) and
-    /// one tile per file — a rounded, bevelled thumbnail with the
-    /// container at its top-left and the running time at its
-    /// bottom-right, and the frame size and rate underneath. Centred in
+    /// The launch window's recent entries: a header (`RECENT`, `⌘1–n`)
+    /// and one tile per group — a rounded, bevelled thumbnail with the
+    /// container (or the clip count) at its top-left and the running
+    /// time at its bottom-right, and the frame size and rate underneath.
+    /// A group of several clips is a STACK: the first clip's frame in
+    /// front, the next ones peeking out above it as narrower, dimmer
+    /// cards, so a comparison reads as one thing to reopen. Centred in
     /// the band `top..bottom`; left out when the band is too short or
     /// there is nothing to show. Records each tile's rect for hit testing.
     fn push_recent_row(&mut self, items: &mut Vec<Item>, w: f32, top: f32, bottom: f32) {
         let shown = self.recent.shown();
         let n = shown.len();
-        let row_h = RECENT_HEAD + RECENT_STEP + TILE_H + RECENT_STEP + RECENT_META;
+        let row_h = RECENT_HEAD + RECENT_STEP + STACK_RISE + TILE_H + RECENT_STEP + RECENT_META;
         if n == 0 || bottom - top < row_h {
             return;
         }
@@ -3210,18 +3292,72 @@ impl App {
             ..TextItem::new(x0 + row_w, y0 + RECENT_HEAD / 2.0, 10.0, INK_FAINT, keys)
         }));
 
-        let ty = y0 + RECENT_HEAD + RECENT_STEP;
+        let ty = y0 + RECENT_HEAD + RECENT_STEP + STACK_RISE;
         let chip = TextBg { radius: 4.0, pad_x: 4.0, pad_y: 1.0, ..TextBg::new(CHIP_BG) };
         for (slot, &i) in shown.iter().enumerate() {
             let t = &self.recent.tiles[i];
-            let r = RectPx { x: x0 + slot as f32 * (TILE_W + TILE_GAP), y: ty, w: TILE_W, h: TILE_H };
+            let stack = t.stack();
+            let rest = RectPx { x: x0 + slot as f32 * (TILE_W + TILE_GAP), y: ty, w: TILE_W, h: TILE_H };
+            // The hovered tile grows about its centre by `TILE_LIFT`,
+            // eased in and out; the stack and chips follow because they
+            // are laid out from `r`. The hit rect stays the resting one,
+            // so the edge can't flicker as the tile crosses it.
+            let lift = self.recent.lift.get(slot).copied().unwrap_or(0.0);
+            let eased = lift * lift * (3.0 - 2.0 * lift);
+            let k = 1.0 + TILE_LIFT * eased;
+            let r = RectPx {
+                x: rest.x - rest.w * (k - 1.0) / 2.0,
+                y: rest.y - rest.h * (k - 1.0) / 2.0,
+                w: rest.w * k,
+                h: rest.h * k,
+            };
             let hot = self.recent.hover == Some(slot);
+            // The cards behind, furthest first: each one step up and a
+            // step narrower than the one in front of it, dimmer the
+            // further back, so the stack reads from the front card's
+            // top edge.
+            for depth in (1..stack.len()).rev() {
+                let d = depth as f32;
+                let card = RectPx {
+                    x: r.x + d * STACK_INSET,
+                    y: r.y - d * STACK_STEP,
+                    w: r.w - 2.0 * d * STACK_INSET,
+                    h: r.h,
+                };
+                let dim = 1.0 - 0.3 * d;
+                items.push(Item::Rect(RectItem { radius: TILE_R, ..RectItem::new(card, WELL) }));
+                if t.clips[stack[depth]].rgba.is_some() {
+                    let inner = RectPx { x: card.x + 1.0, y: card.y + 1.0, w: card.w - 2.0, h: card.h - 2.0 };
+                    items.push(Item::Thumb {
+                        r: inner,
+                        slot: slot * recent::STACK + depth,
+                        radius: TILE_R - 1.0,
+                        alpha: dim,
+                        cover: true,
+                        clip_poster: false,
+                    });
+                }
+                items.push(Item::Rect(RectItem {
+                    radius: TILE_R,
+                    border_w: 1.0,
+                    border_color: BEVEL,
+                    ..RectItem::new(card, [0.0; 4])
+                }));
+            }
             // The recessed well first; the frame sits in it one px in, so
             // the bevel's hairline runs round the picture, not over it.
             items.push(Item::Rect(RectItem { radius: TILE_R, ..RectItem::new(r, WELL) }));
-            if t.rgba.is_some() {
+            let front = stack.first().copied();
+            if front.is_some_and(|c| t.clips[c].rgba.is_some()) {
                 let inner = RectPx { x: r.x + 1.0, y: r.y + 1.0, w: r.w - 2.0, h: r.h - 2.0 };
-                items.push(Item::Thumb { r: inner, slot, radius: TILE_R - 1.0, alpha: 1.0, cover: true, clip_poster: false });
+                items.push(Item::Thumb {
+                    r: inner,
+                    slot: slot * recent::STACK,
+                    radius: TILE_R - 1.0,
+                    alpha: 1.0,
+                    cover: true,
+                    clip_poster: false,
+                });
             }
             // The bevel: a faint white outline all round, and a brighter
             // one that is strongest along the top edge and gone by the
@@ -3239,10 +3375,12 @@ impl App {
                 fade_down: true,
                 ..RectItem::new(r, [0.0; 4])
             }));
-            if let Some(info) = &t.info {
+            if let Some(info) = front.and_then(|c| t.clips[c].info.as_ref()) {
+                let live = t.live();
+                let label = if live > 1 { format!("{live} CLIPS") } else { recent::container(&t.paths[front.unwrap()]) };
                 items.push(Item::Text(TextItem {
                     bg: Some(chip),
-                    ..TextItem::new(r.x + 9.0, r.y + 6.0, 10.0, CHIP_INK, recent::container(&t.path))
+                    ..TextItem::new(r.x + 9.0, r.y + 6.0, 10.0, CHIP_INK, label)
                 }));
                 if info.duration > 0.0 {
                     items.push(Item::Text(TextItem {
@@ -3252,20 +3390,35 @@ impl App {
                         ..TextItem::new(r.x + r.w - 9.0, r.y + r.h - 6.0, 10.0, CHIP_INK, recent::fmt_duration(info.duration))
                     }));
                 }
+                // The meta line describes the group: a figure the clips
+                // share, or "mixed" where they differ — that difference
+                // is often what the comparison is about.
+                let probed: Vec<&VideoInfo> = t.clips.iter().filter(|c| !c.failed).filter_map(|c| c.info.as_ref()).collect();
+                let same = |f: &dyn Fn(&VideoInfo) -> String| probed.iter().all(|i| f(i) == f(info));
+                let size = if same(&|i| format!("{}×{}", i.width, i.height)) {
+                    format!("{}×{}", info.width, info.height)
+                } else {
+                    "mixed".to_string()
+                };
+                let fps = if same(&|i| recent::fmt_fps(i.fps)) {
+                    format!("{} fps", recent::fmt_fps(info.fps))
+                } else {
+                    "mixed fps".to_string()
+                };
                 let my = r.y + r.h + RECENT_STEP + RECENT_META / 2.0;
                 items.push(Item::Text(TextItem {
                     valign: VAlign::Middle,
                     max_width: Some(TILE_W / 2.0),
-                    ..TextItem::new(r.x, my, 11.0, INK_MUTED, format!("{}×{}", info.width, info.height))
+                    ..TextItem::new(r.x, my, 11.0, INK_MUTED, size)
                 }));
                 items.push(Item::Text(TextItem {
                     align: Align::Right,
                     valign: VAlign::Middle,
                     max_width: Some(TILE_W / 2.0),
-                    ..TextItem::new(r.x + r.w, my, 11.0, INK_MUTED, format!("{} fps", recent::fmt_fps(info.fps)))
+                    ..TextItem::new(r.x + r.w, my, 11.0, INK_MUTED, fps)
                 }));
             }
-            self.recent.hits.push(r);
+            self.recent.hits.push(rest);
         }
     }
 }
@@ -5871,6 +6024,53 @@ const CONTROL_BG: [f32; 4] = [26.0 / 255.0, 26.0 / 255.0, 26.0 / 255.0, 1.0];
 #[cfg(test)]
 mod tests {
     #[test]
+    fn recent_tile_lift_eases_toward_the_hovered_slot_and_settles() {
+        let mut row = super::RecentRow::default();
+        row.hover = Some(1);
+        assert!(row.animate(super::TILE_LIFT_S / 2.0));
+        assert!((row.lift[1] - 0.5).abs() < 1e-4);
+        assert_eq!(row.lift[0], 0.0);
+        assert!(row.animate(super::TILE_LIFT_S));
+        assert_eq!(row.lift[1], 1.0);
+        // Settled: nothing moves, so the launch loop may go idle.
+        assert!(!row.animate(super::TILE_LIFT_S));
+        row.hover = None;
+        assert!(row.animate(super::TILE_LIFT_S / 2.0));
+        assert!((row.lift[1] - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn lifted_recent_tile_grows_about_its_centre_and_keeps_its_hit_rect() {
+        let mut app = App::new(Vec::new(), &crate::config::Config::default());
+        let clip = || super::RecentClip { info: None, rgba: Some(vec![0; 16]), failed: false };
+        app.recent.tiles = vec![super::RecentTile {
+            paths: vec![PathBuf::from("/a.mp4"), PathBuf::from("/b.mp4")],
+            clips: vec![clip(), clip()],
+        }];
+        let thumbs = |app: &mut App| {
+            let mut items = Vec::new();
+            app.recent.hits.clear();
+            app.push_recent_row(&mut items, 1280.0, 500.0, 900.0);
+            items.into_iter().filter_map(|i| match i { Item::Thumb { r, slot, .. } => Some((slot, r)), _ => None }).collect::<Vec<_>>()
+        };
+        let rest = thumbs(&mut app);
+        let hit = app.recent.hits[0];
+        app.recent.hover = Some(0);
+        app.recent.lift = vec![1.0];
+        let lifted = thumbs(&mut app);
+        // Front frame (slot 0) and the card behind it (slot 1), both up.
+        assert_eq!(rest.len(), 2);
+        assert_eq!(lifted.len(), 2);
+        let (r0, r1) = (rest[0].1, lifted[0].1);
+        assert!(r1.w > r0.w && r1.h > r0.h);
+        assert!(((r1.x + r1.w / 2.0) - (r0.x + r0.w / 2.0)).abs() < 0.01);
+        assert!(((r1.y + r1.h / 2.0) - (r0.y + r0.h / 2.0)).abs() < 0.01);
+        assert!((r1.w / r0.w - (1.0 + super::TILE_LIFT)).abs() < 0.02);
+        let h = app.recent.hits[0];
+        assert_eq!((h.x, h.y, h.w, h.h), (hit.x, hit.y, hit.w, hit.h));
+    }
+
+    #[test]
     fn frame_detail_loads_real_images_and_selects_only_a_gop() {
         let Some(clip) = test_clip() else { return };
         let mut app = mk_app(&clip, 1);
@@ -8086,6 +8286,16 @@ const TILE_W: f32 = 132.0;
 const TILE_H: f32 = 74.0;
 const TILE_GAP: f32 = 64.0;
 const TILE_R: f32 = 8.0;
+/// A group's stack: each card behind the front one sits `STACK_STEP` px
+/// higher and `STACK_INSET` px narrower a side. The row reserves the
+/// full rise above every tile, so the header never moves as groups
+/// come and go.
+/// The hovered tile's lift: how much it grows, and how long the ease takes.
+const TILE_LIFT: f32 = 0.08;
+const TILE_LIFT_S: f32 = 0.15;
+const STACK_STEP: f32 = 5.0;
+const STACK_INSET: f32 = 6.0;
+const STACK_RISE: f32 = STACK_STEP * (recent::STACK as f32 - 1.0);
 /// Header line, the step between the row's lines, the metadata line.
 const RECENT_HEAD: f32 = 14.0;
 const RECENT_STEP: f32 = 8.0;

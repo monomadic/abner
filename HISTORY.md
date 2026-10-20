@@ -3,6 +3,31 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-20 — the recent row remembers groups
+
+A launch-window tile is now the SET of clips that were open together, not one
+file: a pair being compared comes back as one tile that reopens the pair. The
+runner records the whole open list after every load (the command line's set, or
+`App::videos` after a drop lands), `~/.config/abner/recent` holds one group a
+line with its paths tab-separated (the old one-path-per-line file reads as
+groups of one), and the same clips in another slot order are the same entry
+(`recent::merge`). A group's tile is a stack: the first clip's frame in front,
+up to `recent::STACK` (3) cards peeking out above it, each 5px higher, 6px
+narrower a side and dimmer; the chip reads `N CLIPS` and the meta line says
+`mixed` where the clips' size or rate differ. The atlas gives each tile
+`STACK` cells; a clip in two groups is probed once. A file that has gone
+missing drops out of its stack (and the group opens without it); a group with
+nothing left drops out of the row. The hovered tile LIFTS: each slot keeps a
+0..1 amount eased over `TILE_LIFT_S` (150 ms, smoothstep) toward the hover, and
+the tile grows `TILE_LIFT` (8%) about its centre with its stack and chips
+following, the launch loop redrawing at display pace while any is moving; the
+hit rect stays the resting one so the edge can't flicker. Tests:
+`parse_keeps_absolute_unique_groups_in_order`,
+`merge_puts_the_opened_group_first_and_caps`,
+`merge_drops_the_same_group_in_another_order`,
+`recent_tile_lift_eases_toward_the_hovered_slot_and_settles`,
+`lifted_recent_tile_grows_about_its_centre_and_keeps_its_hit_rect`.
+
 ## 2026-10-20 — native File and Frame menus
 
 The menu bar now has File (Open… ⌘O, Reveal in Finder ⇧⌘R, Export ⌘E, Close
