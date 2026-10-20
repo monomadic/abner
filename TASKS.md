@@ -14,6 +14,16 @@ Effort estimates come from the 2026-09-04 comparison against switchblade.
 
 ## Next
 
+20. **Three-stream cold seek on FilmCraft.** `benchmark_three_4k_players` (cold exact
+   seek to 3.5 s in a 4 s 4K H.264 GOP): one player lands in 690 ms against the libav
+   player's 824, three players in 947 against 861 (interleaved medians, 2026-10-21). The
+   contention is between streams, not per stream, and it is not rayon (capping its pool at
+   2 / 4 / 6 threads is slower at every setting). Suspects: FilmCraft's VideoToolbox output
+   copy on the session callback threads, the GOP cache storing every decoded picture of the
+   decode-forward as planar frames (allocation churn under three sources), and our RGBA
+   buffers (696 MiB resident for three players against 490: the rewind window plus
+   decoding ahead to the budget). Profile with three sources before changing anything.
+
 4. **Waker latch on the decoder→loop nudge.** `main.rs` sends one proxy event per
    player per dry→ready transition with no latch; N players × transitions all queue on
    the unbounded channel. Switchblade's `Waker` swaps an `AtomicBool` in `wake()` and

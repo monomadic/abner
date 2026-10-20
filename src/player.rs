@@ -1306,3 +1306,59 @@ mod tests {
         let _ = std::fs::remove_file(&fifo);
     }
 }
+
+#[cfg(test)]
+mod parity_tests {
+    use super::*;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    /// The RGBA the player hands out for a frame is ffmpeg's RGBA conversion of the same frame,
+    /// within the rounding of two different fixed-point converters: the pictures themselves
+    /// are bit-exact (codec-bench), so what this guards is `fc::fit_rgba_into`'s colour maths
+    /// (matrix, range, chroma siting) against a second implementation.
+    #[test]
+    fn delivered_rgba_matches_ffmpegs_conversion() {
+        if Command::new("ffmpeg").arg("-version").output().is_err() {
+            eprintln!("skipping: ffmpeg not on PATH");
+            return;
+        }
+        let dir = std::env::temp_dir().join("abner_player_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let clip = dir.join("parity.mp4");
+        let ok = Command::new("ffmpeg")
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=duration=2:size=320x180:rate=30,noise=alls=8:allf=t"])
+            .args(["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-g", "30", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"])
+            .arg(&clip)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(ok, "fixture");
+        // frame 10 from ffmpeg, as RGBA
+        let out = Command::new("ffmpeg")
+            .args(["-v", "error", "-i"])
+            .arg(&clip)
+            .args(["-vf", "select=eq(n\\,10)", "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgba", "-"])
+            .output()
+            .unwrap();
+        assert_eq!(out.stdout.len(), 320 * 180 * 4, "one RGBA frame from ffmpeg");
+        let p = Player::spawn(&clip, 320, 180, true, None, SMALL_CACHE).expect("spawn");
+        p.seek(10.0 / 30.0, true);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let ours = loop {
+            if let Some((pts, f)) = p.take_next() {
+                assert!((pts - 10.0 / 30.0).abs() < 0.002, "landed on {pts}");
+                break f;
+            }
+            assert!(Instant::now() < deadline, "no frame");
+            thread::sleep(Duration::from_millis(5));
+        };
+        let diffs: Vec<u32> = ours.iter().zip(&out.stdout).map(|(a, b)| a.abs_diff(*b) as u32).collect();
+        let mean = diffs.iter().sum::<u32>() as f64 / diffs.len() as f64;
+        let max = *diffs.iter().max().unwrap();
+        let over4 = diffs.iter().filter(|&&d| d > 4).count();
+        eprintln!("rgba vs ffmpeg: mean {mean:.3}, max {max}, >4: {over4} of {}", diffs.len());
+        assert!(mean < 1.0, "mean difference {mean:.3}");
+        assert!(over4 * 1000 < diffs.len(), "{over4} samples differ by more than 4 levels");
+    }
+}
