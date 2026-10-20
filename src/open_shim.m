@@ -275,3 +275,10 @@ void ab_set_header_controls(void *raw_view, const double *rects, size_t count) {
     }
     if (![input.controlRects isEqualToArray:values]) input.controlRects = values;
 }
+
+// Copy UTF-8 while the autoreleased pasteboard string is alive.
+char *ab_paste_text(void) {
+    NSString *text = [[NSPasteboard generalPasteboard] stringForType:NSPasteboardTypeString];
+    return text ? strdup([text UTF8String]) : NULL;
+}
+void ab_free_text(char *text) { free(text); }

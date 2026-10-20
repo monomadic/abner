@@ -8,6 +8,7 @@
 //! window-shadow trick for macOS Tahoe's contour line.
 
 mod processor_cli;
+mod processor_gui;
 mod app;
 mod config;
 mod cut;
@@ -54,6 +55,11 @@ config: abner.default.toml (built in) overlaid by the first of
   --config <file>, ./abner.toml, ~/.config/abner/abner.toml,
   ~/.config/abner.toml — set only the keys you change. A config error
   stops startup.
+
+processor previews (composed launcher):
+  --processor ID                    open the runtime settings and preview panel
+  --processor-settings JSON         optional initial settings object
+  P                                 toggle processor controls; Space plays preview
 
 composition probes (no window):
   --list-processors                  list registered descriptors and settings
@@ -116,6 +122,8 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
     let mut mode: Option<app::Mode> = None;
     let mut config_path: Option<PathBuf> = None;
     let mut mask_mode = false;
+    let mut processor = None;
+    let mut processor_settings = serde_json::json!({});
     // The Sources sidebar hidden, as the header toggle leaves it: for captures.
     let mut no_sources = false;
     let mut no_inspector = false;
@@ -128,7 +136,11 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
     let mut paths: Vec<PathBuf> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
-        if a == "--view" {
+        if a == "--processor" {
+            processor=Some(it.next().ok_or_else(||anyhow::anyhow!("--processor needs a registered ID"))?.clone());
+        } else if a == "--processor-settings" {
+            processor_settings=serde_json::from_str(it.next().ok_or_else(||anyhow::anyhow!("--processor-settings needs JSON"))?)?;
+        } else if a == "--view" {
             let v = it.next().and_then(|v| app::Mode::parse(v));
             match v {
                 Some(m) => mode = Some(m),
@@ -234,6 +246,8 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
         app.duplicate_sources();
         for v in &app.videos { v.player.set_notify(notify.clone()); }
     }
+    app.set_processors(registry);
+    if let Some(id)=processor {app.start_processor(&id,processor_settings).map_err(anyhow::Error::msg)?;}
     app.set_recent(recent::load());
     app.set_video_splash(video_splash);
     if let Some(path) = video_splash.then(backdrop_path).flatten() {
@@ -758,6 +772,18 @@ impl ApplicationHandler for Runner {
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
+                    return;
+                }
+                if (self.mods.super_key() || self.mods.control_key())
+                    && let WinitKey::Character(s)=&event.logical_key
+                    && s.chars().next().is_some_and(|c|self.app.processor_shortcut(c)) {
+                    if let Some(w)=&self.window {w.request_redraw();}
+                    return;
+                }
+                if !self.mods.super_key() && !self.mods.control_key()
+                    && let WinitKey::Character(s)=&event.logical_key
+                    && self.app.processor_text(s) {
+                    if let Some(w)=&self.window {w.request_redraw();}
                     return;
                 }
                 let key = match &event.logical_key {

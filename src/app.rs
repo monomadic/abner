@@ -163,6 +163,7 @@ pub struct Video {
 }
 
 pub struct App {
+    processors: crate::processor_gui::Panel,
     pub videos: Vec<Video>,
     active: usize,
     source_scroll: usize,
@@ -659,6 +660,7 @@ impl App {
         let fps = Self::fps_of(&videos);
         let wrap = Self::wrap_of(&videos);
         Self {
+            processors: crate::processor_gui::Panel::default(),
             masks: (0..videos.len()).map(|_| None).collect(),
             mask_mode: false,
             brush_diameter: cfg.mask.brush_size,
@@ -1597,7 +1599,22 @@ impl App {
         }
     }
 
+    pub fn start_processor(&mut self,id:&str,settings:serde_json::Value)->Result<(),String>{
+        self.processors.start(id,settings)?;
+        self.playing=false;
+        Ok(())
+    }
+    pub fn processor_shortcut(&mut self,c:char)->bool {self.processors.shortcut(c)}
+    pub fn processor_text(&mut self,text:&str)->bool { self.processors.text_input(text) }
+    pub fn set_processors(&mut self, registry: abner_processor_api::Registry) {
+        self.processors = crate::processor_gui::Panel::new(registry);
+    }
+
     pub fn key(&mut self, mut k: Key) {
+        if self.processors.key(k) {
+            if self.processors.open { self.playing = false; }
+            return;
+        }
         if k == Key::OpenFiles { self.cmds.push(Cmd::OpenFiles); return; }
         if k == Key::DuplicateSources { self.duplicate_sources(); return; }
         if k == Key::SelectSources {
@@ -1786,6 +1803,7 @@ impl App {
     }
 
     pub fn cursor_moved(&mut self, x: f32, y: f32) {
+        if self.processors.pointer(x,y,self.vp) { self.cursor=(x,y); return; }
         self.cursor_inside = true;
         if let Some((_, sx, sy, moved)) = &mut self.source_copy_drag {
             *moved |= (x - *sx).hypot(y - *sy) >= 5.0;
@@ -1869,6 +1887,10 @@ impl App {
     }
 
     pub fn mouse_down(&mut self, x: f32, y: f32) {
+        if self.ready() && self.processors.click(x, y, self.vp) {
+            if self.processors.open { self.playing = false; }
+            return;
+        }
         if !self.ready() {
             // The launch window: a recent tile opens its file; anywhere
             // else is just the drop target.
@@ -1951,6 +1973,7 @@ impl App {
     }
 
     pub fn mouse_up(&mut self) {
+        if self.processors.release(){return;}
         self.source_copy_drag = None;
         if let Some(CutDrag::Band { x0, add, .. }) = self.cut_drag {
             if self.cut_band_rect().is_none() && !add {
@@ -2000,6 +2023,7 @@ impl App {
     }
 
     pub fn scroll(&mut self, dx: f32, dy: f32) {
+        if self.processors.scroll(dy, self.cursor, self.vp) { return; }
         self.stroke_last = None;
         if !self.ready() { return; }
         if self.cut_mode && self.show_ui && self.cut_tab == 1 && contains(self.cut_side().body, self.cursor.0, self.cursor.1) {
@@ -2130,6 +2154,7 @@ impl App {
     }
 
     pub fn tick(&mut self, dt: f32, vp: (f32, f32), _scale: f32) -> FrameDesc {
+        if self.videos.is_empty(){self.processors.close();}
         if self.vp != vp {
             self.stroke_last = None;
             self.vp = vp;
@@ -2392,8 +2417,14 @@ impl App {
             self.build_status_line(&mut items, vp);
         }
 
+        if self.processors.open { self.playing = false; }
+        let preview_end = self.cut.as_ref().filter(|_|self.cut_mode && self.active==self.cut_video)
+            .and_then(|c|c.segments().into_iter().find(|s|self.t>=s.start && self.t<s.end).map(|s|s.end));
+        self.processors.tick(&self.videos[self.active].info, self.t, preview_end, &mut uploads, n);
+        self.processors.draw(&mut items, vp, n);
+
         let animating =
-            self.playing || !self.started || self.cut_thumb.play.is_some() || self.cut_hot_animating()
+            self.processors.animating() || self.playing || !self.started || self.cut_thumb.play.is_some() || self.cut_hot_animating()
             || self.rail_sliding();
         FrameDesc {
             clear: FRAME_BG,
@@ -8247,7 +8278,7 @@ const SHADOW_PASSES: [(f32, f32, f32); 3] = [(2.0, 4.0, 0.80), (5.0, 10.0, 0.55)
 /// width, the floor's tilt from the screen plane, and how much light
 /// the floor gives back.
 const FLOOR_PERSP: f32 = 1.36;
-const FLOOR_TILT: f32 = 1.0472; // 60° — shallower than the card's 72°, so it runs further toward the viewer
+const FLOOR_TILT: f32 = std::f32::consts::FRAC_PI_3; // 60° — shallower than the card's 72°, so it runs further toward the viewer
 const FLOOR_ALPHA: f32 = 0.15;
 /// How far below the horizon the reflection starts, as a fraction of the
 /// mark's height — a gap of floor between the tagline and its mirror,

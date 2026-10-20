@@ -263,6 +263,7 @@ struct Shared {
     /// seek target while one is in flight.
     position: AtomicU64,
     failed: AtomicBool,
+    eof: AtomicBool,
     /// Fired when a frame becomes deliverable with none before it — wakes
     /// an idle render loop (paused app waiting on a framestep's frame).
     notify: Mutex<Option<Notify>>,
@@ -354,6 +355,7 @@ impl Player {
             cmd: Mutex::new(None),
             position: AtomicU64::new(0f64.to_bits()),
             failed: AtomicBool::new(false),
+            eof: AtomicBool::new(false),
             notify: Mutex::new(None),
             pool: Mutex::new(Vec::new()),
         });
@@ -418,6 +420,7 @@ impl Player {
             c.landing = false;
             *self.shared.cmd.lock().unwrap() = None;
         } else {
+            self.shared.eof.store(false, Ordering::Release);
             c.pending = exact.then_some(key);
             c.landing = !exact;
             *self.shared.cmd.lock().unwrap() = Some((t, exact, forward));
@@ -484,6 +487,12 @@ impl Player {
     #[allow(dead_code)]
     pub fn position(&self) -> f64 {
         f64::from_bits(self.shared.position.load(Ordering::Relaxed))
+    }
+
+    /// True only after the decoder has drained its tail and no frames remain.
+    pub fn exhausted(&self) -> bool {
+        let no_seek = self.shared.cmd.lock().unwrap().is_none();
+        no_seek && self.shared.eof.load(Ordering::Acquire) && self.buffered() == 0
     }
 
     pub fn failed(&self) -> bool {
@@ -793,6 +802,7 @@ unsafe fn reader(shared: &Shared, cfg: &ReaderCfg) -> Result<(), String> {
                 return Ok(());
             }
             if let Some((target, exact, forward)) = shared.cmd.lock().unwrap().take() {
+                shared.eof.store(false, Ordering::Release);
                 pump.active_target = exact.then(|| us(target));
                 pump.active_seen_before_target = false;
                 // A seek that fails (transient SMB fault, stale handle)
@@ -842,6 +852,7 @@ unsafe fn reader(shared: &Shared, cfg: &ReaderCfg) -> Result<(), String> {
                         return Ok(());
                     }
                 }
+                shared.eof.store(true, Ordering::Release);
                 if native_av1 && shared.cache.lock().unwrap().frames.is_empty() {
                     return Err("hardware AV1: no decoded frames".into());
                 }

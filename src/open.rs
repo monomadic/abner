@@ -135,6 +135,11 @@ mod imp {
         }
     }
 
+    pub fn paste_text() -> Option<String> {
+        unsafe extern "C" {fn ab_paste_text()->*mut c_char;fn ab_free_text(text:*mut c_char);}
+        unsafe {let text=ab_paste_text();if text.is_null(){return None;}
+            let value=CStr::from_ptr(text).to_string_lossy().into_owned();ab_free_text(text);Some(value)}
+    }
     pub fn choose_files() { unsafe { ab_choose_files(); } }
 
     /// Take every path the OS has asked us to open since the last drain.
@@ -147,6 +152,7 @@ mod imp {
 mod imp {
     use std::path::PathBuf;
 
+    pub fn paste_text()->Option<String>{None}
     pub fn choose_files() {}
     pub fn take_view_request() -> Option<usize> { None }
     pub fn take_menu_requests() -> Vec<super::MenuAction> { Vec::new() }
@@ -171,4 +177,4 @@ mod imp {
     }
 }
 
-pub use imp::{choose_files, copy_png, drain, install, reveal, sync_menus, take_menu_requests, take_view_request};
+pub use imp::{paste_text, choose_files, copy_png, drain, install, reveal, sync_menus, take_menu_requests, take_view_request};

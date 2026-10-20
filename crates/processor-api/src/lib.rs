@@ -84,7 +84,8 @@ pub trait Session {
     /// Completed output frames; the host owns timeline totals and job-wide progress.
     fn progress(&self) -> Progress;
 }
-pub trait Factory {
+/// Factories can move to a preview worker; sessions stay on their creating thread.
+pub trait Factory: Send {
     fn descriptor(&self) -> Descriptor;
     fn create(
         &self,

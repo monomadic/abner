@@ -3,6 +3,26 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-21 — schema controls and live processor previews
+
+Added a generic runtime-descriptor panel with numeric sliders and exact entry,
+enums, booleans, strings, native paste and presets. A dedicated worker constructs
+thread-affine sessions, decodes bounded display-proxy sections and streams paired
+source/output frames into the existing renderer. Requests debounce and coalesce;
+settings changes and seeks cancel active sessions and reject stale generations.
+Short sections flush buffered output at EOF and timeline split/cut boundaries.
+The panel exposes frame progress, throughput, ETA and independent preview playback.
+The initial scope is SDR constant-rate, timestamp-preserving preview processing;
+export remains the source timeline and the UI labels that distinction.
+
+Seven regression tests cover schema defaults, numeric/text editing, proxy geometry,
+input gestures, cancellation/stale generations, fractional-rate decoded frames,
+buffered EOF output and timeline boundaries. The full host suite passes with 119
+tests and one ignored test. Replaced a rounded angle constant with the standard
+constant to remove an existing Clippy error; other pre-existing lint warnings
+remain. No external processor identity, dependencies, assets or captures are
+committed.
+
 ## 2026-10-21 — reliable local composition paths and discovery errors
 
 Resolve relative plugin-directory overrides before writing generated dependencies

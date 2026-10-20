@@ -1125,6 +1125,13 @@ impl Gpu {
 
     pub fn render(&mut self, desc: &FrameDesc, viewport: (f32, f32)) {
         for up in &desc.uploads {
+            // Preview slots follow source slots and can change dimensions.
+            if up.idx >= self.videos.len() || self.videos[up.idx].tex.width() != up.w || self.videos[up.idx].tex.height() != up.h {
+                let mut dims: Vec<_> = self.videos.iter().map(|v| (v.tex.width(), v.tex.height())).collect();
+                dims.resize(dims.len().max(up.idx + 1), (2, 2));
+                dims[up.idx] = (up.w, up.h);
+                self.set_video_dims(&dims);
+            }
             self.upload_video(up);
         }
         if let Some(up) = &desc.plate {

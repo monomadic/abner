@@ -249,3 +249,45 @@ preserve original media and avoid unnecessary encoding generations.
 Relative `ABNER_PLUGINS` paths are resolved against the calling directory. An
 explicit missing, invalid or unreadable plugin directory fails the build; only
 a missing default `plugins/` directory is treated as an empty installation.
+
+
+### Interactive processor previews
+
+In a composed build, load a clip and click **Processors [P]** (or press `P`).
+Click the processor name to cycle registered factories. The controls come from
+its runtime schema: bounded numbers and integers use sliders; clicking their
+labels opens exact text entry. Enums cycle on click, booleans toggle, and strings
+accept text (including file paths). Enter commits text, Escape cancels it;
+macOS supports Cmd+A and Cmd+V. Scroll the settings column to reach more fields.
+Cycle presets applies each descriptor's preset over the schema defaults.
+Unsupported auxiliary or nested input types are labelled explicitly; the initial
+editor is not a complete JSON Schema implementation.
+
+The panel automatically rebuilds a short preview after settings settle or the
+playhead moves. Source and processed frames play side by side at matched source
+timestamps; Space pauses their loop. Refresh retries a failed preview. Progress
+shows completed frames, throughput and estimated remaining processing time.
+The main timeline stays paused while the panel is open.
+
+The worker decodes up to 24 frames from the playhead, stopping at the current
+split/cut boundary or EOF, then drains buffered processor output. Each request
+creates a fresh session; configuration changes, seeks, source changes and closing
+the panel cancel the previous request and discard stale results. A bounded mailbox
+coalesces pending requests. Factories must implement `Send` so the registry can
+move to the worker; sessions and native device objects are created and used on
+that worker, and need not implement `Send`.
+
+These are **display proxies**, at most 640×360 before processing, decoded to
+8-bit RGBA and expanded to RGB16 for the processor. They are not full-precision
+or native-resolution exports. Preview frame storage is budgeted to 96 MiB
+(excluding model/session memory and temporary conversion buffers). This first
+host path supports constant-rate, timestamp-preserving processors and SDR
+Rec.709. Untagged sources are assumed SDR; incompatible tagged color spaces and
+HDR are rejected. Interpolation, auxiliary inputs, persisted processing stacks,
+full color negotiation and processor export remain future work. The existing
+Export action still exports the source timeline without preview processing.
+
+For a reproducible startup, use `--processor ID --processor-settings JSON`
+with a video path. IDs and settings come from the installed registry, never from
+committed host configuration. The ordinary empty-registry build shows an empty
+processor panel and retains its existing media workflow.
