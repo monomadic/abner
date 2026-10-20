@@ -184,10 +184,13 @@ from one to the other, keeping its number.
   frame and `Workspace::panel` the panel's own, with `list`/`inspector` starting at
   `rail - panel` — anchor rail content on `list.x`/`panel`, never on 0/`rail`, or it
   squashes mid-slide. The **right toggle** (`inspector_toggle`, timeline only, 43px in
-  from the edge, drawn only at ≥1000px wide) slides the cut inspector off the right
+  from the edge, drawn only at ≥1000px wide, `CUT_COLUMNS_MIN_W`) slides the cut inspector off the right
   edge the same way (`show_inspector`/`side_slide`): `Workspace::side` keeps
   `CUT_SIDE_W` and overhangs the window while the canvas reclaims the inside part;
-  hidden = zero-width. Export and the ready lamp step left of it. `--no-inspector`
+  hidden = zero-width. **Under `CUT_COLUMNS_MIN_W` cut mode keeps neither column**
+  (2026-10-21): the inspector is gone and `Workspace::new` forces the rail to the
+  mini strip whatever `show_sources`/`rail_slide` say, so the two collapse together;
+  widening restores the rail. Export and the ready lamp step left of it. `--no-inspector`
   for captures. The **rail's focused inspector folds** (2026-10-15): a 14px grip
   strip of three dots rides its top edge (`Workspace::grip`, `Action::ToggleDetail`);
   a click slides the panel down behind the action row over `DETAIL_SLIDE_S` (150 ms)

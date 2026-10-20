@@ -2579,7 +2579,7 @@ impl App {
             out.push(Control::new(l.grip, "", self.show_detail, Action::ToggleDetail));
         }
         if self.cut_mode {
-            if self.vp.0 >= 1000.0 {
+            if self.vp.0 >= CUT_COLUMNS_MIN_W {
                 out.push(Control::new(self.inspector_toggle(), "", self.show_inspector, Action::ToggleInspector));
             }
             self.cut_controls(&mut out);
@@ -4650,7 +4650,7 @@ impl App {
     fn build_cut_header(&self, items: &mut Vec<Item>) {
         let r = self.header_tabs();
         self.mode_selector().draw(items, self.cursor, self.cursor_inside);
-        if self.vp.0 >= 1000.0 {
+        if self.vp.0 >= CUT_COLUMNS_MIN_W {
             let toggle = self.inspector_toggle();
             draw_sidebar_toggle(items, toggle, true, self.show_inspector, self.cursor_inside && contains(toggle, self.cursor.0, self.cursor.1));
             let cut = self.cut.as_ref().unwrap();
@@ -5759,6 +5759,9 @@ fn wrap_text(text: &str, columns: usize) -> Vec<String> {
 }
 
 const CUT_TOOLBAR_H: f32 = 50.0;
+/// Below this width cut mode keeps neither side column: the cut inspector
+/// goes and the source rail is the mini strip.
+const CUT_COLUMNS_MIN_W: f32 = 1000.0;
 const CUT_TIMELINE_H: f32 = 198.0;
 /// Short windows drop the chapter and audio rows.
 const CUT_TIMELINE_COMPACT_H: f32 = 126.0;
@@ -5848,6 +5851,10 @@ impl Workspace {
         // the panel's own width, and its rects start at `rail - panel` so
         // a half-open rail is the right-hand part of a whole one.
         let full = if w < 900.0 { 210.0_f32.min(w * 0.3) } else { 280.0 };
+        // Cut mode under CUT_COLUMNS_MIN_W drops its right column; the
+        // rail collapses to the mini strip at the same width, so the two
+        // columns go together and the lanes keep their room.
+        let slide = if cut && w < CUT_COLUMNS_MIN_W { 0.0 } else { slide };
         let panel = if !visible || slide <= 0.0 { 0.0 } else { full };
         let ease = |t: f32| { let t = t.clamp(0.0, 1.0); t * t * (3.0 - 2.0 * t) };
         // Hidden, the rail is still the mini strip: the toggle and one
@@ -5870,7 +5877,7 @@ impl Workspace {
             let lanes = if h >= CUT_FULL_MIN_H { CUT_TIMELINE_H } else { CUT_TIMELINE_COMPACT_H } + lift;
             // The inspector keeps its width and slides past the right edge;
             // `side_in` is the part still inside, which the canvas reclaims.
-            let side_w = if w >= 1000.0 { CUT_SIDE_W } else { 0.0 };
+            let side_w = if w >= CUT_COLUMNS_MIN_W { CUT_SIDE_W } else { 0.0 };
             let side_in = (side_w * ease(side_slide)).round();
             let side = if side_in > 0.0 { side_w } else { 0.0 };
             let transport_y = h - CUT_STATUS_H - lanes - CUT_TOOLBAR_H;
@@ -6453,6 +6460,27 @@ mod tests {
         assert!(cut.list.y + cut.list.h + RAIL_FOOTER_H <= cut.transport.y);
         app.vp = (1280.0, 1000.0);
         assert_eq!(app.workspace().inspector.h, RAIL_INSPECTOR_H);
+    }
+
+    /// Under CUT_COLUMNS_MIN_W cut mode drops both side columns: the cut
+    /// inspector is gone and the rail is the mini strip, whatever
+    /// `show_sources` says; widening the window brings the rail back.
+    #[test]
+    fn narrow_cut_window_collapses_the_rail_with_the_inspector() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        app.set_cut_default(true);
+        app.vp = (1280.0, 800.0);
+        let wide = app.workspace();
+        assert!(wide.panel > 0.0 && wide.side.w > 0.0 && !wide.mini);
+        app.vp = (960.0, 800.0);
+        let narrow = app.workspace();
+        assert!(narrow.mini && narrow.panel == 0.0 && narrow.side.w == 0.0, "{:?}", (narrow.rail, narrow.panel, narrow.side.w));
+        assert_eq!(narrow.rail, RAIL_MINI_W);
+        assert_eq!(narrow.canvas.x, RAIL_MINI_W);
+        assert!(app.show_sources);
+        app.vp = (1280.0, 800.0);
+        assert!(app.workspace().panel > 0.0);
     }
 
     /// The header's sidebar toggle (Figma 278:573) hides the Sources rail:
