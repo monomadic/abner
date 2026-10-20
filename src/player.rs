@@ -472,6 +472,13 @@ impl Player {
         Some((key as f64 * 1e-6, f))
     }
 
+    /// The cached frame at exactly `pts` (a pts this player delivered —
+    /// `take_upto`/`take_next` leave frames resident, so the frame on
+    /// screen is normally still here). None once eviction took it.
+    pub fn frame_at(&self, pts: f64) -> Option<Rgba> {
+        self.shared.cache.lock().unwrap().frames.get(&us(pts)).cloned()
+    }
+
     /// Seconds into the clip: the pts of the frame currently on screen, or
     /// the seek target while one is in flight.
     #[allow(dead_code)]

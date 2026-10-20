@@ -497,6 +497,7 @@ impl Runner {
                         log::warn!("could not open {}: {err}", path.display());
                     }
                 }
+                Cmd::Reveal(path) => open::reveal(&path),
                 Cmd::Quit => event_loop.exit(),
                 Cmd::ToggleFullscreen => {
                     if let Some(w) = &self.window {
@@ -958,7 +959,30 @@ impl ApplicationHandler for Runner {
             self.animating = true;
             if let Some(w) = &self.window { w.request_redraw(); }
         }
-        open::sync_view_menu(self.app.workspace_mode(), self.app.ready());
+        // Native File / Frame menu picks, then whatever they asked the runner for.
+        let picks = open::take_menu_requests();
+        if !picks.is_empty() {
+            for pick in picks { self.app.menu(pick); }
+            self.apply_cmds(event_loop);
+            self.animating = true;
+            if let Some(w) = &self.window { w.request_redraw(); }
+        }
+        // A finished Copy Frame: the pasteboard is AppKit's, so it is set here.
+        if let Some(result) = self.app.take_frame_png() {
+            let message = match result {
+                Ok((png, w, h)) => {
+                    open::copy_png(&png);
+                    format!("Copied frame as PNG ({w}×{h})")
+                }
+                Err(error) => {
+                    log::error!("copy frame failed: {error}");
+                    format!("Copy frame failed: {error}")
+                }
+            };
+            self.app.notify(message);
+            if let Some(w) = &self.window { w.request_redraw(); }
+        }
+        open::sync_menus(self.app.workspace_mode(), self.app.ready(), self.app.can_export());
         // The cadence rules live in `schedule` (tested there), not here.
         let Some(w) = &self.window else { return };
         match schedule::next_frame(

@@ -3,6 +3,21 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-20 — native File and Frame menus
+
+The menu bar now has File (Open… ⌘O, Reveal in Finder ⇧⌘R, Export ⌘E, Close
+⌘W) and Frame (Copy Frame as PNG ⌘C) beside View. `open_shim.m` builds all
+three once (`ab_sync_menus`); every pick queues an `open::MenuAction` that the
+runner applies in `about_to_wait`, and item state is re-derived from `App` each
+turn — Export is live only where the mode has an export (the timeline's cut,
+the crop marquee's ProRes), the rest need a clip, Close on the empty window
+quits like ⌘W. Copy Frame reads the focused clip's shown frame back from the
+player's cache (`Player::frame_at` — `take_upto` leaves frames resident, so
+nothing is kept app-side outside mask mode), strips the alpha and encodes on a
+worker, and the runner puts the bytes on the pasteboard as `public.png`
+(`ab_copy_png`); the status line says `Copied frame as PNG (W×H)` for 3 s
+(`App::notify`). Test: `copy_frame_encodes_the_shown_frame_as_rgb_png`.
+
 ## 2026-10-20 — `cargo build-with-plugins`
 
 Dropping a processor crate into the gitignored `plugins/` directory and running

@@ -84,6 +84,8 @@ pub enum Cmd {
     OpenRecent(usize),
     OpenFiles,
     OpenDirectory(std::path::PathBuf),
+    /// File > Reveal in Finder: select this clip in a Finder window.
+    Reveal(std::path::PathBuf),
 }
 
 /// What a press on the crop marquee took hold of.
@@ -178,6 +180,12 @@ pub struct App {
     /// from `mask_save` because it runs for as long as the clip takes to
     /// encode, and a PNG save shouldn't queue behind it.
     crop_export: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+    /// Frame > Copy Frame as PNG: the encode runs on a worker; the runner
+    /// takes the bytes (`take_frame_png`) and puts them on the pasteboard,
+    /// which only it can reach.
+    frame_copy: Option<std::sync::mpsc::Receiver<Result<(Vec<u8>, u32, u32), String>>>,
+    /// A transient line for the status bar (`notify`), shown for `NOTICE_S`.
+    notice: Option<(String, Instant)>,
     /// The crop marquee (`C`), in the ACTIVE video's image pixels. While
     /// it is up the pointer moves/resizes it instead of painting, and `S`
     /// exports what it holds instead of the whole frame.
@@ -588,6 +596,8 @@ impl App {
             mask_status: String::new(),
             mask_save: None,
             crop_export: None,
+            frame_copy: None,
+            notice: None,
             crop: None,
             crop_drag: None,
             last_click: None,
@@ -1358,6 +1368,81 @@ impl App {
     /// `HoveredFileCancelled`).
     pub fn set_drag_hover(&mut self, on: bool) {
         self.drag_hover = on;
+    }
+
+    /// A pick from the native File / Frame menu (`open::MenuAction`).
+    pub fn menu(&mut self, action: crate::open::MenuAction) {
+        use crate::open::MenuAction as M;
+        match action {
+            M::Open => self.cmds.push(Cmd::OpenFiles),
+            M::Close => self.key(Key::Close),
+            M::Reveal => if self.ready() {
+                self.cmds.push(Cmd::Reveal(self.videos[self.active].info.path.clone()));
+            },
+            M::Export => self.export(),
+            M::CopyFrame => self.copy_frame(),
+        }
+    }
+
+    /// Whether File > Export has anything to export: the timeline's cut,
+    /// or the crop marquee's ProRes. Plain playback exports nothing.
+    pub fn can_export(&self) -> bool {
+        (self.cut_mode && self.cut.is_some()) || (self.mask_mode && self.crop.is_some())
+    }
+
+    /// File > Export: the same export the mode's own button runs.
+    fn export(&mut self) {
+        if self.cut_mode && self.cut.is_some() {
+            self.cut_action(CutAction::Export);
+        } else if self.mask_mode && self.crop.is_some() {
+            self.export_crop();
+        }
+    }
+
+    /// Frame > Copy Frame as PNG: the focused clip's frame on screen, at
+    /// native resolution, encoded on a worker. The GPU's copy can't be read
+    /// back, but the player's cache still holds the delivered frame
+    /// (`frame_at`); mask mode's `last_frame` is the fallback.
+    fn copy_frame(&mut self) {
+        if !self.ready() || self.frame_copy.is_some() { return; }
+        let v = &self.videos[self.active];
+        let frame = if v.delivered { v.player.frame_at(v.shown_pts) } else { None }
+            .or_else(|| v.last_frame.clone());
+        let Some(frame) = frame else {
+            self.notify("No frame to copy yet".into());
+            return;
+        };
+        let (w, h) = (v.player.w, v.player.h);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.frame_copy = Some(receiver);
+        std::thread::spawn(move || {
+            let result = encode_png_rgb(&frame, w, h).map(|png| (png, w, h)).map_err(|e| e.to_string());
+            let _ = sender.send(result);
+        });
+    }
+
+    /// The finished PNG from `copy_frame`, once; the runner owns the pasteboard.
+    pub fn take_frame_png(&mut self) -> Option<Result<(Vec<u8>, u32, u32), String>> {
+        let receiver = self.frame_copy.as_ref()?;
+        let result = match receiver.try_recv() {
+            Ok(r) => r,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("worker stopped".into()),
+        };
+        self.frame_copy = None;
+        Some(result)
+    }
+
+    /// A line in the status bar for a few seconds (the timeline's own
+    /// status line when that is what's up).
+    pub fn notify(&mut self, message: String) {
+        if self.cut_mode && let Some(cut) = &mut self.cut { cut.status = message.clone(); }
+        self.notice = Some((message, Instant::now()));
+    }
+
+    fn fresh_notice(&self) -> Option<&str> {
+        let (text, at) = self.notice.as_ref()?;
+        (at.elapsed().as_secs_f32() < NOTICE_S).then_some(text.as_str())
     }
 
     pub fn take_cmds(&mut self) -> Vec<Cmd> {
@@ -2877,7 +2962,8 @@ impl App {
         }
         let mode = if !self.mask_mode { "SOURCES" } else if self.crop.is_some() { "CROP" } else { "MASK" };
         ui_label(items, 16.0, y + STATUS_H / 2.0, 10.0, if self.mask_mode { MASK_RED } else { ACCENT }, mode, Align::Left, 70.0);
-        let status = if !self.mask_status.is_empty() && self.mask_mode { self.mask_status.clone() }
+        let status = if let Some(notice) = self.fresh_notice() { notice.to_string() }
+            else if !self.mask_status.is_empty() && self.mask_mode { self.mask_status.clone() }
             else { format!("Clip {} · {}", self.active + 1, if self.zoom <= 1.001 { "fit".into() } else { format!("{:.1}×", self.zoom) }) };
         let hint = if self.mask_mode { if self.crop.is_some() {
                 format!("a {}   drag move / resize   s save   e export", ASPECTS[self.aspect].0)
@@ -6353,6 +6439,40 @@ mod tests {
         assert!(app.masks.iter().all(Option::is_none));
     }
 
+    /// Frame > Copy Frame as PNG: the frame on screen is read back from
+    /// the player's cache (nothing is kept app-side outside mask mode), the
+    /// worker hands back a decodable RGB PNG at the clip's native size, and
+    /// the menu is dead without a clip.
+    #[test]
+    fn copy_frame_encodes_the_shown_frame_as_rgb_png() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.videos[0].delivered), "no frame delivered");
+        assert!(app.videos[0].last_frame.is_none(), "plain playback keeps no app-side copy");
+        app.menu(crate::open::MenuAction::CopyFrame);
+        assert!(app.frame_copy.is_some(), "the shown frame was not in the cache");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let got = loop {
+            if let Some(got) = app.take_frame_png() { break got; }
+            assert!(Instant::now() < deadline, "encode never finished");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let (png, w, h) = got.expect("encode failed");
+        assert_eq!((w, h), (320, 180));
+        let mut reader = png::Decoder::new(std::io::Cursor::new(png)).read_info().unwrap();
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut buf).unwrap();
+        assert_eq!((info.width, info.height, info.color_type), (320, 180, png::ColorType::Rgb));
+        assert!(buf.iter().any(|&b| b != 0), "a black frame: the pixels did not come through");
+
+        let mut empty = App::new(Vec::new(), &crate::config::Config::default());
+        assert!(!empty.can_export());
+        empty.menu(crate::open::MenuAction::CopyFrame);
+        assert!(empty.frame_copy.is_none());
+        empty.menu(crate::open::MenuAction::Reveal);
+        assert!(empty.take_cmds().is_empty());
+    }
+
     /// The crop marquee: it starts on the whole frame, the corners resize
     /// and the body moves (both staying inside the image), it takes the
     /// pointer away from the brush while it is up, and S writes the mask
@@ -8033,6 +8153,25 @@ fn ratio_label(w: u32, h: u32, preset: Option<&str>) -> String {
     let g = gcd(w, h);
     let (rw, rh) = (w / g, h / g);
     if rw <= 32 && rh <= 32 { format!("{rw}:{rh}") } else { format!("{:.2}:1", w as f32 / h.max(1) as f32) }
+}
+
+/// How long a `notify` line stays in the status bar.
+const NOTICE_S: f32 = 3.0;
+
+/// RGBA frame → RGB PNG bytes. A decoded video frame's alpha is always
+/// opaque, so the channel is dropped: a quarter smaller and no consumer
+/// gets to treat the picture as translucent.
+fn encode_png_rgb(rgba: &[u8], w: u32, h: u32) -> anyhow::Result<Vec<u8>> {
+    anyhow::ensure!(rgba.len() >= (w as usize) * (h as usize) * 4, "frame buffer is short");
+    let rgb: Vec<u8> = rgba.chunks_exact(4).take((w * h) as usize).flat_map(|p| [p[0], p[1], p[2]]).collect();
+    let mut out = Vec::new();
+    let mut encoder = png::Encoder::new(&mut out, w, h);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header()?;
+    writer.write_image_data(&rgb)?;
+    writer.finish()?;
+    Ok(out)
 }
 
 fn name_of(path: &std::path::Path) -> String {

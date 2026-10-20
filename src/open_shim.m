@@ -22,45 +22,108 @@
 #import <objc/runtime.h>
 
 // Keep AppKit actions out of the Rust app's mutable event-loop borrow. The
-// callback queues a request; Rust applies it and then supplies the actual mode.
+// callbacks queue a request; Rust applies it on the loop and then supplies
+// the actual state (checkmarks, enabled items) through ab_sync_menus.
 typedef void (*AbViewCallback)(int mode);
+typedef void (*AbMenuCallback)(int action);
 static AbViewCallback ab_view_cb = NULL;
-@interface AbViewMenuTarget : NSObject
+static AbMenuCallback ab_menu_cb = NULL;
+@interface AbMenuTarget : NSObject
 - (void)selectMode:(NSMenuItem *)sender;
+- (void)menuAction:(NSMenuItem *)sender;
 @end
-@implementation AbViewMenuTarget
+@implementation AbMenuTarget
 - (void)selectMode:(NSMenuItem *)sender {
     if (ab_view_cb != NULL) ab_view_cb((int)sender.tag);
 }
+- (void)menuAction:(NSMenuItem *)sender {
+    if (ab_menu_cb != NULL) ab_menu_cb((int)sender.tag);
+}
 @end
 
-void ab_sync_view_menu(int mode, bool enabled, AbViewCallback cb) {
-    static NSMenu *menu = nil;
-    static AbViewMenuTarget *target = nil;
-    ab_view_cb = cb;
-    if (menu == nil) {
+// Menu action tags — mirrored by open.rs's MenuAction.
+enum { AB_MENU_OPEN = 1, AB_MENU_REVEAL = 2, AB_MENU_EXPORT = 3, AB_MENU_CLOSE = 4, AB_MENU_COPY_FRAME = 5 };
+
+static NSMenuItem *ab_item(NSMenu *menu, NSString *title, SEL action, NSString *key,
+                           NSEventModifierFlags mods, NSInteger tag, id target) {
+    NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title action:action keyEquivalent:key];
+    item.keyEquivalentModifierMask = mods;
+    item.target = target;
+    item.tag = tag;
+    [menu addItem:item];
+    return item;
+}
+
+static void ab_add_menu(NSMenu *bar, NSMenu *menu, NSInteger at) {
+    NSMenuItem *heading = [[NSMenuItem alloc] initWithTitle:menu.title action:nil keyEquivalent:@""];
+    heading.submenu = menu;
+    [bar insertItem:heading atIndex:MIN(at, bar.numberOfItems)];
+}
+
+// File · View · Frame, after winit's application menu. Built once; every
+// call re-derives the enabled/checked state from the app, never from clicks.
+void ab_sync_menus(int mode, bool has_clips, bool can_export, AbViewCallback view_cb, AbMenuCallback menu_cb) {
+    static NSMenu *file = nil, *view = nil, *frame = nil;
+    static AbMenuTarget *target = nil;
+    ab_view_cb = view_cb;
+    ab_menu_cb = menu_cb;
+    if (view == nil) {
         NSMenu *bar = NSApp.mainMenu;
         if (bar == nil) return; // winit creates the standard application menu.
-        target = [AbViewMenuTarget new];
-        menu = [[NSMenu alloc] initWithTitle:@"View"];
-        menu.autoenablesItems = NO;
+        target = [AbMenuTarget new];
+        NSEventModifierFlags cmd = NSEventModifierFlagCommand;
+
+        file = [[NSMenu alloc] initWithTitle:@"File"];
+        file.autoenablesItems = NO;
+        ab_item(file, @"Open…", @selector(menuAction:), @"o", cmd, AB_MENU_OPEN, target);
+        [file addItem:[NSMenuItem separatorItem]];
+        ab_item(file, @"Reveal in Finder", @selector(menuAction:), @"r", cmd | NSEventModifierFlagShift, AB_MENU_REVEAL, target);
+        ab_item(file, @"Export", @selector(menuAction:), @"e", cmd, AB_MENU_EXPORT, target);
+        [file addItem:[NSMenuItem separatorItem]];
+        ab_item(file, @"Close", @selector(menuAction:), @"w", cmd, AB_MENU_CLOSE, target);
+
+        view = [[NSMenu alloc] initWithTitle:@"View"];
+        view.autoenablesItems = NO;
         NSArray<NSString *> *names = @[@"Sources", @"Timeline", @"Mask", @"Crop"];
         const NSInteger modes[] = {0, 3, 1, 2};
         for (NSUInteger i = 0; i < names.count; i++) {
-            NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:names[i]
-                action:@selector(selectMode:) keyEquivalent:@""];
-            item.target = target;
-            item.tag = modes[i];
-            [menu addItem:item];
+            ab_item(view, names[i], @selector(selectMode:), @"", 0, modes[i], target);
         }
-        NSMenuItem *heading = [[NSMenuItem alloc] initWithTitle:@"View" action:nil keyEquivalent:@""];
-        heading.submenu = menu;
-        [bar insertItem:heading atIndex:MIN((NSInteger)1, bar.numberOfItems)];
+
+        frame = [[NSMenu alloc] initWithTitle:@"Frame"];
+        frame.autoenablesItems = NO;
+        ab_item(frame, @"Copy Frame as PNG", @selector(menuAction:), @"c", cmd, AB_MENU_COPY_FRAME, target);
+
+        ab_add_menu(bar, file, 1);
+        ab_add_menu(bar, view, 2);
+        ab_add_menu(bar, frame, 3);
     }
-    for (NSMenuItem *item in menu.itemArray) {
-        item.enabled = enabled;
+    for (NSMenuItem *item in file.itemArray) {
+        switch (item.tag) {
+            case AB_MENU_OPEN: item.enabled = YES; break;
+            case AB_MENU_EXPORT: item.enabled = can_export; break;
+            case AB_MENU_CLOSE: item.enabled = YES; break; // on the empty window it quits, like ⌘W
+            default: item.enabled = has_clips; break;
+        }
+    }
+    for (NSMenuItem *item in view.itemArray) {
+        item.enabled = has_clips;
         item.state = item.tag == mode ? NSControlStateValueOn : NSControlStateValueOff;
     }
+    for (NSMenuItem *item in frame.itemArray) item.enabled = has_clips;
+}
+
+// Encoded PNG bytes onto the general pasteboard. Main thread.
+void ab_copy_png(const uint8_t *bytes, size_t len) {
+    NSPasteboard *pb = [NSPasteboard generalPasteboard];
+    [pb clearContents];
+    [pb setData:[NSData dataWithBytes:bytes length:len] forType:NSPasteboardTypePNG];
+}
+
+// Select the file in a Finder window.
+void ab_reveal_in_finder(const char *path) {
+    NSURL *url = [NSURL fileURLWithFileSystemRepresentation:path isDirectory:NO relativeToURL:nil];
+    [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:@[url]];
 }
 
 typedef void (*AbOpenCallback)(const char *path);

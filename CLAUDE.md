@@ -401,7 +401,13 @@ the "VIDEO QUALITY TESTING TOOLKIT" line that used to be a second text run.
   argv, and winit 0.30 panics if its `NSApplicationDelegate` is replaced, so the shim
   grafts `application:openURLs:` onto winit's delegate class before the run loop starts.
   Opened paths drain in `about_to_wait` into `files_dropped(paths, false)` — always an
-  add, never the ⌘-replace. The plist's `CFBundleDocumentTypes` are the other half; without
+  add, never the ⌘-replace. **The native menus** (File · View · Frame) are the same
+  shim: `ab_sync_menus` builds them once and re-derives every item's enabled/checked
+  state from `App` on each `about_to_wait` (never from clicks); a pick queues an
+  `open::MenuAction` (File) or a view request, applied on the loop. Frame > Copy Frame
+  as PNG reads the shown frame from the player's cache (`Player::frame_at`), encodes
+  RGB on a worker, and the runner sets the pasteboard (`ab_copy_png`) — AppKit's, so
+  `App` only hands back bytes (`take_frame_png`) and shows a 3 s `notify` line. The plist's `CFBundleDocumentTypes` are the other half; without
   the handler, declaring them makes AppKit's `NSDocumentController` answer with "Abner
   cannot open files in the “MPEG-4 movie” format".
 - Verify visual changes with a targeted window capture, never by injecting global
