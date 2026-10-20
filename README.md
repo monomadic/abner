@@ -245,3 +245,7 @@ flush. Create a fresh session for each contiguous timeline segment or preview se
 The processing workspace is intended as an ordered experiment/editing workflow,
 never a user-editable node canvas. Compression and re-encoding choices stay visible;
 preserve original media and avoid unnecessary encoding generations.
+
+Relative `ABNER_PLUGINS` paths are resolved against the calling directory. An
+explicit missing, invalid or unreadable plugin directory fails the build; only
+a missing default `plugins/` directory is treated as an empty installation.

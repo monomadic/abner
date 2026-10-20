@@ -3,6 +3,15 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-21 — reliable local composition paths and discovery errors
+
+Resolve relative plugin-directory overrides before writing generated dependencies
+or changing Cargo's working directory. Report directory errors with their path;
+only a missing default installation is optional. Five generic regression tests
+cover relative generated dependencies, absolute overrides, missing defaults versus
+explicit paths, invalid directories and empty installations. Processor identities
+and implementation details remain outside committed files.
+
 ## 2026-10-20 — the recent row remembers groups
 
 A launch-window tile is now the SET of clips that were open together, not one

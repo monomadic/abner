@@ -32,16 +32,22 @@ fn main() -> Result<()> {
         .nth(2)
         .context("tools/build-with-plugins must sit two levels under the repository root")?
         .to_path_buf();
-    let plugins = std::env::var_os("ABNER_PLUGINS")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root.join("plugins"));
+    let configured = std::env::var_os("ABNER_PLUGINS").map(PathBuf::from);
+    let plugins = plugin_directory(&root, &std::env::current_dir()?, configured.as_deref());
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    let crates = discover(&plugins)?;
+    let crates = discover(&plugins, configured.is_none())?;
     if crates.is_empty() {
-        eprintln!("build-with-plugins: no plugin crates in {} (building an empty registry)", plugins.display());
+        eprintln!(
+            "build-with-plugins: no plugin crates in {} (building an empty registry)",
+            plugins.display()
+        );
     } else {
-        eprintln!("build-with-plugins: {} plugin crate(s) in {}", crates.len(), plugins.display());
+        eprintln!(
+            "build-with-plugins: {} plugin crate(s) in {}",
+            crates.len(),
+            plugins.display()
+        );
         for c in &crates {
             eprintln!("  {} ({})", c.name, c.path.display());
         }
@@ -67,7 +73,11 @@ fn main() -> Result<()> {
     }
 
     let bin = output_binary(&target_dir, &args);
-    ensure!(bin.is_file(), "cargo succeeded but no binary at {}", bin.display());
+    ensure!(
+        bin.is_file(),
+        "cargo succeeded but no binary at {}",
+        bin.display()
+    );
     eprintln!("build-with-plugins: built {}", bin.display());
     Ok(())
 }
@@ -84,14 +94,35 @@ impl Plugin {
     }
 }
 
+/// Resolve overrides against the caller's directory before Cargo changes its
+/// working directory or interprets generated manifest-relative dependency paths.
+fn plugin_directory(root: &Path, cwd: &Path, configured: Option<&Path>) -> PathBuf {
+    match configured {
+        Some(path) => cwd.join(path),
+        None => root.join("plugins"),
+    }
+}
+
 /// Every immediate subdirectory of `dir` holding a `Cargo.toml`, sorted by
 /// name. Hidden directories (the generated `.launcher`) are skipped.
-fn discover(dir: &Path) -> Result<Vec<Plugin>> {
+fn discover(dir: &Path, allow_missing: bool) -> Result<Vec<Plugin>> {
     let mut found = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else { return Ok(found) };
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if allow_missing && error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(found);
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("reading plugin directory {}", dir.display()));
+        }
+    };
     for entry in entries {
         let path = entry?.path();
-        let hidden = path.file_name().and_then(|n| n.to_str()).is_none_or(|n| n.starts_with('.'));
+        let hidden = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_none_or(|n| n.starts_with('.'));
         if hidden || !path.is_dir() {
             continue;
         }
@@ -99,8 +130,11 @@ fn discover(dir: &Path) -> Result<Vec<Plugin>> {
         if !manifest.is_file() {
             continue;
         }
-        let text = std::fs::read_to_string(&manifest).with_context(|| format!("reading {}", manifest.display()))?;
-        let doc: toml::Table = text.parse().with_context(|| format!("parsing {}", manifest.display()))?;
+        let text = std::fs::read_to_string(&manifest)
+            .with_context(|| format!("reading {}", manifest.display()))?;
+        let doc: toml::Table = text
+            .parse()
+            .with_context(|| format!("parsing {}", manifest.display()))?;
         let name = doc
             .get("package")
             .and_then(|p| p.get("name"))
@@ -113,14 +147,26 @@ fn discover(dir: &Path) -> Result<Vec<Plugin>> {
             .all(|(i, c)| c.is_ascii_alphanumeric() || c == '_' || (c == '-' && i > 0))
             && !name.starts_with(|c: char| c.is_ascii_digit())
             && !name.is_empty();
-        ensure!(valid, "{}: package name {name:?} is not a usable crate name", manifest.display());
-        ensure!(name != "abner" && name != "abner-processor-api", "{}: a plugin may not be named {name:?}", manifest.display());
+        ensure!(
+            valid,
+            "{}: package name {name:?} is not a usable crate name",
+            manifest.display()
+        );
+        ensure!(
+            name != "abner" && name != "abner-processor-api",
+            "{}: a plugin may not be named {name:?}",
+            manifest.display()
+        );
         found.push(Plugin { name, path });
     }
     found.sort_by(|a, b| a.name.cmp(&b.name));
     for pair in found.windows(2) {
         if pair[0].ident() == pair[1].ident() {
-            bail!("two plugins resolve to the same crate name: {} and {}", pair[0].path.display(), pair[1].path.display());
+            bail!(
+                "two plugins resolve to the same crate name: {} and {}",
+                pair[0].path.display(),
+                pair[1].path.display()
+            );
         }
     }
     Ok(found)
@@ -139,12 +185,18 @@ fn write_launcher(root: &Path, launcher: &Path, crates: &[Plugin]) -> Result<()>
 
     let path_dep = |p: &Path| {
         let mut t = toml::Table::new();
-        t.insert("path".into(), toml::Value::String(p.to_string_lossy().into_owned()));
+        t.insert(
+            "path".into(),
+            toml::Value::String(p.to_string_lossy().into_owned()),
+        );
         toml::Value::Table(t)
     };
     let mut deps = toml::Table::new();
     deps.insert("abner".into(), path_dep(root));
-    deps.insert("abner-processor-api".into(), path_dep(&root.join("crates/processor-api")));
+    deps.insert(
+        "abner-processor-api".into(),
+        path_dep(&root.join("crates/processor-api")),
+    );
     deps.insert("anyhow".into(), toml::Value::String("1".into()));
     for c in crates {
         deps.insert(c.name.clone(), path_dep(&c.path));
@@ -215,13 +267,25 @@ fn output_binary(target_dir: &Path, args: &[String]) -> PathBuf {
             "--release" | "-r" => profile = "release".into(),
             "--profile" => {
                 if let Some(p) = it.next() {
-                    profile = if p == "dev" || p == "test" { "debug".into() } else if p == "bench" { "release".into() } else { p.clone() };
+                    profile = if p == "dev" || p == "test" {
+                        "debug".into()
+                    } else if p == "bench" {
+                        "release".into()
+                    } else {
+                        p.clone()
+                    };
                 }
             }
             "--target" => triple = it.next().cloned(),
             _ => {
                 if let Some(p) = a.strip_prefix("--profile=") {
-                    profile = if p == "dev" || p == "test" { "debug".into() } else if p == "bench" { "release".into() } else { p.into() };
+                    profile = if p == "dev" || p == "test" {
+                        "debug".into()
+                    } else if p == "bench" {
+                        "release".into()
+                    } else {
+                        p.into()
+                    };
                 } else if let Some(t) = a.strip_prefix("--target=") {
                     triple = Some(t.into());
                 }
@@ -233,4 +297,99 @@ fn output_binary(target_dir: &Path, args: &[String]) -> PathBuf {
         dir.push(t);
     }
     dir.join(profile).join(LAUNCHER_NAME)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "abner-composition-test-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    #[test]
+    fn relative_override_emits_absolute_dependency_and_launcher_paths() {
+        let f = Fixture::new();
+        let root = f.0.join("host");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"example-host\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let plugins = plugin_directory(&root, &f.0, Some(Path::new("local-plugins")));
+        let crate_dir = plugins.join("example");
+        std::fs::create_dir_all(&crate_dir).unwrap();
+        std::fs::write(
+            crate_dir.join("Cargo.toml"),
+            "[package]\nname = \"example-effect\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let crates = discover(&plugins, false).unwrap();
+        let launcher = plugins.join(".launcher");
+        write_launcher(&root, &launcher, &crates).unwrap();
+        assert!(launcher.is_absolute());
+        let manifest: toml::Table = std::fs::read_to_string(launcher.join("Cargo.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let emitted = Path::new(
+            manifest["dependencies"]["example-effect"]["path"]
+                .as_str()
+                .unwrap(),
+        );
+        assert!(emitted.is_absolute());
+        assert_eq!(launcher.join(emitted), crate_dir);
+        assert!(launcher.join(emitted).join("Cargo.toml").is_file());
+    }
+    #[test]
+    fn absolute_override_is_preserved() {
+        let f = Fixture::new();
+        assert_eq!(
+            plugin_directory(Path::new("/unused"), Path::new("/different"), Some(&f.0)),
+            f.0
+        );
+    }
+    #[test]
+    fn only_missing_default_directory_is_optional() {
+        let f = Fixture::new();
+        let dir = plugin_directory(&f.0, Path::new("/unused"), None);
+        assert_eq!(dir, f.0.join("plugins"));
+        assert!(discover(&dir, true).unwrap().is_empty());
+        let error = discover(&dir, false)
+            .err()
+            .expect("explicit missing directory must fail");
+        assert!(error.to_string().contains(&dir.display().to_string()));
+    }
+    #[test]
+    fn invalid_directory_errors_are_never_treated_as_empty() {
+        let f = Fixture::new();
+        let file = f.0.join("not-a-directory");
+        std::fs::write(&file, "fixture").unwrap();
+        for allow_missing in [false, true] {
+            let error = discover(&file, allow_missing)
+                .err()
+                .expect("file is not a plugin directory");
+            assert!(error.to_string().contains(&file.display().to_string()));
+        }
+    }
+    #[test]
+    fn existing_empty_directory_is_valid() {
+        let f = Fixture::new();
+        assert!(discover(&f.0, false).unwrap().is_empty());
+    }
 }
