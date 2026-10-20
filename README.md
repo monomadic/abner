@@ -214,9 +214,26 @@ registry; the ordinary executable supplies an empty one. The experimental API
 is in `crates/processor-api`. A separately generated launcher can depend on
 independent processor crates and register their factories before calling `run`.
 
-Keep that generated project outside this repository. Committed host files must
+Keep that generated project outside the committed tree. Committed host files must
 not identify, document or depend on external processors (generic examples and
-builtins excepted). Runtime descriptors and settings may contain full processor
+builtins excepted).
+
+The quick way is **`cargo build-with-plugins [cargo build flags]`**, run from the
+repository root: drop processor crates into the gitignored `plugins/` directory
+(one crate per folder; `ABNER_PLUGINS` points elsewhere) and the command
+generates a launcher under `plugins/.launcher` that registers every one of them,
+then builds it into `target/<profile>/abner-with-plugins` with the flags you
+passed (`--release` and friends). A plugin crate depends on
+`abner-processor-api` by path and exports one function:
+
+```rust
+pub fn factories() -> Vec<Box<dyn abner_processor_api::Factory>>
+```
+
+The launcher is its own package with its own lockfile, so a run changes nothing
+git tracks — not even the root `Cargo.lock` — and the build stamp keeps the real
+commit hash. Plain `cargo build` still produces the empty-registry binary.
+`packaging/build-app.sh --with-plugins` bundles the composed launcher instead. Runtime descriptors and settings may contain full processor
 information. `--list-processors` prints descriptors; `--check-processor ID
 SETTINGS_JSON` processes four synthetic frames without opening a window. These
 are composition probes, not a processor export UI. The initial contract supports

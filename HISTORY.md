@@ -3,6 +3,22 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-20 — `cargo build-with-plugins`
+
+Dropping a processor crate into the gitignored `plugins/` directory and running
+`cargo build-with-plugins [cargo build flags]` now compiles it into a launcher.
+Cargo resolves dependencies from manifests before anything runs (checked on
+1.98.1: config `include` is stable but contributes no dependencies, `path-bases`
+is still unstable, `[patch]` can only replace), so the alias runs a small
+committed helper, `tools/build-with-plugins`, that discovers the crates,
+generates `plugins/.launcher` — its own package and lockfile, registering each
+crate's `factories()` before `abner::run` — and builds it into `target/` as
+`abner-with-plugins`. A run leaves `git status` clean and the root `Cargo.lock`
+untouched; the build stamp ignores untracked files, so the hash stays honest.
+Plain `cargo build` is unchanged (empty registry). `build-app.sh --with-plugins`
+bundles the composed launcher. Proven with a throwaway identity processor:
+`--list-processors` and `--check-processor` pass, a second run is a no-op.
+
 ## 2026-10-18 — no clip number over the canvas
 
 The old 24px number badge still sat in the top-left of the video in Sources mode

@@ -419,8 +419,16 @@ builtins may be exceptions. Runtime registries may retain and expose complete
 processor information. Generated composition manifests, launcher source, lockfiles
 and provenance containing external processor identities live outside this repository.
 The normal executable supplies an empty registry to the library's `run` entry point.
-The generic API lives in `crates/processor-api`; processor implementations and
-composition tooling are maintained independently. `src/lib.rs` now owns the former
+The generic API lives in `crates/processor-api`; processor implementations are
+maintained independently. **`cargo build-with-plugins`** (alias → the committed,
+generic helper `tools/build-with-plugins`) is the sanctioned way to compose them
+locally: it scans the gitignored `plugins/` directory, generates a launcher
+package under `plugins/.launcher` (own `[workspace]`, own lockfile, so the root
+`Cargo.lock` never learns a plugin's name) whose `main` registers each crate's
+`factories()` and calls `run`, and builds it into `target/` with the user's
+`cargo build` flags as `abner-with-plugins`. Cargo cannot do this itself —
+config `include` is stable but cannot add dependencies, and manifests take no
+globs — which is why a helper exists. `build-app.sh --with-plugins` bundles it. `src/lib.rs` now owns the former
 main module tree and window loop; `src/main.rs` is only the default launcher.
 
 ## Product boundary: experiment workspace

@@ -32,6 +32,9 @@
 #   --debug           build the debug profile instead of release
 #   --sign <identity>  codesign with a real identity instead of ad-hoc ("-")
 #   --with-cli-tools  copy ffmpeg/ffprobe into the bundle too
+#   --with-plugins    bundle the launcher `cargo build-with-plugins` composes
+#                      from the gitignored plugins/ directory instead of the
+#                      plain binary (same name inside the bundle)
 #   --install         copy the built app to /Applications (replacing any
 #                      existing Abner.app there)
 #   --open            launch the app once it's built (or installed)
@@ -51,6 +54,7 @@ BIN_NAME="abner"
 BUNDLE_ID="com.abner.app"
 SIGN_IDENTITY="-"   # "-" = ad-hoc; pass --sign "Developer ID Application: ..." for a real one
 WITH_CLI_TOOLS=0
+WITH_PLUGINS=0
 OPEN_AFTER=0
 INSTALL_AFTER=0
 
@@ -59,10 +63,11 @@ while [ $# -gt 0 ]; do
     --debug) PROFILE=debug; CARGO_PROFILE_FLAG=;;
     --sign) SIGN_IDENTITY="$2"; shift ;;
     --with-cli-tools) WITH_CLI_TOOLS=1 ;;
+    --with-plugins) WITH_PLUGINS=1 ;;
     --open) OPEN_AFTER=1 ;;
     --install) INSTALL_AFTER=1 ;;
     -h|--help)
-      sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) echo "unknown arg: $1" >&2; exit 1 ;;
@@ -92,9 +97,18 @@ BUILD="$(date -u +%Y%m%d.%H%M%S)"
 # one, never the short string.
 DISPLAY_VERSION="$VERSION-$GIT_HASH"
 
-echo "==> building $BIN_NAME ($PROFILE, v$DISPLAY_VERSION)"
-cargo build $CARGO_PROFILE_FLAG
-BIN="$ROOT/target/$PROFILE/$BIN_NAME"
+if [ "$WITH_PLUGINS" = 1 ]; then
+  # The composed launcher (tools/build-with-plugins) registers whatever crates
+  # sit in plugins/ and lands in the same target dir under its own name; the
+  # bundle still calls it abner-bin, so nothing else below changes.
+  echo "==> building $BIN_NAME with plugins ($PROFILE, v$DISPLAY_VERSION)"
+  cargo build-with-plugins $CARGO_PROFILE_FLAG
+  BIN="$ROOT/target/$PROFILE/$BIN_NAME-with-plugins"
+else
+  echo "==> building $BIN_NAME ($PROFILE, v$DISPLAY_VERSION)"
+  cargo build $CARGO_PROFILE_FLAG
+  BIN="$ROOT/target/$PROFILE/$BIN_NAME"
+fi
 [ -x "$BIN" ] || { echo "error: build produced no binary at $BIN" >&2; exit 1; }
 
 OUT_DIR="$ROOT/target/$PROFILE/bundle"

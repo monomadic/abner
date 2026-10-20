@@ -1,0 +1,14 @@
+# The `cargo build-with-plugins` helper (see .cargo/config.toml [alias]).
+# Its own package, not a member of anything: it is run with --manifest-path.
+[package]
+name = "build-with-plugins"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Compose a launcher from the crates in plugins/ and build it."
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+toml = "1.1"
