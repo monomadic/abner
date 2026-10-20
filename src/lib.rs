@@ -15,6 +15,7 @@ mod cut;
 mod smart;
 mod mask;
 mod open;
+mod fc;
 mod player;
 mod probe;
 mod recent;

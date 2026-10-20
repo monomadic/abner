@@ -3,8 +3,10 @@
 # switchblade's packaging/build-app.sh, minus what abner doesn't have
 # (document icons, random-pick asset folders).
 #
-# The release binary links against Homebrew's ffmpeg dylibs
-# (/opt/homebrew/opt/ffmpeg/lib/*.dylib) with absolute paths — fine for
+# The release binary links no third-party dylibs any more (decoding is
+# pure Rust since the FilmCraft player; it used to link Homebrew's ffmpeg
+# with absolute paths, which is why the bundling step below exists and
+# stays, generic and cheap). That was fine for
 # `cargo run` on a dev machine, fatal for anything handed to someone else:
 # Gatekeeper-quarantined apps don't inherit a shell PATH, homebrew may live
 # at /usr/local instead of /opt/homebrew (Intel), or may not be installed

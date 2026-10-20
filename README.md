@@ -54,8 +54,9 @@ dropping to replace the whole set instead. A single path on the command line
 Every load rewinds all streams to 0, so an arrival is frame-locked with what was
 already playing rather than joining mid-flight.
 
-Born out of the [switchblade](../switchblade) project's graphics stack: in-process libav
-decode (VideoToolbox for h264/hevc/prores), a wgpu renderer with mip-chained video
+Born out of the [switchblade](../switchblade) project's graphics stack: in-process pure-Rust
+decode ([FilmCraft](https://github.com/storytold/filmcraft)'s codecs, VideoToolbox underneath for
+h264/hevc/vp9/av1), a wgpu renderer with mip-chained video
 textures (no minification shimmer on 4K sources), idle-throttled render loop, and
 mpv-style fake fullscreen.
 
@@ -177,27 +178,28 @@ covering the image.
 ## Requirements
 
 - macOS (first target; the shader/loop are portable, fullscreen + font paths are mac-specific)
-- ffmpeg 8.x — the `ffprobe` CLI for metadata **and** the dev libraries the in-process
-  decoder links against (`brew install ffmpeg` provides both)
+- ffmpeg — the `ffprobe` CLI for metadata, any version (`brew install ffmpeg`). Nothing is
+  linked: decoding is pure Rust, so the build needs no ffmpeg headers and the bundle carries
+  no ffmpeg libraries.
 
 ## Build
 
 ```sh
 cargo build --release
 ./target/release/abner --help
-./packaging/build-app.sh --open      # self-contained Abner.app (bundles the ffmpeg dylibs, ad-hoc codesigns)
+./packaging/build-app.sh --open      # self-contained Abner.app (ad-hoc codesigns; no dylibs to bundle any more)
 ./packaging/build-app.sh --install   # …and copy it to /Applications
 ```
 
-The bundle carries its own copies of the ffmpeg libraries, so it runs on a machine
-without Homebrew; the `ffprobe` CLI it shells out to at startup is still looked up on
-PATH (`--with-cli-tools` copies that in too). The app icon is `assets/app-icon.png` —
+The bundle links no third-party libraries, so it runs on a machine without Homebrew; the
+`ffprobe` CLI it shells out to at startup is still looked up on PATH (`--with-cli-tools`
+copies that in too). The app icon is `assets/app-icon.png` —
 drop a new square PNG there and both the bundle's `.icns` and the bare binary's Dock
 icon follow. Double-clicking a video on the bundle doesn't load it yet (see TASKS.md).
 
 `cargo test` runs the regression suite: master-clock draining, exact seek, two-player
-sync, framestep adoption, reader-thread cleanup (including a reader wedged in libav I/O
-on a FIFO), redraw cadence. It generates tiny test clips with ffmpeg under `$TMPDIR`.
+sync, framestep adoption, reader-thread cleanup (including a source that cannot be read,
+which fails at once instead of wedging a reader), redraw cadence. It generates tiny test clips with ffmpeg under `$TMPDIR`.
 
 A startup `ffprobe` that doesn't return within 30s (a file on a volume that has gone
 away) is an error rather than a hang; a decoder whose seek fails is marked failed in

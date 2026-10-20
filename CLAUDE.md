@@ -63,9 +63,11 @@ from one to the other, keeping its number.
   switchblade lost a day to it (a stale baked-in PNG read exactly like an icon cache
   that wouldn't clear). AppKit decodes the PNG, so no image crate is pulled in; other
   platforms want an already-decoded RGBA buffer, so it's a no-op there.
-- `src/player.rs` — adapted from switchblade's `SeekablePlayer` (in-process libav via
-  rsmpeg, VT decode for h264/hevc/prores always and vp9/av1 when the chip has the
-  block, content-relative time, drop-wakes-the-parked-reader). **Key difference: no
+- `src/player.rs` — adapted from switchblade's `SeekablePlayer`, on FilmCraft since
+  2026-10-21 (`src/fc.rs` is switchblade's bridge: pure-Rust demux and decode, VideoToolbox
+  for h264/hevc/vp9/av1 chosen by FilmCraft per stream with its software decoders as the
+  fallback, the container's sync-sample table for keyframe landings, a one-pass fixed-point
+  Y'CbCr→RGBA at native size; content-relative time, drop-wakes-the-parked-reader). **Key difference: no
   per-player pacing, and a FRAME CACHE instead of a queue** (2026-10-14). The app
   owns ONE master clock and drains each player with `take_upto(t)` (pop all due,
   newest wins). Sync is by construction, pause is "stop advancing t", EOF parks the
@@ -98,9 +100,11 @@ from one to the other, keeping its number.
   Decode is at native resolution — pixels are the product here, nothing scales.
   Three robustness rules ported from switchblade (2026-09-04), each a shipped bug there:
   `Drop` takes the `cache` lock for an instant before notifying (a store+notify between
-  the reader's `closed` check and its wait is a lost wakeup = leaked thread); an AVIO
-  interrupt callback is installed BEFORE `avformat_open_input` so a drop reaches a
-  reader wedged in libav I/O on a dead mount (`dropped_player_interrupts_a_reader_blocked_in_libav_io`);
+  the reader's `closed` check and its wait is a lost wakeup = leaked thread); a command
+  or a drop raises a cancel flag FilmCraft polls between samples, so a decode-forward in
+  progress gives up, and `fc::open` stats before opening so a FIFO or a directory fails at
+  once (`unreadable_source_fails_instead_of_hanging`; a dead network mount can still block in
+  the kernel, as it could the libav reader between its interrupt polls);
   a failed seek FAILS the player rather than continuing from wherever it was, because a
   silently unsynced stream is the one thing this product must never show.
 - `src/config.rs` — `abner.default.toml` (repo root, `include_str!`'d, so the bundle
@@ -384,21 +388,17 @@ the "VIDEO QUALITY TESTING TOOLKIT" line that used to be a second text run.
 
 - `cargo test` generates tiny ffmpeg test clips; the suite covers master-clock
   draining, exact seek, two-player sync, framestep adoption, reader-thread cleanup
-  (condvar-parked AND wedged-in-libav-I/O, the latter via a mkfifo dribble), and the
+  (condvar-parked, and a source that cannot be read), and the
   redraw cadence (`schedule::tests`), crop drags and the paired crop export, and
   slot-filling drops (0 → 1 → 2 → 3, asserting
   a lone clip plays, the clock rewinds and the streams stay inside a frame period of each other).
   Keep it green — sync IS the product.
-- Building needs the ffmpeg **8.x** dev libraries — `brew install ffmpeg@8`, which is
-  keg-only, so `.cargo/config.toml` puts its pkgconfig dir on `PKG_CONFIG_PATH` (not
-  forced: an explicit `PKG_CONFIG_PATH` still wins). Plain `brew ffmpeg` is 9.x now and
-  **rsmpeg does not build against it** — 0.18 is the newest release, it generates its
-  bindings from whatever headers pkg-config finds, and on 9.x `AVCodec::pix_fmts` and
-  friends became accessor functions while `AVCodecID` changed signedness, so the errors
-  land inside rsmpeg's own source and read like a broken crate rather than a wrong
-  ffmpeg. Keep ffmpeg 9 linked in PATH — the startup `ffprobe` is a separate process and
-  is happy on either. The only other non-obvious dependency is `png`, for the wordmark
-  texture.
+- Building needs no ffmpeg headers or libraries: decoding is FilmCraft's pure-Rust codecs,
+  git-pinned in `Cargo.toml` to the same fork revision switchblade uses (it carries the VP9 and
+  AV1 VideoToolbox decoders until storytold/filmcraft#2180 and #2608 merge; move the pin to
+  upstream `main` once they do, together with switchblade's). The startup `ffprobe` is a
+  separate process and any ffmpeg version will do. The only other non-obvious dependency is
+  `png`, for the wordmark texture.
 - **`./packaging/build-app.sh [--open|--install]` builds `Abner.app`** — switchblade's
   recipe: release build, `assets/app-icon.png` → `AppIcon.icns`, `Info.plist.in` with
   version + a NUMERIC build stamp (`CFBundleVersion` = UTC `YYYYMMDD.HHMMSS`; the git
@@ -406,7 +406,8 @@ the "VIDEO QUALITY TESTING TOOLKIT" line that used to be a second text run.
   the higher version, a hash parses as ~0, and a stale cargo-bundle leftover in
   `target/` answered for the installed app and exited with usage; `--install` also
   unregisters the build-tree twin), every non-system dylib copied into `Contents/Frameworks` with
-  load paths rewritten to `@rpath`, ad-hoc codesign (mandatory on Apple Silicon after
+  load paths rewritten to `@rpath` (none, since the FilmCraft player; the step stays for
+  whatever a future dependency brings), ad-hoc codesign (mandatory on Apple Silicon after
   `install_name_tool`), then `lsregister -f` so an in-place reinstall doesn't keep the
   old icon. `CFBundleExecutable` is a thin launcher that prepends the Homebrew bin dirs
   to PATH, because a Finder-launched app gets no PATH and the startup `ffprobe` would

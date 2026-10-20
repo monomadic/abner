@@ -88,6 +88,24 @@ Plain `cargo build` is unchanged (empty registry). `build-app.sh --with-plugins`
 bundles the composed launcher. Proven with a throwaway identity processor:
 `--list-processors` and `--check-processor` pass, a second run is a no-op.
 
+||||||| parent of c3f5f36 (player: decode with FilmCraft (pure Rust) instead of linking libav)
+## 2026-10-21 — decoding in pure Rust (FilmCraft)
+
+The in-process libav player and `rsmpeg` are gone: `src/player.rs` runs on FilmCraft's
+`MediaSource` through `src/fc.rs` (switchblade's bridge, carried over), with the frame
+cache, its runs/pending/landing rules and the whole public API unchanged. VideoToolbox
+still decodes h264/hevc/vp9/av1 on Apple silicon, chosen by FilmCraft per stream and
+bit-exact with its software decoders (the fallback), and the pictures match ffmpeg's
+decode bit for bit on every codec the harness checks. Exact seeks decode a rewind window
+before the target from the preceding keyframe (the container's own sync-sample table, MP4
+sample tables or Matroska cues); same-GOP targets extend the current run as before.
+Y'CbCr→RGBA at native size is one fixed-point pass. What it buys: no ffmpeg 8 pin, no
+pkg-config, no `.cargo/config.toml`, no dylibs in the bundle, and a decoder that returns the
+right frame on exact seeks into open-GOP HEVC, where libav returned the CRA picture for the
+leading frames before it — for an A/B tool that is a correctness fix. Decided on the numbers
+from [codec-bench](https://github.com/monomadic/codec-bench). The FilmCraft pin is a fork
+revision carrying the VP9 (storytold/filmcraft#2180) and AV1 (#2608) VideoToolbox decoders.
+
 ## 2026-10-18 — no clip number over the canvas
 
 The old 24px number badge still sat in the top-left of the video in Sources mode
