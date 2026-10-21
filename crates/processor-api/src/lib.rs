@@ -70,6 +70,34 @@ pub struct Progress {
     pub completed: u64,
     pub total: Option<u64>,
 }
+/// Optional in-flight updates, including work inside a single process() call.
+/// The host callback must return promptly. Percentages describe this phase only.
+pub type ProgressReporter = Arc<dyn Fn(Progress) + Send + Sync>;
+
+#[derive(Clone, Copy, Default, Serialize)]
+pub enum Role {
+    Generator,
+    #[default]
+    Processor,
+    PostProcessor,
+}
+#[derive(Clone, Copy, Default, Serialize)]
+pub enum InputRequirement {
+    /// Legacy processors have not declared their temporal requirements.
+    #[default]
+    Unspecified,
+    IndependentFrame,
+    Window {
+        before: u32,
+        after: u32,
+    },
+    WholeClip,
+}
+#[derive(Clone, Copy, Default, Serialize)]
+pub struct Capabilities {
+    pub role: Role,
+    pub input: InputRequirement,
+}
 /// Ordered streaming frames. Calls may emit zero or several outputs. After EOF,
 /// call finish once and consume all returned frames. Drop/recreate a session at
 /// cuts, seeks or configuration changes: recurrent history must not cross them.
@@ -77,6 +105,8 @@ pub struct Progress {
 /// Errors are terminal: discard this session and any unpublished job output.
 /// CPU RGB16 only; this contract does not yet negotiate GPU/color/auxiliary inputs.
 pub trait Session {
+    /// Implementations may retain this callback to report progress during work.
+    fn set_progress_reporter(&mut self, _reporter: ProgressReporter) {}
     fn process(&mut self, input: Frame) -> Result<Vec<Frame>>;
     fn finish(&mut self) -> Result<Vec<Frame>>;
     fn output_dimensions(&self) -> [usize; 2];
@@ -86,6 +116,10 @@ pub trait Session {
 }
 /// Factories can move to a preview worker; sessions stay on their creating thread.
 pub trait Factory: Send {
+    /// Declarations describe the plugin, not a guarantee of host execution support.
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::default()
+    }
     fn descriptor(&self) -> Descriptor;
     fn create(
         &self,
