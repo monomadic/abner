@@ -2061,6 +2061,7 @@ impl App {
         if self.processors.scroll(dy, self.cursor, self.vp) { return; }
         self.stroke_last = None;
         if !self.ready() { return; }
+        if self.processors.open { return self.pan_canvas(dx, dy); }
         if self.cut_mode && self.show_ui && self.cut_tab == 1 && contains(self.cut_side().body, self.cursor.0, self.cursor.1) {
             self.info_scroll = (self.info_scroll.min(self.info_scroll_max()) - dy).clamp(0.0, self.info_scroll_max());
             return;
@@ -2084,7 +2085,12 @@ impl App {
                 else if dy > 0.0 { first.saturating_sub(1) } else { first };
             return;
         }
-        if !contains(self.workspace().canvas, self.cursor.0, self.cursor.1) { return; }
+        self.pan_canvas(dx, dy);
+    }
+
+    /// Two-finger scroll over the canvas pans a zoomed picture.
+    fn pan_canvas(&mut self, dx: f32, dy: f32) {
+        if !contains(self.canvas(), self.cursor.0, self.cursor.1) { return; }
         if self.zoom > 1.001 {
             let base = self.gesture_base(self.cursor.0, self.cursor.1);
             self.center.0 -= dx / (base.w * self.zoom);
@@ -2098,14 +2104,14 @@ impl App {
     /// center. Positive delta = fingers spreading = zoom in.
     pub fn pinch(&mut self, delta: f32) {
         self.stroke_last = None;
-        if self.ready() && self.cut_mode && self.show_ui && self.cut_over_panel() {
+        if self.ready() && !self.processors.open && self.cut_mode && self.show_ui && self.cut_over_panel() {
             let lane = self.cut_lanes().video;
             let anchor = (self.cursor.0 - lane.x).clamp(0.0, lane.w);
             // Spreading zooms in, closing zooms out, anchored under the pointer.
             if let Some(cut) = &mut self.cut { cut.zoom(((delta as f64) * 1.8).exp(), anchor, lane.w); }
             return;
         }
-        if !self.ready() || !contains(self.workspace().canvas, self.cursor.0, self.cursor.1) { return; }
+        if !self.ready() || !contains(self.canvas(), self.cursor.0, self.cursor.1) { return; }
         let (cx, cy) = self.cursor;
         let base = self.gesture_base(cx, cy);
         let old = self.zoom;
@@ -2156,7 +2162,7 @@ impl App {
     /// hovered cell in side-by-side, the active video's canvas fit
     /// otherwise.
     fn video_cell(&self, idx: usize) -> RectPx {
-        let mut cell = self.workspace().canvas;
+        let mut cell = self.canvas();
         if self.shown_mode() == Mode::SideBySide && !self.single() {
             cell.w /= self.videos.len().max(1) as f32;
             cell.x += idx as f32 * cell.w;
@@ -2174,14 +2180,23 @@ impl App {
 
     fn base_rect(&self, idx: usize) -> RectPx {
         let dims = (self.videos[idx].info.width, self.videos[idx].info.height);
-        let mut cell = self.video_cell(idx);
-        if self.cut_mode && self.show_ui {
-            // Timeline board: 764×430 footage centered in a 1140×583 canvas.
-            let (dx, dy) = (cell.w * 188.0 / 1140.0, cell.h * 76.5 / 583.0);
-            cell = RectPx { x: cell.x + dx, y: cell.y + dy, w: cell.w - 2.0*dx, h: cell.h - 2.0*dy };
-            return Self::fit_rect(dims, cell);
+        let cell = self.video_cell(idx);
+        if self.processors.open || self.cut_mode && self.show_ui {
+            return Canvas { r: cell }.fit(dims);
         }
         Self::fit_rect(dims, inset_rect(cell, if self.show_ui { 24.0 } else { 0.0 }))
+    }
+
+    /// The picture surface pointer gestures act on: the processors
+    /// viewer while that mode is up (the same `Canvas` as the timeline's),
+    /// the workspace canvas otherwise.
+    fn canvas(&self) -> RectPx {
+        if self.processors.open { crate::processor_gui::Panel::viewer(self.vp) } else { self.workspace().canvas }
+    }
+
+    /// Zoom and pan as the processors viewer draws them.
+    pub(crate) fn view(&self) -> (f32, (f32, f32)) {
+        (self.zoom, self.center)
     }
 
     fn content_rect(&self, idx: usize) -> RectPx {
@@ -2382,17 +2397,19 @@ impl App {
         }
         let mode = if self.single() { Mode::Overlay } else { self.shown_mode() };
         let canvas = self.workspace().canvas;
-        if self.show_ui { items.push(Item::Rect(RectItem::new(canvas, if self.cut_mode { hex_color(CUT_CANVAS) } else { CANVAS_BG }))); }
+        let board = Canvas { r: canvas };
+        if self.show_ui {
+            if self.cut_mode { board.ground(&mut items); }
+            else { items.push(Item::Rect(RectItem::new(canvas, CANVAS_BG))); }
+        }
         items.push(Item::Clip(Some(canvas)));
         // Keep the lifted picture attached to its zoomed bounds, while the
         // recessed document edge stays attached to the canvas itself.
         if self.show_ui {
             if mode == Mode::SideBySide {
-                for i in 0..n {
-                    items.push(Item::Shadow { r: self.content_rect(i), inner: false, blur: 18.0, alpha: 0.42 });
-                }
+                for i in 0..n { Canvas::lift(&mut items, self.content_rect(i)); }
             } else {
-                items.push(Item::Shadow { r: self.content_rect(a), inner: false, blur: 18.0, alpha: 0.42 });
+                Canvas::lift(&mut items, self.content_rect(a));
             }
         }
         match mode {
@@ -2456,14 +2473,7 @@ impl App {
         if self.cut_mode && self.show_ui {
             self.build_cut_chips(&mut items);
         }
-        if self.show_ui {
-            items.push(Item::Shadow {
-                r: canvas,
-                inner: true,
-                blur: 16.0,
-                alpha: 0.28,
-            });
-        }
+        if self.show_ui { board.recess(&mut items); }
         items.push(Item::Clip(None));
         if self.show_ui {
             if self.cut_mode {
@@ -2509,7 +2519,7 @@ impl App {
             &mut uploads,
             n,
         );
-        self.processors.draw(&mut items, vp, n);
+        self.processors.draw(&mut items, vp, n, self.view());
 
         let animating = self.processors.animating()
             || self.playing
@@ -3044,19 +3054,12 @@ impl App {
             // the visible rect clips it while the panel folds.
             items.push(Item::Clip(Some(RectPx { x: 0.0, y: l.inspector.y, w: l.rail, h: l.inspector.h })));
             items.push(Item::Rect(RectItem::new(RectPx { h: RAIL_INSPECTOR_H, ..l.inspector }, hex_color(INSPECTOR_BG))));
-            let cap = RectPx { x: x0, y: y + 16.0, w: 24.0, h: 24.0 };
-            items.push(Item::Rect(RectItem { radius: 12.0, ..RectItem::new(cap, mix(INSPECTOR_BG, 0xffffff, 0.5)) }));
-            items.push(Item::Text(TextItem { header: true, align: Align::Center, valign: VAlign::Middle, max_width: Some(22.0),
-                ..TextItem::new(cap.x + 12.0, cap.y + 12.0, 15.0, hex_color(0x000000), (self.active + 1).to_string()) }));
+            draw_keycap(items, RectPx { x: x0, y: y + 16.0, w: 24.0, h: 24.0 }, self.active + 1, mix(INSPECTOR_BG, 0xffffff, 0.5));
             items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(l.panel - 80.0),
                 ..TextItem::new(x0 + 32.0, y + 28.0, 13.0, hex_color(SOURCE_INK), name_of(&v.info.path)) }));
             // Dashed hairlines: rects, there is no line primitive.
             for ry in [y + 49.0, y + 178.0] {
-                let mut x = x0;
-                while x < x1 {
-                    items.push(Item::Rect(RectItem::new(RectPx { x, y: ry, w: 3.0_f32.min(x1 - x), h: 1.0 }, hex_color(INSPECTOR_DASH))));
-                    x += 6.0;
-                }
+                draw_dashed_hairline(items, x0, x1, ry);
             }
             for (i, (key, value)) in [
                 ("Format", format!("{} {}", v.info.codec, v.info.pix_fmt)),
@@ -3084,24 +3087,8 @@ impl App {
             items.push(Item::Clip(None));
         }
         if l.grip.h > 0.0 {
-            // The grip, as the Figma draws it: an 8px #151515 strip along
-            // the inspector's top edge under a 1px near-black line, with
-            // three 5×4 discs (a #2a2a2a fill in a hairline #020202 outline) on
-            // a 6px pitch centred in it. The strip sits at the bottom of the
-            // 14px hit area; the rest is the rail's ground. Under the
-            // pointer the discs lighten.
             let hover = self.cursor_inside && contains(l.grip, self.cursor.0, self.cursor.1);
-            let strip = RectPx { x: l.grip.x, y: l.grip.y + l.grip.h - RAIL_GRIP_STRIP_H, w: l.panel, h: RAIL_GRIP_STRIP_H };
-            items.push(Item::Rect(RectItem::new(RectPx { y: strip.y - 1.0, h: 1.0, ..strip }, hex_color(RAIL_GRIP_LINE))));
-            items.push(Item::Rect(RectItem::new(strip, hex_color(RAIL_GRIP_BG))));
-            let fill = hex_color(if hover { SOURCE_SUBTLE } else { RAIL_GRIP_DOT_FILL });
-            let cx = l.grip.x + l.panel / 2.0;
-            for k in -1..=1 {
-                let (dw, dh) = RAIL_GRIP_DOT;
-                let dot = RectPx { x: cx - dw / 2.0 + k as f32 * RAIL_GRIP_PITCH, y: strip.y + strip.h / 2.0 - dh / 2.0, w: dw, h: dh };
-                items.push(Item::Rect(RectItem { radius: dh / 2.0, border_w: 0.75, border_color: hex_color(RAIL_GRIP_LINE),
-                    ..RectItem::new(dot, fill) }));
-            }
+            draw_rail_grip(items, l.grip, l.panel, hover);
         }
     }
 
@@ -5995,7 +5982,7 @@ fn lerp4(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
     std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t)
 }
 
-fn mix(bg: u32, fg: u32, alpha: f32) -> [f32; 4] {
+pub(crate) fn mix(bg: u32, fg: u32, alpha: f32) -> [f32; 4] {
     let (b, f) = (hex_color(bg), hex_color(fg));
     [b[0] + (f[0] - b[0]) * alpha, b[1] + (f[1] - b[1]) * alpha, b[2] + (f[2] - b[2]) * alpha, 1.0]
 }
@@ -6108,7 +6095,7 @@ impl Workspace {
         // `rail` is what the layout gives the panel this frame; `panel` is
         // the panel's own width, and its rects start at `rail - panel` so
         // a half-open rail is the right-hand part of a whole one.
-        let full = if w < 900.0 { 210.0_f32.min(w * 0.3) } else { 280.0 };
+        let full = rail_full_width(w);
         // Cut mode under CUT_COLUMNS_MIN_W drops its right column; the
         // rail collapses to the mini strip at the same width, so the two
         // columns go together and the lanes keep their room.
@@ -6196,14 +6183,14 @@ impl Control {
         Self { r, label: label.into(), selected, action, hint: "" }
     }
 }
-fn contains(r: RectPx, x: f32, y: f32) -> bool {
+pub(crate) fn contains(r: RectPx, x: f32, y: f32) -> bool {
     x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h
 }
 fn inset_rect(r: RectPx, pad: f32) -> RectPx {
     let pad = pad.min((r.w - 1.0).max(0.0) / 2.0).min((r.h - 1.0).max(0.0) / 2.0);
     RectPx { x: r.x + pad, y: r.y + pad, w: r.w - pad * 2.0, h: r.h - pad * 2.0 }
 }
-fn ui_label(items: &mut Vec<Item>, x: f32, y: f32, px: f32, color: [f32; 4], text: impl Into<String>, align: Align, width: f32) {
+pub(crate) fn ui_label(items: &mut Vec<Item>, x: f32, y: f32, px: f32, color: [f32; 4], text: impl Into<String>, align: Align, width: f32) {
     items.push(Item::Text(TextItem { interface: true, align, valign: VAlign::Middle, max_width: Some(width.max(0.0)),
         ..TextItem::new(x, y, px, color, text) }));
 }
@@ -6221,7 +6208,73 @@ fn draw_cut_footer_button(items: &mut Vec<Item>, r: RectPx, label: &str, key_lab
     items.push(Item::Rect(RectItem { radius: 5.0, ..RectItem::new(key, hex_color(if disabled { 0x151515 } else { 0x1b1b1b })) }));
     ui_label(items, key.x + key.w / 2.0, cy, 10.0, ink, key_label, Align::Center, key.w);
 }
-fn hex_color(rgb: u32) -> [f32; 4] {
+/// The timeline's canvas (12:2), the one picture surface the Timeline and
+/// Processors modes share: a #2c2c2c ground, the footage fitted into the
+/// board's 764×430-of-1140×583 window and lifted on a drop shadow, under
+/// the recessed inner edge. Zoom and pan are `App`'s one shared
+/// `(zoom, center)`, so a pinch carries across modes.
+#[derive(Clone, Copy)]
+pub(crate) struct Canvas { pub r: RectPx }
+impl Canvas {
+    pub fn fit(&self, dims: (u32, u32)) -> RectPx {
+        let c = self.r;
+        let (dx, dy) = (c.w * 188.0 / 1140.0, c.h * 76.5 / 583.0);
+        App::fit_rect(dims, RectPx { x: c.x + dx, y: c.y + dy, w: c.w - 2.0 * dx, h: c.h - 2.0 * dy })
+    }
+    /// `fit` under the shared zoom/center.
+    pub fn picture(&self, dims: (u32, u32), view: (f32, (f32, f32))) -> RectPx {
+        App::zoomed(self.fit(dims), view.0, view.1)
+    }
+    pub fn ground(&self, items: &mut Vec<Item>) {
+        items.push(Item::Rect(RectItem::new(self.r, hex_color(CUT_CANVAS))));
+    }
+    /// The picture's drop shadow, attached to its zoomed bounds.
+    pub fn lift(items: &mut Vec<Item>, picture: RectPx) {
+        items.push(Item::Shadow { r: picture, inner: false, blur: 18.0, alpha: 0.42 });
+    }
+    /// The recessed edge, attached to the canvas itself.
+    pub fn recess(&self, items: &mut Vec<Item>) {
+        items.push(Item::Shadow { r: self.r, inner: true, blur: 16.0, alpha: 0.28 });
+    }
+}
+/// The Sources rail's full panel width at window width `w` (the processors
+/// panel's left column uses the same, so the two rails line up).
+pub(crate) fn rail_full_width(w: f32) -> f32 {
+    if w < 900.0 { 210.0_f32.min(w * 0.3) } else { 280.0 }
+}
+/// The rail's white keycap: a 24px disc with the slot number in black.
+pub(crate) fn draw_keycap(items: &mut Vec<Item>, cap: RectPx, n: usize, fill: [f32; 4]) {
+    items.push(Item::Rect(RectItem { radius: cap.h / 2.0, ..RectItem::new(cap, fill) }));
+    items.push(Item::Text(TextItem { header: true, align: Align::Center, valign: VAlign::Middle, max_width: Some(cap.w - 2.0),
+        ..TextItem::new(cap.x + cap.w / 2.0, cap.y + cap.h / 2.0, 15.0, [0.0, 0.0, 0.0, fill[3]], n.to_string()) }));
+}
+/// The inspector's dashed hairline: rects, there is no line primitive.
+pub(crate) fn draw_dashed_hairline(items: &mut Vec<Item>, x0: f32, x1: f32, y: f32) {
+    let mut x = x0;
+    while x < x1 {
+        items.push(Item::Rect(RectItem::new(RectPx { x, y, w: 3.0_f32.min(x1 - x), h: 1.0 }, hex_color(INSPECTOR_DASH))));
+        x += 6.0;
+    }
+}
+/// The grip, as the Figma draws it: an 8px #151515 strip along the
+/// inspector's top edge under a 1px near-black line, with three 5×4 discs
+/// (a #2a2a2a fill in a hairline #020202 outline) on a 6px pitch centred in
+/// it. The strip sits at the bottom of the 14px hit area; the rest is the
+/// rail's ground. Under the pointer the discs lighten.
+pub(crate) fn draw_rail_grip(items: &mut Vec<Item>, grip: RectPx, panel: f32, hover: bool) {
+    let strip = RectPx { x: grip.x, y: grip.y + grip.h - RAIL_GRIP_STRIP_H, w: panel, h: RAIL_GRIP_STRIP_H };
+    items.push(Item::Rect(RectItem::new(RectPx { y: strip.y - 1.0, h: 1.0, ..strip }, hex_color(RAIL_GRIP_LINE))));
+    items.push(Item::Rect(RectItem::new(strip, hex_color(RAIL_GRIP_BG))));
+    let fill = hex_color(if hover { SOURCE_SUBTLE } else { RAIL_GRIP_DOT_FILL });
+    let cx = grip.x + panel / 2.0;
+    for k in -1..=1 {
+        let (dw, dh) = RAIL_GRIP_DOT;
+        let dot = RectPx { x: cx - dw / 2.0 + k as f32 * RAIL_GRIP_PITCH, y: strip.y + strip.h / 2.0 - dh / 2.0, w: dw, h: dh };
+        items.push(Item::Rect(RectItem { radius: dh / 2.0, border_w: 0.75, border_color: hex_color(RAIL_GRIP_LINE),
+            ..RectItem::new(dot, fill) }));
+    }
+}
+pub(crate) fn hex_color(rgb: u32) -> [f32; 4] {
     [((rgb >> 16) & 255) as f32 / 255.0, ((rgb >> 8) & 255) as f32 / 255.0, (rgb & 255) as f32 / 255.0, 1.0]
 }
 /// The texture window that fills `r` edge to edge at the clip's own
@@ -6259,30 +6312,30 @@ fn draw_sidebar_toggle(items: &mut Vec<Item>, r: RectPx, right: bool, shown: boo
 }
 /// Timeline Edit / Header (12:5): 44px shell with a blue selected tab.
 const CUT_HEADER_H: f32 = 44.0;
-const CUT_HEADER_BLUE: u32 = 0x0074e1;
-const HEADER_H: f32 = CUT_HEADER_H;
+pub(crate) const CUT_HEADER_BLUE: u32 = 0x0074e1;
+pub(crate) const HEADER_H: f32 = CUT_HEADER_H;
 const CONTEXT_H: f32 = 40.0;
 /// Sources sidebar (278:584): 157px cards on a 12px gap, a 100px preview.
 const SOURCE_H: f32 = 169.0;
 const SOURCE_THUMB_H: f32 = 100.0;
 /// The app's rows the design leaves out: the footer line above the
 /// inspector and the Duplicate / Add files buttons under it.
-const RAIL_FOOTER_H: f32 = 36.0;
+pub(crate) const RAIL_FOOTER_H: f32 = 36.0;
 /// The sidebar's slide, seconds (the design's "panels slide outward over 200 ms").
 const RAIL_SLIDE_S: f32 = 0.2;
 /// The rail's heading strip under the header: "Sources N" and the sidebar
 /// toggle, which lives in the rail rather than the header.
-const RAIL_HEAD_H: f32 = 36.0;
+pub(crate) const RAIL_HEAD_H: f32 = 36.0;
 /// Collapsed, the rail is this strip: the toggle over one keycap per clip.
 const RAIL_MINI_W: f32 = 44.0;
 const RAIL_MINI_PITCH: f32 = 40.0;
-const RAIL_ACTIONS_H: f32 = 40.0;
+pub(crate) const RAIL_ACTIONS_H: f32 = 40.0;
 /// The focused inspector (278:609) is 216px; the grip strip along its top
 /// edge folds it away over `DETAIL_SLIDE_S` — quicker than the rail, it
 /// moves less.
-const RAIL_INSPECTOR_H: f32 = 216.0;
-const RAIL_GRIP_H: f32 = 14.0;
-const DETAIL_SLIDE_S: f32 = 0.15;
+pub(crate) const RAIL_INSPECTOR_H: f32 = 216.0;
+pub(crate) const RAIL_GRIP_H: f32 = 14.0;
+pub(crate) const DETAIL_SLIDE_S: f32 = 0.15;
 /// The grip as measured off the Figma: an 8px #151515 strip under a 1px
 /// #060606 line, three 5×4 #2a2a2a discs outlined in near-black on a 6px
 /// pitch.
@@ -6295,26 +6348,26 @@ const RAIL_GRIP_DOT_FILL: u32 = 0x2a2a2a;
 /// The focused card's ring, the idle card's grey edge (as the design's
 /// card renders, #444444), and the keycap plate (white @ 0.5 in Figma;
 /// linear blending wants less).
-const SOURCE_RING: u32 = 0xff9d00;
-const SOURCE_EDGE: u32 = 0x444444;
-const SOURCE_EDGE_HOVER: u32 = 0x5c5c5c;
+pub(crate) const SOURCE_RING: u32 = 0xff9d00;
+pub(crate) const SOURCE_EDGE: u32 = 0x444444;
+pub(crate) const SOURCE_EDGE_HOVER: u32 = 0x5c5c5c;
 const SOURCE_KEYCAP: [f32; 4] = [1.0, 1.0, 1.0, 0.3];
 /// Focused inspector (278:609): its ground, the dashed hairlines, the path.
-const INSPECTOR_BG: u32 = 0x0f0f0f;
+pub(crate) const INSPECTOR_BG: u32 = 0x0f0f0f;
 const INSPECTOR_DASH: u32 = 0x252525;
-const INSPECTOR_PATH: u32 = 0x3694eb;
+pub(crate) const INSPECTOR_PATH: u32 = 0x3694eb;
 /// Sources card variables: surface, border, ink, secondary, subtle.
-const SOURCE_SURFACE: u32 = 0x11151b;
-const SOURCE_BORDER: u32 = 0x323b47;
-const SOURCE_INK: u32 = 0xf0f3f7;
-const SOURCE_SECONDARY: u32 = 0xb3bdc9;
-const SOURCE_SUBTLE: u32 = 0x8d9aab;
-const WORKSPACE_PANEL: [f32; 4] = [0.0196, 0.0196, 0.0235, 1.0];
+pub(crate) const SOURCE_SURFACE: u32 = 0x11151b;
+pub(crate) const SOURCE_BORDER: u32 = 0x323b47;
+pub(crate) const SOURCE_INK: u32 = 0xf0f3f7;
+pub(crate) const SOURCE_SECONDARY: u32 = 0xb3bdc9;
+pub(crate) const SOURCE_SUBTLE: u32 = 0x8d9aab;
+pub(crate) const WORKSPACE_PANEL: [f32; 4] = [0.0196, 0.0196, 0.0235, 1.0];
 const CANVAS_BG: [f32; 4] = [29.0 / 255.0, 27.0 / 255.0, 27.0 / 255.0, 1.0];
-const WORKSPACE_TEXT: [f32; 4] = [209.0 / 255.0, 209.0 / 255.0, 209.0 / 255.0, 1.0];
-const WORKSPACE_DIM: [f32; 4] = [0.57, 0.57, 0.57, 1.0];
+pub(crate) const WORKSPACE_TEXT: [f32; 4] = [209.0 / 255.0, 209.0 / 255.0, 209.0 / 255.0, 1.0];
+pub(crate) const WORKSPACE_DIM: [f32; 4] = [0.57, 0.57, 0.57, 1.0];
 const WORKSPACE_MUTED: [f32; 4] = [0.43, 0.43, 0.43, 1.0];
-const WORKSPACE_RULE: [f32; 4] = [0.09, 0.09, 0.09, 1.0];
+pub(crate) const WORKSPACE_RULE: [f32; 4] = [0.09, 0.09, 0.09, 1.0];
 const CONTROL_BG: [f32; 4] = [26.0 / 255.0, 26.0 / 255.0, 26.0 / 255.0, 1.0];
 
 #[cfg(test)]
@@ -8700,7 +8753,7 @@ const SEEK_GRAB: f32 = 9.0;
 /// Advance width of the monospace UI font, in em — used only to step
 /// between right-aligned status segments and keycap chips, never to
 /// place a glyph (the renderer measures those exactly).
-const MONO_ADV: f32 = 0.60;
+pub(crate) const MONO_ADV: f32 = 0.60;
 
 /// Logical height of a standard macOS titlebar. The window has no visible
 /// bar (`set_titlebar_glass` makes it transparent and runs the content

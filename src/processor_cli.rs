@@ -4,7 +4,18 @@ pub fn handle(registry: &Registry) -> anyhow::Result<bool> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("--list-processors") if args.len() == 1 => {
-            println!("{}", serde_json::to_string_pretty(&registry.descriptors())?);
+            let listed: Vec<_> = registry
+                .descriptors()
+                .into_iter()
+                .map(|d| {
+                    let f = registry.get(&d.id).map_err(anyhow::Error::msg)?;
+                    let mut v = serde_json::to_value(&d)?;
+                    v["categories"] = serde_json::to_value(f.categories())?;
+                    v["capabilities"] = serde_json::to_value(f.capabilities())?;
+                    Ok(v)
+                })
+                .collect::<anyhow::Result<_>>()?;
+            println!("{}", serde_json::to_string_pretty(&listed)?);
         }
         Some("--check-processor") => {
             anyhow::ensure!(args.len() == 3, "usage: --check-processor ID SETTINGS_JSON");

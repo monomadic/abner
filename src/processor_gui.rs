@@ -1,13 +1,19 @@
 //! Runtime-schema controls and cancellable, bounded display previews.
 //! No processor identity or implementation belongs in this module.
 use crate::{
-    app::Key,
+    app::{
+        CUT_HEADER_BLUE, Canvas, DETAIL_SLIDE_S, HEADER_H, INSPECTOR_BG, INSPECTOR_PATH, Key, MONO_ADV,
+        RAIL_ACTIONS_H, RAIL_FOOTER_H, RAIL_GRIP_H, RAIL_HEAD_H, RAIL_INSPECTOR_H, SOURCE_BORDER,
+        SOURCE_EDGE, SOURCE_EDGE_HOVER, SOURCE_INK, SOURCE_RING, SOURCE_SECONDARY, SOURCE_SUBTLE,
+        SOURCE_SURFACE, WORKSPACE_DIM, WORKSPACE_PANEL, WORKSPACE_RULE, WORKSPACE_TEXT,
+        draw_dashed_hairline, draw_keycap, draw_rail_grip, hex_color, mix, rail_full_width,
+    },
     player::{Player, Rgba},
     probe::VideoInfo,
-    render::{Item, RectItem, RectPx, TextItem, Upload, VideoMode},
+    render::{Align, Item, RectItem, RectPx, TextItem, Upload, VAlign, VideoMode},
 };
 use abner_processor_api::{
-    Cancellation, Capabilities, Descriptor, Frame, InputRequirement, Progress, Registry, Role,
+    Cancellation, Capabilities, Category, Descriptor, Frame, InputRequirement, Progress, Registry, Role,
     Session,
 };
 use serde_json::{Value, json};
@@ -22,6 +28,8 @@ const FRAMES: usize = 24;
 const INK: [f32; 4] = [0.8, 0.8, 0.8, 1.0];
 const DIM: [f32; 4] = [0.43, 0.43, 0.43, 1.0];
 const BLUE: [f32; 4] = [0.04, 0.33, 0.7, 1.0];
+/// One processor card (64px) plus the Sources rail's 12px gap.
+const CARD_PITCH: f32 = 76.0;
 
 #[derive(Clone, Debug)]
 enum Kind {
@@ -162,21 +170,36 @@ fn stage_status(name: &str, progress: &Progress) -> String {
         None => format!("{name} · {phase} · working"),
     }
 }
-fn capability_label(c: Capabilities) -> String {
-    let role = match c.role {
+fn role_label(c: Capabilities) -> &'static str {
+    match c.role {
         Role::Generator => "Generator",
         Role::Processor => "Processor",
         Role::PostProcessor => "Post-processor",
-    };
-    let input = match c.input {
+    }
+}
+fn input_label(c: Capabilities) -> String {
+    match c.input {
         InputRequirement::Unspecified => "input needs undeclared".into(),
         InputRequirement::IndependentFrame => "one frame".into(),
         InputRequirement::Window { before, after } => {
             format!("context −{before} / +{after} frames")
         }
         InputRequirement::WholeClip => "needs entire clip".into(),
-    };
-    format!("{role} · {input}")
+    }
+}
+fn capability_label(c: Capabilities) -> String {
+    format!("{} · {}", role_label(c), input_label(c))
+}
+fn category_label(categories: &[Category]) -> String {
+    if categories.is_empty() {
+        "Uncategorized".into()
+    } else {
+        categories
+            .iter()
+            .map(Category::label)
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
 }
 /// Stage boundaries remain visible even for legacy sessions without callbacks.
 struct ReportingSession {
@@ -574,6 +597,13 @@ pub struct Panel {
     enabled: Vec<bool>,
     supported: Vec<bool>,
     capabilities: Vec<Capabilities>,
+    categories: Vec<Vec<Category>>,
+    /// Last pointer position, for the rail's hover states.
+    cursor: (f32, f32),
+    /// The focused-processor inspector under the list, folded by its grip
+    /// like the Sources rail's; `detail_at` times the 150 ms slide.
+    show_detail: bool,
+    detail_at: Option<Instant>,
     pub seek: Option<f64>,
     pub toggle_play: bool,
     time: f64,
@@ -614,6 +644,10 @@ impl Default for Panel {
             enabled: vec![],
             supported: vec![],
             capabilities: vec![],
+            categories: vec![],
+            cursor: (-1.0, -1.0),
+            show_detail: true,
+            detail_at: None,
             seek: None,
             toggle_play: false,
             time: 0.0,
@@ -653,6 +687,15 @@ impl Panel {
             .iter()
             .map(|d| registry.get(&d.id).unwrap().capabilities())
             .collect();
+        let categories = descriptors
+            .iter()
+            .map(|d| {
+                let mut c = registry.get(&d.id).unwrap().categories();
+                c.sort();
+                c.dedup();
+                c
+            })
+            .collect();
         let supported = descriptors
             .iter()
             .map(|d| {
@@ -668,7 +711,8 @@ impl Panel {
             .iter()
             .map(|d| defaults(&fields(&d.settings_schema)))
             .collect();
-        let enabled = vec![true; descriptors.len()];
+        // Plugins start bypassed: running one is always the user's choice.
+        let enabled = vec![false; descriptors.len()];
         let worker = (!descriptors.is_empty()).then(|| Worker::new(registry));
         let mut s = Self::default();
         s.descriptors = descriptors;
@@ -676,6 +720,7 @@ impl Panel {
         s.enabled = enabled;
         s.supported = supported;
         s.capabilities = capabilities;
+        s.categories = categories;
         s.worker = worker;
         s.select(0);
         s
@@ -734,6 +779,8 @@ impl Panel {
             return Err("Processor settings must be an object".into());
         }
         self.select(index);
+        // Naming it on the command line is the opt-in.
+        self.enabled[index] = true;
         for (k, v) in settings.as_object().unwrap() {
             self.settings[k] = v.clone();
         }
@@ -773,6 +820,7 @@ impl Panel {
         if !self.open {
             return false;
         }
+        self.cursor = (x, y);
         if self.scrubbing {
             let t = Self::timeline(vp);
             self.seek = Some(
@@ -804,8 +852,26 @@ impl Panel {
             self.toggle();
         }
     }
+    /// Only the inspector's fold slide runs hot; the host polls the worker
+    /// at 100ms while paused.
     pub fn animating(&self) -> bool {
-        false // The host polls the worker at 100ms while paused; no hot render loop.
+        self.detail_at
+            .is_some_and(|t| t.elapsed().as_secs_f32() < DETAIL_SLIDE_S)
+    }
+    /// 0 folded … 1 open.
+    fn detail_slide(&self) -> f32 {
+        let p = self.detail_at.map_or(1.0, |t| {
+            (t.elapsed().as_secs_f32() / DETAIL_SLIDE_S).clamp(0.0, 1.0)
+        });
+        if self.show_detail { p } else { 1.0 - p }
+    }
+    fn toggle_detail(&mut self) {
+        // Reversing mid-slide starts from where the panel is: back-date the
+        // start so the new direction's progress equals the distance covered.
+        let open = self.detail_slide();
+        self.show_detail = !self.show_detail;
+        let done = if self.show_detail { open } else { 1.0 - open };
+        self.detail_at = Some(Instant::now() - Duration::from_secs_f32(done * DETAIL_SLIDE_S));
     }
     pub fn enter(&mut self) {
         self.open = true;
@@ -863,6 +929,7 @@ impl Panel {
         self.enabled.swap(self.selected, to);
         self.supported.swap(self.selected, to);
         self.capabilities.swap(self.selected, to);
+        self.categories.swap(self.selected, to);
         self.select(to);
     }
     pub fn key(&mut self, key: Key) -> bool {
@@ -947,13 +1014,57 @@ impl Panel {
             h: (vp.1 - 44.0).max(1.0),
         }
     }
+    /// The Sources rail's width, so switching modes doesn't move the edge.
     fn left(vp: (f32, f32)) -> f32 {
-        (vp.0 * 0.22).clamp(160.0, 250.0)
+        rail_full_width(vp.0)
+    }
+    fn list_top() -> f32 {
+        HEADER_H + RAIL_HEAD_H + 10.0
+    }
+    /// The grip strip and the visible part of the focused inspector, as
+    /// the Sources rail lays them out: above the Move up / down row, and
+    /// only when the list keeps room for one card and its footer line.
+    fn detail(&self, vp: (f32, f32)) -> (RectPx, RectPx) {
+        let l = Self::left(vp);
+        let bottom = vp.1 - RAIL_ACTIONS_H;
+        let none = RectPx { x: 0.0, y: bottom, w: l, h: 0.0 };
+        let needed = CARD_PITCH + RAIL_FOOTER_H + RAIL_GRIP_H + RAIL_INSPECTOR_H;
+        if self.descriptors.is_empty() || bottom - Self::list_top() < needed {
+            return (none, none);
+        }
+        let t = self.detail_slide();
+        let shown = (RAIL_INSPECTOR_H * t * t * (3.0 - 2.0 * t)).round();
+        let inspector = RectPx { x: 0.0, y: bottom - shown, w: l, h: shown };
+        let grip = RectPx { x: 0.0, y: inspector.y - RAIL_GRIP_H, w: l, h: RAIL_GRIP_H };
+        (grip, inspector)
+    }
+    fn list(&self, vp: (f32, f32)) -> RectPx {
+        let (grip, _) = self.detail(vp);
+        let y = Self::list_top();
+        let end = if grip.h > 0.0 { grip.y } else { vp.1 - RAIL_ACTIONS_H };
+        RectPx { x: 0.0, y, w: Self::left(vp), h: (end - RAIL_FOOTER_H - y).max(CARD_PITCH) }
+    }
+    fn card(&self, i: usize, vp: (f32, f32)) -> RectPx {
+        RectPx {
+            x: 12.0,
+            y: Self::list_top() + i as f32 * CARD_PITCH - self.list_scroll,
+            w: Self::left(vp) - 24.0,
+            h: CARD_PITCH - 12.0,
+        }
+    }
+    /// The enable box, where the Sources card keeps its batch checkbox.
+    fn card_check(&self, i: usize, vp: (f32, f32)) -> RectPx {
+        let r = self.card(i, vp);
+        RectPx { x: r.x + r.w - 32.0, y: r.y + (r.h - 20.0) / 2.0, w: 20.0, h: 20.0 }
+    }
+    fn move_button(vp: (f32, f32), down: bool) -> RectPx {
+        let w = (Self::left(vp) - 32.0) / 2.0;
+        RectPx { x: if down { 20.0 + w } else { 12.0 }, y: vp.1 - 34.0, w, h: 28.0 }
     }
     fn right(vp: (f32, f32)) -> f32 {
         (vp.0 * 0.25).clamp(200.0, 310.0)
     }
-    fn viewer(vp: (f32, f32)) -> RectPx {
+    pub(crate) fn viewer(vp: (f32, f32)) -> RectPx {
         let l = Self::left(vp);
         let r = Self::right(vp);
         RectPx {
@@ -995,14 +1106,17 @@ impl Panel {
         let r = Self::bounds(vp);
         if self.open && hit(r, cursor.0, cursor.1) {
             if cursor.0 < Self::left(vp) {
+                let list = self.list(vp);
                 self.list_scroll = (self.list_scroll - dy).clamp(
                     0.0,
-                    (self.descriptors.len() as f32 * 58.0 - (vp.1 - 170.0)).max(0.0),
+                    (self.descriptors.len() as f32 * CARD_PITCH - list.h).max(0.0),
                 );
                 return true;
             }
             if cursor.0 < vp.0 - Self::right(vp) {
-                return true;
+                // Over the canvas the app pans a zoomed picture, as on the
+                // timeline; the rest of the middle column swallows it.
+                return !hit(Self::viewer(vp), cursor.0, cursor.1);
             }
             self.scroll = (self.scroll - dy).clamp(
                 0.0,
@@ -1021,18 +1135,23 @@ impl Panel {
             return false;
         }
         if x < Self::left(vp) {
-            if y >= 96.0 && y < vp.1 - 55.0 {
-                let index = ((y - 96.0 + self.list_scroll) / 58.0) as usize;
-                if index < self.descriptors.len() {
-                    if x < 40.0 {
+            let (grip, _) = self.detail(vp);
+            if grip.h > 0.0 && hit(grip, x, y) {
+                self.toggle_detail();
+            } else if hit(Self::move_button(vp, false), x, y) {
+                self.move_selected(-1);
+            } else if hit(Self::move_button(vp, true), x, y) {
+                self.move_selected(1);
+            } else if hit(self.list(vp), x, y) {
+                let index = ((y - Self::list_top() + self.list_scroll) / CARD_PITCH) as usize;
+                if index < self.descriptors.len() && hit(self.card(index, vp), x, y) {
+                    if hit(self.card_check(index, vp), x, y) {
                         self.enabled[index] = !self.enabled[index];
                         self.changed();
                     } else if index != self.selected {
                         self.select(index);
                     }
                 }
-            } else if y >= vp.1 - 50.0 {
-                self.move_selected(if x < Self::left(vp) / 2.0 { -1 } else { 1 });
             }
             return true;
         }
@@ -1176,7 +1295,9 @@ impl Panel {
         if self.dirty.is_some() && self.editing.is_none() {
             self.dirty = None;
             let chain = self.chain();
-            if self
+            if chain.is_empty() && !self.descriptors.is_empty() {
+                self.status = "Nothing enabled · tick a processor to run it".into();
+            } else if self
                 .descriptors
                 .iter()
                 .enumerate()
@@ -1258,121 +1379,160 @@ impl Panel {
             });
         }
     }
-    pub fn draw(&self, items: &mut Vec<Item>, vp: (f32, f32), slot: usize) {
+    /// The left column as the Sources rail draws it (278:584): a heading
+    /// strip, one card per processor (keycap, name, categories) ringed
+    /// orange on the focused one, the enable box where Sources keeps its
+    /// batch checkbox, then the folding focused inspector and the
+    /// Move up / down row in the Duplicate / Add files strip.
+    fn draw_rail(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
+        let l = Self::left(vp);
+        let ink = hex_color(SOURCE_INK);
+        let secondary = hex_color(SOURCE_SECONDARY);
+        let subtle = hex_color(SOURCE_SUBTLE);
+        let over = |r: RectPx| hit(r, self.cursor.0, self.cursor.1);
+        items.push(Item::Rect(RectItem::new(
+            RectPx { x: 0.0, y: HEADER_H, w: l, h: vp.1 - HEADER_H },
+            WORKSPACE_PANEL,
+        )));
+        items.push(Item::Rect(RectItem::new(
+            RectPx { x: l - 1.0, y: HEADER_H, w: 1.0, h: vp.1 - HEADER_H },
+            WORKSPACE_RULE,
+        )));
+        let (hx, hy) = (14.0, HEADER_H + RAIL_HEAD_H / 2.0);
+        items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(l - 110.0),
+            ..TextItem::new(hx, hy, 13.0, ink, "Processors") }));
+        items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(40.0),
+            ..TextItem::new(hx + 11.0 * 13.0 * MONO_ADV, hy, 13.0, secondary, self.descriptors.len().to_string()) }));
+        let on = self.enabled.iter().filter(|e| **e).count();
+        if !self.descriptors.is_empty() {
+            items.push(Item::Text(TextItem { regular: true, align: Align::Right, valign: VAlign::Middle, max_width: Some(70.0),
+                ..TextItem::new(l - 14.0, hy, 11.0, if on > 0 { hex_color(CUT_HEADER_BLUE) } else { subtle }, format!("{on} on")) }));
+        }
+        let list = self.list(vp);
+        items.push(Item::Clip(Some(list)));
+        for (i, d) in self.descriptors.iter().enumerate() {
+            let c = self.card(i, vp);
+            if c.y + c.h < list.y || c.y > list.y + list.h {
+                continue;
+            }
+            let active = i == self.selected;
+            let hover = over(c) && over(list);
+            items.push(Item::Rect(RectItem { radius: 10.0, border_w: 2.0,
+                border_color: hex_color(if active { SOURCE_RING } else if hover { SOURCE_EDGE_HOVER } else { SOURCE_EDGE }),
+                ..RectItem::new(c, if active { WORKSPACE_PANEL } else { hex_color(0x000000) }) }));
+            let on = self.enabled[i];
+            draw_keycap(items, RectPx { x: c.x + 12.0, y: c.y + 20.0, w: 24.0, h: 24.0 }, i + 1,
+                [1.0, 1.0, 1.0, if on { 0.85 } else { 0.3 }]);
+            let tx = c.x + 46.0;
+            let tw = c.w - 46.0 - 42.0;
+            items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(tw),
+                ..TextItem::new(tx, c.y + 23.0, 13.0, if on { ink } else { secondary }, d.name.as_str()) }));
+            let meta = if on && !self.supported[i] {
+                "No frame preview".to_string()
+            } else {
+                category_label(&self.categories[i])
+            };
+            items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(tw),
+                ..TextItem::new(tx, c.y + 42.0, 11.0, if on { secondary } else { subtle }, meta) }));
+            let check = self.card_check(i, vp);
+            let fill = hex_color(if on { CUT_HEADER_BLUE } else { 0x080d14 });
+            items.push(Item::Rect(RectItem { radius: 4.0, border_w: 1.0,
+                border_color: if on { fill } else if over(check) { ink } else { secondary },
+                ..RectItem::new(check, fill) }));
+            if on {
+                for (x, y) in [(0., 3.), (2., 5.), (4., 3.), (6., 1.), (8., -1.)] {
+                    items.push(Item::Rect(RectItem::new(RectPx { x: check.x + 4.0 + x, y: check.y + 7.0 + y, w: 3.0, h: 3.0 }, ink)));
+                }
+            }
+        }
+        items.push(Item::Clip(None));
+        let footer = if self.descriptors.is_empty() {
+            "No processors in this build".to_string()
+        } else {
+            let fits = (list.h / CARD_PITCH).floor().max(1.0) as usize;
+            if self.descriptors.len() > fits {
+                let first = (self.list_scroll / CARD_PITCH).round() as usize + 1;
+                format!("{}–{} / {} · scroll", first, (first + fits - 1).min(self.descriptors.len()), self.descriptors.len())
+            } else {
+                "Ticked processors run top to bottom".into()
+            }
+        };
+        items.push(Item::Text(TextItem { interface: true, valign: VAlign::Middle, max_width: Some(l - 24.0),
+            ..TextItem::new(12.0, list.y + list.h + 16.0, 11.0, subtle, footer) }));
+        self.draw_detail(items, vp);
+        for down in [false, true] {
+            let b = Self::move_button(vp, down);
+            let hover = over(b) && !self.descriptors.is_empty();
+            items.push(Item::Rect(RectItem { radius: 8.0, border_w: 1.0,
+                border_color: hex_color(SOURCE_BORDER), ..RectItem::new(b, hex_color(SOURCE_SURFACE)) }));
+            items.push(Item::Text(TextItem { interface: true, align: Align::Center, valign: VAlign::Middle, max_width: Some(b.w - 8.0),
+                ..TextItem::new(b.x + b.w / 2.0, b.y + b.h / 2.0, 11.0, if hover { WORKSPACE_TEXT } else { WORKSPACE_DIM },
+                    if down { "Move down" } else { "Move up" }) }));
+        }
+    }
+    /// Focused inspector (278:609), for the focused processor: keycap and
+    /// name as the title row, five mono rows between dashed hairlines
+    /// (categories first) and the registry ID where Sources puts the path.
+    fn draw_detail(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
+        let (grip, inspector) = self.detail(vp);
+        if grip.h <= 0.0 {
+            return;
+        }
+        let l = Self::left(vp);
+        if inspector.h > 0.0 {
+            let i = self.selected;
+            let d = &self.descriptors[i];
+            let c = self.capabilities[i];
+            let (y, x0, x1) = (inspector.y, 16.0, l - 16.0);
+            // Full layout anchored at the top, clipped while it folds.
+            items.push(Item::Clip(Some(inspector)));
+            items.push(Item::Rect(RectItem::new(RectPx { h: RAIL_INSPECTOR_H, ..inspector }, hex_color(INSPECTOR_BG))));
+            draw_keycap(items, RectPx { x: x0, y: y + 16.0, w: 24.0, h: 24.0 }, i + 1, mix(INSPECTOR_BG, 0xffffff, 0.5));
+            items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(l - 80.0),
+                ..TextItem::new(x0 + 32.0, y + 28.0, 13.0, hex_color(SOURCE_INK), d.name.as_str()) }));
+            for ry in [y + 49.0, y + 178.0] {
+                draw_dashed_hairline(items, x0, x1, ry);
+            }
+            let settings = format!("{} fields · {} presets", self.fields.len(), d.presets.len());
+            for (k, (key, value)) in [
+                ("Category", category_label(&self.categories[i])),
+                ("Role", role_label(c).to_string()),
+                ("Input", input_label(c)),
+                ("Preview", if self.supported[i] { "Frame preview".into() } else { "Not supported".into() }),
+                ("Settings", settings),
+            ].into_iter().enumerate() {
+                let ry = y + 68.5 + k as f32 * 23.0;
+                items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(78.0),
+                    ..TextItem::new(x0, ry, 11.0, WORKSPACE_DIM, key) }));
+                items.push(Item::Text(TextItem { regular: true, align: Align::Right, valign: VAlign::Middle, max_width: Some(l - 110.0),
+                    ..TextItem::new(x1, ry, 11.0, WORKSPACE_TEXT, value) }));
+            }
+            items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(l - 32.0),
+                ..TextItem::new(x0, y + 195.0, 10.0, hex_color(INSPECTOR_PATH), d.id.as_str()) }));
+            items.push(Item::Clip(None));
+        }
+        draw_rail_grip(items, grip, l, hit(grip, self.cursor.0, self.cursor.1));
+    }
+    /// `view` is the app's shared zoom/center, which the viewer's canvas
+    /// applies exactly as the timeline's does.
+    pub fn draw(&self, items: &mut Vec<Item>, vp: (f32, f32), slot: usize, view: (f32, (f32, f32))) {
         if !self.open {
             return;
         }
         let r = Self::bounds(vp);
-        let l = Self::left(vp);
         let right = vp.0 - Self::right(vp);
         items.push(Item::Clip(Some(r)));
         items.push(Item::Rect(RectItem::new(r, [0.012, 0.012, 0.012, 1.0])));
-        for panel in [
-            RectPx {
-                x: 0.0,
-                y: 44.0,
-                w: l,
-                h: r.h,
-            },
+        items.push(Item::Rect(RectItem::new(
             RectPx {
                 x: right,
                 y: 44.0,
                 w: vp.0 - right,
                 h: r.h,
             },
-        ] {
-            items.push(Item::Rect(RectItem::new(panel, [0.006, 0.006, 0.006, 1.0])));
-        }
-        text(items, 16.0, 62.0, 12.0, "PROCESSORS", INK, l - 32.0);
-        text(
-            items,
-            16.0,
-            81.0,
-            10.0,
-            "Enabled processors run top to bottom",
-            DIM,
-            l - 32.0,
-        );
-        let listclip = RectPx {
-            x: 0.0,
-            y: 96.0,
-            w: l,
-            h: (vp.1 - 155.0).max(1.0),
-        };
-        items.push(Item::Clip(Some(listclip)));
-        for (i, d) in self.descriptors.iter().enumerate() {
-            let y = 96.0 + i as f32 * 58.0 - self.list_scroll;
-            button(
-                items,
-                RectPx {
-                    x: 8.0,
-                    y: y + 4.0,
-                    w: l - 16.0,
-                    h: 50.0,
-                },
-                "",
-                i == self.selected,
-            );
-            text(
-                items,
-                14.0,
-                y + 20.0,
-                12.0,
-                if self.enabled[i] { "[x]" } else { "[ ]" },
-                if self.enabled[i] { INK } else { DIM },
-                28.0,
-            );
-            text(items, 47.0, y + 14.0, 12.0, &d.name, INK, l - 60.0);
-            text(
-                items,
-                47.0,
-                y + 33.0,
-                10.0,
-                if !self.enabled[i] {
-                    "Bypassed"
-                } else if !self.supported[i] {
-                    "No frame preview"
-                } else {
-                    "Enabled"
-                },
-                DIM,
-                l - 60.0,
-            );
-        }
-        items.push(Item::Clip(Some(r)));
-        if self.descriptors.is_empty() {
-            text(
-                items,
-                16.0,
-                120.0,
-                11.0,
-                "No processors in this build",
-                DIM,
-                l - 32.0,
-            );
-        }
-        button(
-            items,
-            RectPx {
-                x: 8.0,
-                y: vp.1 - 45.0,
-                w: l / 2.0 - 12.0,
-                h: 28.0,
-            },
-            "Move up",
-            false,
-        );
-        button(
-            items,
-            RectPx {
-                x: l / 2.0 + 4.0,
-                y: vp.1 - 45.0,
-                w: l / 2.0 - 12.0,
-                h: 28.0,
-            },
-            "Move down",
-            false,
-        );
+            [0.006, 0.006, 0.006, 1.0],
+        )));
+        self.draw_rail(items, vp);
         let v = Self::viewer(vp);
         let cached = self
             .frames
@@ -1408,28 +1568,27 @@ impl Panel {
             );
         }
         let dims = cached.map_or(self.source_dims, |f| f.output);
-        let scale = (v.w / dims[0].max(1) as f32).min(v.h / dims[1].max(1) as f32);
-        let w = dims[0] as f32 * scale;
-        let h = dims[1] as f32 * scale;
         let source = if cached.is_some() {
             slot + 1
         } else {
             self.source
         };
+        let board = Canvas { r: v };
+        board.ground(items);
+        items.push(Item::Clip(Some(v)));
+        let picture = board.picture((dims[0], dims[1]), view);
+        Canvas::lift(items, picture);
         items.push(Item::Video {
             a: source,
             b: source,
-            r: RectPx {
-                x: v.x + (v.w - w) / 2.0,
-                y: v.y + (v.h - h) / 2.0,
-                w,
-                h,
-            },
+            r: picture,
             uv: [0.0, 0.0, 1.0, 1.0],
             mode: VideoMode::Tex,
             p0: 0.0,
             p1: 0.0,
         });
+        board.recess(items);
+        items.push(Item::Clip(Some(r)));
         for (i, label) in [
             "Prev rendered",
             "< Frame",
@@ -1732,6 +1891,45 @@ mod tests {
         );
     }
     #[test]
+    fn rail_cards_select_tick_and_fold_like_sources() {
+        struct Tagged(&'static str, Vec<Category>);
+        impl abner_processor_api::Factory for Tagged {
+            fn categories(&self) -> Vec<Category> {
+                self.1.clone()
+            }
+            fn descriptor(&self) -> Descriptor {
+                Descriptor { id: self.0.into(), ..BufferedFactory.descriptor() }
+            }
+            fn create(&self, w: usize, h: usize, s: &Value) -> Result<Box<dyn Session>, String> {
+                BufferedFactory.create(w, h, s)
+            }
+        }
+        let mut r = Registry::default();
+        r.register(Box::new(Tagged("example.a", vec![Category::Upscaling, Category::Denoising, Category::Upscaling]))).unwrap();
+        r.register(Box::new(Tagged("example.b", vec![]))).unwrap();
+        let mut p = Panel::new(r);
+        p.enter();
+        // Sorted, deduplicated, and labelled; none declared reads as such.
+        assert_eq!(category_label(&p.categories[0]), "Upscaling · Denoising");
+        assert_eq!(category_label(&p.categories[1]), "Uncategorized");
+        let vp = (1280.0, 900.0);
+        let card = p.card(1, vp);
+        assert!(p.click(card.x + 60.0, card.y + 20.0, vp));
+        assert_eq!(p.selected, 1);
+        assert_eq!(p.enabled, [false, false], "a card click focuses, never enables");
+        let check = p.card_check(0, vp);
+        p.click(check.x + 5.0, check.y + 5.0, vp);
+        assert_eq!(p.enabled, [true, false]);
+        assert_eq!(p.selected, 1, "the enable box doesn't move focus");
+        let (grip, inspector) = p.detail(vp);
+        assert!(inspector.h > 0.0);
+        p.click(grip.x + 20.0, grip.y + 5.0, vp);
+        assert!(!p.show_detail && p.animating());
+        p.move_selected(-1);
+        assert_eq!(category_label(&p.categories[0]), "Uncategorized");
+        assert_eq!(p.enabled, [false, true], "flags travel with their processor");
+    }
+    #[test]
     fn proxy_preserves_aspect_without_upscaling() {
         assert_eq!(proxy_dimensions(1920, 1080), [640, 360]);
         assert_eq!(proxy_dimensions(1080, 1920), [203, 360]);
@@ -2001,6 +2199,10 @@ mod tests {
         r.register(Box::new(Named("example.a"))).unwrap();
         r.register(Box::new(Named("example.b"))).unwrap();
         let mut p = Panel::new(r);
+        // Plugins start bypassed; nothing runs until it is ticked.
+        assert_eq!(p.enabled, [false, false]);
+        assert!(p.chain().is_empty());
+        p.enabled = vec![true, true];
         p.enter();
         p.settings["strength"] = json!(0.8);
         p.changed();

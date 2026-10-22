@@ -3,6 +3,32 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-22 — Processor rail, categories, off by default, shared canvas
+
+Processors start bypassed: `Panel::new` ticks nothing, and only `--processor ID`
+(naming it on the command line) enables one. With nothing ticked, Preview says so
+instead of running an empty chain.
+
+`Factory::categories()` declares one or more `Category` values (Interpolation,
+Enhancement, Upscaling, Denoising, Sharpening, Deinterlacing, Restoration,
+Stabilization, Color, Analysis, Generation, `Other(String)`). It defaults to none so
+older plugins still build; the host shows those as "Uncategorized".
+`--list-processors` now prints categories and capabilities with each descriptor.
+
+The Process mode's left column is the Sources rail: same width
+(`rail_full_width`), heading strip, 64px cards on the 12px gap with the orange
+`SOURCE_RING` on the focused one, keycap, name, categories, and the enable box
+where Sources keeps its batch checkbox. Under the cards is the folding focused
+inspector (Category / Role / Input / Preview / Settings, the ID in
+`INSPECTOR_PATH` blue). It shares `draw_keycap`, `draw_dashed_hairline` and
+`draw_rail_grip` with the Sources inspector, and Move up / down sit in the
+Duplicate / Add files strip.
+
+The Process viewer draws through `app::Canvas`, the timeline's canvas: #2c2c2c
+ground, board-proportioned fit, lift shadow, recessed edge. It also uses the app's
+shared zoom/center, so pinch and two-finger pan work there (`App::canvas()` is
+the viewer while Process is up).
+
 ## 2026-10-22 — coalescing decoder waker (task 4)
 
 All players and native-open notifications share a Switchblade-style atomic

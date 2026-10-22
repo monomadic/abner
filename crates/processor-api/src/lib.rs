@@ -93,6 +93,42 @@ pub enum InputRequirement {
     },
     WholeClip,
 }
+/// What a plugin is for. A plugin declares one or more; the host groups and
+/// labels with them and never infers behaviour from them.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub enum Category {
+    Interpolation,
+    Enhancement,
+    Upscaling,
+    Denoising,
+    Sharpening,
+    Deinterlacing,
+    Restoration,
+    Stabilization,
+    Color,
+    Analysis,
+    Generation,
+    /// Anything the list above does not cover; shown as written.
+    Other(String),
+}
+impl Category {
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Interpolation => "Interpolation",
+            Self::Enhancement => "Enhancement",
+            Self::Upscaling => "Upscaling",
+            Self::Denoising => "Denoising",
+            Self::Sharpening => "Sharpening",
+            Self::Deinterlacing => "Deinterlacing",
+            Self::Restoration => "Restoration",
+            Self::Stabilization => "Stabilization",
+            Self::Color => "Color",
+            Self::Analysis => "Analysis",
+            Self::Generation => "Generation",
+            Self::Other(s) => s,
+        }
+    }
+}
 #[derive(Clone, Copy, Default, Serialize)]
 pub struct Capabilities {
     pub role: Role,
@@ -123,6 +159,13 @@ pub trait Factory: Send {
     /// Opt out if timestamp-preserving frame previews are unsupported.
     fn supports_preview(&self) -> bool {
         true
+    }
+
+    /// One or more categories this plugin belongs to. The default (none)
+    /// exists so older plugins still build; the host lists them as
+    /// uncategorized until they declare.
+    fn categories(&self) -> Vec<Category> {
+        Vec::new()
     }
 
     fn descriptor(&self) -> Descriptor;
