@@ -61,7 +61,9 @@ config: abner.default.toml (built in) overlaid by the first of
 processor previews (composed launcher):
   --processor ID                    open the runtime settings and preview panel
   --processor-settings JSON         optional initial settings object
-  P                                 toggle processor controls; Space plays preview
+  --process                         open the Process workspace
+  R                                 preview current frame in Process
+  Shift-Left / Shift-Right           previous / next rendered frame
 
 composition probes (no window):
   --list-processors                  list registered descriptors and settings
@@ -125,6 +127,7 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
     let mut config_path: Option<PathBuf> = None;
     let mut mask_mode = false;
     let mut processor = None;
+    let mut process_workspace = false;
     let mut processor_settings = serde_json::json!({});
     // The Sources sidebar hidden, as the header toggle leaves it: for captures.
     let mut no_sources = false;
@@ -138,10 +141,19 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
     let mut paths: Vec<PathBuf> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
-        if a == "--processor" {
-            processor=Some(it.next().ok_or_else(||anyhow::anyhow!("--processor needs a registered ID"))?.clone());
+        if a == "--process" {
+            process_workspace = true;
+        } else if a == "--processor" {
+            processor = Some(
+                it.next()
+                    .ok_or_else(|| anyhow::anyhow!("--processor needs a registered ID"))?
+                    .clone(),
+            );
         } else if a == "--processor-settings" {
-            processor_settings=serde_json::from_str(it.next().ok_or_else(||anyhow::anyhow!("--processor-settings needs JSON"))?)?;
+            processor_settings = serde_json::from_str(
+                it.next()
+                    .ok_or_else(|| anyhow::anyhow!("--processor-settings needs JSON"))?,
+            )?;
         } else if a == "--view" {
             let v = it.next().and_then(|v| app::Mode::parse(v));
             match v {
@@ -245,10 +257,18 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
     let mut app = App::new(videos, &config);
     if duplicate {
         app.duplicate_sources();
-        for v in &app.videos { v.player.set_notify(notify.clone()); }
+        for v in &app.videos {
+            v.player.set_notify(notify.clone());
+        }
     }
     app.set_processors(registry);
-    if let Some(id)=processor {app.start_processor(&id,processor_settings).map_err(anyhow::Error::msg)?;}
+    if process_workspace {
+        app.select_workspace_mode(4);
+    }
+    if let Some(id) = processor {
+        app.start_processor(&id, processor_settings)
+            .map_err(anyhow::Error::msg)?;
+    }
     app.set_recent(recent::load());
     app.set_video_splash(video_splash);
     if let Some(path) = video_splash.then(backdrop_path).flatten() {

@@ -253,43 +253,46 @@ explicit missing, invalid or unreadable plugin directory fails the build; only
 a missing default `plugins/` directory is treated as an empty installation.
 
 
-### Interactive processor previews
+### Process workspace
 
-In a composed build, load a clip and click **Processors [P]** (or press `P`).
-Click the processor name to cycle registered factories. The controls come from
-its runtime schema: bounded numbers and integers use sliders; clicking their
-labels opens exact text entry. Enums cycle on click, booleans toggle, and strings
-accept text (including file paths). Enter commits text, Escape cancels it;
-macOS supports Cmd+A and Cmd+V. Scroll the settings column to reach more fields.
-Cycle presets applies each descriptor's preset over the schema defaults.
-Unsupported auxiliary or nested input types are labelled explicitly; the initial
-editor is not a complete JSON Schema implementation.
+Open a clip and select **Process**, immediately after Timeline (also available in
+View > Process or with `--process`). The old floating preview dialog and P toggle
+are gone. Installed processors appear on the left in processing order. Toggle a
+row’s checkbox to bypass it; select a row to focus its settings, and use Move up /
+Move down to reorder it. Each processor retains its own settings when focus moves.
 
-The panel automatically rebuilds a short preview after settings settle or the
-playhead moves. Source and processed frames play side by side at matched source
-timestamps; Space pauses their loop. Refresh retries a failed preview. Progress
-shows completed frames, throughput and estimated remaining processing time.
-The main timeline stays paused while the panel is open.
+The large viewer uses the normal clip transport. Click the clip timeline to seek
+or drag its playhead; Space plays/pauses, and the frame buttons step source frames.
+**Preview frame** (R) explicitly renders the current frame through enabled
+processors up to and including the focused processor. The returned frame replaces
+source display at that position and gets a blue timeline mark. **Prev rendered** /
+**Next rendered** (Shift-Left / Shift-Right) jump between marked frames. Seeking
+preserves marks; settings, order, bypass, source or timeline edits invalidate them.
+Preview frames survive switching workspaces, within a 96 MiB cache budget; evicted
+frames lose their marks. Changing processor focus conservatively clears the cache.
 
-The worker decodes up to 24 frames from the playhead, stopping at the current
-split/cut boundary or EOF, then drains buffered processor output. Each request
-creates a fresh session; configuration changes, seeks, source changes and closing
-the panel cancel the previous request and discard stale results. A bounded mailbox
-coalesces pending requests. Factories must implement `Send` so the registry can
-move to the worker; sessions and native device objects are created and used on
-that worker, and need not implement `Send`.
+The right inspector uses runtime schemas: numeric sliders support exact entry by
+clicking their labels, enums cycle, booleans toggle, and text fields accept paths.
+Enter commits text, Escape cancels; Cmd+A / Cmd+V work. Scroll to reach additional
+settings. Cycle processor presets applies built-in presets over schema defaults.
+Unsupported nested/auxiliary types are labelled. Factories may opt out of frame
+previews with `supports_preview()`; the host has no processor-specific branches.
 
-These are **display proxies**, at most 640×360 before processing, decoded to
-8-bit RGBA and expanded to RGB16 for the processor. They are not full-precision
-or native-resolution exports. Preview frame storage is budgeted to 96 MiB
-(excluding model/session memory and temporary conversion buffers). This first
-host path supports constant-rate, timestamp-preserving processors and SDR
-Rec.709. Untagged sources are assumed SDR; incompatible tagged color spaces and
-HDR are rejected. Interpolation, auxiliary inputs, persisted processing stacks,
-full color negotiation and processor export remain future work. The existing
-Export action still exports the source timeline without preview processing.
+Preview sessions run on a worker, in chain order, including each stage’s buffered
+output and end-of-stream flush. To preserve temporal history, decoding begins at
+the current kept segment’s start, continues through the requested frame and up to
+24 following frames, stopping at the segment boundary or EOF. Only the requested
+frame is cached. This can take time for distant frames; context preparation shows
+frame progress. Reconfiguration cancels old work and rejects late results. Device
+calls already executing may finish before cancellation takes effect.
 
-For a reproducible startup, use `--processor ID --processor-settings JSON`
-with a video path. IDs and settings come from the installed registry, never from
-committed host configuration. The ordinary empty-registry build shows an empty
-processor panel and retains its existing media workflow.
+These are **SDR display proxies**, at most 640×360 before processing, decoded as
+8-bit RGBA then expanded to RGB16. They are not full-resolution exports. The cache
+budget excludes model/session memory. Current previews require constant-rate,
+timestamp-preserving processors and SDR Rec.709; incompatible tagged color is
+rejected. Persistent stack presets, auxiliary inputs, interpolation, full color
+negotiation and processor export remain future work. Process does not write media;
+Timeline’s existing export still exports its source edits, without processing.
+
+`--processor ID --processor-settings JSON` opens Process focused on a registered
+processor. Ordinary builds with an empty registry show an empty processor list.

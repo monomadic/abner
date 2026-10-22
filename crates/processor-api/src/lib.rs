@@ -120,6 +120,11 @@ pub trait Factory: Send {
     fn capabilities(&self) -> Capabilities {
         Capabilities::default()
     }
+    /// Opt out if timestamp-preserving frame previews are unsupported.
+    fn supports_preview(&self) -> bool {
+        true
+    }
+
     fn descriptor(&self) -> Descriptor;
     fn create(
         &self,

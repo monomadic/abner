@@ -24,6 +24,32 @@ passes rustfmt and the patch passes whitespace checks. Live startup, paused
 step/seek repainting and hide/restore still need window-level verification;
 no event-count or throughput benchmark was run.
 
+## 2026-10-22 — Processor capability and stage feedback
+
+Factories can declare generator / processor / post-processor roles and independent,
+windowed or whole-clip input requirements. The Process inspector displays these
+declarations; legacy plugins explicitly show undeclared requirements. The frame
+preview runner refuses declared generators and whole-clip stages rather than
+pretending it can execute them. These declarations do not add those execution modes.
+
+Sessions can optionally report progress during a single process call. The UI shows
+the active processor and phase, with a stage percentage only when a nonzero total
+is supplied. Existing sessions retain phase-boundary feedback through process and
+buffered completion; stale-generation events are ignored. Preview completion shows
+the number of saved frames. Existing implementations require adoption of the new
+callback to provide detailed in-flight percentages.
+
+## 2026-10-21 — Process workspace and marked frame previews
+
+Replaced the floating preview dialog with a Process tab after Timeline, an ordered
+bypassable processor list, persistent per-processor settings, a large video viewer
+and clip transport. Explicit frame previews run the enabled chain through focus;
+marked frames can be revisited with previous/next rendered controls. Configuration
+and timeline changes cancel stale work and invalidate the bounded cache. Buffered
+stages flush in order; temporal previews decode from the kept segment boundary.
+The generic factory supports an opt-out from frame preview. This remains proxy
+previewing: final processor media export is not connected.
+
 ## 2026-10-21 — schema controls and live processor previews
 
 Added a generic runtime-descriptor panel with numeric sliders and exact entry,
@@ -52,6 +78,26 @@ only a missing default installation is optional. Five generic regression tests
 cover relative generated dependencies, absolute overrides, missing defaults versus
 explicit paths, invalid directories and empty installations. Processor identities
 and implementation details remain outside committed files.
+
+## 2026-10-21 — decoding in pure Rust (FilmCraft)
+
+The in-process libav player and `rsmpeg` are gone: `src/player.rs` runs on FilmCraft's
+`MediaSource` through `src/fc.rs` (switchblade's bridge, carried over), with the frame
+cache, its runs/pending/landing rules and the whole public API unchanged. VideoToolbox
+still decodes h264/hevc/vp9/av1 on Apple silicon, chosen by FilmCraft per stream and
+bit-exact with its software decoders (the fallback), and the pictures match ffmpeg's
+decode bit for bit on every codec the harness checks. Exact seeks decode a rewind window
+before the target from the preceding keyframe (the container's own sync-sample table, MP4
+sample tables or Matroska cues); same-GOP targets extend the current run as before.
+Y'CbCr→RGBA at native size is one fixed-point pass. Codec coverage is FilmCraft's: h264,
+hevc, vp9, av1, prores, dnxhd, mpeg-2, mjpeg and the containers mp4/mov, mkv/webm, mxf, mpeg-ts,
+avi; FFV1 and other libav-only codecs no longer play (the processor preview test's synthetic
+source moved from FFV1 to lossless H.264 for that reason). What it buys: no ffmpeg 8 pin, no
+pkg-config, no `.cargo/config.toml`, no dylibs in the bundle, and a decoder that returns the
+right frame on exact seeks into open-GOP HEVC, where libav returned the CRA picture for the
+leading frames before it — for an A/B tool that is a correctness fix. Decided on the numbers
+from [codec-bench](https://github.com/monomadic/codec-bench). The FilmCraft pin is a fork
+revision carrying the VP9 (storytold/filmcraft#2180) and AV1 (#2608) VideoToolbox decoders.
 
 ## 2026-10-20 — the recent row remembers groups
 
@@ -108,27 +154,6 @@ untouched; the build stamp ignores untracked files, so the hash stays honest.
 Plain `cargo build` is unchanged (empty registry). `build-app.sh --with-plugins`
 bundles the composed launcher. Proven with a throwaway identity processor:
 `--list-processors` and `--check-processor` pass, a second run is a no-op.
-
-||||||| parent of c3f5f36 (player: decode with FilmCraft (pure Rust) instead of linking libav)
-## 2026-10-21 — decoding in pure Rust (FilmCraft)
-
-The in-process libav player and `rsmpeg` are gone: `src/player.rs` runs on FilmCraft's
-`MediaSource` through `src/fc.rs` (switchblade's bridge, carried over), with the frame
-cache, its runs/pending/landing rules and the whole public API unchanged. VideoToolbox
-still decodes h264/hevc/vp9/av1 on Apple silicon, chosen by FilmCraft per stream and
-bit-exact with its software decoders (the fallback), and the pictures match ffmpeg's
-decode bit for bit on every codec the harness checks. Exact seeks decode a rewind window
-before the target from the preceding keyframe (the container's own sync-sample table, MP4
-sample tables or Matroska cues); same-GOP targets extend the current run as before.
-Y'CbCr→RGBA at native size is one fixed-point pass. Codec coverage is FilmCraft's: h264,
-hevc, vp9, av1, prores, dnxhd, mpeg-2, mjpeg and the containers mp4/mov, mkv/webm, mxf, mpeg-ts,
-avi; FFV1 and other libav-only codecs no longer play (the processor preview test's synthetic
-source moved from FFV1 to lossless H.264 for that reason). What it buys: no ffmpeg 8 pin, no
-pkg-config, no `.cargo/config.toml`, no dylibs in the bundle, and a decoder that returns the
-right frame on exact seeks into open-GOP HEVC, where libav returned the CRA picture for the
-leading frames before it — for an A/B tool that is a correctness fix. Decided on the numbers
-from [codec-bench](https://github.com/monomadic/codec-bench). The FilmCraft pin is a fork
-revision carrying the VP9 (storytold/filmcraft#2180) and AV1 (#2608) VideoToolbox decoders.
 
 ## 2026-10-18 — no clip number over the canvas
 

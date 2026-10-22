@@ -6,7 +6,10 @@ use crate::{
     probe::VideoInfo,
     render::{Item, RectItem, RectPx, TextItem, Upload, VideoMode},
 };
-use abner_processor_api::{Cancellation, Descriptor, Frame, Registry};
+use abner_processor_api::{
+    Cancellation, Capabilities, Descriptor, Frame, InputRequirement, Progress, Registry, Role,
+    Session,
+};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -123,8 +126,8 @@ fn text_value(field: &Field, schema: &Value, text: &str) -> Result<Option<Value>
 
 struct Request {
     generation: u64,
-    id: String,
-    settings: Value,
+    chain: Vec<(String, Value)>,
+    target: Option<f64>,
     info: VideoInfo,
     start: f64,
     end: Option<f64>,
@@ -135,13 +138,79 @@ struct Mailbox {
     stop: bool,
 }
 struct Worker {
-    active: Arc<Mutex<Option<Cancellation>>>,
+    active: Arc<Mutex<Vec<Cancellation>>>,
     mailbox: Arc<(Mutex<Mailbox>, Condvar)>,
     rx: mpsc::Receiver<Event>,
 }
 enum Event {
     Frame(u64, Preview),
+    Progress(u64, usize, usize),
+    Stage(u64, String),
     Done(u64, Result<(), String>),
+}
+fn stage_status(name: &str, progress: &Progress) -> String {
+    let phase = if progress.phase.trim().is_empty() {
+        "Processing"
+    } else {
+        &progress.phase
+    };
+    match progress.total.filter(|total| *total > 0) {
+        Some(total) => format!(
+            "{name} · {phase} · {:.0}% of stage",
+            (progress.completed.min(total) as f64 / total as f64 * 100.0).floor()
+        ),
+        None => format!("{name} · {phase} · working"),
+    }
+}
+fn capability_label(c: Capabilities) -> String {
+    let role = match c.role {
+        Role::Generator => "Generator",
+        Role::Processor => "Processor",
+        Role::PostProcessor => "Post-processor",
+    };
+    let input = match c.input {
+        InputRequirement::Unspecified => "input needs undeclared".into(),
+        InputRequirement::IndependentFrame => "one frame".into(),
+        InputRequirement::Window { before, after } => {
+            format!("context −{before} / +{after} frames")
+        }
+        InputRequirement::WholeClip => "needs entire clip".into(),
+    };
+    format!("{role} · {input}")
+}
+/// Stage boundaries remain visible even for legacy sessions without callbacks.
+struct ReportingSession {
+    inner: Box<dyn Session>,
+    report: abner_processor_api::ProgressReporter,
+}
+impl Session for ReportingSession {
+    fn process(&mut self, input: Frame) -> Result<Vec<Frame>, String> {
+        (self.report)(Progress {
+            phase: "Processing".into(),
+            completed: 0,
+            total: None,
+        });
+        let result = self.inner.process(input);
+        (self.report)(self.inner.progress());
+        result
+    }
+    fn finish(&mut self) -> Result<Vec<Frame>, String> {
+        (self.report)(Progress {
+            phase: "Finishing buffered frames".into(),
+            completed: 0,
+            total: None,
+        });
+        self.inner.finish()
+    }
+    fn output_dimensions(&self) -> [usize; 2] {
+        self.inner.output_dimensions()
+    }
+    fn cancellation(&self) -> Cancellation {
+        self.inner.cancellation()
+    }
+    fn progress(&self) -> Progress {
+        self.inner.progress()
+    }
 }
 struct Preview {
     before: Rgba,
@@ -150,7 +219,6 @@ struct Preview {
     output: [u32; 2],
     pts: f64,
     elapsed: f64,
-    total: usize,
 }
 impl Worker {
     fn new(registry: Registry) -> Self {
@@ -164,7 +232,7 @@ impl Worker {
         // At most one section in flight plus its completion; the UI clears stale events.
         let (tx, rx) = mpsc::sync_channel(FRAMES + 2);
         let shared = mailbox.clone();
-        let active = Arc::new(Mutex::new(None));
+        let active = Arc::new(Mutex::new(Vec::new()));
         let active_worker = active.clone();
         std::thread::spawn(move || {
             loop {
@@ -184,7 +252,7 @@ impl Worker {
                     render(&registry, &request, &tx, Some(&active_worker))
                 }))
                 .unwrap_or_else(|_| Err("Processor panicked; preview stopped".into()));
-                *active_worker.lock().unwrap() = None;
+                active_worker.lock().unwrap().clear();
                 if tx.send(Event::Done(generation, result)).is_err() {
                     break;
                 }
@@ -197,7 +265,7 @@ impl Worker {
         }
     }
     fn cancel(&self) {
-        if let Some(c) = self.active.lock().unwrap().as_ref() {
+        for c in self.active.lock().unwrap().iter() {
             c.cancel();
         }
     }
@@ -229,21 +297,67 @@ fn render(
     registry: &Registry,
     r: &Request,
     tx: &mpsc::SyncSender<Event>,
-    active: Option<&Mutex<Option<Cancellation>>>,
+    active: Option<&Mutex<Vec<Cancellation>>>,
 ) -> Result<(), String> {
     r.cancel.check()?;
     // The display decoder emits RGBA8. This preview is explicitly a proxy, not
     // a full precision export or a color-managed HDR conversion.
     check_sdr(&r.info.path)?;
     let [w, h] = proxy_dimensions(r.info.width, r.info.height);
-    let mut session = registry
-        .get(&r.id)?
-        .create(w as usize, h as usize, &r.settings)?;
-    if let Some(active) = active {
-        *active.lock().unwrap() = Some(session.cancellation());
+    let mut sessions = Vec::new();
+    let mut dims = [w as usize, h as usize];
+    for (id, settings) in &r.chain {
+        let factory = registry.get(id)?;
+        let caps = factory.capabilities();
+        if !matches!(caps.role, Role::Processor)
+            || matches!(caps.input, InputRequirement::WholeClip)
+        {
+            return Err(format!(
+                "{}: generator / whole-clip execution is not supported by frame previews",
+                factory.descriptor().name
+            ));
+        }
+        if !factory.supports_preview() {
+            return Err(format!(
+                "{} does not support frame previews",
+                factory.descriptor().name
+            ));
+        }
+        let name = factory.descriptor().name;
+        let feedback = active.is_some();
+        if feedback {
+            let _ = tx.try_send(Event::Stage(
+                r.generation,
+                format!("{name} · Preparing processor"),
+            ));
+        }
+        let mut session = factory.create(dims[0], dims[1], settings)?;
+        let sender = tx.clone();
+        let generation = r.generation;
+        let report: abner_processor_api::ProgressReporter = Arc::new(move |progress| {
+            if feedback {
+                let _ = sender.try_send(Event::Stage(generation, stage_status(&name, &progress)));
+            }
+        });
+        session.set_progress_reporter(report.clone());
+        let session: Box<dyn Session> = Box::new(ReportingSession {
+            inner: session,
+            report,
+        });
+        dims = session.output_dimensions();
+        if dims.contains(&0)
+            || dims.iter().any(|d| *d > 8192)
+            || dims[0] * dims[1] * 8 > PREVIEW_BYTES
+        {
+            return Err("Processor output exceeds the preview memory budget".into());
+        }
+        if let Some(active) = active {
+            active.lock().unwrap().push(session.cancellation());
+        }
+        r.cancel.check()?;
+        sessions.push(session);
     }
-    r.cancel.check()?;
-    let [ow, oh] = session.output_dimensions();
+    let [ow, oh] = dims;
     if ow < 2 || oh < 2 || ow > 8192 || oh > 8192 {
         return Err("Unsupported preview output dimensions".into());
     }
@@ -290,6 +404,11 @@ fn render(
                     255,
                 ]);
             }
+            if r.target
+                .is_some_and(|target| (source_pts - target).abs() > 0.51 / fps)
+            {
+                continue;
+            }
             received += 1;
             tx.send(Event::Frame(
                 r.generation,
@@ -300,7 +419,6 @@ fn render(
                     output: [ow as u32, oh as u32],
                     pts: source_pts,
                     elapsed: started.elapsed().as_secs_f64(),
-                    total: count,
                 },
             ))
             .map_err(|_| "Preview closed")?;
@@ -327,7 +445,13 @@ fn render(
         }
     };
     let mut next = read_frame()?;
-    for _ in 0..count {
+    let decode_count = r.target.map_or(count, |target| {
+        (((target - r.start).max(0.0) * fps).ceil() as usize).saturating_add(FRAMES)
+    });
+    for decoded in 0..decode_count {
+        if r.target.is_some() {
+            let _ = tx.try_send(Event::Progress(r.generation, decoded, decode_count));
+        }
         let Some((source_pts, rgba)) = next.take() else {
             break;
         };
@@ -351,21 +475,35 @@ fn render(
             .iter()
             .flat_map(|p| [p[0] as u16 * 257, p[1] as u16 * 257, p[2] as u16 * 257])
             .collect();
+        if originals.len() >= count {
+            return Err("Processor buffered too many frames for preview".into());
+        }
         originals.insert(pts, (rgba, source_pts));
         emit(
-            session.process(Frame {
-                width: w as usize,
-                height: h as usize,
-                pixels,
-                pts,
-                duration,
-                time_base: [1, 1_000_000],
-            })?,
+            process_chain(
+                &mut sessions,
+                0,
+                vec![Frame {
+                    width: w as usize,
+                    height: h as usize,
+                    pixels,
+                    pts,
+                    duration,
+                    time_base: [1, 1_000_000],
+                }],
+                &r.cancel,
+            )?,
             &mut originals,
         )?;
     }
     r.cancel.check()?;
-    emit(session.finish()?, &mut originals)?;
+    for i in 0..sessions.len() {
+        let tail = sessions[i].finish()?;
+        emit(
+            process_chain(&mut sessions, i + 1, tail, &r.cancel)?,
+            &mut originals,
+        )?;
+    }
     if received == 0 {
         return Err("No preview frames at this position".into());
     }
@@ -373,6 +511,29 @@ fn render(
         return Err("Processor did not return all preview frames".into());
     }
     Ok(())
+}
+fn process_chain(
+    sessions: &mut [Box<dyn abner_processor_api::Session>],
+    from: usize,
+    mut frames: Vec<Frame>,
+    cancel: &Cancellation,
+) -> Result<Vec<Frame>, String> {
+    for session in &mut sessions[from..] {
+        let mut outputs = Vec::new();
+        for frame in frames {
+            cancel.check()?;
+            outputs.extend(session.process(frame)?);
+            let bytes: usize = outputs
+                .iter()
+                .map(|f| f.pixels.len().saturating_mul(2))
+                .sum();
+            if bytes > PREVIEW_BYTES {
+                return Err("Processor batch exceeds preview budget".into());
+            }
+        }
+        frames = outputs;
+    }
+    Ok(frames)
 }
 fn check_sdr(path: &std::path::Path) -> Result<(), String> {
     let mut cmd = std::process::Command::new("ffprobe");
@@ -409,6 +570,22 @@ pub struct Panel {
     pub open: bool,
     descriptors: Vec<Descriptor>,
     selected: usize,
+    saved: Vec<Value>,
+    enabled: Vec<bool>,
+    supported: Vec<bool>,
+    capabilities: Vec<Capabilities>,
+    pub seek: Option<f64>,
+    pub toggle_play: bool,
+    time: f64,
+    pub segment_start: f64,
+    pub timeline_revision: u64,
+    duration: f64,
+    fps: f64,
+    source: usize,
+    source_dims: [u32; 2],
+    list_scroll: f32,
+    scrubbing: bool,
+    filename: String,
     fields: Vec<Field>,
     settings: Value,
     worker: Option<Worker>,
@@ -421,7 +598,6 @@ pub struct Panel {
     busy: bool,
     selected_frame: usize,
     playback: bool,
-    play_started: Instant,
     editing: Option<(usize, String)>,
     scroll: f32,
     dragging: Option<usize>,
@@ -434,6 +610,22 @@ impl Default for Panel {
             open: false,
             descriptors: vec![],
             selected: 0,
+            saved: vec![],
+            enabled: vec![],
+            supported: vec![],
+            capabilities: vec![],
+            seek: None,
+            toggle_play: false,
+            time: 0.0,
+            segment_start: 0.0,
+            timeline_revision: 0,
+            duration: 1.0,
+            fps: 24.0,
+            source: 0,
+            source_dims: [16, 9],
+            list_scroll: 0.0,
+            scrubbing: false,
+            filename: String::new(),
             fields: vec![],
             settings: json!({}),
             worker: None,
@@ -446,7 +638,6 @@ impl Default for Panel {
             busy: false,
             selected_frame: 0,
             playback: true,
-            play_started: Instant::now(),
             editing: None,
             scroll: 0.0,
             dragging: None,
@@ -458,9 +649,33 @@ impl Default for Panel {
 impl Panel {
     pub fn new(registry: Registry) -> Self {
         let descriptors = registry.descriptors();
+        let capabilities = descriptors
+            .iter()
+            .map(|d| registry.get(&d.id).unwrap().capabilities())
+            .collect();
+        let supported = descriptors
+            .iter()
+            .map(|d| {
+                registry.get(&d.id).is_ok_and(|f| {
+                    let c = f.capabilities();
+                    f.supports_preview()
+                        && matches!(c.role, Role::Processor)
+                        && !matches!(c.input, InputRequirement::WholeClip)
+                })
+            })
+            .collect();
+        let saved = descriptors
+            .iter()
+            .map(|d| defaults(&fields(&d.settings_schema)))
+            .collect();
+        let enabled = vec![true; descriptors.len()];
         let worker = (!descriptors.is_empty()).then(|| Worker::new(registry));
         let mut s = Self::default();
         s.descriptors = descriptors;
+        s.saved = saved;
+        s.enabled = enabled;
+        s.supported = supported;
+        s.capabilities = capabilities;
         s.worker = worker;
         s.select(0);
         s
@@ -473,7 +688,7 @@ impl Panel {
         self.selected = index;
         self.preset = 0;
         self.fields = fields(&self.descriptors[index].settings_schema);
-        self.settings = defaults(&self.fields);
+        self.settings = self.saved[index].clone();
         self.scroll = 0.0;
         self.editing = None;
         self.changed();
@@ -487,8 +702,11 @@ impl Panel {
         self.frames.clear();
         self.selected_frame = 0;
         self.busy = false;
-        self.dirty = Some(Instant::now());
-        self.status = "Waiting for settings…".into();
+        self.dirty = None;
+        if let Some(saved) = self.saved.get_mut(self.selected) {
+            *saved = self.settings.clone();
+        }
+        self.status = "Preview current frame to inspect the enabled chain.".into();
     }
     fn toggle(&mut self) {
         self.dragging = None;
@@ -501,7 +719,6 @@ impl Panel {
                 worker.cancel();
             }
             self.generation += 1;
-            self.frames.clear();
             self.busy = false;
             self.editing = None;
             self.dirty = None;
@@ -556,6 +773,14 @@ impl Panel {
         if !self.open {
             return false;
         }
+        if self.scrubbing {
+            let t = Self::timeline(vp);
+            self.seek = Some(
+                (((x - t.x) / t.w).clamp(0.0, 1.0) as f64 * self.duration * self.fps).floor()
+                    / self.fps,
+            );
+            return true;
+        }
         if let Some(i) = self.dragging {
             let row = self.row(i, vp);
             let f = &self.fields[i];
@@ -571,7 +796,8 @@ impl Panel {
         hit(Self::bounds(vp), x, y)
     }
     pub fn release(&mut self) -> bool {
-        self.dragging.take().is_some()
+        let scrub = std::mem::take(&mut self.scrubbing);
+        self.dragging.take().is_some() || scrub
     }
     pub fn close(&mut self) {
         if self.open {
@@ -579,7 +805,65 @@ impl Panel {
         }
     }
     pub fn animating(&self) -> bool {
-        self.open && self.playback && self.frames.len() > 1
+        false // The host polls the worker at 100ms while paused; no hot render loop.
+    }
+    pub fn enter(&mut self) {
+        self.open = true;
+    }
+    pub fn source(&mut self, slot: usize, dims: [u32; 2], playing: bool) {
+        self.source = slot;
+        self.source_dims = dims;
+        self.playback = playing;
+    }
+    pub fn take_seek(&mut self) -> Option<f64> {
+        self.seek.take()
+    }
+    fn request_preview(&mut self) {
+        self.cancel.cancel();
+        if let Some(w) = &self.worker {
+            w.cancel();
+        }
+        self.generation += 1;
+        self.dirty = Some(Instant::now());
+        self.toggle_play = self.playback;
+        self.status = "Preparing frame preview…".into();
+    }
+    fn jump(&mut self, next: bool) {
+        let tolerance = 0.5 / self.fps.max(1.0);
+        self.seek = if next {
+            self.frames.iter().find(|f| f.pts > self.time + tolerance)
+        } else {
+            self.frames
+                .iter()
+                .rev()
+                .find(|f| f.pts < self.time - tolerance)
+        }
+        .map(|f| f.pts);
+    }
+    fn chain(&self) -> Vec<(String, Value)> {
+        self.descriptors
+            .iter()
+            .enumerate()
+            .take(self.selected + 1)
+            .filter(|(i, _)| self.enabled[*i])
+            .map(|(i, d)| (d.id.clone(), self.saved[i].clone()))
+            .collect()
+    }
+    fn move_selected(&mut self, delta: isize) {
+        if self.descriptors.is_empty() {
+            return;
+        }
+        let to = self
+            .selected
+            .saturating_add_signed(delta)
+            .min(self.descriptors.len() - 1);
+        self.saved[self.selected] = self.settings.clone();
+        self.descriptors.swap(self.selected, to);
+        self.saved.swap(self.selected, to);
+        self.enabled.swap(self.selected, to);
+        self.supported.swap(self.selected, to);
+        self.capabilities.swap(self.selected, to);
+        self.select(to);
     }
     pub fn key(&mut self, key: Key) -> bool {
         if self.open && self.editing.is_some() {
@@ -626,49 +910,100 @@ impl Panel {
             }
             return true;
         }
-        if matches!(key, Key::Char('p' | 'P')) {
-            self.toggle();
-            return true;
+        if !self.open {
+            return false;
         }
-        if self.open && key == Key::Escape {
-            self.toggle();
-            return true;
-        }
-        if self.open && key == Key::Space {
-            self.playback = !self.playback;
-            self.play_started = Instant::now();
-            return true;
-        }
-        false
-    }
-    fn button(vp: (f32, f32)) -> RectPx {
-        RectPx {
-            x: vp.0 - 160.0,
-            y: vp.1 - 25.0,
-            w: 150.0,
-            h: 23.0,
+        match key {
+            Key::Space => {
+                self.toggle_play = true;
+                true
+            }
+            Key::KeyLeft => {
+                self.jump(false);
+                true
+            }
+            Key::KeyRight => {
+                self.jump(true);
+                true
+            }
+            Key::Char('r' | 'R') => {
+                self.request_preview();
+                true
+            }
+            Key::Char('m' | 'M' | 'c' | 'C' | 't' | 'T' | 'p' | 'P') => true,
+            Key::Render | Key::SaveProject => {
+                self.status =
+                    "Process previews do not write media. Use Timeline for editing exports.".into();
+                true
+            }
+            _ => false,
         }
     }
     fn bounds(vp: (f32, f32)) -> RectPx {
         RectPx {
-            x: 12.0,
-            y: 76.0,
-            w: (vp.0 - 24.0).max(280.0),
-            h: (vp.1 - 240.0).max(180.0),
+            x: 0.0,
+            y: 44.0,
+            w: vp.0,
+            h: (vp.1 - 44.0).max(1.0),
+        }
+    }
+    fn left(vp: (f32, f32)) -> f32 {
+        (vp.0 * 0.22).clamp(160.0, 250.0)
+    }
+    fn right(vp: (f32, f32)) -> f32 {
+        (vp.0 * 0.25).clamp(200.0, 310.0)
+    }
+    fn viewer(vp: (f32, f32)) -> RectPx {
+        let l = Self::left(vp);
+        let r = Self::right(vp);
+        RectPx {
+            x: l + 16.0,
+            y: 88.0,
+            w: (vp.0 - l - r - 32.0).max(1.0),
+            h: (vp.1 - 250.0).max(1.0),
+        }
+    }
+    fn timeline(vp: (f32, f32)) -> RectPx {
+        let v = Self::viewer(vp);
+        RectPx {
+            x: v.x,
+            y: vp.1 - 109.0,
+            w: v.w,
+            h: 28.0,
+        }
+    }
+    fn transport(vp: (f32, f32), i: usize) -> RectPx {
+        let v = Self::viewer(vp);
+        let width = (v.w - 20.0) / 5.0;
+        RectPx {
+            x: v.x + i as f32 * (width + 5.0),
+            y: vp.1 - 155.0,
+            w: width,
+            h: 29.0,
         }
     }
     fn row(&self, i: usize, vp: (f32, f32)) -> RectPx {
         let r = Self::bounds(vp);
         RectPx {
-            x: r.x + 12.0,
-            y: r.y + 110.0 + i as f32 * 51.0 - self.scroll,
-            w: 270.0,
+            x: vp.0 - Self::right(vp) + 14.0,
+            y: r.y + 126.0 + i as f32 * 51.0 - self.scroll,
+            w: Self::right(vp) - 28.0,
             h: 45.0,
         }
     }
     pub fn scroll(&mut self, dy: f32, cursor: (f32, f32), vp: (f32, f32)) -> bool {
         let r = Self::bounds(vp);
         if self.open && hit(r, cursor.0, cursor.1) {
+            if cursor.0 < Self::left(vp) {
+                self.list_scroll = (self.list_scroll - dy).clamp(
+                    0.0,
+                    (self.descriptors.len() as f32 * 58.0 - (vp.1 - 170.0)).max(0.0),
+                );
+                return true;
+            }
+            if cursor.0 < vp.0 - Self::right(vp) {
+                return true;
+            }
             self.scroll = (self.scroll - dy).clamp(
                 0.0,
                 (self.fields.len() as f32 * 51.0 - (r.h - 170.0)).max(0.0),
@@ -678,10 +1013,6 @@ impl Panel {
         false
     }
     pub fn click(&mut self, x: f32, y: f32, vp: (f32, f32)) -> bool {
-        if hit(Self::button(vp), x, y) {
-            self.toggle();
-            return true;
-        }
         if !self.open {
             return false;
         }
@@ -689,35 +1020,65 @@ impl Panel {
         if !hit(r, x, y) {
             return false;
         }
-        if y < r.y + 40.0 {
-            if x > r.x + r.w - 60.0 {
-                self.toggle();
-            } else if !self.descriptors.is_empty() {
-                self.select((self.selected + 1) % self.descriptors.len());
+        if x < Self::left(vp) {
+            if y >= 96.0 && y < vp.1 - 55.0 {
+                let index = ((y - 96.0 + self.list_scroll) / 58.0) as usize;
+                if index < self.descriptors.len() {
+                    if x < 40.0 {
+                        self.enabled[index] = !self.enabled[index];
+                        self.changed();
+                    } else if index != self.selected {
+                        self.select(index);
+                    }
+                }
+            } else if y >= vp.1 - 50.0 {
+                self.move_selected(if x < Self::left(vp) / 2.0 { -1 } else { 1 });
             }
             return true;
         }
-        if self.descriptors.is_empty() {
+        for i in 0..5 {
+            if hit(Self::transport(vp, i), x, y) {
+                match i {
+                    0 => self.jump(false),
+                    1 => self.seek = Some((self.time - 1.0 / self.fps).max(0.0)),
+                    2 => self.toggle_play = true,
+                    3 => {
+                        self.seek = Some(
+                            (self.time + 1.0 / self.fps)
+                                .min((self.duration - 1.0 / self.fps).max(0.0)),
+                        )
+                    }
+                    _ => self.jump(true),
+                }
+                return true;
+            }
+        }
+        let timeline = Self::timeline(vp);
+        if hit(timeline, x, y) {
+            self.scrubbing = true;
+            self.seek = Some(
+                (((x - timeline.x) / timeline.w).clamp(0.0, 1.0) as f64 * self.duration * self.fps)
+                    .floor()
+                    / self.fps,
+            );
             return true;
         }
-        if y < r.y + 78.0 {
-            if x < r.x + 145.0 {
-                self.changed();
-            } else if x < r.x + 290.0 {
-                let d = &self.descriptors[self.selected];
-                if let Some(p) = d.presets.get(self.preset % d.presets.len().max(1)) {
-                    self.preset += 1;
-                    self.settings = defaults(&self.fields);
-                    if let Some(map) = p.settings.as_object() {
-                        for (k, v) in map {
-                            self.settings[k] = v.clone();
-                        }
+        let right = vp.0 - Self::right(vp);
+        if y < 84.0 && x >= right {
+            self.request_preview();
+            return true;
+        }
+        if (88.0..124.0).contains(&y) && x >= right && !self.descriptors.is_empty() {
+            let d = &self.descriptors[self.selected];
+            if let Some(p) = d.presets.get(self.preset % d.presets.len().max(1)) {
+                self.preset += 1;
+                self.settings = defaults(&self.fields);
+                if let Some(map) = p.settings.as_object() {
+                    for (k, v) in map {
+                        self.settings[k] = v.clone();
                     }
-                    self.changed();
                 }
-            } else {
-                self.playback = !self.playback;
-                self.play_started = Instant::now();
+                self.changed();
             }
             return true;
         }
@@ -789,93 +1150,106 @@ impl Panel {
         slot: usize,
     ) {
         if !self.open {
-            if let Some(worker) = &self.worker {
-                while worker.rx.try_recv().is_ok() {}
+            if let Some(w) = &self.worker {
+                while w.rx.try_recv().is_ok() {}
             }
             return;
         }
-        let context = (info.path.clone(), start.to_bits(), end.map(f64::to_bits));
+        self.time = start;
+        self.filename = info
+            .path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        self.duration = info.duration;
+        self.fps = info.fps.max(1.0);
+        let context = (
+            info.path.clone(),
+            info.duration.to_bits(),
+            Some(self.timeline_revision),
+        );
         if self.context.as_ref() != Some(&context) {
             self.context = Some(context);
             self.changed();
         }
-        if self
-            .dirty
-            .is_some_and(|t| t.elapsed() >= Duration::from_millis(180))
-            && self.editing.is_none()
-            && !self.descriptors.is_empty()
-        {
-            self.cancel = Cancellation::default();
+        if self.dirty.is_some() && self.editing.is_none() {
             self.dirty = None;
-            self.busy = true;
-            self.status = "Loading processor and decoding preview…".into();
-            self.worker.as_ref().unwrap().submit(Request {
-                generation: self.generation,
-                id: self.descriptors[self.selected].id.clone(),
-                settings: self.settings.clone(),
-                info: info.clone(),
-                start,
-                end,
-                cancel: self.cancel.clone(),
-            });
+            let chain = self.chain();
+            if self
+                .descriptors
+                .iter()
+                .enumerate()
+                .take(self.selected + 1)
+                .any(|(i, _)| self.enabled[i] && !self.supported[i])
+            {
+                self.status = "An enabled processor does not support frame previews.".into();
+            } else if let Some(worker) = &self.worker {
+                self.cancel = Cancellation::default();
+                self.busy = true;
+                self.status = "Rendering current frame through the enabled chain…".into();
+                worker.submit(Request {
+                    generation: self.generation,
+                    chain,
+                    target: Some(start),
+                    info: info.clone(),
+                    start: self.segment_start,
+                    end,
+                    cancel: self.cancel.clone(),
+                });
+            } else {
+                self.status = "No processors installed in this build.".into();
+            }
         }
         if let Some(worker) = &self.worker {
             while let Ok(event) = worker.rx.try_recv() {
                 match event {
                     Event::Frame(g, f) if g == self.generation => {
-                        if self.frames.is_empty() {
-                            self.play_started = Instant::now();
+                        self.frames
+                            .retain(|old| (old.pts - f.pts).abs() > 0.5 / self.fps);
+                        let needed = f.before.len() + f.after.len();
+                        while !self.frames.is_empty()
+                            && self
+                                .frames
+                                .iter()
+                                .map(|f| f.before.len() + f.after.len())
+                                .sum::<usize>()
+                                + needed
+                                > PREVIEW_BYTES
+                        {
+                            self.frames.remove(0);
                         }
-                        self.status = format!(
-                            "Preview {}/{} · {:.1} fps · ETA {:.1}s",
-                            self.frames.len() + 1,
-                            f.total,
-                            (self.frames.len() + 1) as f64 / f.elapsed.max(0.001),
-                            (f.total - self.frames.len() - 1) as f64 * f.elapsed
-                                / (self.frames.len() + 1) as f64
-                        );
+                        self.status =
+                            format!("Rendered {:.3}s · {:.2}s processing", f.pts, f.elapsed);
                         self.frames.push(f);
+                        self.frames.sort_by(|a, b| a.pts.total_cmp(&b.pts));
+                    }
+                    Event::Progress(g, done, total) if g == self.generation => {
+                        self.status = format!("Preparing temporal context · {done}/{total} frames");
+                    }
+                    Event::Stage(g, status) if g == self.generation => {
+                        self.status = status;
                     }
                     Event::Done(g, result) if g == self.generation => {
                         self.busy = false;
-                        match result {
-                            Ok(()) => {
-                                self.status = format!(
-                                    "Ready · {} frames · {:.1} fps",
-                                    self.frames.len(),
-                                    self.frames.len() as f64
-                                        / self.frames.last().map_or(1.0, |f| f.elapsed).max(0.001)
-                                );
-                            }
-                            Err(e) => {
-                                self.frames.clear();
-                                self.status = e;
-                            }
+                        if let Err(e) = result {
+                            self.status = e;
+                        } else {
+                            self.status =
+                                format!("Preview ready · {} saved frames", self.frames.len());
                         }
                     }
                     _ => {}
                 }
             }
         }
-        if !self.frames.is_empty() {
-            if self.playback {
-                let seconds = self.play_started.elapsed().as_secs_f64();
-                let first = self.frames[0].pts;
-                let duration =
-                    (self.frames.last().unwrap().pts - first + 1.0 / info.fps).max(1.0 / info.fps);
-                let t = first + seconds % duration;
-                self.selected_frame = self
-                    .frames
-                    .partition_point(|f| f.pts <= t)
-                    .saturating_sub(1);
-            }
-            let f = &self.frames[self.selected_frame.min(self.frames.len() - 1)];
-            uploads.push(Upload {
-                idx: slot,
-                w: f.input[0],
-                h: f.input[1],
-                buf: f.before.clone(),
-            });
+        if let Some(i) = self
+            .frames
+            .iter()
+            .position(|f| (f.pts - start).abs() <= 0.51 / self.fps)
+        {
+            self.selected_frame = i;
+            let f = &self.frames[i];
             uploads.push(Upload {
                 idx: slot + 1,
                 w: f.output[0],
@@ -885,92 +1259,299 @@ impl Panel {
         }
     }
     pub fn draw(&self, items: &mut Vec<Item>, vp: (f32, f32), slot: usize) {
-        button(items, Self::button(vp), "Processors [P]", self.open);
         if !self.open {
             return;
         }
         let r = Self::bounds(vp);
+        let l = Self::left(vp);
+        let right = vp.0 - Self::right(vp);
         items.push(Item::Clip(Some(r)));
-        items.push(Item::Rect(RectItem::new(r, [0.018, 0.018, 0.018, 1.0])));
-        let title = self
-            .descriptors
-            .get(self.selected)
-            .map(|d| format!("Processor preview: {}  ▸", d.name))
-            .unwrap_or_else(|| "No processors installed".into());
-        text(items, r.x + 14.0, r.y + 12.0, 14.0, &title, INK, r.w - 90.0);
+        items.push(Item::Rect(RectItem::new(r, [0.012, 0.012, 0.012, 1.0])));
+        for panel in [
+            RectPx {
+                x: 0.0,
+                y: 44.0,
+                w: l,
+                h: r.h,
+            },
+            RectPx {
+                x: right,
+                y: 44.0,
+                w: vp.0 - right,
+                h: r.h,
+            },
+        ] {
+            items.push(Item::Rect(RectItem::new(panel, [0.006, 0.006, 0.006, 1.0])));
+        }
+        text(items, 16.0, 62.0, 12.0, "PROCESSORS", INK, l - 32.0);
         text(
             items,
-            r.x + r.w - 50.0,
-            r.y + 12.0,
-            13.0,
-            "Close",
-            INK,
-            45.0,
+            16.0,
+            81.0,
+            10.0,
+            "Enabled processors run top to bottom",
+            DIM,
+            l - 32.0,
         );
+        let listclip = RectPx {
+            x: 0.0,
+            y: 96.0,
+            w: l,
+            h: (vp.1 - 155.0).max(1.0),
+        };
+        items.push(Item::Clip(Some(listclip)));
+        for (i, d) in self.descriptors.iter().enumerate() {
+            let y = 96.0 + i as f32 * 58.0 - self.list_scroll;
+            button(
+                items,
+                RectPx {
+                    x: 8.0,
+                    y: y + 4.0,
+                    w: l - 16.0,
+                    h: 50.0,
+                },
+                "",
+                i == self.selected,
+            );
+            text(
+                items,
+                14.0,
+                y + 20.0,
+                12.0,
+                if self.enabled[i] { "[x]" } else { "[ ]" },
+                if self.enabled[i] { INK } else { DIM },
+                28.0,
+            );
+            text(items, 47.0, y + 14.0, 12.0, &d.name, INK, l - 60.0);
+            text(
+                items,
+                47.0,
+                y + 33.0,
+                10.0,
+                if !self.enabled[i] {
+                    "Bypassed"
+                } else if !self.supported[i] {
+                    "No frame preview"
+                } else {
+                    "Enabled"
+                },
+                DIM,
+                l - 60.0,
+            );
+        }
+        items.push(Item::Clip(Some(r)));
         if self.descriptors.is_empty() {
             text(
                 items,
-                r.x + 14.0,
-                r.y + 60.0,
-                12.0,
-                "Build a composed launcher from your local processor directory.",
-                INK,
-                r.w - 28.0,
+                16.0,
+                120.0,
+                11.0,
+                "No processors in this build",
+                DIM,
+                l - 32.0,
             );
-            items.push(Item::Clip(None));
-            return;
         }
         button(
             items,
             RectPx {
-                x: r.x + 12.0,
-                y: r.y + 44.0,
-                w: 128.0,
+                x: 8.0,
+                y: vp.1 - 45.0,
+                w: l / 2.0 - 12.0,
                 h: 28.0,
             },
-            "Refresh preview",
+            "Move up",
             false,
         );
         button(
             items,
             RectPx {
-                x: r.x + 150.0,
-                y: r.y + 44.0,
-                w: 132.0,
+                x: l / 2.0 + 4.0,
+                y: vp.1 - 45.0,
+                w: l / 2.0 - 12.0,
                 h: 28.0,
             },
-            "Cycle presets",
+            "Move down",
             false,
         );
-        button(
-            items,
-            RectPx {
-                x: r.x + 304.0,
-                y: r.y + 44.0,
-                w: 154.0,
-                h: 28.0,
-            },
-            if self.playback {
-                "Pause preview"
-            } else {
-                "Play preview"
-            },
-            self.playback,
-        );
+        let v = Self::viewer(vp);
+        let cached = self
+            .frames
+            .iter()
+            .find(|f| (f.pts - self.time).abs() <= 0.51 / self.fps);
+        let title = if cached.is_some() {
+            "RENDERED FRAME"
+        } else {
+            "SOURCE FRAME"
+        };
         text(
             items,
-            r.x + 12.0,
-            r.y + 86.0,
-            10.0,
-            "SETTINGS · scroll for more",
-            DIM,
-            270.0,
+            v.x,
+            61.0,
+            11.0,
+            title,
+            if cached.is_some() { BLUE } else { DIM },
+            v.w,
         );
+        text(items, v.x, 78.0, 10.0, &self.filename, DIM, v.w);
+        if let Some(f) = cached {
+            text(
+                items,
+                v.x,
+                v.y + v.h + 10.0,
+                10.0,
+                &format!(
+                    "Proxy {}×{} → {}×{} · through focused processor",
+                    f.input[0], f.input[1], f.output[0], f.output[1]
+                ),
+                DIM,
+                v.w,
+            );
+        }
+        let dims = cached.map_or(self.source_dims, |f| f.output);
+        let scale = (v.w / dims[0].max(1) as f32).min(v.h / dims[1].max(1) as f32);
+        let w = dims[0] as f32 * scale;
+        let h = dims[1] as f32 * scale;
+        let source = if cached.is_some() {
+            slot + 1
+        } else {
+            self.source
+        };
+        items.push(Item::Video {
+            a: source,
+            b: source,
+            r: RectPx {
+                x: v.x + (v.w - w) / 2.0,
+                y: v.y + (v.h - h) / 2.0,
+                w,
+                h,
+            },
+            uv: [0.0, 0.0, 1.0, 1.0],
+            mode: VideoMode::Tex,
+            p0: 0.0,
+            p1: 0.0,
+        });
+        for (i, label) in [
+            "Prev rendered",
+            "< Frame",
+            if self.playback { "Pause" } else { "Play" },
+            "Frame >",
+            "Next rendered",
+        ]
+        .iter()
+        .enumerate()
+        {
+            button(items, Self::transport(vp, i), label, false);
+        }
+        let t = Self::timeline(vp);
+        items.push(Item::Rect(RectItem::new(
+            RectPx {
+                y: t.y + 12.0,
+                h: 4.0,
+                ..t
+            },
+            [0.08, 0.08, 0.08, 1.0],
+        )));
+        for f in &self.frames {
+            let x = t.x + t.w * (f.pts / self.duration.max(0.001)) as f32;
+            items.push(Item::Rect(RectItem::new(
+                RectPx {
+                    x: x - 2.0,
+                    y: t.y + 6.0,
+                    w: 4.0,
+                    h: 16.0,
+                },
+                BLUE,
+            )));
+        }
+        let x = t.x + t.w * (self.time / self.duration.max(0.001)).clamp(0.0, 1.0) as f32;
+        items.push(Item::Rect(RectItem::new(
+            RectPx {
+                x,
+                y: t.y + 1.0,
+                w: 2.0,
+                h: 26.0,
+            },
+            INK,
+        )));
+        text(
+            items,
+            t.x,
+            t.y + 32.0,
+            11.0,
+            &format!(
+                "{:.3}s / {:.3}s · {} rendered frames",
+                self.time,
+                self.duration,
+                self.frames.len()
+            ),
+            INK,
+            t.w,
+        );
+        text(items, v.x, vp.1 - 44.0, 10.0, &self.status, INK, v.w);
+        text(
+            items,
+            v.x,
+            vp.1 - 23.0,
+            9.0,
+            "Preview: SDR proxy · source untouched · no processor export yet",
+            DIM,
+            v.w,
+        );
+        button(
+            items,
+            RectPx {
+                x: right + 14.0,
+                y: 53.0,
+                w: Self::right(vp) - 28.0,
+                h: 30.0,
+            },
+            if self.busy {
+                "Rendering… (R to restart)"
+            } else {
+                "Preview frame [R]"
+            },
+            self.busy,
+        );
+        button(
+            items,
+            RectPx {
+                x: right + 14.0,
+                y: 91.0,
+                w: Self::right(vp) - 28.0,
+                h: 29.0,
+            },
+            "Cycle processor presets",
+            false,
+        );
+        let name = self
+            .descriptors
+            .get(self.selected)
+            .map_or("Settings", |d| d.name.as_str());
+        text(
+            items,
+            right + 14.0,
+            132.0,
+            11.0,
+            name,
+            INK,
+            Self::right(vp) - 28.0,
+        );
+        if let Some(c) = self.capabilities.get(self.selected) {
+            text(
+                items,
+                right + 14.0,
+                148.0,
+                9.0,
+                &capability_label(*c),
+                DIM,
+                Self::right(vp) - 28.0,
+            );
+        }
         let clip = RectPx {
-            x: r.x + 10.0,
-            y: r.y + 105.0,
-            w: 276.0,
-            h: (r.h - 169.0).max(0.0),
+            x: right,
+            y: 167.0,
+            w: Self::right(vp),
+            h: (vp.1 - 227.0).max(1.0),
         };
         items.push(Item::Clip(Some(clip)));
         for (i, f) in self.fields.iter().enumerate() {
@@ -1023,116 +1604,6 @@ impl Panel {
                 row.w - 10.0,
             );
         }
-        items.push(Item::Clip(Some(r)));
-        let x = r.x + 304.0;
-        let width = (r.w - 320.0).max(0.0);
-        let half = (width - 12.0) / 2.0;
-        for (i, label) in ["SOURCE", "PROCESSED"].iter().enumerate() {
-            text(
-                items,
-                x + i as f32 * (half + 12.0),
-                r.y + 88.0,
-                11.0,
-                label,
-                DIM,
-                half,
-            );
-        }
-        if let Some(f) = self
-            .frames
-            .get(self.selected_frame.min(self.frames.len().saturating_sub(1)))
-        {
-            for (i, dims) in [f.input, f.output].iter().enumerate() {
-                let cell = RectPx {
-                    x: x + i as f32 * (half + 12.0),
-                    y: r.y + 112.0,
-                    w: half.max(1.0),
-                    h: (r.h - 190.0).max(1.0),
-                };
-                let scale = (cell.w / dims[0] as f32).min(cell.h / dims[1] as f32);
-                let w = dims[0] as f32 * scale;
-                let h = dims[1] as f32 * scale;
-                items.push(Item::Video {
-                    a: slot + i,
-                    b: slot + i,
-                    r: RectPx {
-                        x: cell.x + (cell.w - w) / 2.0,
-                        y: cell.y + (cell.h - h) / 2.0,
-                        w,
-                        h,
-                    },
-                    uv: [0.0, 0.0, 1.0, 1.0],
-                    mode: VideoMode::Tex,
-                    p0: 0.0,
-                    p1: 0.0,
-                });
-            }
-            text(
-                items,
-                x,
-                r.y + r.h - 69.0,
-                11.0,
-                &format!(
-                    "Frame {}/{} · {:.3}s · {}×{} → {}×{}",
-                    self.selected_frame + 1,
-                    self.frames.len(),
-                    f.pts,
-                    f.input[0],
-                    f.input[1],
-                    f.output[0],
-                    f.output[1]
-                ),
-                INK,
-                width,
-            );
-        } else {
-            text(
-                items,
-                x,
-                r.y + 130.0,
-                12.0,
-                if self.busy {
-                    "Building preview…"
-                } else {
-                    "Adjust a setting or refresh to preview."
-                },
-                DIM,
-                width,
-            );
-        }
-        if self.busy {
-            let fraction = self
-                .frames
-                .last()
-                .map_or(0.0, |f| self.frames.len() as f32 / f.total as f32);
-            items.push(Item::Rect(RectItem::new(
-                RectPx {
-                    x: r.x + 12.0,
-                    y: r.y + r.h - 56.0,
-                    w: (r.w - 24.0) * fraction,
-                    h: 3.0,
-                },
-                BLUE,
-            )));
-        }
-        text(
-            items,
-            r.x + 12.0,
-            r.y + r.h - 48.0,
-            11.0,
-            &self.status,
-            INK,
-            r.w - 24.0,
-        );
-        text(
-            items,
-            r.x + 12.0,
-            r.y + r.h - 25.0,
-            10.0,
-            "Preview only · SDR / 640×360 / 8-bit decode · processors are not included in export",
-            DIM,
-            r.w - 24.0,
-        );
         items.push(Item::Clip(None));
     }
 }
@@ -1213,6 +1684,52 @@ mod tests {
         assert!(c.check().is_err());
         assert_eq!(p.generation, 1);
         assert!(p.frames.is_empty());
+    }
+    #[test]
+    fn stage_feedback_never_invents_a_percentage() {
+        let mut progress = Progress {
+            phase: "Tiles".into(),
+            completed: 1,
+            total: None,
+        };
+        assert_eq!(
+            stage_status("Example", &progress),
+            "Example · Tiles · working"
+        );
+        progress.total = Some(0);
+        assert!(!stage_status("Example", &progress).contains('%'));
+        progress.total = Some(4);
+        assert!(stage_status("Example", &progress).ends_with("25% of stage"));
+        progress.completed = 9;
+        assert!(stage_status("Example", &progress).ends_with("100% of stage"));
+        progress.phase.clear();
+        assert!(stage_status("Example", &progress).contains("Processing"));
+    }
+    #[test]
+    fn whole_clip_capability_is_visible_but_not_previewable() {
+        struct WholeClip;
+        impl abner_processor_api::Factory for WholeClip {
+            fn descriptor(&self) -> Descriptor {
+                BufferedFactory.descriptor()
+            }
+            fn capabilities(&self) -> Capabilities {
+                Capabilities {
+                    role: Role::PostProcessor,
+                    input: InputRequirement::WholeClip,
+                }
+            }
+            fn create(&self, _: usize, _: usize, _: &Value) -> Result<Box<dyn Session>, String> {
+                panic!("whole-clip processor must not be opened as a frame processor")
+            }
+        }
+        let mut registry = Registry::default();
+        registry.register(Box::new(WholeClip)).unwrap();
+        let p = Panel::new(registry);
+        assert!(!p.supported[0]);
+        assert_eq!(
+            capability_label(p.capabilities[0]),
+            "Post-processor · needs entire clip"
+        );
     }
     #[test]
     fn proxy_preserves_aspect_without_upscaling() {
@@ -1356,8 +1873,8 @@ mod tests {
         let info = crate::probe::probe(&path).unwrap();
         let r = Request {
             generation: 7,
-            id: "example.buffered".into(),
-            settings: json!({}),
+            chain: vec![("example.buffered".into(), json!({}))],
+            target: None,
             info: info.clone(),
             start: 0.0,
             end: None,
@@ -1376,8 +1893,8 @@ mod tests {
         assert!(frames.windows(2).all(|f| f[1].pts > f[0].pts));
         let limited = Request {
             generation: 9,
-            id: r.id.clone(),
-            settings: json!({}),
+            chain: r.chain.clone(),
+            target: None,
             info: info.clone(),
             start: 0.0,
             end: Some(0.1),
@@ -1393,6 +1910,29 @@ mod tests {
             limited_count, 3,
             "a preview session must stop and drain at a timeline boundary"
         );
+        // Two buffering stages must flush in order and publish ONLY the requested frame.
+        let single = Request {
+            generation: 12,
+            chain: vec![
+                ("example.buffered".into(), json!({})),
+                ("example.buffered".into(), json!({})),
+            ],
+            target: Some(frames[2].pts),
+            info: info.clone(),
+            start: 0.0,
+            end: None,
+            cancel: Cancellation::default(),
+        };
+        render(&registry(), &single, &tx, None).unwrap();
+        let mut selected = vec![];
+        while let Ok(event) = rx.try_recv() {
+            if let Event::Frame(_, f) = event {
+                selected.push(f);
+            }
+        }
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].pts, frames[2].pts);
+        assert_eq!(selected[0].before, selected[0].after);
         // Already-cancelled requests must never publish output.
         r.cancel.cancel();
         assert!(render(&registry(), &r, &tx, None).is_err());
@@ -1403,7 +1943,7 @@ mod tests {
         panel.generation = 8;
         panel.context = Some((info.path.clone(), 0.0f64.to_bits(), None));
         panel.worker = Some(Worker {
-            active: Arc::new(Mutex::new(None)),
+            active: Arc::new(Mutex::new(Vec::new())),
             mailbox: Arc::new((
                 Mutex::new(Mailbox {
                     pending: None,
@@ -1418,5 +1958,149 @@ mod tests {
         panel.tick(&info, 0.0, None, &mut uploads, 1);
         assert!(uploads.is_empty());
         assert!(panel.frames.is_empty());
+        panel.frames = vec![mark(0.0), mark(0.1)];
+        panel.tick(&info, 0.2, None, &mut uploads, 1);
+        assert_eq!(panel.frames.len(), 2, "seeking must preserve valid marks");
+        panel.close();
+        panel.enter();
+        assert_eq!(
+            panel.frames.len(),
+            2,
+            "changing workspace must preserve valid marks"
+        );
+    }
+    struct Named(&'static str);
+    impl abner_processor_api::Factory for Named {
+        fn descriptor(&self) -> Descriptor {
+            let mut d = BufferedFactory.descriptor();
+            d.id = self.0.into();
+            d
+        }
+        fn create(
+            &self,
+            w: usize,
+            h: usize,
+            s: &Value,
+        ) -> Result<Box<dyn abner_processor_api::Session>, String> {
+            BufferedFactory.create(w, h, s)
+        }
+    }
+    fn mark(pts: f64) -> Preview {
+        Preview {
+            before: Arc::new(vec![0; 16]),
+            after: Arc::new(vec![0; 16]),
+            input: [2, 2],
+            output: [2, 2],
+            pts,
+            elapsed: 1.0,
+        }
+    }
+    #[test]
+    fn ordered_chain_bypass_settings_and_frame_navigation() {
+        let mut r = Registry::default();
+        r.register(Box::new(Named("example.a"))).unwrap();
+        r.register(Box::new(Named("example.b"))).unwrap();
+        let mut p = Panel::new(r);
+        p.enter();
+        p.settings["strength"] = json!(0.8);
+        p.changed();
+        p.select(1);
+        assert_eq!(
+            p.chain()
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            ["example.a", "example.b"]
+        );
+        p.enabled[0] = false;
+        p.changed();
+        assert_eq!(p.chain().len(), 1);
+        p.move_selected(-1);
+        assert_eq!(p.descriptors[0].id, "example.b");
+        assert!(p.enabled[0]);
+        assert!(!p.enabled[1]);
+        p.select(1);
+        assert_eq!(p.settings["strength"], json!(0.8));
+        p.frames = vec![mark(1.0), mark(3.0), mark(7.0)];
+        p.time = 3.0;
+        p.jump(true);
+        assert_eq!(p.take_seek(), Some(7.0));
+        p.jump(false);
+        assert_eq!(p.take_seek(), Some(1.0));
+        p.time = 0.0;
+        p.jump(false);
+        assert_eq!(p.take_seek(), None);
+        p.time = 8.0;
+        p.jump(true);
+        assert_eq!(p.take_seek(), None);
+        let old = p.cancel.clone();
+        p.changed();
+        assert!(p.frames.is_empty());
+        assert!(old.check().is_err());
+        assert!(
+            p.dirty.is_none(),
+            "settings changes must not start expensive inference automatically"
+        );
+    }
+    struct Arithmetic {
+        multiply: u16,
+        add: u16,
+    }
+    impl abner_processor_api::Session for Arithmetic {
+        fn process(&mut self, mut f: Frame) -> Result<Vec<Frame>, String> {
+            for p in &mut f.pixels {
+                *p = *p * self.multiply + self.add;
+            }
+            Ok(vec![f])
+        }
+        fn finish(&mut self) -> Result<Vec<Frame>, String> {
+            Ok(vec![])
+        }
+        fn output_dimensions(&self) -> [usize; 2] {
+            [2, 2]
+        }
+        fn cancellation(&self) -> Cancellation {
+            Cancellation::default()
+        }
+        fn progress(&self) -> abner_processor_api::Progress {
+            abner_processor_api::Progress {
+                phase: "test".into(),
+                completed: 0,
+                total: None,
+            }
+        }
+    }
+    #[test]
+    fn chain_order_changes_pixels_and_cancellation_prevents_execution() {
+        let make = || Frame {
+            width: 2,
+            height: 2,
+            pixels: vec![10; 12],
+            pts: 0,
+            duration: 1,
+            time_base: [1, 24],
+        };
+        let mut sessions: Vec<Box<dyn abner_processor_api::Session>> = vec![
+            Box::new(Arithmetic {
+                multiply: 2,
+                add: 0,
+            }),
+            Box::new(Arithmetic {
+                multiply: 1,
+                add: 3,
+            }),
+        ];
+        let cancel = Cancellation::default();
+        assert_eq!(
+            process_chain(&mut sessions, 0, vec![make()], &cancel).unwrap()[0].pixels[0],
+            23
+        );
+        sessions.swap(0, 1);
+        assert_eq!(
+            process_chain(&mut sessions, 0, vec![make()], &cancel).unwrap()[0].pixels[0],
+            26
+        );
+        cancel.cancel();
+        assert!(process_chain(&mut sessions, 0, vec![make()], &cancel).is_err());
     }
 }

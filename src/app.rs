@@ -1599,28 +1599,54 @@ impl App {
         }
     }
 
-    pub fn start_processor(&mut self,id:&str,settings:serde_json::Value)->Result<(),String>{
-        self.processors.start(id,settings)?;
-        self.playing=false;
+    pub fn start_processor(&mut self, id: &str, settings: serde_json::Value) -> Result<(), String> {
+        self.activate(Action::Tool(4));
+        self.processors.start(id, settings)?;
+        self.playing = false;
         Ok(())
     }
-    pub fn processor_shortcut(&mut self,c:char)->bool {self.processors.shortcut(c)}
-    pub fn processor_text(&mut self,text:&str)->bool { self.processors.text_input(text) }
+    fn apply_processor_transport(&mut self) {
+        if std::mem::take(&mut self.processors.toggle_play) {
+            self.playing = !self.playing;
+        }
+        if let Some(t) = self.processors.take_seek() {
+            self.playing = false;
+            self.seek_all(
+                t.min((self.videos[self.active].info.duration - 1.0 / self.fps.max(1.0)).max(0.0)),
+                true,
+            );
+            self.adopt_seek = false;
+        }
+    }
+    pub fn processor_shortcut(&mut self, c: char) -> bool {
+        self.processors.shortcut(c)
+    }
+    pub fn processor_text(&mut self, text: &str) -> bool {
+        self.processors.text_input(text)
+    }
     pub fn set_processors(&mut self, registry: abner_processor_api::Registry) {
         self.processors = crate::processor_gui::Panel::new(registry);
     }
 
     pub fn key(&mut self, mut k: Key) {
         if self.processors.key(k) {
-            if self.processors.open { self.playing = false; }
+            self.apply_processor_transport();
             return;
         }
-        if k == Key::OpenFiles { self.cmds.push(Cmd::OpenFiles); return; }
-        if k == Key::DuplicateSources { self.duplicate_sources(); return; }
+        if k == Key::OpenFiles {
+            self.cmds.push(Cmd::OpenFiles);
+            return;
+        }
+        if k == Key::DuplicateSources {
+            self.duplicate_sources();
+            return;
+        }
         if k == Key::SelectSources {
             if !self.cut_mode && !self.mask_mode {
                 let select = !self.videos.iter().all(|v| v.selected);
-                for v in &mut self.videos { v.selected = select; }
+                for v in &mut self.videos {
+                    v.selected = select;
+                }
             }
             return;
         }
@@ -1790,20 +1816,27 @@ impl App {
             self.mask_status.clear();
             // The new video has its own dimensions; a marquee carried over
             // from the old one would mean nothing.
-            if self.crop.is_some() { self.crop = Some(self.full_crop()); }
+            if self.crop.is_some() {
+                self.crop = Some(self.full_crop());
+            }
         }
     }
 
     fn reveal_source(&mut self) {
         let capacity = self.source_capacity();
-        if self.active < self.source_first() { self.source_scroll = self.active; }
-        else if self.active >= self.source_first() + capacity {
+        if self.active < self.source_first() {
+            self.source_scroll = self.active;
+        } else if self.active >= self.source_first() + capacity {
             self.source_scroll = self.active + 1 - capacity;
         }
     }
 
     pub fn cursor_moved(&mut self, x: f32, y: f32) {
-        if self.processors.pointer(x,y,self.vp) { self.cursor=(x,y); return; }
+        if self.processors.pointer(x, y, self.vp) {
+            self.cursor = (x, y);
+            self.apply_processor_transport();
+            return;
+        }
         self.cursor_inside = true;
         if let Some((_, sx, sy, moved)) = &mut self.source_copy_drag {
             *moved |= (x - *sx).hypot(y - *sy) >= 5.0;
@@ -1888,13 +1921,15 @@ impl App {
 
     pub fn mouse_down(&mut self, x: f32, y: f32) {
         if self.ready() && self.processors.click(x, y, self.vp) {
-            if self.processors.open { self.playing = false; }
+            self.apply_processor_transport();
             return;
         }
         if !self.ready() {
             // The launch window: a recent tile opens its file; anywhere
             // else is just the drop target.
-            if let Some(n) = self.recent.hit(x, y) { self.open_recent(n); }
+            if let Some(n) = self.recent.hit(x, y) {
+                self.open_recent(n);
+            }
             return;
         }
         self.cursor = (x, y);
@@ -2395,36 +2430,92 @@ impl App {
                     Mode::Delta => (VideoMode::Delta, 0.0),
                     // Divider follows the pointer, in the (possibly
                     // zoomed) rect's own coordinates.
-                    Mode::Split => {
-                        (VideoMode::Split, ((self.cursor.0 - r.x) / r.w.max(1.0)).clamp(0.0, 1.0))
-                    }
+                    Mode::Split => (
+                        VideoMode::Split,
+                        ((self.cursor.0 - r.x) / r.w.max(1.0)).clamp(0.0, 1.0),
+                    ),
                     Mode::Checker => (VideoMode::Checker, self.checker_px),
                     _ => (VideoMode::Blend, self.blend),
                 };
-                items.push(Item::Video { a, b, r, uv: full_uv, mode, p0, p1: self.gain });
+                items.push(Item::Video {
+                    a,
+                    b,
+                    r,
+                    uv: full_uv,
+                    mode,
+                    p0,
+                    p1: self.gain,
+                });
             }
         }
 
         items.push(Item::Clip(Some(canvas)));
-        if self.mask_mode { self.build_mask_layer(&mut items); }
-        if self.cut_mode && self.show_ui { self.build_cut_chips(&mut items); }
+        if self.mask_mode {
+            self.build_mask_layer(&mut items);
+        }
+        if self.cut_mode && self.show_ui {
+            self.build_cut_chips(&mut items);
+        }
         if self.show_ui {
-            items.push(Item::Shadow { r: canvas, inner: true, blur: 16.0, alpha: 0.28 });
+            items.push(Item::Shadow {
+                r: canvas,
+                inner: true,
+                blur: 16.0,
+                alpha: 0.28,
+            });
         }
         items.push(Item::Clip(None));
         if self.show_ui {
-            if self.cut_mode { self.build_cut_hud(&mut items, vp); } else { self.build_hud(&mut items, vp); }
+            if self.cut_mode {
+                self.build_cut_hud(&mut items, vp);
+            } else {
+                self.build_hud(&mut items, vp);
+            }
             self.build_status_line(&mut items, vp);
         }
 
-        if self.processors.open { self.playing = false; }
-        let preview_end = self.cut.as_ref().filter(|_|self.cut_mode && self.active==self.cut_video)
-            .and_then(|c|c.segments().into_iter().find(|s|self.t>=s.start && self.t<s.end).map(|s|s.end));
-        self.processors.tick(&self.videos[self.active].info, self.t, preview_end, &mut uploads, n);
+        let segment = self
+            .cut
+            .as_ref()
+            .filter(|_| self.active == self.cut_video)
+            .and_then(|c| {
+                c.segments()
+                    .into_iter()
+                    .find(|s| self.t >= s.start && self.t < s.end)
+            });
+        self.processors.segment_start = segment.as_ref().map_or(0.0, |s| s.start);
+        self.processors.timeline_revision = self
+            .cut
+            .as_ref()
+            .filter(|_| self.active == self.cut_video)
+            .map_or(0, |c| {
+                c.segments().iter().fold(0u64, |h, s| {
+                    h.wrapping_mul(31) ^ s.start.to_bits() ^ s.end.to_bits().rotate_left(19)
+                })
+            });
+        let preview_end = segment.map(|s| s.end);
+        self.processors.source(
+            self.active,
+            [
+                self.videos[self.active].player.w,
+                self.videos[self.active].player.h,
+            ],
+            self.playing,
+        );
+        self.processors.tick(
+            &self.videos[self.active].info,
+            self.t,
+            preview_end,
+            &mut uploads,
+            n,
+        );
         self.processors.draw(&mut items, vp, n);
 
-        let animating =
-            self.processors.animating() || self.playing || !self.started || self.cut_thumb.play.is_some() || self.cut_hot_animating()
+        let animating = self.processors.animating()
+            || self.playing
+            || !self.started
+            || self.cut_thumb.play.is_some()
+            || self.cut_hot_animating()
             || self.rail_sliding();
         FrameDesc {
             clear: FRAME_BG,
@@ -2566,63 +2657,144 @@ impl App {
 
     fn source_checkbox(&self, index: usize) -> RectPx {
         let r = self.source_row(index);
-        RectPx { x: r.x + r.w - 39.0, y: r.y + 81.0, w: 20.0, h: 20.0 }
+        RectPx {
+            x: r.x + r.w - 39.0,
+            y: r.y + 81.0,
+            w: 20.0,
+            h: 20.0,
+        }
     }
 
     fn controls(&self) -> Vec<Control> {
         let l = self.workspace();
         let mut out = self.mode_selector().controls();
+        if self.processors.open {
+            return out;
+        }
         if l.rail > 0.0 {
-            out.push(Control::new(self.sidebar_toggle(), "", self.show_sources, Action::ToggleSources));
+            out.push(Control::new(
+                self.sidebar_toggle(),
+                "",
+                self.show_sources,
+                Action::ToggleSources,
+            ));
         }
         if l.grip.h > 0.0 {
-            out.push(Control::new(l.grip, "", self.show_detail, Action::ToggleDetail));
+            out.push(Control::new(
+                l.grip,
+                "",
+                self.show_detail,
+                Action::ToggleDetail,
+            ));
         }
         if self.cut_mode {
             if self.vp.0 >= CUT_COLUMNS_MIN_W {
-                out.push(Control::new(self.inspector_toggle(), "", self.show_inspector, Action::ToggleInspector));
+                out.push(Control::new(
+                    self.inspector_toggle(),
+                    "",
+                    self.show_inspector,
+                    Action::ToggleInspector,
+                ));
             }
             self.cut_controls(&mut out);
             return out;
         }
         if l.panel > 0.0 && !self.mask_mode {
             let w = (l.panel - 32.0) / 2.0;
-            for (x, label, action) in [(l.list.x + 12.0, "Duplicate", Action::Duplicate),
-                (l.list.x + 20.0 + w, "+ Add files", Action::OpenFiles)] {
-                out.push(Control::new(RectPx { x, y: self.vp.1 - STATUS_H - 34.0, w, h: 28.0 }, label, false, action));
+            for (x, label, action) in [
+                (l.list.x + 12.0, "Duplicate", Action::Duplicate),
+                (l.list.x + 20.0 + w, "+ Add files", Action::OpenFiles),
+            ] {
+                out.push(Control::new(
+                    RectPx {
+                        x,
+                        y: self.vp.1 - STATUS_H - 34.0,
+                        w,
+                        h: 28.0,
+                    },
+                    label,
+                    false,
+                    action,
+                ));
             }
             if self.videos.iter().any(|v| v.selected) {
-                out.push(Control::new(RectPx { x: l.list.x + l.panel - 64.0, y: l.list.y + l.list.h + 4.0, w: 52.0, h: 24.0 },
-                    "Clear", false, Action::ClearSources));
+                out.push(Control::new(
+                    RectPx {
+                        x: l.list.x + l.panel - 64.0,
+                        y: l.list.y + l.list.h + 4.0,
+                        w: 52.0,
+                        h: 24.0,
+                    },
+                    "Clear",
+                    false,
+                    Action::ClearSources,
+                ));
             }
         }
         let mut x = l.rail + 12.0;
         let y = HEADER_H + 6.0;
         if !self.mask_mode {
             for (mode, label, w) in [
-                (Mode::Overlay, "Single", 62.0), (Mode::SideBySide, "Side by side", 102.0),
-                (Mode::Delta, "Difference", 96.0), (Mode::Split, "Wipe", 58.0),
-                (Mode::Checker, "Checker", 74.0), (Mode::Blend, "Blend", 64.0),
+                (Mode::Overlay, "Single", 62.0),
+                (Mode::SideBySide, "Side by side", 102.0),
+                (Mode::Delta, "Difference", 96.0),
+                (Mode::Split, "Wipe", 58.0),
+                (Mode::Checker, "Checker", 74.0),
+                (Mode::Blend, "Blend", 64.0),
             ] {
-                out.push(Control::new(RectPx { x, y, w, h: 27.0 }, label, self.mode == mode, Action::View(mode)));
+                out.push(Control::new(
+                    RectPx { x, y, w, h: 27.0 },
+                    label,
+                    self.mode == mode,
+                    Action::View(mode),
+                ));
                 x += w + 4.0;
             }
-            if matches!(self.mode, Mode::Delta | Mode::Checker | Mode::Blend) && x + 144.0 < self.vp.0 {
+            if matches!(self.mode, Mode::Delta | Mode::Checker | Mode::Blend)
+                && x + 144.0 < self.vp.0
+            {
                 for (label, up) in [("−", false), ("+", true)] {
-                    out.push(Control::new(RectPx { x, y, w: 28.0, h: 27.0 }, label, false, Action::Param(up)));
+                    out.push(Control::new(
+                        RectPx {
+                            x,
+                            y,
+                            w: 28.0,
+                            h: 27.0,
+                        },
+                        label,
+                        false,
+                        Action::Param(up),
+                    ));
                     x += 32.0;
                 }
             }
         } else if self.crop.is_some() {
             x += 142.0;
-            for (label, w, action) in [("Save still + mask", 138.0, Action::Save), ("Export ProRes", 122.0, Action::Export)] {
-                out.push(Control::new(RectPx { x, y, w, h: 27.0 }, label, false, action));
+            for (label, w, action) in [
+                ("Save still + mask", 138.0, Action::Save),
+                ("Export ProRes", 122.0, Action::Export),
+            ] {
+                out.push(Control::new(
+                    RectPx { x, y, w, h: 27.0 },
+                    label,
+                    false,
+                    action,
+                ));
                 x += w + 8.0;
             }
         } else {
             x += 118.0;
-            for (label, w, action) in [("−", 28.0, Action::Brush(false)), ("+", 28.0, Action::Brush(true)), ("Save mask", 100.0, Action::Save)] {
-                out.push(Control::new(RectPx { x, y, w, h: 27.0 }, label, false, action));
+            for (label, w, action) in [
+                ("−", 28.0, Action::Brush(false)),
+                ("+", 28.0, Action::Brush(true)),
+                ("Save mask", 100.0, Action::Save),
+            ] {
+                out.push(Control::new(
+                    RectPx { x, y, w, h: 27.0 },
+                    label,
+                    false,
+                    action,
+                ));
                 x += w + 8.0;
             }
         }
@@ -2631,20 +2803,44 @@ impl App {
 
     fn activate(&mut self, action: Action) {
         self.mouse_up();
+        if matches!(action, Action::Tool(t) if t != 4) {
+            self.processors.close();
+        }
         match action {
             Action::Tool(0) => {
                 self.set_cut_mode(false);
-                if self.mask_mode { self.mask_mode = false; self.leave_mask_mode(); }
+                if self.mask_mode {
+                    self.mask_mode = false;
+                    self.leave_mask_mode();
+                }
             }
             Action::Tool(3) => self.set_cut_mode(true),
+            Action::Tool(4) => {
+                self.set_cut_mode(false);
+                if self.mask_mode {
+                    self.mask_mode = false;
+                    self.leave_mask_mode();
+                }
+                self.processors.enter();
+                self.playing = false;
+                self.show_ui = true;
+            }
             Action::Cut(action) => self.cut_action(action),
             Action::Tool(tool) => {
-                if !self.mask_mode { self.key(Key::Char('m')); }
-                if (tool == 2) != self.crop.is_some() { self.toggle_crop(); }
+                if !self.mask_mode {
+                    self.key(Key::Char('m'));
+                }
+                if (tool == 2) != self.crop.is_some() {
+                    self.toggle_crop();
+                }
             }
             Action::Duplicate => self.duplicate_sources(),
             Action::OpenFiles => self.cmds.push(Cmd::OpenFiles),
-            Action::ClearSources => { for v in &mut self.videos { v.selected = false; } },
+            Action::ClearSources => {
+                for v in &mut self.videos {
+                    v.selected = false;
+                }
+            }
             Action::ToggleSources => self.show_sources = !self.show_sources,
             Action::ToggleInspector => self.show_inspector = !self.show_inspector,
             Action::ToggleDetail => self.show_detail = !self.show_detail,
@@ -2659,26 +2855,54 @@ impl App {
     /// Persistent transport; these rectangles also own mouse hit testing.
     fn btn_prev(&self) -> RectPx {
         let r = self.workspace().transport;
-        RectPx { x: r.x + 18.0, y: r.y + 14.0, w: 26.0, h: 32.0 }
+        RectPx {
+            x: r.x + 18.0,
+            y: r.y + 14.0,
+            w: 26.0,
+            h: 32.0,
+        }
     }
     fn btn_play(&self) -> RectPx {
         let r = self.btn_prev();
-        RectPx { x: r.x + 34.0, w: 32.0, ..r }
+        RectPx {
+            x: r.x + 34.0,
+            w: 32.0,
+            ..r
+        }
     }
     fn btn_next(&self) -> RectPx {
         let r = self.btn_play();
-        RectPx { x: r.x + 40.0, w: 26.0, ..r }
+        RectPx {
+            x: r.x + 40.0,
+            w: 26.0,
+            ..r
+        }
     }
     fn seek_rect(&self, _vp: (f32, f32)) -> RectPx {
         let r = self.workspace().transport;
         let x = self.btn_next().x + 40.0;
         let reserve = if r.w >= 720.0 { 300.0 } else { 186.0 };
-        RectPx { x, y: r.y + 28.0, w: (r.w - (x - r.x) - reserve).max(32.0), h: 4.0 }
+        RectPx {
+            x,
+            y: r.y + 28.0,
+            w: (r.w - (x - r.x) - reserve).max(32.0),
+            h: 4.0,
+        }
     }
 
     /// Shared by the painted header and the native View menu.
     pub fn workspace_mode(&self) -> usize {
-        if self.cut_mode { 3 } else if !self.mask_mode { 0 } else if self.crop.is_none() { 1 } else { 2 }
+        if self.processors.open {
+            4
+        } else if self.cut_mode {
+            3
+        } else if !self.mask_mode {
+            0
+        } else if self.crop.is_none() {
+            1
+        } else {
+            2
+        }
     }
 
     /// `--no-sources`: the rail hidden, as the header toggle leaves it.
@@ -2706,7 +2930,7 @@ impl App {
     }
 
     pub fn select_workspace_mode(&mut self, mode: usize) {
-        if self.ready() && mode < 4 && mode != self.workspace_mode() {
+        if self.ready() && mode < 5 && mode != self.workspace_mode() {
             self.activate(Action::Tool(mode));
         }
     }
@@ -2720,18 +2944,33 @@ impl App {
     /// The sidebar toggle rides the right end of the rail's heading strip,
     /// so it slides with the panel and lands at the top of the mini strip.
     fn sidebar_toggle(&self) -> RectPx {
-        RectPx { x: self.workspace().rail - 38.0, y: HEADER_H + (RAIL_HEAD_H - 28.0) / 2.0, w: 32.0, h: 28.0 }
+        RectPx {
+            x: self.workspace().rail - 38.0,
+            y: HEADER_H + (RAIL_HEAD_H - 28.0) / 2.0,
+            w: 32.0,
+            h: 28.0,
+        }
     }
 
     /// The right toggle (12:5 puts it 43px in from the edge); timeline only,
     /// and only when the window is wide enough to carry the inspector.
     fn inspector_toggle(&self) -> RectPx {
-        RectPx { x: self.vp.0 - 43.0, y: 8.0, w: 32.0, h: 28.0 }
+        RectPx {
+            x: self.vp.0 - 43.0,
+            y: 8.0,
+            w: 32.0,
+            h: 28.0,
+        }
     }
 
     fn mode_selector(&self) -> ModeSelector {
         ModeSelector {
-            rect: RectPx { x: self.header_left(), y: 8.0, w: 385.0, h: 28.0 },
+            rect: RectPx {
+                x: self.header_left(),
+                y: 8.0,
+                w: 470.0,
+                h: 28.0,
+            },
             active: self.workspace_mode(),
         }
     }
@@ -3477,11 +3716,30 @@ struct ModeSelector {
 impl ModeSelector {
     /// Header / Container (122:441): 2px padding, 1px gaps, four equal segments.
     fn controls(&self) -> Vec<Control> {
-        let w = (self.rect.w - 4.0 - 3.0 * 1.0) / 4.0;
-        [("Sources", 0), ("Timeline", 3), ("Crop", 2), ("Mask", 1)]
-            .into_iter().enumerate().map(|(index, (label, mode))| Control::new(
-                RectPx { x: self.rect.x + 2.0 + index as f32 * (w + 1.0), y: self.rect.y + 2.0, w, h: self.rect.h - 4.0 },
-                label, self.active == mode, Action::Tool(mode))).collect()
+        let w = (self.rect.w - 4.0 - 4.0 * 1.0) / 5.0;
+        [
+            ("Sources", 0),
+            ("Timeline", 3),
+            ("Process", 4),
+            ("Crop", 2),
+            ("Mask", 1),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (label, mode))| {
+            Control::new(
+                RectPx {
+                    x: self.rect.x + 2.0 + index as f32 * (w + 1.0),
+                    y: self.rect.y + 2.0,
+                    w,
+                    h: self.rect.h - 4.0,
+                },
+                label,
+                self.active == mode,
+                Action::Tool(mode),
+            )
+        })
+        .collect()
     }
 
     /// A #151515 housing with a 42%-ink hairline; the selected segment is
@@ -6235,8 +6493,8 @@ mod tests {
     fn native_workspace_selection_matches_header_for_every_transition() {
         let Some(clip) = test_clip() else { return };
         let mut app = mk_app(&clip, 1);
-        for from in 0..4 {
-            for to in 0..4 {
+        for from in 0..5 {
+            for to in 0..5 {
                 app.select_workspace_mode(from);
                 app.select_workspace_mode(to);
                 assert_eq!(app.workspace_mode(), to, "{from} -> {to}");
@@ -6379,15 +6637,21 @@ mod tests {
         assert!(!app.titlebar_background(100.0, 20.0));
         assert!(!app.titlebar_background(600.0, HEADER_H));
         let original = app.mode_selector().controls();
-        for mode in [3, 2, 1, 0] {
+        for mode in [3, 4, 2, 1, 0] {
             app.activate(Action::Tool(mode));
             let controls = app.mode_selector().controls();
-            assert_eq!(controls.len(), 4);
+            assert_eq!(controls.len(), 5);
             assert_eq!(controls.iter().filter(|c| c.selected).count(), 1);
             for (before, after) in original.iter().zip(&controls) {
-                assert_eq!((before.r.x, before.r.y, before.r.w, before.r.h),
-                    (after.r.x, after.r.y, after.r.w, after.r.h), "mode changes cannot move the shared selector");
-                assert_eq!(after.selected, matches!(after.action, Action::Tool(i) if i == mode));
+                assert_eq!(
+                    (before.r.x, before.r.y, before.r.w, before.r.h),
+                    (after.r.x, after.r.y, after.r.w, after.r.h),
+                    "mode changes cannot move the shared selector"
+                );
+                assert_eq!(
+                    after.selected,
+                    matches!(after.action, Action::Tool(i) if i == mode)
+                );
             }
         }
         app.set_cut_mode(true);

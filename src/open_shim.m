@@ -84,8 +84,8 @@ void ab_sync_menus(int mode, bool has_clips, bool can_export, AbViewCallback vie
 
         view = [[NSMenu alloc] initWithTitle:@"View"];
         view.autoenablesItems = NO;
-        NSArray<NSString *> *names = @[@"Sources", @"Timeline", @"Mask", @"Crop"];
-        const NSInteger modes[] = {0, 3, 1, 2};
+        NSArray<NSString *> *names = @[@"Sources", @"Timeline", @"Process", @"Mask", @"Crop"];
+        const NSInteger modes[] = {0, 3, 4, 1, 2};
         for (NSUInteger i = 0; i < names.count; i++) {
             ab_item(view, names[i], @selector(selectMode:), @"", 0, modes[i], target);
         }
