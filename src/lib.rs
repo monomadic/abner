@@ -22,6 +22,7 @@ mod recent;
 mod render;
 mod schedule;
 mod text;
+mod waker;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -30,7 +31,7 @@ use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
@@ -223,10 +224,9 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
     event_loop.set_control_flow(ControlFlow::Poll);
     // Frame-arrival wakes (paused framesteps, seek completions) coalesce
     // into single redraws via the event-loop proxy.
-    let proxy = event_loop.create_proxy();
-    let notify: player::Notify = Arc::new(move || {
-        let _ = proxy.send_event(());
-    });
+    let waker = waker::Waker::new();
+    let worker_waker = waker.clone();
+    let notify: player::Notify = Arc::new(move || worker_waker.wake());
     for v in &videos {
         v.player.set_notify(notify.clone());
     }
@@ -263,6 +263,8 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
         title,
         window_size: (config.window.width, config.window.height),
         notify,
+        waker,
+        proxy: event_loop.create_proxy(),
         dropped: Vec::new(),
         window: None,
         gpu: None,
@@ -423,6 +425,8 @@ struct Runner {
     /// Handed to every player, including ones spawned by a drop, so a
     /// frame arriving while the loop idles still wakes it.
     notify: player::Notify,
+    waker: waker::Waker,
+    proxy: EventLoopProxy<()>,
     /// Files dropped this loop turn. winit reports one `DroppedFile` per
     /// file with NO end-of-batch event, so they collect here and flush as
     /// one gesture in `about_to_wait` — switchblade's `FilesDropped`
@@ -719,6 +723,10 @@ impl ApplicationHandler for Runner {
         self.app.set_plate(gpu.plate_size(), gpu.plate_horizon());
         self.window = Some(window);
         self.gpu = Some(gpu);
+        // Only arm once the window and GPU can service the event. A decoder
+        // completion during initialization is retained and replayed by arm().
+        let proxy = self.proxy.clone();
+        self.waker.arm(move || { let _ = proxy.send_event(()); });
         self.last_frame = Instant::now();
     }
 
@@ -908,6 +916,9 @@ impl ApplicationHandler for Runner {
                 }
             }
             WindowEvent::RedrawRequested => {
+                // Clear before consuming frames: completions during this redraw
+                // must be able to request the next one (including while paused).
+                self.waker.take_pending();
                 let now = Instant::now();
                 let dt = if self.focused { (now - self.last_frame).as_secs_f32().min(0.05) } else { 0.0 };
                 self.last_frame = now;

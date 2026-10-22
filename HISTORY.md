@@ -3,6 +3,27 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-22 — coalescing decoder waker (task 4)
+
+All players and native-open notifications share a Switchblade-style atomic
+pending latch. Only the first wake in a redraw batch sends a proxy event;
+RedrawRequested clears the latch before consuming frames so paused steps and
+seek completions arriving during rendering can schedule another frame. The
+callback is armed after window/GPU initialization and replays pending startup
+work. Arming and notification are serialized to avoid duplicate startup events.
+
+Focused tests cover concurrent player notifications, clearing and re-waking,
+completion during rendering, both startup orderings and concurrent arm/wake.
+This changes event-loop notifications only; task 20's FilmCraft contention and
+any performance measurement remain separate.
+
+On macOS, `cargo test` passes (130 passed, 3 ignored). Clippy across all targets
+is blocked by the existing `overly_complex_bool_expr` in `src/cut.rs:1096`;
+it completes with that lint allowed, retaining existing warnings. The new module
+passes rustfmt and the patch passes whitespace checks. Live startup, paused
+step/seek repainting and hide/restore still need window-level verification;
+no event-count or throughput benchmark was run.
+
 ## 2026-10-21 — schema controls and live processor previews
 
 Added a generic runtime-descriptor panel with numeric sliders and exact entry,

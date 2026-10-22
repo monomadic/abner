@@ -24,11 +24,7 @@ Effort estimates come from the 2026-09-04 comparison against switchblade.
    buffers (696 MiB resident for three players against 490: the rewind window plus
    decoding ahead to the budget). Profile with three sources before changing anything.
 
-4. **Waker latch on the decoder→loop nudge.** `main.rs` sends one proxy event per
-   player per dry→ready transition with no latch; N players × transitions all queue on
-   the unbounded channel. Switchblade's `Waker` swaps an `AtomicBool` in `wake()` and
-   clears it at the top of `RedrawRequested`, so one event is ever in flight, and its
-   `arm()` covers the startup race (a worker finishing during GPU init). ~35 lines.
+4. *(done 2026-10-22 — coalescing decoder waker; see HISTORY.md)*
 5. **Mip floor for many-up layouts.** `MIP_LEVELS = 4` floors a 3840-wide source at
    480px on the long side — fine for 2-up, but a 6-up side-by-side on a retina window
    minifies that into a ~300px cell, which is exactly the shimmer the chain exists to
