@@ -2973,16 +2973,50 @@ impl App {
         }
     }
 
+    /// Header tabs (MainNav 382:4686, 2026-10-26): five 110×30 tabs on a
+    /// 5px gap. They shrink together so the row ends 12px short of what
+    /// the header carries at its right — the READY chip, or cut mode's
+    /// status chip and Export button.
     fn mode_selector(&self) -> ModeSelector {
+        let right = if self.cut_mode {
+            if self.vp.0 >= CUT_COLUMNS_MIN_W { self.cut_status_chip().x } else { self.vp.0 - 115.0 }
+        } else { self.status_chip().x };
+        let tab_w = ((right - 12.0 - self.header_left() - 4.0 * TAB_GAP) / 5.0).clamp(40.0, TAB_W);
         ModeSelector {
             rect: RectPx {
                 x: self.header_left(),
-                y: 8.0,
-                w: 470.0,
-                h: 28.0,
+                y: (HEADER_H - TAB_H) / 2.0,
+                w: 5.0 * tab_w + 4.0 * TAB_GAP,
+                h: TAB_H,
             },
             active: self.workspace_mode(),
         }
+    }
+
+    /// The READY chip (Header 382:4716 `Status / READY`): 126×28, ending
+    /// 11px from the right edge, level with the tabs. Input modes only;
+    /// cut mode's status chip (`cut_status_chip`) says what the export
+    /// will do instead.
+    fn status_chip(&self) -> RectPx {
+        RectPx { x: self.vp.0 - 11.0 - 126.0, y: (HEADER_H - 28.0) / 2.0, w: 126.0, h: 28.0 }
+    }
+
+    /// Cut mode's status chip: same chip, sized to its mono text, right
+    /// edge where the status line used to end (left of Export and the
+    /// inspector toggle).
+    fn cut_status_chip(&self) -> RectPx {
+        let (text, _) = self.cut_status();
+        let w = 22.0 + text.chars().count() as f32 * (MONO_ADV * 10.0 + 0.5) + 12.0;
+        let right = self.vp.0 - 285.0 + 12.0;
+        RectPx { x: right - w, y: (HEADER_H - 28.0) / 2.0, w, h: 28.0 }
+    }
+
+    fn cut_status(&self) -> (&'static str, u32) {
+        let cut = self.cut.as_ref().unwrap();
+        if cut.encoding() { ("ENCODING SPLIT GOPs…", 0xb68aff) }
+        else if cut.scanning() { ("SCANNING KEYFRAMES…", CUT_INK) }
+        else if cut.copy_ready() { ("READY · STREAM COPY", CUT_LAMP) }
+        else { ("SPLIT GOPs · ENCODING NEEDED", 0xb68aff) }
     }
 
     fn build_hud(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
@@ -3001,6 +3035,7 @@ impl App {
             items.push(Item::Rect(RectItem::new(r, WORKSPACE_RULE)));
         }
         self.mode_selector().draw(items, self.cursor, self.cursor_inside);
+        draw_status_chip(items, self.status_chip(), HEADER_LAMP, "READY", hex_color(0xc8c8c8));
         for control in self.controls() {
             let hovered = contains(control.r, self.cursor.0, self.cursor.1) && self.cursor_inside;
             if matches!(control.action, Action::Tool(_) | Action::ToggleSources | Action::ToggleInspector | Action::ToggleDetail) {
@@ -3701,9 +3736,9 @@ struct ModeSelector {
 }
 
 impl ModeSelector {
-    /// Header / Container (122:441): 2px padding, 1px gaps, four equal segments.
+    /// MainNav (382:4686): five equal tabs on a `TAB_GAP`.
     fn controls(&self) -> Vec<Control> {
-        let w = (self.rect.w - 4.0 - 4.0 * 1.0) / 5.0;
+        let w = (self.rect.w - 4.0 * TAB_GAP) / 5.0;
         [
             ("Sources", 0),
             ("Timeline", 3),
@@ -3716,10 +3751,10 @@ impl ModeSelector {
         .map(|(index, (label, mode))| {
             Control::new(
                 RectPx {
-                    x: self.rect.x + 2.0 + index as f32 * (w + 1.0),
-                    y: self.rect.y + 2.0,
+                    x: self.rect.x + index as f32 * (w + TAB_GAP),
+                    y: self.rect.y,
                     w,
-                    h: self.rect.h - 4.0,
+                    h: self.rect.h,
                 },
                 label,
                 self.active == mode,
@@ -3729,27 +3764,41 @@ impl ModeSelector {
         .collect()
     }
 
-    /// A #151515 housing with a 42%-ink hairline; the selected segment is
-    /// lifted to #ededec with dark type, the rest sit at 34% ink. The
-    /// design's alphas are baked with `mix()` over their ground — linear
-    /// blending would read them far too bright.
+    /// Separate outlined tabs, not a housing: an idle tab is the panel
+    /// with a 1px white/12% border and #ededec SF Pro Medium type; the
+    /// selected one carries a 2px `HEADER_RING` ring over the ring colour
+    /// at 18% and #f0f3f7 type. The design's alphas are baked with `mix()`
+    /// over the panel — linear blending would read them far too bright.
     fn draw(&self, items: &mut Vec<Item>, cursor: (f32, f32), inside: bool) {
-        let ground = 0x151515;
-        items.push(Item::Rect(RectItem { radius: 4.0, border_w: 1.0, border_color: mix(ground, 0xededec, 0.42),
-            ..RectItem::new(self.rect, hex_color(ground)) }));
+        let ground = 0x050506;
         for control in self.controls() {
             let r = control.r;
             let hovered = inside && contains(r, cursor.0, cursor.1);
             if control.selected {
-                items.push(Item::Rect(RectItem { radius: 3.0, ..RectItem::new(r, hex_color(0xededec)) }));
+                items.push(Item::Rect(RectItem { radius: 4.0, border_w: 2.0, border_color: hex_color(HEADER_RING),
+                    ..RectItem::new(r, mix(ground, HEADER_RING, 0.18)) }));
+            } else {
+                items.push(Item::Rect(RectItem { radius: 4.0, border_w: 1.0,
+                    border_color: mix(ground, 0xffffff, if hovered { 0.28 } else { 0.12 }),
+                    ..RectItem::new(r, hex_color(ground)) }));
             }
-            let color = if control.selected { hex_color(0x11151b) }
-                else { mix(ground, 0xededec, if hovered { 0.7 } else { 0.34 }) };
-            items.push(Item::Text(TextItem { header: true, align: Align::Center, valign: VAlign::Middle,
-                tracking: 0.0337, max_width: Some(r.w - 8.0),
-                ..TextItem::new(r.x + r.w / 2.0, r.y + r.h / 2.0, 11.0, color, control.label.to_uppercase()) }));
+            let color = hex_color(if control.selected { SOURCE_INK } else if hovered { 0xffffff } else { 0xededec });
+            items.push(Item::Text(TextItem { inspector: 2, align: Align::Left, valign: VAlign::Middle,
+                tracking: 0.0337, max_width: Some(r.w - 24.0),
+                ..TextItem::new(r.x + 12.0, r.y + r.h / 2.0, 12.0, color, control.label) }));
         }
     }
+}
+
+/// The header's status chip (`Status / READY`, 382:4716): a white/9%
+/// pill on the panel, a 6px lamp 10px in and mono 10px text 22px in.
+fn draw_status_chip(items: &mut Vec<Item>, r: RectPx, lamp: u32, text: &str, color: [f32; 4]) {
+    let cy = r.y + r.h / 2.0;
+    items.push(Item::Rect(RectItem { radius: 4.0, ..RectItem::new(r, mix(0x050506, 0xffffff, 0.09)) }));
+    items.push(Item::Rect(RectItem { radius: 3.0,
+        ..RectItem::new(RectPx { x: r.x + 10.0, y: cy - 3.0, w: 6.0, h: 6.0 }, hex_color(lamp)) }));
+    items.push(Item::Text(TextItem { valign: VAlign::Middle, tracking: 0.5, max_width: Some(r.w - 34.0),
+        ..TextItem::new(r.x + 22.0, cy, 10.0, color, text) }));
 }
 
 struct CutSide {
@@ -4898,17 +4947,11 @@ impl App {
         if self.vp.0 >= CUT_COLUMNS_MIN_W {
             let toggle = self.inspector_toggle();
             draw_sidebar_toggle(items, toggle, true, self.show_inspector, self.cursor_inside && contains(toggle, self.cursor.0, self.cursor.1));
-            let cut = self.cut.as_ref().unwrap();
-            let (text, color) = if cut.encoding() {
-                ("ENCODING SPLIT GOPs…", hex_color(0xb68aff))
-            } else if cut.scanning() { ("SCANNING KEYFRAMES…", hex_color(CUT_INK))
-            } else if cut.copy_ready() {
-                ("READY · STREAM COPY", hex_color(CUT_LAMP))
-            } else { ("SPLIT GOPs · ENCODING NEEDED", hex_color(0xb68aff)) };
-            let status_right = self.vp.0 - 285.0;
-            items.push(Item::Text(TextItem { align: Align::Right, valign: VAlign::Middle,
-                tracking: 0.63, max_width: Some((status_right - 12.0 - r.x - r.w).max(0.0)),
-                ..TextItem::new(status_right, 21.5, 10.5, color, text) }));
+            let (text, lamp) = self.cut_status();
+            let chip = self.cut_status_chip();
+            if chip.x >= r.x + r.w + 12.0 {
+                draw_status_chip(items, chip, lamp, text, hex_color(0xc8c8c8));
+            }
         }
     }
 
@@ -6060,6 +6103,14 @@ const CUT_CUE: u32 = 0xc1a9ee;
 /// A chapter flag already passed; the snap lamp.
 const CUT_FLAG_PAST: u32 = 0x393a3a;
 const CUT_LAMP: u32 = 0x20c45f;
+/// Header tab ring and selected tint (Figma `header/ink`, 382:4686).
+const HEADER_RING: u32 = 0x0088ff;
+/// The READY chip's lamp (Header 382:4716 `Status / READY`).
+const HEADER_LAMP: u32 = 0x90c9a4;
+/// Header tabs: 110×30 on a 5px gap (MainNav 382:4686).
+const TAB_W: f32 = 110.0;
+const TAB_H: f32 = 30.0;
+const TAB_GAP: f32 = 5.0;
 
 #[derive(Clone, Copy)]
 struct Workspace {
@@ -6685,10 +6736,14 @@ mod tests {
         let Some(clip) = test_clip() else { return };
         let mut app = mk_app(&clip, 2);
         app.vp = (1280.0, 800.0);
-        assert!(app.titlebar_background(600.0, 20.0));
+        // Five 110px tabs on a 5px gap end at 648; the strip past them is bare.
+        let tabs = app.header_tabs();
+        assert_eq!((tabs.x, tabs.w, tabs.h), (78.0, 570.0, TAB_H));
+        assert!(app.titlebar_background(700.0, 20.0));
         assert!(!app.titlebar_background(50.0, 20.0));
         assert!(!app.titlebar_background(100.0, 20.0));
-        assert!(!app.titlebar_background(600.0, HEADER_H));
+        assert!(!app.titlebar_background(600.0, 20.0), "over the fifth tab");
+        assert!(!app.titlebar_background(700.0, HEADER_H));
         let original = app.mode_selector().controls();
         for mode in [3, 4, 2, 1, 0] {
             app.activate(Action::Tool(mode));

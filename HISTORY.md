@@ -3,6 +3,19 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-26 — Header tabs as outlined buttons, READY chip
+
+`ModeSelector` now draws the Figma `MainNav` (382:4686): five separate 110×30
+tabs on a 5px gap, radius 4 — an idle tab is the panel with a 1px white/12%
+border and #ededec SF Pro Medium 12px type, the selected one a 2px
+`HEADER_RING` (#0088ff) ring over the same colour at 18%. The segmented
+housing is gone. The tabs shrink together so the row ends 12px short of what
+the header carries at its right. That is the new `draw_status_chip`: in Input
+modes a 126×28 READY chip ending 11px from the edge (`status_chip`, mint
+`HEADER_LAMP`); in cut mode the same chip sized to its mono text
+(`cut_status_chip`) replaces the bare status line, left of Render, Export and
+the inspector toggle. FIGMA.md records the design side.
+
 ## 2026-10-25 — Recent tiles only for files that still exist
 
 `recent::load` now runs `prune` over the parsed list: a path that is not a file
