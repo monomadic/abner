@@ -398,3 +398,16 @@ tracking, with the Figma icon slots and label offsets. Narrow cards hide the num
 instead of shrinking the type. Containers retain 8px outer / 7px image radii, a
 3px colored inset and 20px identity row. Image height follows the actual video
 aspect ratio; portrait cards narrow to keep images within the 120px height cap.
+
+### Header tabs and READY chip (2026-10-26)
+
+`MainNav` 382:4686 (inside the `Header` component 382:4716, which every shell
+frame instances) is now four SEPARATE tabs, not a segmented housing: 110×30,
+radius 4, 5px gap, starting at x=75 — idle tabs have no fill and a 1px
+white/12% border with an SF Pro Medium 12px label (#ededec, tracking
+0.0337px); the selected tab carries a 2px `header/ink` (#0088ff,
+`CUT_HEADER_INK`) ring over the same colour at 18% and a #f0f3f7 label. A
+`Status / READY` chip (126×28, white/9% fill, radius 4, a 6px #90c9a4 lamp and
+JetBrains Mono Medium 10px "READY" in #c8c8c8) ends 11px from the right edge;
+the header's `Toggle Inspector` instance is hidden, not deleted. Not yet
+implemented in `ModeSelector`.
