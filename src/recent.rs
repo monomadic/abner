@@ -60,11 +60,38 @@ fn list_path() -> Option<PathBuf> {
 /// Never empty.
 pub type Group = Vec<PathBuf>;
 
-/// The recent groups, most recent first. A missing or unreadable file is
-/// an empty list, never an error: it is a convenience.
+/// The recent groups, most recent first, with every path that is no
+/// longer a file dropped (`prune`), so the launch window never shows a
+/// tile for a clip that has gone. A missing or unreadable list is an
+/// empty list, never an error: it is a convenience.
 pub fn load() -> Vec<Group> {
     let Some(file) = list_path() else { return Vec::new() };
-    parse(&std::fs::read_to_string(file).unwrap_or_default())
+    prune(parse(&std::fs::read_to_string(file).unwrap_or_default()))
+}
+
+/// Keep only the paths that are files right now; a group with none left
+/// goes. The list file itself is left alone (`KEEP` is deeper than the
+/// row for exactly this), so a volume that comes back brings its
+/// entries back with it. This stats every listed path: a dead network
+/// mount can block here as it would in the thumbnail probe, but the
+/// row would otherwise show its clips for the probe deadline and then
+/// drop them, which is the hole this check closes.
+fn prune(groups: Vec<Group>) -> Vec<Group> {
+    groups
+        .into_iter()
+        .map(|g| {
+            g.into_iter()
+                .filter(|p| {
+                    let ok = p.is_file();
+                    if !ok {
+                        log::info!("recent {}: no longer a file, skipped", p.display());
+                    }
+                    ok
+                })
+                .collect::<Group>()
+        })
+        .filter(|g| !g.is_empty())
+        .collect()
 }
 
 fn parse(text: &str) -> Vec<Group> {
@@ -292,6 +319,21 @@ mod tests {
         // with tabs is one group.
         let got = parse("/a.mov\n\nrelative.mp4\n/b.mkv\t/c.mkv\t/b.mkv\n/a.mov\n");
         assert_eq!(got, vec![g(&["/a.mov"]), g(&["/b.mkv", "/c.mkv"])]);
+    }
+
+    #[test]
+    fn prune_drops_missing_paths_and_empty_groups() {
+        let dir = std::env::temp_dir().join(format!("abner-recent-prune-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.mp4");
+        let b = dir.join("b.mp4");
+        std::fs::write(&a, b"x").unwrap();
+        std::fs::write(&b, b"x").unwrap();
+        let gone = dir.join("gone.mp4");
+        // A directory is not a file either.
+        let got = prune(vec![vec![a.clone(), gone.clone()], vec![gone.clone()], vec![dir.clone()], vec![b.clone()]]);
+        assert_eq!(got, vec![vec![a.clone()], vec![b.clone()]]);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

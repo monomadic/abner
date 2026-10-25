@@ -3,6 +3,18 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-25 — Recent tiles only for files that still exist
+
+`recent::load` now runs `prune` over the parsed list: a path that is not a file
+right now drops out of its group, and a group with nothing left drops out,
+before the launch window makes a tile of it. Until now a deleted clip or one on an
+unmounted volume got a tile as an empty well that only vanished once its
+thumbnail worker's ffprobe failed (up to the 20 s deadline). The list FILE is left
+alone — `KEEP` is deeper than the row for exactly this — so a volume that mounts
+again brings its entries back. The check stats each listed path, which a dead
+network mount can block; that is the same exposure the thumbnail probe already
+had.
+
 ## 2026-10-22 — Processor rail, categories, off by default, shared canvas
 
 Processors start bypassed: `Panel::new` ticks nothing, and only `--processor ID`
