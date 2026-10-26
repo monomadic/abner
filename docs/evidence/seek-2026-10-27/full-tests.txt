@@ -1,0 +1,160 @@
+   Compiling abner v0.1.0 (/Users/nom/src/abner)
+    Finished `test` profile [optimized + debuginfo] target(s) in 6.53s
+     Running unittests src/lib.rs (target/debug/deps/abner-3d22c3854060f819)
+
+running 139 tests
+test app::tests::a_lone_clip_opens_in_timeline_mode ... ok
+test app::tests::a_sound_clip_can_be_picked_too ... ok
+test app::tests::backspace_closes_focused_source_and_leaves_empty_window_open ... ok
+test app::tests::backspace_removes_checked_sources_and_preserves_unselected_focus ... ok
+test app::tests::cmd_click_and_rubber_band_pick_several_clips ... ok
+test app::tests::cmd_w_closes_the_focused_clip ... ok
+test app::tests::completed_encode_belongs_to_its_source_after_switching_modes ... ok
+test app::tests::copy_frame_encodes_the_shown_frame_as_rgb_png ... ok
+test app::tests::crop_aspect_presets_reshape_and_lock_the_marquee ... ok
+test app::tests::crop_export_writes_a_prores_proxy_at_the_marquee_size ... ok
+test app::tests::crop_marquee_drags_and_exports_mask_and_video_at_one_size ... ok
+test app::tests::crop_ratio_label_names_presets_and_reduces_free_rects ... ok
+test app::tests::ctrl_shift_brackets_walk_the_header_tabs_without_wrapping ... ok
+test app::tests::cut_clip_hover_lift_tweens_in_and_out ... ok
+test app::tests::cut_inspector_tabs_toggle_chapters_seek_and_ghosts_select ... ok
+test app::tests::cut_mode_snaps_cuts_skips_and_undoes ... ok
+test app::tests::cut_mode_u_undoes_and_the_wheel_zooms_the_track ... ok
+test app::tests::cut_thumbnail_posters_load_and_the_hovered_one_plays ... ok
+test app::tests::dropped_clips_fill_slots_in_order_and_stay_synced ... ok
+test app::tests::duplicate_sources_preserve_time_media_and_independent_selection ... ok
+test app::tests::duplicate_viewed_source_while_playing_stays_frame_locked ... ok
+test app::tests::encode_buttons_render_gops_and_replace_the_working_source ... ok
+test app::tests::encoding_regions_remain_visible_and_toolbar_fits ... ok
+test app::tests::fit_cell_crops_and_pads_to_the_atlas_cell ... ok
+test app::tests::frame_detail_loads_real_images_and_selects_only_a_gop ... ok
+test app::tests::frame_marker_detail_follows_zoom_and_key_flag ... ok
+test app::tests::framestep_moves_one_frame_and_adopts_true_pts ... ok
+test app::tests::holding_the_timeline_pauses_playback_until_release ... ok
+test app::tests::hover_playhead_matches_click_and_hides_for_other_actions ... ok
+test app::tests::inspector_directory_has_pointer_and_opens_the_focused_path ... ok
+test app::tests::inspector_grip_folds_the_detail_panel_and_the_list_takes_the_room ... ok
+test app::tests::lifted_recent_tile_grows_about_its_centre_and_keeps_its_hit_rect ... ok
+test app::tests::mask_painting_tracks_zoom_focus_and_export ... ok
+test app::tests::movie_icon_toggles_clip_posters_without_seeking ... ok
+test app::tests::narrow_cut_window_collapses_the_rail_with_the_inspector ... ok
+test app::tests::native_titlebar_excludes_controls_content_and_fullscreen ... ok
+test app::tests::native_workspace_selection_matches_header_for_every_transition ... ok
+test app::tests::number_keys_pick_clips_and_v_cycles_views ... ok
+test app::tests::opened_clips_sit_paused_on_their_first_frame ... ok
+test app::tests::option_drag_duplicates_only_the_dragged_source_on_release ... ok
+test app::tests::option_drag_inserts_at_drop_boundary_including_blank_space ... ok
+test app::tests::pinch_zooms_around_the_pointer_and_z_resets ... ok
+test app::tests::pointer_seek_stays_exact_as_decoded_frames_arrive ... ok
+test app::tests::recent_tile_lift_eases_toward_the_hovered_slot_and_settles ... ok
+test app::tests::seeks_coalesce_while_one_is_in_flight ... ok
+test app::tests::short_rail_drops_the_inspector_instead_of_overlapping_the_transport ... ok
+test app::tests::side_by_side_zoom_anchors_inside_the_correct_workspace_cell ... ok
+test app::tests::sidebar_toggle_hides_the_source_rail_and_survives_mode_switches ... ok
+test app::tests::source_checkboxes_do_not_change_view_and_clear_keeps_focus ... ok
+test app::tests::speed_scales_the_master_clock ... ok
+test app::tests::split_guide_previews_pixels_without_moving_clock_and_restores_on_leave ... ok
+test app::tests::split_tool_preview_and_click_use_nearest_key_or_next_frame ... ok
+test app::tests::transport_buttons_and_seek_bar_are_live ... ok
+test app::tests::workspace_controls_select_tools_and_never_paint_the_shell ... ok
+test app::tests::workspace_geometry_and_scroll_keep_every_clip_reachable ... ok
+test config::tests::default_is_complete_and_valid ... ok
+test config::tests::empty_overlay_is_the_default ... ok
+test config::tests::errors_name_the_key ... ok
+test config::tests::explicit_missing_path_is_an_error ... ok
+test config::tests::keys_parse_names_and_characters ... ok
+test config::tests::overlay_changes_only_what_it_names ... ok
+test cut::tests::added_chapters_sort_refuse_near_duplicates_and_move_with_the_cuts ... ok
+test cut::tests::cuts_merge_segments_alternate_and_undo_walks_back ... ok
+test cut::tests::decoded_frame_types_preserve_key_flags_and_presentation_order ... ok
+test cut::tests::dragged_edges_resize_cuts_trim_the_ends_and_never_cross ... ok
+test cut::tests::dragging_one_split_leaves_the_others_alone ... ok
+test cut::tests::gop_packets_follow_decode_order_and_include_the_final_group ... ok
+test cut::tests::gop_selection_and_zoom_ceiling_do_not_expand_to_the_clip ... ok
+test cut::tests::gop_stats_name_the_median_and_the_longest ... ok
+test cut::tests::in_snaps_back_out_snaps_forward_and_the_warning_names_the_cost ... ok
+test cut::tests::join_merges_adjacent_pieces_and_refuses_gaps ... ok
+test cut::tests::pending_gops_follow_actual_edits_not_the_snap_toggle ... ok
+test cut::tests::scan_finds_keyframes_and_the_export_drops_the_cut_range ... ok
+test cut::tests::split_encoding_requires_complete_ip_only_gop ... ok
+test cut::tests::splits_add_boundaries_only_in_kept_material ... ok
+test cut::tests::srt_cues_parse_and_shed_their_markup ... ok
+test cut::tests::stream_facts_read_from_ffprobe_json ... ok
+test cut::tests::the_view_fits_zooms_about_the_anchor_and_pages_to_the_playhead ... ok
+test cut::tests::timeline_project_round_trips_and_rejects_changed_source ... ok
+test fc::register_timing::register_cost ... ignored
+test fc::tests::bilinear_resize_averages ... ok
+test fc::tests::fused_decimation_matches_the_two_pass_path ... ok
+test fc::tests::inside_keeps_aspect_and_evenness ... ok
+test fc::timing_tests::fit_timing ... ignored
+test mask::tests::aspect_presets_hold_their_ratio ... ok
+test mask::tests::crop_stays_inside_the_image_and_cuts_both_planes_alike ... ok
+test mask::tests::edges_resize_one_axis_and_locked_edges_follow_the_ratio ... ok
+test mask::tests::saved_png_preserves_dimensions_polarity_and_pixels ... ok
+test mask::tests::swept_circle_is_connected_clipped_and_binary ... ok
+test player::parity_tests::delivered_rgba_matches_ffmpegs_conversion ... ok
+test player::tests::benchmark_three_4k_players ... ignored
+test player::tests::cache_keeps_the_frames_nearest_the_position_within_budget ... ok
+test player::tests::cold_long_gop_seek_skips_distant_rgba_but_lands_exact ... ok
+test player::tests::dropped_player_releases_its_reader ... ok
+test player::tests::exact_seek_lands_and_take_next_adopts ... ok
+test player::tests::exact_seeks_inside_a_cached_gop_are_served_without_the_decoder ... ok
+test player::tests::exact_seeks_inside_one_gop_land_forward_and_back ... ok
+test player::tests::master_clock_take_upto_pops_in_pts_order ... ok
+test player::tests::pending_seek_uses_its_covered_run_even_with_a_later_cached_run ... ok
+test player::tests::two_players_stay_in_sync_on_the_master_clock ... ok
+test player::tests::unreadable_source_fails_instead_of_hanging ... ok
+test player::tests::vp9_and_av1_decode_and_seek ... ok
+test probe::tests::a_source_that_never_answers_times_out ... ok
+test probe::tests::probe_mkv_matches_ffprobe ... ok
+test processor_gui::tests::chain_order_changes_pixels_and_cancellation_prevents_execution ... ok
+test processor_gui::tests::gui_controls_edit_runtime_settings_and_cancel_on_drag ... ok
+test processor_gui::tests::invalidation_cancels_and_discards_old_frames ... ok
+test processor_gui::tests::numeric_controls_clamp_and_keep_integer_types ... ok
+test processor_gui::tests::ordered_chain_bypass_settings_and_frame_navigation ... ok
+test processor_gui::tests::preview_drains_buffered_tail_and_matches_fractional_rate_source ... FAILED
+test processor_gui::tests::rail_cards_select_tick_and_fold_like_sources ... ok
+test processor_gui::tests::schema_defaults_do_not_invent_optional_values ... ok
+test processor_gui::tests::stage_feedback_never_invents_a_percentage ... ok
+test processor_gui::tests::text_edit_can_restore_discovery_and_reject_invalid_numbers ... ok
+test processor_gui::tests::whole_clip_capability_is_visible_but_not_previewable ... ok
+test recent::tests::changes_preserve_changed_pixels_and_white_out_small_differences ... ok
+test recent::tests::labels ... ok
+test recent::tests::merge_drops_the_same_group_in_another_order ... ok
+test recent::tests::merge_puts_the_opened_group_first_and_caps ... ok
+test recent::tests::parse_keeps_absolute_unique_groups_in_order ... ok
+test recent::tests::prune_drops_missing_paths_and_empty_groups ... ok
+test recent::tests::timeline_preview_seeks_the_requested_b_frame ... ok
+test render::frame_icon_tests::figma_svg_icons_render_nonempty_distinct_pixels_at_intrinsic_size ... ok
+test render::workspace_tests::scissors_stay_inside_the_surface ... ok
+test schedule::tests::animating_floors_the_interval_at_min_frame ... ok
+test schedule::tests::animating_visible_redraws_continuously_once_min_frame_elapses ... ok
+test schedule::tests::idle_waits_a_full_tick_then_redraws_without_polling ... ok
+test schedule::tests::live_deadline_caps_the_idle_wait ... ok
+test schedule::tests::occluded_never_redraws_continuously_and_ignores_the_deadline ... ok
+test smart::tests::only_requested_gops_change_and_audio_and_frame_timing_survive ... ok
+test text::tests::fitted_unicode_labels_respect_measured_width ... ok
+test text::tests::interface_font_and_fractional_sizes_have_distinct_cached_glyphs ... ok
+test titlebar_tests::double_click_requires_nearby_presses_without_a_drag ... ok
+test waker::tests::arming_without_work_waits_for_completion ... ok
+test waker::tests::completion_during_redraw_requests_another_frame ... ok
+test waker::tests::concurrent_arm_and_wake_send_exactly_once ... ok
+test waker::tests::player_clones_coalesce_concurrent_notifications ... ok
+test waker::tests::redraw_clears_latch_before_next_completion ... ok
+test waker::tests::startup_completion_is_replayed_once_when_armed ... ok
+
+failures:
+
+---- processor_gui::tests::preview_drains_buffered_tail_and_matches_fractional_rate_source stdout ----
+
+thread 'processor_gui::tests::preview_drains_buffered_tail_and_matches_fractional_rate_source' (1266040) panicked at src/processor_gui.rs:2199:44:
+called `Result::unwrap()` on an `Err` value: "Preview decoder failed"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    processor_gui::tests::preview_drains_buffered_tail_and_matches_fractional_rate_source
+
+test result: FAILED. 135 passed; 1 failed; 3 ignored; 0 measured; 0 filtered out; finished in 13.04s
+
+error: test failed, to rerun pass `--lib`

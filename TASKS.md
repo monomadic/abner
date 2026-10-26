@@ -23,6 +23,12 @@ Effort estimates come from the 2026-09-04 comparison against switchblade.
    decode-forward as planar frames (allocation churn under three sources), and our RGBA
    buffers (696 MiB resident for three players against 490: the rewind window plus
    decoding ahead to the budget). Profile with three sources before changing anything.
+   2026-10-27: [profile and reproduction](docs/SEEK-PROFILING.md) added. On an M4 Pro,
+   interleaved release medians are 388/618 ms (one, FilmCraft/libav) and 534/795 ms
+   (three): the latency crossover did not reproduce. Three-stream peak RSS is
+   3435/901 MiB; FilmCraft retains 2278 MiB of planar pictures in addition to RGBA.
+   Callback copy is the leading measured cost; pool allocation/lock and GOP insertion
+   time are small. No decoder policy or budget change; investigation stays open.
 
 4. *(done 2026-10-22 — coalescing decoder waker; see HISTORY.md)*
 5. **Mip floor for many-up layouts.** `MIP_LEVELS = 4` floors a 3840-wide source at

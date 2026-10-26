@@ -3,6 +3,18 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-27 — Task 20: seek profiling and reproduction (investigation remains open)
+
+Added opt-in player stage timings, FilmCraft retained-byte/hardware counters, a
+controlled planar-versus-RGBA benchmark, and a disposable dependency instrumentation
+script covering callback copy, asynchronous wait, planar allocation/pool locking,
+and GOP storage. [The report](docs/SEEK-PROFILING.md) records hardware-confirmed,
+interleaved FilmCraft/libav runs and separates cache bytes from process RSS.
+The latency crossover did not reproduce on the M4 Pro; planar retention and
+callback-copy cost did. Exact seek/rewind/sync tests pass. No playback policy,
+Rayon settings or memory budgets changed; task 20 is still open. The report also
+records the full-suite processor preview failure rather than claiming a clean run.
+
 ## 2026-10-26 — Process page: footer bar, Render frame, icon transport, keys
 
 The Process page gets the footer bar every other page has, at the Timeline's

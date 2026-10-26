@@ -1,0 +1,22 @@
+    Blocking waiting for file lock on build directory
+   Compiling abner v0.1.0 (/Users/nom/src/abner)
+    Finished `test` profile [optimized + debuginfo] target(s) in 11.09s
+     Running unittests src/lib.rs (target/debug/deps/abner-3d22c3854060f819)
+
+running 13 tests
+test player::parity_tests::delivered_rgba_matches_ffmpegs_conversion ... ok
+test player::tests::benchmark_three_4k_players ... ignored
+test player::tests::cache_keeps_the_frames_nearest_the_position_within_budget ... ok
+test player::tests::cold_long_gop_seek_skips_distant_rgba_but_lands_exact ... ok
+test player::tests::dropped_player_releases_its_reader ... ok
+test player::tests::exact_seek_lands_and_take_next_adopts ... ok
+test player::tests::exact_seeks_inside_a_cached_gop_are_served_without_the_decoder ... ok
+test player::tests::exact_seeks_inside_one_gop_land_forward_and_back ... ok
+test player::tests::master_clock_take_upto_pops_in_pts_order ... ok
+test player::tests::pending_seek_uses_its_covered_run_even_with_a_later_cached_run ... ok
+test player::tests::two_players_stay_in_sync_on_the_master_clock ... ok
+test player::tests::unreadable_source_fails_instead_of_hanging ... ok
+test player::tests::vp9_and_av1_decode_and_seek ... ok
+
+test result: ok. 12 passed; 0 failed; 1 ignored; 0 measured; 126 filtered out; finished in 3.10s
+

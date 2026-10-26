@@ -298,10 +298,16 @@ struct Shared {
 }
 
 impl Shared {
-    fn take_buf(&self, len: usize) -> Vec<u8> {
-        let mut buf = self.pool.lock().unwrap().pop().unwrap_or_default();
+    fn take_buf(&self, len: usize, profile: bool) -> (Vec<u8>, bool, f64) {
+        let started = profile.then(std::time::Instant::now);
+        let mut pool = self.pool.lock().unwrap();
+        let lock_ms = started.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
+        let recycled = pool.pop();
+        drop(pool);
+        let reused = recycled.as_ref().is_some_and(|b| b.capacity() >= len);
+        let mut buf = recycled.unwrap_or_default();
         buf.resize(len, 0);
-        buf
+        (buf, reused, lock_ms)
     }
 
     fn recycle_buf(&self, buf: Rgba) {
@@ -568,6 +574,11 @@ enum Flow {
 
 /// The reader thread: decode into the cache until dropped, following the commands.
 fn reader(shared: &Arc<Shared>, cfg: &ReaderCfg) -> Result<(), String> {
+    // Opt-in diagnostics: no clock reads or output on the normal playback path.
+    let profile = std::env::var_os("ABNER_PROFILE_SEEK").is_some();
+    let elapsed_ms = |start: Option<std::time::Instant>| {
+        start.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0)
+    };
     let src = fc::open(&cfg.path)?;
     let (frame_s, frames) = fc::timing(&src).ok_or_else(|| "no video stream".to_string())?;
     let sync = fc::SyncTable::open(&cfg.path);
@@ -660,6 +671,7 @@ fn reader(shared: &Arc<Shared>, cfg: &ReaderCfg) -> Result<(), String> {
             }
         }
         shared.cancel.store(false, Ordering::Relaxed);
+        let request_start = profile.then(std::time::Instant::now);
         let frame = match fc::frame_at(&src, index, frame_s, &shared.cancel) {
             Ok(f) => f,
             Err(true) => continue, // cancelled by a command or a drop
@@ -673,6 +685,7 @@ fn reader(shared: &Arc<Shared>, cfg: &ReaderCfg) -> Result<(), String> {
                 return Err(format!("frame {index} failed to decode"));
             }
         };
+        let request_ms = elapsed_ms(request_start);
         if !hw_noted {
             hw_noted = true;
             log::info!(
@@ -688,13 +701,25 @@ fn reader(shared: &Arc<Shared>, cfg: &ReaderCfg) -> Result<(), String> {
         if active_target.is_some_and(|t| key < t - SAME_FRAME_US) {
             seen_before_target = true;
         }
-        let mut buf = shared.take_buf(frame_bytes);
+        let prepare_start = profile.then(std::time::Instant::now);
+        let (mut buf, reused, pool_lock_ms) = shared.take_buf(frame_bytes, profile);
+        let prepare_ms = elapsed_ms(prepare_start);
+        let convert_start = profile.then(std::time::Instant::now);
         fc::fit_rgba_into(&frame, Fit::Exact { w: cfg.w, h: cfg.h }, &mut buf);
+        let convert_ms = elapsed_ms(convert_start);
         drop(frame);
         if buf.len() != frame_bytes {
             buf.resize(frame_bytes, 0);
         }
-        match push(shared, key, buf, active_target, seen_before_target) {
+        let push_start = profile.then(std::time::Instant::now);
+        let flow = push(shared, key, buf, active_target, seen_before_target);
+        let push_ms = elapsed_ms(push_start);
+        if profile {
+            let rgba_bytes = shared.cache.lock().unwrap().bytes;
+            let pool_capacity: usize = shared.pool.lock().unwrap().iter().map(Vec::capacity).sum();
+            eprintln!("seek-profile thread={:?} source={} frame={index} target={active_target:?} request_ms={request_ms:.3} prepare_ms={prepare_ms:.3} rgba_reused={reused} rgba_pool_lock_ms={pool_lock_ms:.3} convert_ms={convert_ms:.3} push_including_wait_ms={push_ms:.3} rgba_cache_bytes={} rgba_pool_capacity={} planar_cache_bytes={} planar_pool={:?}", std::thread::current().id(), cfg.path.display(), rgba_bytes, pool_capacity, filmcraft_codecs::gop::cached_bytes(), filmcraft_frame::pool::stats());
+        }
+        match flow {
             Flow::Stop => return Ok(()),
             Flow::Continue => {}
         }
@@ -900,9 +925,48 @@ mod tests {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(3);
+        assert!(n > 0, "ABNER_BENCH_PLAYERS must be positive");
+        // A controlled counterfactual: identical planar requests and retained pictures,
+        // with/without Abner's seven-frame RGBA rewind/target window. No decode-ahead.
+        // Opening is outside the timer in BOTH modes; do not compare to cold_ms directly.
+        if let Ok(stage) = std::env::var("ABNER_BENCH_STAGE") {
+            assert!(matches!(stage.as_str(), "planar" | "rgba"));
+            let sources: Vec<_> = (0..n).map(|_| fc::open(&clip).unwrap()).collect();
+            let barrier = Arc::new(std::sync::Barrier::new(n + 1));
+            let before = filmcraft_codecs::gop::gop_stats();
+            let threads: Vec<_> = sources.into_iter().map(|src| {
+                let barrier = barrier.clone();
+                let convert = stage == "rgba";
+                thread::spawn(move || {
+                    let cancel = Arc::new(AtomicBool::new(false));
+                    let mut retained = Vec::new();
+                    barrier.wait();
+                    for index in 78..=84 {
+                        let frame = fc::frame_at(&src, index, 1.0 / 24.0, &cancel).unwrap();
+                        if convert {
+                            let mut buf = Vec::new();
+                            fc::fit_rgba_into(&frame, Fit::Exact { w: 3840, h: 2160 }, &mut buf);
+                            retained.push(buf);
+                        }
+                    }
+                    // Keep both layers alive until the caller collects all workers.
+                    (src, retained)
+                })
+            }).collect();
+            let started = Instant::now();
+            barrier.wait();
+            let retained: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+            eprintln!("stage={stage} players={n} elapsed_ms={} gop_delta={:?} hardware={:?} planar_cache_bytes={}", started.elapsed().as_millis(), filmcraft_codecs::gop::gop_stats() - before, filmcraft_codecs::hw::hw_stats(), filmcraft_codecs::gop::cached_bytes());
+            drop(retained);
+            let _ = std::fs::remove_dir_all(dir);
+            return;
+        }
         let players: Vec<_> = (0..n)
             .map(|_| Player::spawn(&clip, 3840, 2160, true, None, 256 << 20).unwrap())
             .collect();
+        let gop_before = filmcraft_codecs::gop::gop_stats();
+        let pool_before = filmcraft_frame::pool::stats();
+        let hw_before = filmcraft_codecs::hw::hw_stats();
         let cold = Instant::now();
         for p in &players {
             p.seek(3.5, true);
@@ -920,6 +984,9 @@ mod tests {
                 .iter()
                 .all(|&pts| (pts - landed[0]).abs() < 1.0 / 24.0)
         );
+        assert!(landed.iter().all(|&pts| (pts - 3.5).abs() < 1e-6), "inexact landing: {landed:?}");
+        eprintln!("cold: players={n} gop_delta={:?} planar_cache_bytes={} pool_before={pool_before:?} pool_after={:?}", filmcraft_codecs::gop::gop_stats() - gop_before, filmcraft_codecs::gop::cached_bytes(), filmcraft_frame::pool::stats());
+        eprintln!("hardware: before={hw_before:?} after={:?}", filmcraft_codecs::hw::hw_stats());
         let cached = Instant::now();
         for p in &players {
             p.seek(3.42, true);
@@ -936,7 +1003,7 @@ mod tests {
         let cache_mib: f64 =
             players.iter().map(|p| p.cached_bytes() as f64).sum::<f64>() / 1048576.0;
         eprintln!(
-            "4K x3: cold={cold_ms}ms, cached={cached_us}us, cached_frames={cached_pts:?}, cache={cache_mib:.1}MiB"
+            "4K x{n}: cold={cold_ms}ms, cached={cached_us}us, cached_frames={cached_pts:?}, cache={cache_mib:.1}MiB"
         );
         drop(players);
         let _ = std::fs::remove_dir_all(dir);

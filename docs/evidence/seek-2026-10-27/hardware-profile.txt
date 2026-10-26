@@ -1,0 +1,2009 @@
+
+running 1 test
+fc-profile gop_store_evict_ns=208 retained_bytes=0
+fc-profile gop_store_evict_ns=125 retained_bytes=0
+fc-profile gop_store_evict_ns=0 retained_bytes=0
+fc-profile gop_store_evict_ns=125 retained_bytes=0
+fc-profile gop_store_evict_ns=41 retained_bytes=0
+fc-profile gop_store_evict_ns=83 retained_bytes=0
+fc-profile plane_pool_lock_ns=167 reused=false
+fc-profile plane_allocation_ns=2041 bytes=8294400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=667 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2750 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2292 bytes=8294400
+fc-profile callback_copy_including_pool_ns=3621625
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=541 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=5708 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1709 bytes=8294400
+fc-profile callback_copy_including_pool_ns=3488334
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=333 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2458 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=1834 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=333 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2042 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2084 bytes=8294400
+fc-profile callback_copy_including_pool_ns=3489042
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1125 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2834 bytes=2073600
+fc-profile plane_pool_lock_ns=83 reused=false
+fc-profile plane_allocation_ns=3042 bytes=8294400
+fc-profile callback_copy_including_pool_ns=3600292
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1125 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=3083 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2542 bytes=8294400
+fc-profile callback_copy_including_pool_ns=3565250
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=875 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2750 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1917 bytes=8294400
+fc-profile callback_copy_including_pool_ns=3595250
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=916 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2542 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2000 bytes=8294400
+fc-profile callback_copy_including_pool_ns=3562958
+fc-profile asynchronous_wait_ns=16857625
+fc-profile gop_store_evict_ns=30333 retained_bytes=37324800
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=417 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2708 bytes=2073600
+fc-profile gop_store_evict_ns=125 retained_bytes=37324800
+fc-profile gop_store_evict_ns=42 retained_bytes=37324800
+fc-profile callback_copy_including_pool_ns=3571750
+fc-profile asynchronous_wait_ns=18070292
+fc-profile gop_store_evict_ns=1125 retained_bytes=37324800
+fc-profile gop_store_evict_ns=42 retained_bytes=37324800
+fc-profile gop_store_evict_ns=0 retained_bytes=37324800
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2750 bytes=8294400
+fc-profile callback_copy_including_pool_ns=3615459
+fc-profile asynchronous_wait_ns=19472625
+fc-profile gop_store_evict_ns=958 retained_bytes=37324800
+fc-profile gop_store_evict_ns=41 retained_bytes=37324800
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=292 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2208 bytes=2073600
+fc-profile gop_store_evict_ns=42 retained_bytes=37324800
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2375 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2953083
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1958 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1667 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=3750 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=167 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2334 bytes=2073600
+fc-profile callback_copy_including_pool_ns=3018750
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile callback_copy_including_pool_ns=2990542
+fc-profile plane_allocation_ns=2125 bytes=8294400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2375 bytes=8294400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1500 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=3125 bytes=2073600
+fc-profile plane_pool_lock_ns=84 reused=false
+fc-profile plane_allocation_ns=208 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2458 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2625 bytes=8294400
+fc-profile callback_copy_including_pool_ns=3024917
+fc-profile callback_copy_including_pool_ns=2988792
+fc-profile asynchronous_wait_ns=9862250
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=3333 bytes=8294400
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=1709 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=3125 bytes=2073600
+fc-profile gop_store_evict_ns=2292 retained_bytes=74649600
+fc-profile gop_store_evict_ns=83 retained_bytes=74649600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=333 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2667 bytes=2073600
+fc-profile gop_store_evict_ns=42 retained_bytes=74649600
+fc-profile callback_copy_including_pool_ns=2977250
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2041 bytes=8294400
+fc-profile callback_copy_including_pool_ns=3029834
+fc-profile asynchronous_wait_ns=12022875
+fc-profile gop_store_evict_ns=1250 retained_bytes=74649600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2625 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2250 bytes=2073600
+fc-profile gop_store_evict_ns=42 retained_bytes=74649600
+fc-profile gop_store_evict_ns=0 retained_bytes=74649600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2166 bytes=8294400
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=291 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2791 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2947583
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2000 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=250 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2167 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2968458
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2042 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=375 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2291 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2042 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2931709
+fc-profile asynchronous_wait_ns=16088208
+fc-profile gop_store_evict_ns=1459 retained_bytes=74649600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=375 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2917 bytes=2073600
+fc-profile gop_store_evict_ns=41 retained_bytes=74649600
+fc-profile gop_store_evict_ns=0 retained_bytes=74649600
+fc-profile callback_copy_including_pool_ns=2947875
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2167 bytes=8294400
+fc-profile plane_pool_lock_ns=2959 reused=false
+fc-profile plane_allocation_ns=3167 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=166 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2976750
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1959 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2625 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2083 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2993416
+fc-profile asynchronous_wait_ns=11925500
+fc-profile gop_store_evict_ns=1000 retained_bytes=111974400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2250 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=84 bytes=2073600
+fc-profile gop_store_evict_ns=42 retained_bytes=111974400
+fc-profile gop_store_evict_ns=83 retained_bytes=111974400
+fc-profile callback_copy_including_pool_ns=2948750
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2041 bytes=8294400
+fc-profile plane_pool_lock_ns=83 reused=false
+fc-profile plane_allocation_ns=3834 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=166 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2924959
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1667 bytes=8294400
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2625 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2625 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2924042
+fc-profile asynchronous_wait_ns=13593542
+fc-profile gop_store_evict_ns=1542 retained_bytes=111974400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2666 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=83 bytes=2073600
+fc-profile gop_store_evict_ns=125 retained_bytes=111974400
+fc-profile gop_store_evict_ns=0 retained_bytes=111974400
+fc-profile callback_copy_including_pool_ns=2981583
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2375 bytes=8294400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=3709 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=84 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2978666
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1958 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=3167 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1708 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2970291
+fc-profile asynchronous_wait_ns=12323333
+fc-profile gop_store_evict_ns=1375 retained_bytes=111974400
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=3375 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=500 bytes=2073600
+fc-profile gop_store_evict_ns=42 retained_bytes=111974400
+fc-profile gop_store_evict_ns=83 retained_bytes=111974400
+fc-profile callback_copy_including_pool_ns=2706458
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2500 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2375 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=83 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2973334
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2208 bytes=8294400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2334 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=41 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2334 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2992292
+fc-profile asynchronous_wait_ns=12193625
+fc-profile gop_store_evict_ns=2250 retained_bytes=149299200
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2875 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile gop_store_evict_ns=83 retained_bytes=149299200
+fc-profile gop_store_evict_ns=0 retained_bytes=149299200
+fc-profile callback_copy_including_pool_ns=2954583
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=3042 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=3125 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=83 bytes=2073600
+fc-profile callback_copy_including_pool_ns=3028417
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1917 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2584 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2209 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2944750
+fc-profile asynchronous_wait_ns=12121000
+fc-profile gop_store_evict_ns=1791 retained_bytes=149299200
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=3375 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile gop_store_evict_ns=42 retained_bytes=149299200
+fc-profile gop_store_evict_ns=0 retained_bytes=149299200
+fc-profile callback_copy_including_pool_ns=2961958
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1875 bytes=8294400
+fc-profile plane_pool_lock_ns=83 reused=false
+fc-profile plane_allocation_ns=2209 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=792 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2733292
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1833 bytes=8294400
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2000 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=41 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1667 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2766625
+fc-profile asynchronous_wait_ns=11787583
+fc-profile gop_store_evict_ns=1542 retained_bytes=149299200
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=333 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2292 bytes=2073600
+fc-profile gop_store_evict_ns=42 retained_bytes=149299200
+fc-profile gop_store_evict_ns=42 retained_bytes=149299200
+fc-profile callback_copy_including_pool_ns=2979333
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=1875 bytes=8294400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1791 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=4042 bytes=2073600
+fc-profile callback_copy_including_pool_ns=3032625
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2125 bytes=8294400
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=1208 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2458 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=1917 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2999417
+fc-profile asynchronous_wait_ns=11949042
+fc-profile gop_store_evict_ns=1250 retained_bytes=186624000
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=250 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2208 bytes=2073600
+fc-profile gop_store_evict_ns=42 retained_bytes=186624000
+fc-profile gop_store_evict_ns=167 retained_bytes=186624000
+fc-profile callback_copy_including_pool_ns=2977000
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2125 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=584 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2583 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2997083
+fc-profile plane_pool_lock_ns=208 reused=false
+fc-profile plane_allocation_ns=8292 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1042 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=5125 bytes=2073600
+fc-profile plane_pool_lock_ns=167 reused=false
+fc-profile plane_allocation_ns=2708 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1000 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2292 bytes=2073600
+fc-profile callback_copy_including_pool_ns=3021583
+fc-profile asynchronous_wait_ns=12290166
+fc-profile gop_store_evict_ns=1042 retained_bytes=186624000
+fc-profile gop_store_evict_ns=0 retained_bytes=186624000
+fc-profile gop_store_evict_ns=42 retained_bytes=186624000
+fc-profile callback_copy_including_pool_ns=3135666
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2334 bytes=8294400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=250 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2459 bytes=2073600
+fc-profile callback_copy_including_pool_ns=3031417
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2250 bytes=8294400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=291 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2834 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2625 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1083 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1958 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2955041
+fc-profile asynchronous_wait_ns=12604042
+fc-profile gop_store_evict_ns=1375 retained_bytes=186624000
+fc-profile gop_store_evict_ns=334 retained_bytes=186624000
+fc-profile gop_store_evict_ns=41 retained_bytes=186624000
+fc-profile callback_copy_including_pool_ns=2992375
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2250 bytes=8294400
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=334 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=6625 bytes=2073600
+fc-profile callback_copy_including_pool_ns=3031166
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1625 bytes=8294400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1000 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=1958 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2292 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=208 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2375 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2936958
+fc-profile asynchronous_wait_ns=12194708
+fc-profile gop_store_evict_ns=875 retained_bytes=223948800
+fc-profile gop_store_evict_ns=0 retained_bytes=223948800
+fc-profile gop_store_evict_ns=0 retained_bytes=223948800
+fc-profile callback_copy_including_pool_ns=2751375
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2125 bytes=8294400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2916 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=4500 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2736000
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2125 bytes=8294400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=3042 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2083 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2724333
+fc-profile asynchronous_wait_ns=11522000
+fc-profile gop_store_evict_ns=1000 retained_bytes=223948800
+fc-profile gop_store_evict_ns=167 retained_bytes=223948800
+fc-profile plane_pool_lock_ns=83 reused=false
+fc-profile plane_allocation_ns=2666 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile gop_store_evict_ns=42 retained_bytes=223948800
+fc-profile callback_copy_including_pool_ns=2970000
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2500 bytes=8294400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=3250 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=84 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2773750
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=1917 bytes=8294400
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=3792 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=83 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2042 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2947000
+fc-profile asynchronous_wait_ns=11420042
+fc-profile gop_store_evict_ns=875 retained_bytes=223948800
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2959 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=83 bytes=2073600
+fc-profile gop_store_evict_ns=41 retained_bytes=223948800
+fc-profile gop_store_evict_ns=42 retained_bytes=223948800
+fc-profile callback_copy_including_pool_ns=2679625
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2834 bytes=8294400
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=791 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=250 bytes=2073600
+fc-profile callback_copy_including_pool_ns=3004833
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2166 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2542 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2729458
+fc-profile asynchronous_wait_ns=11245750
+fc-profile gop_store_evict_ns=1334 retained_bytes=261273600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2125 bytes=8294400
+fc-profile gop_store_evict_ns=166 retained_bytes=261273600
+fc-profile gop_store_evict_ns=42 retained_bytes=261273600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=333 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2459 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2967292
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1875 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=583 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1917 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2987375
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2875 bytes=8294400
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=209 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2583 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2375 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=250 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2791 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2963458
+fc-profile asynchronous_wait_ns=12504500
+fc-profile gop_store_evict_ns=2125 retained_bytes=261273600
+fc-profile gop_store_evict_ns=0 retained_bytes=261273600
+fc-profile gop_store_evict_ns=42 retained_bytes=261273600
+fc-profile callback_copy_including_pool_ns=2931125
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2250 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=334 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2250 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2686542
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1542 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=292 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2250 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1958 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2981125
+fc-profile asynchronous_wait_ns=12185417
+fc-profile gop_store_evict_ns=1166 retained_bytes=261273600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=708 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2583 bytes=2073600
+fc-profile gop_store_evict_ns=0 retained_bytes=261273600
+fc-profile gop_store_evict_ns=42 retained_bytes=261273600
+fc-profile callback_copy_including_pool_ns=2686250
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1708 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2500 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=84 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2758417
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1833 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2917 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=166 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2989333
+fc-profile asynchronous_wait_ns=12272959
+fc-profile gop_store_evict_ns=958 retained_bytes=298598400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=3083 bytes=8294400
+fc-profile gop_store_evict_ns=41 retained_bytes=298598400
+fc-profile gop_store_evict_ns=41 retained_bytes=298598400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2500 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2951667
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2167 bytes=8294400
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2750 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=42 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2699041
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1834 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2083 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2625 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2921500
+fc-profile asynchronous_wait_ns=11831875
+fc-profile gop_store_evict_ns=1000 retained_bytes=298598400
+fc-profile gop_store_evict_ns=42 retained_bytes=298598400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=3083 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=500 bytes=2073600
+fc-profile gop_store_evict_ns=0 retained_bytes=298598400
+fc-profile callback_copy_including_pool_ns=2973958
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1791 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=916 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=208 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2730709
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1958 bytes=8294400
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2500 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2166 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2963000
+fc-profile asynchronous_wait_ns=11915041
+fc-profile gop_store_evict_ns=1333 retained_bytes=298598400
+fc-profile gop_store_evict_ns=0 retained_bytes=298598400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=3583 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2667 bytes=2073600
+fc-profile gop_store_evict_ns=0 retained_bytes=298598400
+fc-profile callback_copy_including_pool_ns=2958792
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2375 bytes=8294400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=208 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2250 bytes=2073600
+fc-profile callback_copy_including_pool_ns=3101542
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1750 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1333 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2542 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2541 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2712500
+fc-profile asynchronous_wait_ns=12227291
+fc-profile gop_store_evict_ns=1000 retained_bytes=335923200
+fc-profile gop_store_evict_ns=41 retained_bytes=335923200
+fc-profile gop_store_evict_ns=0 retained_bytes=335923200
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1458 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2458 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2970792
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2500 bytes=8294400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1083 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2542 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2976334
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2000 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=292 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=5291 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1875 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=917 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2917 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2950000
+fc-profile asynchronous_wait_ns=12503000
+fc-profile gop_store_evict_ns=1834 retained_bytes=335923200
+fc-profile gop_store_evict_ns=0 retained_bytes=335923200
+fc-profile gop_store_evict_ns=42 retained_bytes=335923200
+fc-profile callback_copy_including_pool_ns=2698625
+fc-profile plane_pool_lock_ns=83 reused=false
+fc-profile plane_allocation_ns=2791 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=3125 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2775209
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2042 bytes=8294400
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2292 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1792 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2991041
+fc-profile asynchronous_wait_ns=12079875
+fc-profile gop_store_evict_ns=2208 retained_bytes=335923200
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile gop_store_evict_ns=42 retained_bytes=335923200
+fc-profile plane_allocation_ns=2875 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=167 bytes=2073600
+fc-profile gop_store_evict_ns=42 retained_bytes=335923200
+fc-profile callback_copy_including_pool_ns=2986417
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1791 bytes=8294400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2500 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile callback_copy_including_pool_ns=3016500
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2083 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2625 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=84 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2916 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2960792
+fc-profile asynchronous_wait_ns=12591125
+fc-profile gop_store_evict_ns=1666 retained_bytes=373248000
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=3666 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=0 bytes=2073600
+fc-profile gop_store_evict_ns=0 retained_bytes=373248000
+fc-profile gop_store_evict_ns=0 retained_bytes=373248000
+fc-profile callback_copy_including_pool_ns=2936875
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2042 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2125 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2977792
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=1875 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2042 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=83 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2334 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2935542
+fc-profile asynchronous_wait_ns=11683916
+fc-profile gop_store_evict_ns=3750 retained_bytes=373248000
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2708 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile gop_store_evict_ns=0 retained_bytes=373248000
+fc-profile gop_store_evict_ns=42 retained_bytes=373248000
+fc-profile callback_copy_including_pool_ns=2918750
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2125 bytes=8294400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=458 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2125 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2929000
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2292 bytes=8294400
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=375 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2459 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2208 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2982000
+fc-profile asynchronous_wait_ns=12365250
+fc-profile gop_store_evict_ns=3708 retained_bytes=373248000
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1834 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=4125 bytes=2073600
+fc-profile gop_store_evict_ns=41 retained_bytes=373248000
+fc-profile gop_store_evict_ns=0 retained_bytes=373248000
+fc-profile callback_copy_including_pool_ns=2716791
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2125 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=250 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2375 bytes=2073600
+fc-profile callback_copy_including_pool_ns=3016292
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=1833 bytes=8294400
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=292 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1958 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2698625
+fc-profile asynchronous_wait_ns=11740542
+fc-profile gop_store_evict_ns=3333 retained_bytes=410572800
+fc-profile gop_store_evict_ns=83 retained_bytes=410572800
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1958 bytes=8294400
+fc-profile gop_store_evict_ns=83 retained_bytes=410572800
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=208 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2292 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2931000
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2417 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=250 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2291 bytes=2073600
+fc-profile callback_copy_including_pool_ns=3006584
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1875 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=833 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2209 bytes=2073600
+fc-profile plane_pool_lock_ns=292 reused=false
+fc-profile plane_allocation_ns=4750 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2966000
+fc-profile asynchronous_wait_ns=12318500
+fc-profile gop_store_evict_ns=4292 retained_bytes=410572800
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1583 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=3375 bytes=2073600
+fc-profile gop_store_evict_ns=125 retained_bytes=410572800
+fc-profile gop_store_evict_ns=42 retained_bytes=410572800
+fc-profile callback_copy_including_pool_ns=2734917
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2708 bytes=8294400
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=625 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2917 bytes=2073600
+fc-profile callback_copy_including_pool_ns=3065791
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2417 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=875 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2834 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2766666
+fc-profile asynchronous_wait_ns=11875834
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2708 bytes=8294400
+fc-profile gop_store_evict_ns=4958 retained_bytes=410572800
+fc-profile gop_store_evict_ns=42 retained_bytes=410572800
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=4042 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=209 bytes=2073600
+fc-profile gop_store_evict_ns=83 retained_bytes=410572800
+fc-profile callback_copy_including_pool_ns=3007458
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2042 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2125 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile callback_copy_including_pool_ns=3025500
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2250 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=3000 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2125 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2709333
+fc-profile asynchronous_wait_ns=13093542
+fc-profile gop_store_evict_ns=1917 retained_bytes=447897600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2792 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile gop_store_evict_ns=41 retained_bytes=447897600
+fc-profile gop_store_evict_ns=0 retained_bytes=447897600
+fc-profile callback_copy_including_pool_ns=2960083
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2041 bytes=8294400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=3084 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=166 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2740875
+fc-profile plane_pool_lock_ns=84 reused=false
+fc-profile plane_allocation_ns=2917 bytes=8294400
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=3292 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=167 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2083 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2955958
+fc-profile asynchronous_wait_ns=12317042
+fc-profile gop_store_evict_ns=2125 retained_bytes=447897600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=4791 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=250 bytes=2073600
+fc-profile gop_store_evict_ns=84 retained_bytes=447897600
+fc-profile gop_store_evict_ns=0 retained_bytes=447897600
+fc-profile callback_copy_including_pool_ns=2972792
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2209 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2500 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2706416
+fc-profile plane_pool_lock_ns=84 reused=false
+fc-profile plane_allocation_ns=2916 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=3000 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2500 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2994291
+fc-profile asynchronous_wait_ns=12439125
+fc-profile gop_store_evict_ns=1917 retained_bytes=447897600
+fc-profile gop_store_evict_ns=0 retained_bytes=447897600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=3125 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2167 bytes=2073600
+fc-profile gop_store_evict_ns=83 retained_bytes=447897600
+fc-profile callback_copy_including_pool_ns=2740542
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2458 bytes=8294400
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=917 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2500 bytes=2073600
+fc-profile callback_copy_including_pool_ns=3053541
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2167 bytes=8294400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=334 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2292 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2712417
+fc-profile asynchronous_wait_ns=11586875
+fc-profile gop_store_evict_ns=2958 retained_bytes=485222400
+fc-profile gop_store_evict_ns=0 retained_bytes=485222400
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=1791 bytes=8294400
+fc-profile gop_store_evict_ns=0 retained_bytes=485222400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=292 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2459 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2962916
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2125 bytes=8294400
+fc-profile plane_pool_lock_ns=125 reused=false
+fc-profile plane_allocation_ns=334 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2792 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2726791
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1708 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=209 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=3708 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2000 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2987875
+fc-profile asynchronous_wait_ns=12364167
+fc-profile gop_store_evict_ns=2000 retained_bytes=485222400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=583 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=3083 bytes=2073600
+fc-profile gop_store_evict_ns=42 retained_bytes=485222400
+fc-profile gop_store_evict_ns=0 retained_bytes=485222400
+fc-profile callback_copy_including_pool_ns=2715833
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=3084 bytes=8294400
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=292 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=5750 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2975084
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1792 bytes=8294400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1541 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2333 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2973833
+fc-profile asynchronous_wait_ns=11956708
+fc-profile gop_store_evict_ns=2833 retained_bytes=485222400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2208 bytes=8294400
+fc-profile gop_store_evict_ns=42 retained_bytes=485222400
+fc-profile gop_store_evict_ns=41 retained_bytes=485222400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2458 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=167 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2922167
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=1708 bytes=8294400
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2417 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2995834
+fc-profile plane_pool_lock_ns=83 reused=false
+fc-profile plane_allocation_ns=2000 bytes=8294400
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2375 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1917 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2998750
+fc-profile asynchronous_wait_ns=13124583
+fc-profile gop_store_evict_ns=3208 retained_bytes=522547200
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2875 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile gop_store_evict_ns=42 retained_bytes=522547200
+fc-profile gop_store_evict_ns=41 retained_bytes=522547200
+fc-profile callback_copy_including_pool_ns=3008500
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2084 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2417 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=84 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2748083
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2083 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1917 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2208 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2935084
+fc-profile asynchronous_wait_ns=12312708
+fc-profile gop_store_evict_ns=1958 retained_bytes=522547200
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=3792 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile gop_store_evict_ns=41 retained_bytes=522547200
+fc-profile gop_store_evict_ns=42 retained_bytes=522547200
+fc-profile callback_copy_including_pool_ns=2726375
+fc-profile plane_pool_lock_ns=83 reused=false
+fc-profile plane_allocation_ns=2084 bytes=8294400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2500 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2978542
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1958 bytes=8294400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2208 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2760875
+fc-profile asynchronous_wait_ns=12259333
+fc-profile gop_store_evict_ns=2083 retained_bytes=522547200
+fc-profile gop_store_evict_ns=0 retained_bytes=522547200
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1792 bytes=8294400
+fc-profile gop_store_evict_ns=42 retained_bytes=522547200
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=292 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2666 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2951500
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1958 bytes=8294400
+fc-profile plane_pool_lock_ns=83 reused=false
+fc-profile plane_allocation_ns=250 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2000 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2973834
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=1791 bytes=8294400
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=42 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=6000 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2676167
+fc-profile asynchronous_wait_ns=12123500
+fc-profile gop_store_evict_ns=2500 retained_bytes=559872000
+fc-profile plane_pool_lock_ns=83 reused=false
+fc-profile plane_allocation_ns=2292 bytes=8294400
+fc-profile gop_store_evict_ns=42 retained_bytes=559872000
+fc-profile gop_store_evict_ns=0 retained_bytes=559872000
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=375 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2667 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2967958
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2875 bytes=8294400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=666 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=4209 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2720791
+fc-profile plane_pool_lock_ns=83 reused=false
+fc-profile plane_allocation_ns=1792 bytes=8294400
+fc-profile plane_pool_lock_ns=167 reused=false
+fc-profile plane_allocation_ns=291 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2208 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2738042
+fc-profile asynchronous_wait_ns=12250042
+fc-profile gop_store_evict_ns=3042 retained_bytes=559872000
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2000 bytes=8294400
+fc-profile gop_store_evict_ns=42 retained_bytes=559872000
+fc-profile gop_store_evict_ns=42 retained_bytes=559872000
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2334 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=83 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2947292
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=1708 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2208 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2695875
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1875 bytes=8294400
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2292 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2934833
+fc-profile asynchronous_wait_ns=13007625
+fc-profile gop_store_evict_ns=2792 retained_bytes=559872000
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile gop_store_evict_ns=0 retained_bytes=559872000
+fc-profile plane_allocation_ns=2666 bytes=8294400
+fc-profile gop_store_evict_ns=250 retained_bytes=559872000
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=3750 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=250 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2693375
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2875 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=3167 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2992584
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2334 bytes=8294400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2334 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=167 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2798042
+fc-profile asynchronous_wait_ns=12346667
+fc-profile gop_store_evict_ns=3333 retained_bytes=597196800
+fc-profile gop_store_evict_ns=125 retained_bytes=597196800
+fc-profile gop_store_evict_ns=0 retained_bytes=597196800
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2375 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=3167 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2683958
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1917 bytes=8294400
+fc-profile plane_pool_lock_ns=3083 reused=false
+fc-profile plane_allocation_ns=3041 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2919709
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1875 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2416 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2973333
+fc-profile asynchronous_wait_ns=13057708
+fc-profile gop_store_evict_ns=3625 retained_bytes=597196800
+fc-profile gop_store_evict_ns=42 retained_bytes=597196800
+fc-profile plane_pool_lock_ns=83 reused=false
+fc-profile plane_allocation_ns=2333 bytes=8294400
+fc-profile gop_store_evict_ns=42 retained_bytes=597196800
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=542 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2709 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2933292
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1750 bytes=8294400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1458 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=3125 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2760833
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2333 bytes=8294400
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=958 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2542 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2735125
+fc-profile asynchronous_wait_ns=13023417
+fc-profile gop_store_evict_ns=2208 retained_bytes=597196800
+fc-profile gop_store_evict_ns=83 retained_bytes=597196800
+fc-profile gop_store_evict_ns=42 retained_bytes=597196800
+fc-profile plane_pool_lock_ns=84 reused=false
+fc-profile plane_allocation_ns=2167 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1459 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2458 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2810042
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1834 bytes=8294400
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=1000 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=3584 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2951000
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1833 bytes=8294400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1000 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2417 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2944000
+fc-profile asynchronous_wait_ns=13251417
+fc-profile gop_store_evict_ns=1416 retained_bytes=634521600
+fc-profile gop_store_evict_ns=125 retained_bytes=634521600
+fc-profile gop_store_evict_ns=42 retained_bytes=634521600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2083 bytes=8294400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=417 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=5083 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2936792
+fc-profile plane_pool_lock_ns=83 reused=false
+fc-profile plane_allocation_ns=2000 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=167 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2417 bytes=2073600
+fc-profile callback_copy_including_pool_ns=3033125
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2083 bytes=8294400
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=1167 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=4625 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2964625
+fc-profile asynchronous_wait_ns=13810709
+fc-profile gop_store_evict_ns=1208 retained_bytes=634521600
+fc-profile gop_store_evict_ns=42 retained_bytes=634521600
+fc-profile gop_store_evict_ns=41 retained_bytes=634521600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2542 bytes=8294400
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=208 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2375 bytes=2073600
+fc-profile callback_copy_including_pool_ns=3006959
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=1875 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1333 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2333 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2930750
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1834 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=291 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2541 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2937959
+fc-profile asynchronous_wait_ns=14485209
+fc-profile gop_store_evict_ns=1708 retained_bytes=634521600
+fc-profile gop_store_evict_ns=42 retained_bytes=634521600
+fc-profile gop_store_evict_ns=41 retained_bytes=634521600
+fc-profile plane_pool_lock_ns=84 reused=false
+fc-profile plane_allocation_ns=2583 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2417 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=708 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2946125
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1750 bytes=8294400
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2333 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=41 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2925833
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=1875 bytes=8294400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=3583 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=84 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2944458
+fc-profile asynchronous_wait_ns=15083708
+fc-profile gop_store_evict_ns=1959 retained_bytes=671846400
+fc-profile gop_store_evict_ns=41 retained_bytes=671846400
+fc-profile gop_store_evict_ns=41 retained_bytes=671846400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2375 bytes=8294400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=3166 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=709 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2952708
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2084 bytes=8294400
+fc-profile plane_pool_lock_ns=84 reused=false
+fc-profile plane_allocation_ns=2291 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=41 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2916166
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2167 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2625 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2993208
+fc-profile asynchronous_wait_ns=14843000
+fc-profile gop_store_evict_ns=3583 retained_bytes=671846400
+fc-profile gop_store_evict_ns=0 retained_bytes=671846400
+fc-profile gop_store_evict_ns=0 retained_bytes=671846400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2250 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=917 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2417 bytes=2073600
+fc-profile callback_copy_including_pool_ns=3017250
+fc-profile plane_pool_lock_ns=84 reused=false
+fc-profile plane_allocation_ns=1792 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=500 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2584 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2936416
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2833 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1083 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2417 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2944916
+fc-profile asynchronous_wait_ns=14723209
+fc-profile gop_store_evict_ns=2041 retained_bytes=671846400
+fc-profile gop_store_evict_ns=0 retained_bytes=671846400
+fc-profile gop_store_evict_ns=41 retained_bytes=671846400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1834 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1041 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2083 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2944500
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1625 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1042 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2375 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2994625
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2291 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=292 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2166 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2948208
+fc-profile asynchronous_wait_ns=14584541
+fc-profile gop_store_evict_ns=1667 retained_bytes=709171200
+fc-profile gop_store_evict_ns=0 retained_bytes=709171200
+fc-profile gop_store_evict_ns=42 retained_bytes=709171200
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2250 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=917 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=5750 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2968125
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1833 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=209 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2209 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2950541
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1916 bytes=8294400
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=209 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=1875 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2961500
+fc-profile asynchronous_wait_ns=14719167
+fc-profile gop_store_evict_ns=1791 retained_bytes=709171200
+fc-profile gop_store_evict_ns=41 retained_bytes=709171200
+fc-profile gop_store_evict_ns=0 retained_bytes=709171200
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=1959 bytes=8294400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2208 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2912584
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2000 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2875 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2943458
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2542 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2084 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2996458
+fc-profile asynchronous_wait_ns=14671750
+fc-profile gop_store_evict_ns=2208 retained_bytes=709171200
+fc-profile gop_store_evict_ns=42 retained_bytes=709171200
+fc-profile gop_store_evict_ns=0 retained_bytes=709171200
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2375 bytes=8294400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2167 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=167 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2946917
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2000 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2209 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=83 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2963667
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=1875 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2417 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2945375
+fc-profile asynchronous_wait_ns=14823125
+fc-profile gop_store_evict_ns=1291 retained_bytes=746496000
+fc-profile gop_store_evict_ns=5042 retained_bytes=746496000
+fc-profile gop_store_evict_ns=42 retained_bytes=746496000
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=1958 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2167 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=83 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2951209
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=1792 bytes=8294400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2459 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2893458
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1833 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2334 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=125 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2915042
+fc-profile asynchronous_wait_ns=14833666
+fc-profile gop_store_evict_ns=1709 retained_bytes=746496000
+fc-profile gop_store_evict_ns=41 retained_bytes=746496000
+fc-profile gop_store_evict_ns=41 retained_bytes=746496000
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2166 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=334 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2000 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2957083
+fc-profile plane_pool_lock_ns=84 reused=false
+fc-profile plane_allocation_ns=2083 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1208 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1958 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2935500
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1959 bytes=8294400
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1542 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1917 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2943750
+fc-profile asynchronous_wait_ns=15027583
+fc-profile gop_store_evict_ns=1542 retained_bytes=746496000
+fc-profile gop_store_evict_ns=41 retained_bytes=746496000
+fc-profile gop_store_evict_ns=0 retained_bytes=746496000
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1834 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2936875
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2041 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2125 bytes=2073600
+fc-profile plane_pool_lock_ns=84 reused=false
+fc-profile plane_allocation_ns=2000 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=167 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2083 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2924084
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=1875 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2960125
+fc-profile asynchronous_wait_ns=15281458
+fc-profile gop_store_evict_ns=2500 retained_bytes=783820800
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=1875 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=3708 bytes=2073600
+fc-profile gop_store_evict_ns=42 retained_bytes=783820800
+fc-profile gop_store_evict_ns=42 retained_bytes=783820800
+fc-profile plane_pool_lock_ns=167 reused=false
+fc-profile plane_allocation_ns=1833 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2967375
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1041 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2292 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=1959 bytes=8294400
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=209 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1917 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2995458
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2375 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2986250
+fc-profile asynchronous_wait_ns=15673709
+fc-profile gop_store_evict_ns=2041 retained_bytes=783820800
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=541 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=3208 bytes=2073600
+fc-profile gop_store_evict_ns=42 retained_bytes=783820800
+fc-profile gop_store_evict_ns=0 retained_bytes=783820800
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2083 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2993417
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1834 bytes=8294400
+fc-profile plane_pool_lock_ns=83 reused=false
+fc-profile plane_allocation_ns=375 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2334 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=208 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=1917 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2964375
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2834 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2921375
+fc-profile asynchronous_wait_ns=15875125
+fc-profile gop_store_evict_ns=2041 retained_bytes=783820800
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=292 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2417 bytes=2073600
+fc-profile gop_store_evict_ns=0 retained_bytes=783820800
+fc-profile gop_store_evict_ns=42 retained_bytes=783820800
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=1834 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2963958
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=1667 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2875 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=167 bytes=2073600
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=2125 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=83 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2961916
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=2417 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2929500
+fc-profile asynchronous_wait_ns=15984500
+fc-profile gop_store_evict_ns=4917 retained_bytes=796262400
+fc-profile plane_pool_lock_ns=167 reused=true
+fc-profile plane_pool_lock_ns=41 reused=true
+fc-profile gop_store_evict_ns=41 retained_bytes=796262400
+fc-profile gop_store_evict_ns=41 retained_bytes=796262400
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile callback_copy_including_pool_ns=2866125
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=3666 bytes=2073600
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=167 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2702334
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=4167 bytes=8294400
+fc-profile callback_copy_including_pool_ns=2791708
+fc-profile asynchronous_wait_ns=15905875
+fc-profile gop_store_evict_ns=2875 retained_bytes=796262400
+fc-profile gop_store_evict_ns=417 retained_bytes=796262400
+fc-profile plane_pool_lock_ns=167 reused=true
+fc-profile plane_pool_lock_ns=41 reused=true
+fc-profile gop_store_evict_ns=42 retained_bytes=796262400
+fc-profile callback_copy_including_pool_ns=2811917
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=167 reused=false
+fc-profile plane_allocation_ns=4500 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=209 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2677292
+fc-profile asynchronous_wait_ns=15734167
+fc-profile gop_store_evict_ns=1459 retained_bytes=796262400
+fc-profile callback_copy_including_pool_ns=2811458
+fc-profile gop_store_evict_ns=41 retained_bytes=796262400
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile gop_store_evict_ns=41 retained_bytes=796262400
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile callback_copy_including_pool_ns=2529667
+fc-profile plane_pool_lock_ns=166 reused=true
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=4708 bytes=8294400
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=41 reused=false
+fc-profile plane_allocation_ns=500 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=2417 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2607833
+fc-profile asynchronous_wait_ns=15511084
+fc-profile gop_store_evict_ns=2459 retained_bytes=796262400
+fc-profile gop_store_evict_ns=0 retained_bytes=796262400
+fc-profile gop_store_evict_ns=41 retained_bytes=796262400
+fc-profile callback_copy_including_pool_ns=2936291
+fc-profile plane_pool_lock_ns=209 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=41 reused=true
+fc-profile callback_copy_including_pool_ns=2689125
+fc-profile plane_pool_lock_ns=166 reused=true
+fc-profile plane_pool_lock_ns=208 reused=true
+fc-profile plane_pool_lock_ns=84 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=83 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile callback_copy_including_pool_ns=2691333
+fc-profile callback_copy_including_pool_ns=2747709
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=4250 bytes=8294400
+fc-profile asynchronous_wait_ns=16374333
+fc-profile gop_store_evict_ns=3834 retained_bytes=796262400
+fc-profile gop_store_evict_ns=0 retained_bytes=796262400
+fc-profile gop_store_evict_ns=42 retained_bytes=796262400
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile callback_copy_including_pool_ns=2920000
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=41 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile callback_copy_including_pool_ns=2615208
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile callback_copy_including_pool_ns=2693250
+fc-profile asynchronous_wait_ns=16844875
+fc-profile gop_store_evict_ns=3750 retained_bytes=796262400
+fc-profile gop_store_evict_ns=42 retained_bytes=796262400
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile gop_store_evict_ns=0 retained_bytes=796262400
+fc-profile callback_copy_including_pool_ns=2679208
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=41 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile callback_copy_including_pool_ns=2716875
+fc-profile asynchronous_wait_ns=16637333
+fc-profile gop_store_evict_ns=2833 retained_bytes=796262400
+fc-profile callback_copy_including_pool_ns=2615542
+fc-profile plane_pool_lock_ns=209 reused=true
+fc-profile gop_store_evict_ns=42 retained_bytes=796262400
+fc-profile gop_store_evict_ns=42 retained_bytes=796262400
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile callback_copy_including_pool_ns=2591709
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=41 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile callback_copy_including_pool_ns=2669417
+fc-profile asynchronous_wait_ns=16098834
+fc-profile gop_store_evict_ns=2208 retained_bytes=796262400
+fc-profile gop_store_evict_ns=42 retained_bytes=796262400
+fc-profile callback_copy_including_pool_ns=2643458
+fc-profile gop_store_evict_ns=0 retained_bytes=796262400
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=167 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile callback_copy_including_pool_ns=2660084
+fc-profile plane_pool_lock_ns=83 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile callback_copy_including_pool_ns=2571541
+fc-profile asynchronous_wait_ns=16261875
+fc-profile gop_store_evict_ns=2375 retained_bytes=796262400
+fc-profile gop_store_evict_ns=42 retained_bytes=796262400
+fc-profile gop_store_evict_ns=125 retained_bytes=796262400
+fc-profile callback_copy_including_pool_ns=2572583
+fc-profile plane_pool_lock_ns=208 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile callback_copy_including_pool_ns=2466042
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=83 reused=true
+fc-profile plane_pool_lock_ns=41 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile callback_copy_including_pool_ns=2659083
+fc-profile asynchronous_wait_ns=16690917
+fc-profile gop_store_evict_ns=2459 retained_bytes=796262400
+fc-profile gop_store_evict_ns=0 retained_bytes=796262400
+fc-profile gop_store_evict_ns=42 retained_bytes=796262400
+fc-profile callback_copy_including_pool_ns=2703416
+fc-profile plane_pool_lock_ns=209 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile callback_copy_including_pool_ns=2675417
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=167 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=83 reused=true
+fc-profile plane_pool_lock_ns=83 reused=true
+fc-profile plane_pool_lock_ns=41 reused=true
+fc-profile callback_copy_including_pool_ns=2544208
+fc-profile asynchronous_wait_ns=17337833
+fc-profile gop_store_evict_ns=2084 retained_bytes=796262400
+fc-profile gop_store_evict_ns=42 retained_bytes=796262400
+fc-profile gop_store_evict_ns=41 retained_bytes=796262400
+fc-profile callback_copy_including_pool_ns=2631666
+fc-profile plane_pool_lock_ns=167 reused=true
+fc-profile plane_pool_lock_ns=125 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile callback_copy_including_pool_ns=2626458
+fc-profile plane_pool_lock_ns=83 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=292 reused=true
+fc-profile plane_pool_lock_ns=41 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=41 reused=true
+fc-profile callback_copy_including_pool_ns=2576917
+fc-profile asynchronous_wait_ns=17522667
+fc-profile gop_store_evict_ns=1667 retained_bytes=796262400
+fc-profile callback_copy_including_pool_ns=2546291
+fc-profile plane_pool_lock_ns=208 reused=true
+fc-profile gop_store_evict_ns=41 retained_bytes=796262400
+fc-profile gop_store_evict_ns=208 retained_bytes=796262400
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=41 reused=true
+fc-profile plane_pool_lock_ns=41 reused=true
+fc-profile callback_copy_including_pool_ns=2627292
+fc-profile plane_pool_lock_ns=41 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=125 reused=true
+fc-profile plane_pool_lock_ns=41 reused=true
+fc-profile callback_copy_including_pool_ns=2609750
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile callback_copy_including_pool_ns=2683625
+fc-profile asynchronous_wait_ns=17102292
+fc-profile gop_store_evict_ns=1500 retained_bytes=796262400
+fc-profile plane_pool_lock_ns=166 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile gop_store_evict_ns=0 retained_bytes=796262400
+fc-profile gop_store_evict_ns=41 retained_bytes=796262400
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile callback_copy_including_pool_ns=2807209
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=84 reused=true
+fc-profile plane_pool_lock_ns=41 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile callback_copy_including_pool_ns=2747042
+fc-profile plane_pool_lock_ns=83 reused=true
+fc-profile plane_pool_lock_ns=42 reused=false
+fc-profile plane_allocation_ns=625 bytes=2073600
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=5916 bytes=2073600
+fc-profile callback_copy_including_pool_ns=2652042
+fc-profile asynchronous_wait_ns=16092084
+fc-profile gop_store_evict_ns=1833 retained_bytes=796262400
+fc-profile gop_store_evict_ns=292 retained_bytes=796262400
+fc-profile gop_store_evict_ns=83 retained_bytes=796262400
+fc-profile plane_pool_lock_ns=208 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile callback_copy_including_pool_ns=2720958
+fc-profile plane_pool_lock_ns=41 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile callback_copy_including_pool_ns=2672125
+fc-profile plane_pool_lock_ns=41 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile callback_copy_including_pool_ns=2622292
+fc-profile asynchronous_wait_ns=15174833
+fc-profile gop_store_evict_ns=2208 retained_bytes=796262400
+fc-profile gop_store_evict_ns=42 retained_bytes=796262400
+fc-profile gop_store_evict_ns=42 retained_bytes=796262400
+fc-profile plane_pool_lock_ns=209 reused=true
+fc-profile callback_copy_including_pool_ns=2589166
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=83 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile callback_copy_including_pool_ns=2540959
+fc-profile plane_pool_lock_ns=83 reused=true
+fc-profile callback_copy_including_pool_ns=2590125
+fc-profile asynchronous_wait_ns=14159750
+fc-profile gop_store_evict_ns=4334 retained_bytes=796262400
+fc-profile plane_pool_lock_ns=208 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile callback_copy_including_pool_ns=2792750
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=83 reused=true
+fc-profile plane_pool_lock_ns=83 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile callback_copy_including_pool_ns=2610625
+fc-profile callback_copy_including_pool_ns=2692709
+fc-profile asynchronous_wait_ns=16197916
+seek-profile thread=ThreadId(5) source=/var/folders/pj/8ngxzplx2kg49mjtngjbm21c0000gp/T/abner-bench-4k-19877/source.mp4 frame=78 target=Some(3500000) request_ms=641.477 prepare_ms=1.379 rgba_reused=false rgba_pool_lock_ms=0.003 convert_ms=5.785 push_including_wait_ms=0.027 rgba_cache_bytes=33177600 rgba_pool_capacity=0 planar_cache_bytes=2388787200 planar_pool=PoolStats { idle_bytes: 12441600, f32_idle_bytes: 0, reused: 132 }
+fc-profile gop_store_evict_ns=2583 retained_bytes=796262400
+fc-profile plane_pool_lock_ns=125 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile callback_copy_including_pool_ns=2600541
+fc-profile plane_pool_lock_ns=208 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+seek-profile thread=ThreadId(4) source=/var/folders/pj/8ngxzplx2kg49mjtngjbm21c0000gp/T/abner-bench-4k-19877/source.mp4 frame=78 target=Some(3500000) request_ms=648.864 prepare_ms=2.383 rgba_reused=false rgba_pool_lock_ms=0.001 convert_ms=10.397 push_including_wait_ms=0.003 rgba_cache_bytes=33177600 rgba_pool_capacity=0 planar_cache_bytes=2388787200 planar_pool=PoolStats { idle_bytes: 24883200, f32_idle_bytes: 0, reused: 138 }
+seek-profile thread=ThreadId(5) source=/var/folders/pj/8ngxzplx2kg49mjtngjbm21c0000gp/T/abner-bench-4k-19877/source.mp4 frame=79 target=Some(3500000) request_ms=0.004 prepare_ms=2.422 rgba_reused=false rgba_pool_lock_ms=0.000 convert_ms=11.008 push_including_wait_ms=0.001 rgba_cache_bytes=66355200 rgba_pool_capacity=0 planar_cache_bytes=2388787200 planar_pool=PoolStats { idle_bytes: 24883200, f32_idle_bytes: 0, reused: 138 }
+fc-profile callback_copy_including_pool_ns=2416042
+fc-profile asynchronous_wait_ns=25172292
+fc-profile gop_store_evict_ns=4708 retained_bytes=796262400
+seek-profile thread=ThreadId(5) source=/var/folders/pj/8ngxzplx2kg49mjtngjbm21c0000gp/T/abner-bench-4k-19877/source.mp4 frame=80 target=Some(3500000) request_ms=0.002 prepare_ms=2.113 rgba_reused=false rgba_pool_lock_ms=0.000 convert_ms=8.638 push_including_wait_ms=0.002 rgba_cache_bytes=99532800 rgba_pool_capacity=0 planar_cache_bytes=2388787200 planar_pool=PoolStats { idle_bytes: 62208000, f32_idle_bytes: 0, reused: 138 }
+seek-profile thread=ThreadId(4) source=/var/folders/pj/8ngxzplx2kg49mjtngjbm21c0000gp/T/abner-bench-4k-19877/source.mp4 frame=79 target=Some(3500000) request_ms=0.003 prepare_ms=1.955 rgba_reused=false rgba_pool_lock_ms=0.000 convert_ms=9.462 push_including_wait_ms=0.001 rgba_cache_bytes=66355200 rgba_pool_capacity=0 planar_cache_bytes=2388787200 planar_pool=PoolStats { idle_bytes: 62208000, f32_idle_bytes: 0, reused: 138 }
+fc-profile gop_store_evict_ns=375 retained_bytes=796262400
+fc-profile gop_store_evict_ns=0 retained_bytes=796262400
+fc-profile plane_pool_lock_ns=41 reused=true
+seek-profile thread=ThreadId(4) source=/var/folders/pj/8ngxzplx2kg49mjtngjbm21c0000gp/T/abner-bench-4k-19877/source.mp4 frame=80 target=Some(3500000) request_ms=0.001 prepare_ms=1.686 rgba_reused=false rgba_pool_lock_ms=0.000 convert_ms=7.373 push_including_wait_ms=0.001 rgba_cache_bytes=99532800 rgba_pool_capacity=0 planar_cache_bytes=2388787200 planar_pool=PoolStats { idle_bytes: 53913600, f32_idle_bytes: 0, reused: 139 }
+fc-profile plane_pool_lock_ns=125 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+seek-profile thread=ThreadId(3) source=/var/folders/pj/8ngxzplx2kg49mjtngjbm21c0000gp/T/abner-bench-4k-19877/source.mp4 frame=78 target=Some(3500000) request_ms=662.737 prepare_ms=11.537 rgba_reused=false rgba_pool_lock_ms=0.001 convert_ms=8.522 push_including_wait_ms=0.002 rgba_cache_bytes=33177600 rgba_pool_capacity=0 planar_cache_bytes=2388787200 planar_pool=PoolStats { idle_bytes: 49766400, f32_idle_bytes: 0, reused: 141 }
+fc-profile gop_store_evict_ns=83 retained_bytes=796262400
+fc-profile gop_store_evict_ns=42 retained_bytes=796262400
+fc-profile callback_copy_including_pool_ns=2554000
+fc-profile plane_pool_lock_ns=208 reused=true
+fc-profile plane_pool_lock_ns=1459 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=41 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+seek-profile thread=ThreadId(3) source=/var/folders/pj/8ngxzplx2kg49mjtngjbm21c0000gp/T/abner-bench-4k-19877/source.mp4 frame=79 target=Some(3500000) request_ms=0.003 prepare_ms=1.595 rgba_reused=false rgba_pool_lock_ms=0.000 convert_ms=8.790 push_including_wait_ms=0.002 rgba_cache_bytes=66355200 rgba_pool_capacity=0 planar_cache_bytes=2388787200 planar_pool=PoolStats { idle_bytes: 24883200, f32_idle_bytes: 0, reused: 147 }
+fc-profile callback_copy_including_pool_ns=2452209
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile callback_copy_including_pool_ns=2705792
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=41 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile callback_copy_including_pool_ns=2387583
+fc-profile callback_copy_including_pool_ns=2619708
+fc-profile asynchronous_wait_ns=31626500
+fc-profile plane_pool_lock_ns=0 reused=false
+fc-profile plane_allocation_ns=6333 bytes=8294400
+fc-profile gop_store_evict_ns=5042 retained_bytes=796262400
+seek-profile thread=ThreadId(3) source=/var/folders/pj/8ngxzplx2kg49mjtngjbm21c0000gp/T/abner-bench-4k-19877/source.mp4 frame=80 target=Some(3500000) request_ms=0.005 prepare_ms=1.908 rgba_reused=false rgba_pool_lock_ms=0.000 convert_ms=10.321 push_including_wait_ms=0.001 rgba_cache_bytes=99532800 rgba_pool_capacity=0 planar_cache_bytes=2388787200 planar_pool=PoolStats { idle_bytes: 37324800, f32_idle_bytes: 0, reused: 153 }
+fc-profile gop_store_evict_ns=292 retained_bytes=796262400
+fc-profile plane_pool_lock_ns=41 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile callback_copy_including_pool_ns=7455916
+fc-profile asynchronous_wait_ns=31872500
+fc-profile plane_pool_lock_ns=41 reused=true
+fc-profile gop_store_evict_ns=3333 retained_bytes=796262400
+seek-profile thread=ThreadId(5) source=/var/folders/pj/8ngxzplx2kg49mjtngjbm21c0000gp/T/abner-bench-4k-19877/source.mp4 frame=81 target=Some(3500000) request_ms=32.583 prepare_ms=1.747 rgba_reused=false rgba_pool_lock_ms=0.000 convert_ms=8.046 push_including_wait_ms=0.001 rgba_cache_bytes=132710400 rgba_pool_capacity=0 planar_cache_bytes=2388787200 planar_pool=PoolStats { idle_bytes: 62208000, f32_idle_bytes: 0, reused: 156 }
+fc-profile plane_pool_lock_ns=83 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile callback_copy_including_pool_ns=2642250
+fc-profile gop_store_evict_ns=4958 retained_bytes=796262400
+fc-profile plane_pool_lock_ns=250 reused=true
+seek-profile thread=ThreadId(4) source=/var/folders/pj/8ngxzplx2kg49mjtngjbm21c0000gp/T/abner-bench-4k-19877/source.mp4 frame=81 target=Some(3500000) request_ms=32.955 prepare_ms=3.780 rgba_reused=false rgba_pool_lock_ms=0.000 convert_ms=10.346 push_including_wait_ms=0.001 rgba_cache_bytes=132710400 rgba_pool_capacity=0 planar_cache_bytes=2388787200 planar_pool=PoolStats { idle_bytes: 62208000, f32_idle_bytes: 0, reused: 158 }
+fc-profile plane_pool_lock_ns=84 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+seek-profile thread=ThreadId(5) source=/var/folders/pj/8ngxzplx2kg49mjtngjbm21c0000gp/T/abner-bench-4k-19877/source.mp4 frame=82 target=Some(3500000) request_ms=0.002 prepare_ms=2.325 rgba_reused=false rgba_pool_lock_ms=0.000 convert_ms=12.134 push_including_wait_ms=0.002 rgba_cache_bytes=165888000 rgba_pool_capacity=0 planar_cache_bytes=2388787200 planar_pool=PoolStats { idle_bytes: 58060800, f32_idle_bytes: 0, reused: 161 }
+fc-profile callback_copy_including_pool_ns=2558250
+seek-profile thread=ThreadId(5) source=/var/folders/pj/8ngxzplx2kg49mjtngjbm21c0000gp/T/abner-bench-4k-19877/source.mp4 frame=83 target=Some(3500000) request_ms=0.002 prepare_ms=2.577 rgba_reused=false rgba_pool_lock_ms=0.000 convert_ms=9.457 push_including_wait_ms=0.001 rgba_cache_bytes=199065600 rgba_pool_capacity=0 planar_cache_bytes=2388787200 planar_pool=PoolStats { idle_bytes: 58060800, f32_idle_bytes: 0, reused: 161 }
+seek-profile thread=ThreadId(4) source=/var/folders/pj/8ngxzplx2kg49mjtngjbm21c0000gp/T/abner-bench-4k-19877/source.mp4 frame=82 target=Some(3500000) request_ms=0.004 prepare_ms=2.826 rgba_reused=false rgba_pool_lock_ms=0.000 convert_ms=9.802 push_including_wait_ms=0.000 rgba_cache_bytes=165888000 rgba_pool_capacity=0 planar_cache_bytes=2388787200 planar_pool=PoolStats { idle_bytes: 58060800, f32_idle_bytes: 0, reused: 161 }
+seek-profile thread=ThreadId(3) source=/var/folders/pj/8ngxzplx2kg49mjtngjbm21c0000gp/T/abner-bench-4k-19877/source.mp4 frame=81 target=Some(3500000) request_ms=23.761 prepare_ms=2.362 rgba_reused=false rgba_pool_lock_ms=0.000 convert_ms=10.627 push_including_wait_ms=0.000 rgba_cache_bytes=132710400 rgba_pool_capacity=0 planar_cache_bytes=2388787200 planar_pool=PoolStats { idle_bytes: 58060800, f32_idle_bytes: 0, reused: 161 }
+fc-profile gop_store_evict_ns=42 retained_bytes=796262400
+fc-profile gop_store_evict_ns=3083 retained_bytes=796262400
+fc-profile gop_store_evict_ns=41 retained_bytes=796262400
+fc-profile plane_pool_lock_ns=41 reused=true
+fc-profile plane_pool_lock_ns=1042 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile callback_copy_including_pool_ns=2399708
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile callback_copy_including_pool_ns=2710583
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile callback_copy_including_pool_ns=2378500
+fc-profile plane_pool_lock_ns=41 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+seek-profile thread=ThreadId(3) source=/var/folders/pj/8ngxzplx2kg49mjtngjbm21c0000gp/T/abner-bench-4k-19877/source.mp4 frame=82 target=Some(3500000) request_ms=0.274 prepare_ms=2.219 rgba_reused=false rgba_pool_lock_ms=0.000 convert_ms=7.873 push_including_wait_ms=0.002 rgba_cache_bytes=165888000 rgba_pool_capacity=0 planar_cache_bytes=2388787200 planar_pool=PoolStats { idle_bytes: 20736000, f32_idle_bytes: 0, reused: 173 }
+fc-profile gop_store_evict_ns=1625 retained_bytes=796262400
+seek-profile thread=ThreadId(4) source=/var/folders/pj/8ngxzplx2kg49mjtngjbm21c0000gp/T/abner-bench-4k-19877/source.mp4 frame=83 target=Some(3500000) request_ms=0.003 prepare_ms=2.140 rgba_reused=false rgba_pool_lock_ms=0.000 convert_ms=8.677 push_including_wait_ms=0.002 rgba_cache_bytes=199065600 rgba_pool_capacity=0 planar_cache_bytes=2388787200 planar_pool=PoolStats { idle_bytes: 33177600, f32_idle_bytes: 0, reused: 173 }
+fc-profile gop_store_evict_ns=0 retained_bytes=796262400
+fc-profile callback_copy_including_pool_ns=2445250
+fc-profile asynchronous_wait_ns=10869125
+fc-profile gop_store_evict_ns=3125 retained_bytes=796262400
+fc-profile gop_store_evict_ns=0 retained_bytes=796262400
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=41 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=83 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile callback_copy_including_pool_ns=2705291
+fc-profile callback_copy_including_pool_ns=2563792
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=41 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile callback_copy_including_pool_ns=2453708
+fc-profile plane_pool_lock_ns=125 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile callback_copy_including_pool_ns=2303834
+fc-profile asynchronous_wait_ns=10507750
+fc-profile gop_store_evict_ns=8209 retained_bytes=796262400
+seek-profile thread=ThreadId(5) source=/var/folders/pj/8ngxzplx2kg49mjtngjbm21c0000gp/T/abner-bench-4k-19877/source.mp4 frame=84 target=Some(3500000) request_ms=11.593 prepare_ms=1.678 rgba_reused=false rgba_pool_lock_ms=0.000 convert_ms=9.211 push_including_wait_ms=0.002 rgba_cache_bytes=232243200 rgba_pool_capacity=0 planar_cache_bytes=2388787200 planar_pool=PoolStats { idle_bytes: 58060800, f32_idle_bytes: 0, reused: 185 }
+seek-profile thread=ThreadId(3) source=/var/folders/pj/8ngxzplx2kg49mjtngjbm21c0000gp/T/abner-bench-4k-19877/source.mp4 frame=83 target=Some(3500000) request_ms=0.248 prepare_ms=1.588 rgba_reused=false rgba_pool_lock_ms=0.000 convert_ms=9.995 push_including_wait_ms=0.001 rgba_cache_bytes=199065600 rgba_pool_capacity=0 planar_cache_bytes=2388787200 planar_pool=PoolStats { idle_bytes: 58060800, f32_idle_bytes: 0, reused: 185 }
+fc-profile gop_store_evict_ns=1666 retained_bytes=796262400
+fc-profile plane_pool_lock_ns=167 reused=true
+fc-profile plane_pool_lock_ns=42 reused=true
+fc-profile plane_pool_lock_ns=0 reused=true
+fc-profile callback_copy_including_pool_ns=2643917
+seek-profile thread=ThreadId(3) source=/var/folders/pj/8ngxzplx2kg49mjtngjbm21c0000gp/T/abner-bench-4k-19877/source.mp4 frame=84 target=Some(3500000) request_ms=0.298 prepare_ms=1.642 rgba_reused=false rgba_pool_lock_ms=0.000 convert_ms=11.013 push_including_wait_ms=0.002 rgba_cache_bytes=232243200 rgba_pool_capacity=0 planar_cache_bytes=2388787200 planar_pool=PoolStats { idle_bytes: 58060800, f32_idle_bytes: 0, reused: 188 }
+seek-profile thread=ThreadId(5) source=/var/folders/pj/8ngxzplx2kg49mjtngjbm21c0000gp/T/abner-bench-4k-19877/source.mp4 frame=85 target=Some(3500000) request_ms=0.002 prepare_ms=1.705 rgba_reused=false rgba_pool_lock_ms=0.000 convert_ms=11.454 push_including_wait_ms=0.000 rgba_cache_bytes=265420800 rgba_pool_capacity=0 planar_cache_bytes=2388787200 planar_pool=PoolStats { idle_bytes: 58060800, f32_idle_bytes: 0, reused: 188 }
+seek-profile thread=ThreadId(4) source=/var/folders/pj/8ngxzplx2kg49mjtngjbm21c0000gp/T/abner-bench-4k-19877/source.mp4 frame=84 target=Some(3500000) request_ms=11.246 prepare_ms=1.784 rgba_reused=false rgba_pool_lock_ms=0.000 convert_ms=11.661 push_including_wait_ms=0.004 rgba_cache_bytes=232243200 rgba_pool_capacity=0 planar_cache_bytes=2388787200 planar_pool=PoolStats { idle_bytes: 58060800, f32_idle_bytes: 0, reused: 188 }
+fc-profile gop_store_evict_ns=2083 retained_bytes=796262400
+cold: players=3 gop_delta=GopStats { hits: 13, misses: 12, seeks: 3, decoded: 261, evicted: 68, decode_ns: 1352532795, skipped: 0, draft: 0, frames: 260 } planar_cache_bytes=2388787200 pool_before=PoolStats { idle_bytes: 0, f32_idle_bytes: 0, reused: 0 } pool_after=PoolStats { idle_bytes: 70502400, f32_idle_bytes: 0, reused: 188 }
+hardware: before=HwStats { frames: 0, sessions: 0, declined: 0, fallbacks: 0 } after=HwStats { frames: 260, sessions: 3, declined: 0, fallbacks: 0 }
+4K x3: cold=779ms, cached=0us, cached_frames=[3.4583329999999997, 3.4583329999999997, 3.4583329999999997], cache=696.1MiB
+test player::tests::benchmark_three_4k_players ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 138 filtered out; finished in 1.29s
+

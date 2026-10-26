@@ -1,0 +1,52 @@
+{
+  "gop_store_evict_ns": {
+    "count": 261,
+    "sum_ms": 0.252118,
+    "max_ms": 0.030333
+  },
+  "plane_pool_lock_ns": {
+    "count": 780,
+    "sum_ms": 0.035209,
+    "max_ms": 0.003083
+  },
+  "plane_allocation_ns": {
+    "count": 592,
+    "sum_ms": 1.092389,
+    "max_ms": 0.008292
+  },
+  "callback_copy_including_pool_ns": {
+    "count": 260,
+    "sum_ms": 749.884957,
+    "max_ms": 7.455916
+  },
+  "asynchronous_wait_ns": {
+    "count": 85,
+    "sum_ms": 1214.269086,
+    "max_ms": 31.8725
+  },
+  "request_ms": {
+    "count": 22,
+    "sum_ms": 2066.067,
+    "max_ms": 662.737
+  },
+  "prepare_ms": {
+    "count": 22,
+    "sum_ms": 55.351,
+    "max_ms": 11.537
+  },
+  "rgba_pool_lock_ms": {
+    "count": 22,
+    "sum_ms": 0.005,
+    "max_ms": 0.003
+  },
+  "convert_ms": {
+    "count": 22,
+    "sum_ms": 210.59199999999998,
+    "max_ms": 12.134
+  },
+  "push_including_wait_ms": {
+    "count": 22,
+    "sum_ms": 0.058,
+    "max_ms": 0.027
+  }
+}

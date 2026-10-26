@@ -1,0 +1,27 @@
+
+running 1 test
+cold: players=3 gop_delta=GopStats { hits: 17, misses: 10, seeks: 3, decoded: 264, evicted: 72, decode_ns: 1363598837, skipped: 0, draft: 0, frames: 264 } planar_cache_bytes=2388787200 pool_before=PoolStats { idle_bytes: 0, f32_idle_bytes: 0, reused: 0 } pool_after=PoolStats { idle_bytes: 62208000, f32_idle_bytes: 0, reused: 201 }
+hardware: before=HwStats { frames: 0, sessions: 0, declined: 0, fallbacks: 0 } after=HwStats { frames: 264, sessions: 3, declined: 0, fallbacks: 0 }
+4K x3: cold=559ms, cached=1us, cached_frames=[3.4583329999999997, 3.4583329999999997, 3.4583329999999997], cache=727.7MiB
+test player::tests::benchmark_three_4k_players ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 138 filtered out; finished in 1.09s
+
+        1.12 real         3.51 user         0.29 sys
+          3601514496  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              247209  page reclaims
+                 164  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  97  voluntary context switches
+                5971  involuntary context switches
+         25793168489  instructions retired
+          5119368613  cycles elapsed
+          3467398456  peak memory footprint
