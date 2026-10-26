@@ -261,12 +261,20 @@ are gone. Installed processors appear on the left in processing order. Toggle a
 row’s checkbox to bypass it; select a row to focus its settings, and use Move up /
 Move down to reorder it. Each processor retains its own settings when focus moves.
 
-The large viewer uses the normal clip transport. Click the clip timeline to seek
-or drag its playhead; Space plays/pauses, and the frame buttons step source frames.
-**Preview frame** (R) explicitly renders the current frame through enabled
-processors up to and including the focused processor. The returned frame replaces
-source display at that position and gets a blue timeline mark. **Prev rendered** /
-**Next rendered** (Shift-Left / Shift-Right) jump between marked frames. Seeking
+The large viewer uses the normal clip transport: five icon buttons under it
+(previous rendered frame, a frame back, play / pause, a frame on, next rendered
+frame; each names itself on hover). Click the clip timeline to seek or drag its
+playhead; Space plays/pauses, ← / → step a source frame, `[` / `]` walk the
+sources, `+` duplicates the focused source. The page has the same footer bar as
+the others, at the Timeline's height: **Render frame** (R), drawn like the
+Timeline's Split button, renders the current frame through enabled processors
+up to and including the focused processor; the status line and key hints sit
+beside it. The returned frame replaces source display at that position and gets
+a blue timeline mark; while a render runs, the frame asked for pulses amber on
+the timeline and the temporal context being decoded sweeps in behind it.
+**Prev rendered** / **Next rendered** (Shift-Left / Shift-Right) jump between
+marked frames. ⌃⇧[ / ⌃⇧] move one header tab back or forward in every
+workspace (Sources · Timeline · Process · Crop · Mask, no wrap). Seeking
 preserves marks; settings, order, bypass, source or timeline edits invalidate them.
 Preview frames survive switching workspaces, within the `processors.preview_cache_mb`
 budget (1024 MB by default); evicted frames lose their marks. Changing processor focus conservatively clears the cache.

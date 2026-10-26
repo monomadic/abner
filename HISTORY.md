@@ -3,6 +3,32 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-26 — Process page: footer bar, Render frame, icon transport, keys
+
+The Process page gets the footer bar every other page has, at the Timeline's
+height (`FOOTER_H` = `CUT_STATUS_H`): a PROCESS label, **Render frame** drawn
+with `draw_cut_footer_button` exactly as the cut footer's Split (it was the
+"Preview frame [R]" button atop the right column; the presets button and the
+settings rows move up by its height), the status line, the key hints and the
+build stamp. The rail and both columns end at the footer. The five full-width
+text transport buttons are five 40px icon squares centred under the viewer —
+`Icon::KeyBack`/`StepBack`/`StepFwd`/`KeyFwd` from the cut toolbar, a triangle
+or two bars for play / pause — naming themselves under the row on hover. A
+running render shows on the timeline: the frame asked for (`pending`) pulses
+amber (`RENDERING`, 0xe6ac69), and the worker's context progress sweeps an amber
+run from the segment start toward it; `animating()` is true while busy so the
+loop stays hot. The rail's "1–5 / 6 · scroll" readout is gone (the line always
+says the run order). Keys: ⌃⇧[ / ⌃⇧] (`Key::PrevMode`/`NextMode`, mapped in
+lib.rs before any other chord, on the bracket or its shifted brace) move one
+header tab in `ModeSelector::ORDER` — the tab order, now one constant shared
+with the painted header — without wrapping; on the Process page `[`/`]` walk the
+sources, `+`/`=` duplicates, and ←/→ step a source frame inside the panel
+(`Panel::step`, shared with the buttons). Visibility of `Icon`, `draw_icon`,
+`draw_cut_footer_button`, `status_build_*`, `ACCENT`, `WORKSPACE_MUTED` and
+`CUT_STATUS_H` widened to the crate for it. A first cut had the viewer's height
+ask the timeline, whose x asked the viewer: the timeline now computes its span
+directly. Tests: the new header-cycling test; the suite is green.
+
 ## 2026-10-26 — Processor previews at native size, budget in the config
 
 The processor preview used to hand every plugin a 640×360 proxy of the source

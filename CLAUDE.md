@@ -151,6 +151,11 @@ from one to the other, keeping its number.
   player's frame cache is what makes them instant inside the resident span.
   Seek-bar targets are `quantize`d to the frame grid and dropped when equal to `t`.
   **Keys**: `1`–`9` pick a clip directly (`select`), `V`/Shift-V cycle the view.
+  ⌃⇧[ / ⌃⇧] (`Key::PrevMode`/`NextMode`, matched in lib.rs on both the bracket
+  and its shifted brace) walk the header tabs in `ModeSelector::ORDER` without
+  wrapping (`cycle_workspace_mode`). On the Process page `[`/`]` walk the
+  sources, `+` duplicates, ←/→ step a frame (`Panel::key`); `R` / the footer's
+  Render frame button renders.
   ⌘W (`Key::Close`, from winit's `ModifiersChanged` state) closes the focused clip
   (`close_active`): survivors shift down a slot and are exact-seeked to the current `t`
   so each re-delivers into its new texture slot; `started` is NOT reset (the seek lands

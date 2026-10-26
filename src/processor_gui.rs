@@ -2,11 +2,13 @@
 //! No processor identity or implementation belongs in this module.
 use crate::{
     app::{
-        CUT_HEADER_BLUE, Canvas, DETAIL_SLIDE_S, HEADER_H, INSPECTOR_BG, INSPECTOR_PATH, Key, MONO_ADV,
-        RAIL_ACTIONS_H, RAIL_FOOTER_H, RAIL_GRIP_H, RAIL_HEAD_H, RAIL_INSPECTOR_H, SOURCE_BORDER,
-        SOURCE_EDGE, SOURCE_EDGE_HOVER, SOURCE_INK, SOURCE_RING, SOURCE_SECONDARY, SOURCE_SUBTLE,
-        SOURCE_SURFACE, WORKSPACE_DIM, WORKSPACE_PANEL, WORKSPACE_RULE, WORKSPACE_TEXT,
-        draw_dashed_hairline, draw_keycap, draw_rail_grip, hex_color, mix, rail_full_width,
+        ACCENT, CUT_HEADER_BLUE, CUT_STATUS_H, Canvas, DETAIL_SLIDE_S, HEADER_H, INSPECTOR_BG,
+        INSPECTOR_PATH, Icon, Key, MONO_ADV, RAIL_ACTIONS_H, RAIL_FOOTER_H, RAIL_GRIP_H, RAIL_HEAD_H,
+        RAIL_INSPECTOR_H, SOURCE_BORDER, SOURCE_EDGE, SOURCE_EDGE_HOVER, SOURCE_INK, SOURCE_RING,
+        SOURCE_SECONDARY, SOURCE_SUBTLE, SOURCE_SURFACE, WORKSPACE_DIM, WORKSPACE_MUTED,
+        WORKSPACE_PANEL, WORKSPACE_RULE, WORKSPACE_TEXT, draw_cut_footer_button, draw_dashed_hairline,
+        draw_icon, draw_keycap, draw_rail_grip, hex_color, mix, rail_full_width, status_build_label,
+        status_build_width, ui_label,
     },
     player::{Player, Rgba},
     probe::VideoInfo,
@@ -31,6 +33,14 @@ const DIM: [f32; 4] = [0.43, 0.43, 0.43, 1.0];
 const BLUE: [f32; 4] = [0.04, 0.33, 0.7, 1.0];
 /// One processor card (64px) plus the Sources rail's 12px gap.
 const CARD_PITCH: f32 = 76.0;
+/// The page's footer bar: the Timeline's height, since it carries the same
+/// kind of button (Render frame, drawn as the cut footer's Split).
+const FOOTER_H: f32 = CUT_STATUS_H;
+/// A frame being rendered: the source palette's amber, pulsed while busy.
+const RENDERING: u32 = 0xe6ac69;
+/// Transport buttons: five icon squares on a 6px gap, centred under the viewer.
+const TRANSPORT_W: f32 = 40.0;
+const TRANSPORT_GAP: f32 = 6.0;
 
 #[derive(Clone, Debug)]
 enum Kind {
@@ -635,6 +645,11 @@ pub struct Panel {
     frames: Vec<Preview>,
     status: String,
     busy: bool,
+    /// The frame the running render was asked for, and the worker's context
+    /// progress (frames decoded, frames to decode): the amber marks.
+    pending: Option<f64>,
+    progress: Option<(usize, usize)>,
+    busy_since: Instant,
     selected_frame: usize,
     playback: bool,
     editing: Option<(usize, String)>,
@@ -680,6 +695,9 @@ impl Default for Panel {
             frames: vec![],
             status: String::new(),
             busy: false,
+            pending: None,
+            progress: None,
+            busy_since: Instant::now(),
             selected_frame: 0,
             playback: true,
             editing: None,
@@ -869,8 +887,9 @@ impl Panel {
     /// Only the inspector's fold slide runs hot; the host polls the worker
     /// at 100ms while paused.
     pub fn animating(&self) -> bool {
-        self.detail_at
-            .is_some_and(|t| t.elapsed().as_secs_f32() < DETAIL_SLIDE_S)
+        self.busy
+            || self.detail_at
+                .is_some_and(|t| t.elapsed().as_secs_f32() < DETAIL_SLIDE_S)
     }
     /// 0 folded … 1 open.
     fn detail_slide(&self) -> f32 {
@@ -907,6 +926,14 @@ impl Panel {
         self.dirty = Some(Instant::now());
         self.toggle_play = self.playback;
         self.status = "Preparing frame preview…".into();
+    }
+    /// One source frame back or forward, clamped to the clip.
+    fn step(&mut self, dir: i32) {
+        self.seek = Some(if dir < 0 {
+            (self.time - 1.0 / self.fps).max(0.0)
+        } else {
+            (self.time + 1.0 / self.fps).min((self.duration - 1.0 / self.fps).max(0.0))
+        });
     }
     fn jump(&mut self, next: bool) {
         let tolerance = 0.5 / self.fps.max(1.0);
@@ -1011,6 +1038,14 @@ impl Panel {
                 self.request_preview();
                 true
             }
+            Key::Left => {
+                self.step(-1);
+                true
+            }
+            Key::Right => {
+                self.step(1);
+                true
+            }
             Key::Char('m' | 'M' | 'c' | 'C' | 't' | 'T' | 'p' | 'P') => true,
             Key::Render | Key::SaveProject => {
                 self.status =
@@ -1028,6 +1063,17 @@ impl Panel {
             h: (vp.1 - 44.0).max(1.0),
         }
     }
+    /// Where the columns end: the footer bar's top.
+    fn bottom(vp: (f32, f32)) -> f32 {
+        vp.1 - FOOTER_H
+    }
+    fn footer(vp: (f32, f32)) -> RectPx {
+        RectPx { x: 0.0, y: Self::bottom(vp), w: vp.0, h: FOOTER_H }
+    }
+    /// Render frame, where the Timeline's footer keeps Split.
+    fn render_button(vp: (f32, f32)) -> RectPx {
+        RectPx { x: 90.0, y: Self::bottom(vp) + 6.0, w: 132.0, h: 26.0 }
+    }
     /// The Sources rail's width, so switching modes doesn't move the edge.
     fn left(vp: (f32, f32)) -> f32 {
         rail_full_width(vp.0)
@@ -1040,7 +1086,7 @@ impl Panel {
     /// only when the list keeps room for one card and its footer line.
     fn detail(&self, vp: (f32, f32)) -> (RectPx, RectPx) {
         let l = Self::left(vp);
-        let bottom = vp.1 - RAIL_ACTIONS_H;
+        let bottom = Self::bottom(vp) - RAIL_ACTIONS_H;
         let none = RectPx { x: 0.0, y: bottom, w: l, h: 0.0 };
         let needed = CARD_PITCH + RAIL_FOOTER_H + RAIL_GRIP_H + RAIL_INSPECTOR_H;
         if self.descriptors.is_empty() || bottom - Self::list_top() < needed {
@@ -1055,7 +1101,7 @@ impl Panel {
     fn list(&self, vp: (f32, f32)) -> RectPx {
         let (grip, _) = self.detail(vp);
         let y = Self::list_top();
-        let end = if grip.h > 0.0 { grip.y } else { vp.1 - RAIL_ACTIONS_H };
+        let end = if grip.h > 0.0 { grip.y } else { Self::bottom(vp) - RAIL_ACTIONS_H };
         RectPx { x: 0.0, y, w: Self::left(vp), h: (end - RAIL_FOOTER_H - y).max(CARD_PITCH) }
     }
     fn card(&self, i: usize, vp: (f32, f32)) -> RectPx {
@@ -1073,7 +1119,7 @@ impl Panel {
     }
     fn move_button(vp: (f32, f32), down: bool) -> RectPx {
         let w = (Self::left(vp) - 32.0) / 2.0;
-        RectPx { x: if down { 20.0 + w } else { 12.0 }, y: vp.1 - 34.0, w, h: 28.0 }
+        RectPx { x: if down { 20.0 + w } else { 12.0 }, y: Self::bottom(vp) - 34.0, w, h: 28.0 }
     }
     fn right(vp: (f32, f32)) -> f32 {
         (vp.0 * 0.25).clamp(200.0, 310.0)
@@ -1085,33 +1131,38 @@ impl Panel {
             x: l + 16.0,
             y: 88.0,
             w: (vp.0 - l - r - 32.0).max(1.0),
-            h: (vp.1 - 250.0).max(1.0),
+            h: (Self::transport_y(vp) - 10.0 - 88.0).max(1.0),
         }
     }
     fn timeline(vp: (f32, f32)) -> RectPx {
-        let v = Self::viewer(vp);
+        // The viewer's span, computed directly: the viewer's height asks
+        // for the transport, which sits on this rect.
+        let (l, r) = (Self::left(vp), Self::right(vp));
         RectPx {
-            x: v.x,
-            y: vp.1 - 109.0,
-            w: v.w,
+            x: l + 16.0,
+            y: Self::bottom(vp) - 60.0,
+            w: (vp.0 - l - r - 32.0).max(1.0),
             h: 28.0,
         }
     }
+    fn transport_y(vp: (f32, f32)) -> f32 {
+        Self::timeline(vp).y - 46.0
+    }
     fn transport(vp: (f32, f32), i: usize) -> RectPx {
         let v = Self::viewer(vp);
-        let width = (v.w - 20.0) / 5.0;
+        let total = 5.0 * TRANSPORT_W + 4.0 * TRANSPORT_GAP;
         RectPx {
-            x: v.x + i as f32 * (width + 5.0),
-            y: vp.1 - 155.0,
-            w: width,
-            h: 29.0,
+            x: v.x + ((v.w - total) / 2.0).max(0.0) + i as f32 * (TRANSPORT_W + TRANSPORT_GAP),
+            y: Self::transport_y(vp),
+            w: TRANSPORT_W,
+            h: 30.0,
         }
     }
     fn row(&self, i: usize, vp: (f32, f32)) -> RectPx {
         let r = Self::bounds(vp);
         RectPx {
             x: vp.0 - Self::right(vp) + 14.0,
-            y: r.y + 126.0 + i as f32 * 51.0 - self.scroll,
+            y: r.y + 88.0 + i as f32 * 51.0 - self.scroll,
             w: Self::right(vp) - 28.0,
             h: 45.0,
         }
@@ -1134,7 +1185,7 @@ impl Panel {
             }
             self.scroll = (self.scroll - dy).clamp(
                 0.0,
-                (self.fields.len() as f32 * 51.0 - (r.h - 170.0)).max(0.0),
+                (self.fields.len() as f32 * 51.0 - (Self::bottom(vp) - 151.0)).max(0.0),
             );
             return true;
         }
@@ -1147,6 +1198,12 @@ impl Panel {
         let r = Self::bounds(vp);
         if !hit(r, x, y) {
             return false;
+        }
+        if hit(Self::footer(vp), x, y) {
+            if hit(Self::render_button(vp), x, y) {
+                self.request_preview();
+            }
+            return true;
         }
         if x < Self::left(vp) {
             let (grip, _) = self.detail(vp);
@@ -1173,14 +1230,9 @@ impl Panel {
             if hit(Self::transport(vp, i), x, y) {
                 match i {
                     0 => self.jump(false),
-                    1 => self.seek = Some((self.time - 1.0 / self.fps).max(0.0)),
+                    1 => self.step(-1),
                     2 => self.toggle_play = true,
-                    3 => {
-                        self.seek = Some(
-                            (self.time + 1.0 / self.fps)
-                                .min((self.duration - 1.0 / self.fps).max(0.0)),
-                        )
-                    }
+                    3 => self.step(1),
                     _ => self.jump(true),
                 }
                 return true;
@@ -1197,11 +1249,7 @@ impl Panel {
             return true;
         }
         let right = vp.0 - Self::right(vp);
-        if y < 84.0 && x >= right {
-            self.request_preview();
-            return true;
-        }
-        if (88.0..124.0).contains(&y) && x >= right && !self.descriptors.is_empty() {
+        if (50.0..86.0).contains(&y) && x >= right && !self.descriptors.is_empty() {
             let d = &self.descriptors[self.selected];
             if let Some(p) = d.presets.get(self.preset % d.presets.len().max(1)) {
                 self.preset += 1;
@@ -1323,6 +1371,9 @@ impl Panel {
                 self.cancel = Cancellation::default();
                 self.busy = true;
                 self.status = "Rendering current frame through the enabled chain…".into();
+                self.pending = Some(start);
+                self.progress = None;
+                self.busy_since = Instant::now();
                 worker.submit(Request {
                     generation: self.generation,
                     chain,
@@ -1361,6 +1412,7 @@ impl Panel {
                         self.frames.sort_by(|a, b| a.pts.total_cmp(&b.pts));
                     }
                     Event::Progress(g, done, total) if g == self.generation => {
+                        self.progress = Some((done, total));
                         self.status = format!("Preparing temporal context · {done}/{total} frames");
                     }
                     Event::Stage(g, status) if g == self.generation => {
@@ -1368,6 +1420,8 @@ impl Panel {
                     }
                     Event::Done(g, result) if g == self.generation => {
                         self.busy = false;
+                        self.pending = None;
+                        self.progress = None;
                         if let Err(e) = result {
                             self.status = e;
                         } else {
@@ -1406,11 +1460,11 @@ impl Panel {
         let subtle = hex_color(SOURCE_SUBTLE);
         let over = |r: RectPx| hit(r, self.cursor.0, self.cursor.1);
         items.push(Item::Rect(RectItem::new(
-            RectPx { x: 0.0, y: HEADER_H, w: l, h: vp.1 - HEADER_H },
+            RectPx { x: 0.0, y: HEADER_H, w: l, h: Self::bottom(vp) - HEADER_H },
             WORKSPACE_PANEL,
         )));
         items.push(Item::Rect(RectItem::new(
-            RectPx { x: l - 1.0, y: HEADER_H, w: 1.0, h: vp.1 - HEADER_H },
+            RectPx { x: l - 1.0, y: HEADER_H, w: 1.0, h: Self::bottom(vp) - HEADER_H },
             WORKSPACE_RULE,
         )));
         let (hx, hy) = (14.0, HEADER_H + RAIL_HEAD_H / 2.0);
@@ -1462,15 +1516,9 @@ impl Panel {
         }
         items.push(Item::Clip(None));
         let footer = if self.descriptors.is_empty() {
-            "No processors in this build".to_string()
+            "No processors in this build"
         } else {
-            let fits = (list.h / CARD_PITCH).floor().max(1.0) as usize;
-            if self.descriptors.len() > fits {
-                let first = (self.list_scroll / CARD_PITCH).round() as usize + 1;
-                format!("{}–{} / {} · scroll", first, (first + fits - 1).min(self.descriptors.len()), self.descriptors.len())
-            } else {
-                "Ticked processors run top to bottom".into()
-            }
+            "Ticked processors run top to bottom"
         };
         items.push(Item::Text(TextItem { interface: true, valign: VAlign::Middle, max_width: Some(l - 24.0),
             ..TextItem::new(12.0, list.y + list.h + 16.0, 11.0, subtle, footer) }));
@@ -1575,7 +1623,7 @@ impl Panel {
                 v.y + v.h + 10.0,
                 10.0,
                 &format!(
-                    "Proxy {}×{} → {}×{} · through focused processor",
+                    "{}×{} → {}×{} · through focused processor",
                     f.input[0], f.input[1], f.output[0], f.output[1]
                 ),
                 DIM,
@@ -1604,18 +1652,7 @@ impl Panel {
         });
         board.recess(items);
         items.push(Item::Clip(Some(r)));
-        for (i, label) in [
-            "Prev rendered",
-            "< Frame",
-            if self.playback { "Pause" } else { "Play" },
-            "Frame >",
-            "Next rendered",
-        ]
-        .iter()
-        .enumerate()
-        {
-            button(items, Self::transport(vp, i), label, false);
-        }
+        self.draw_transport(items, vp);
         let t = Self::timeline(vp);
         items.push(Item::Rect(RectItem::new(
             RectPx {
@@ -1625,8 +1662,9 @@ impl Panel {
             },
             [0.08, 0.08, 0.08, 1.0],
         )));
+        let at = |pts: f64| t.x + t.w * (pts / self.duration.max(0.001)).clamp(0.0, 1.0) as f32;
         for f in &self.frames {
-            let x = t.x + t.w * (f.pts / self.duration.max(0.001)) as f32;
+            let x = at(f.pts);
             items.push(Item::Rect(RectItem::new(
                 RectPx {
                     x: x - 2.0,
@@ -1635,6 +1673,26 @@ impl Panel {
                     h: 16.0,
                 },
                 BLUE,
+            )));
+        }
+        // The frame being rendered: amber, breathing while the worker runs,
+        // with the temporal context it is decoding sweeping in from the
+        // segment start behind it.
+        if self.busy && let Some(pending) = self.pending {
+            let phase = self.busy_since.elapsed().as_secs_f32() * 4.5;
+            let pulse = 0.45 + 0.55 * (0.5 + 0.5 * phase.sin());
+            let amber = hex_color(RENDERING);
+            if let Some((done, total)) = self.progress && total > 0 {
+                let from = self.segment_start.min(pending);
+                let to = (from + done as f64 / self.fps).min(pending);
+                items.push(Item::Rect(RectItem::new(
+                    RectPx { x: at(from), y: t.y + 12.0, w: (at(to) - at(from)).max(0.0), h: 4.0 },
+                    [amber[0], amber[1], amber[2], 0.45],
+                )));
+            }
+            items.push(Item::Rect(RectItem::new(
+                RectPx { x: at(pending) - 2.0, y: t.y + 6.0, w: 4.0, h: 16.0 },
+                [amber[0], amber[1], amber[2], pulse],
             )));
         }
         let x = t.x + t.w * (self.time / self.duration.max(0.001)).clamp(0.0, 1.0) as f32;
@@ -1661,36 +1719,12 @@ impl Panel {
             INK,
             t.w,
         );
-        text(items, v.x, vp.1 - 44.0, 10.0, &self.status, INK, v.w);
-        text(
-            items,
-            v.x,
-            vp.1 - 23.0,
-            9.0,
-            "Preview: native size, 8-bit SDR · source untouched · no processor export yet",
-            DIM,
-            v.w,
-        );
+        self.draw_footer(items, vp);
         button(
             items,
             RectPx {
                 x: right + 14.0,
                 y: 53.0,
-                w: Self::right(vp) - 28.0,
-                h: 30.0,
-            },
-            if self.busy {
-                "Rendering… (R to restart)"
-            } else {
-                "Preview frame [R]"
-            },
-            self.busy,
-        );
-        button(
-            items,
-            RectPx {
-                x: right + 14.0,
-                y: 91.0,
                 w: Self::right(vp) - 28.0,
                 h: 29.0,
             },
@@ -1704,7 +1738,7 @@ impl Panel {
         text(
             items,
             right + 14.0,
-            132.0,
+            94.0,
             11.0,
             name,
             INK,
@@ -1714,7 +1748,7 @@ impl Panel {
             text(
                 items,
                 right + 14.0,
-                148.0,
+                110.0,
                 9.0,
                 &capability_label(*c),
                 DIM,
@@ -1723,9 +1757,9 @@ impl Panel {
         }
         let clip = RectPx {
             x: right,
-            y: 167.0,
+            y: 129.0,
             w: Self::right(vp),
-            h: (vp.1 - 227.0).max(1.0),
+            h: (Self::bottom(vp) - 151.0).max(1.0),
         };
         items.push(Item::Clip(Some(clip)));
         for (i, f) in self.fields.iter().enumerate() {
@@ -1799,6 +1833,79 @@ fn display_value(v: &Value) -> String {
         v.as_str()
             .map(str::to_owned)
             .unwrap_or_else(|| v.to_string())
+    }
+}
+impl Panel {
+    /// Five icon squares: previous rendered frame, a frame back, play /
+    /// pause, a frame on, next rendered frame — the cut toolbar's step and
+    /// keyframe glyphs, a triangle / two bars for the transport. The one
+    /// under the pointer names itself beneath the row.
+    fn draw_transport(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
+        const NAMES: [&str; 5] = ["Prev rendered", "Frame back", "Play", "Frame on", "Next rendered"];
+        for i in 0..5 {
+            let b = Self::transport(vp, i);
+            let hover = hit(b, self.cursor.0, self.cursor.1);
+            items.push(Item::Rect(RectItem {
+                radius: 5.0,
+                border_w: 1.0,
+                border_color: hex_color(if hover { 0x555555 } else { 0x303030 }),
+                ..RectItem::new(b, hex_color(0x050506))
+            }));
+            let ink = hex_color(if hover { 0xffffff } else { 0xc8c8c8 });
+            let (cx, cy) = (b.x + b.w / 2.0, b.y + b.h / 2.0);
+            match i {
+                0 => draw_icon(items, Icon::KeyBack, cx, cy, ink),
+                1 => draw_icon(items, Icon::StepBack, cx, cy, ink),
+                2 if self.playback => {
+                    for x in [-5.0, 1.5] {
+                        items.push(Item::Rect(RectItem { radius: 0.75,
+                            ..RectItem::new(RectPx { x: cx + x, y: cy - 6.0, w: 3.5, h: 12.0 }, ink) }));
+                    }
+                }
+                2 => items.push(Item::Triangle {
+                    r: RectPx { x: cx - 4.0, y: cy - 6.5, w: 10.0, h: 13.0 },
+                    color: ink,
+                    left: false,
+                    radius: 0.75,
+                }),
+                3 => draw_icon(items, Icon::StepFwd, cx, cy, ink),
+                _ => draw_icon(items, Icon::KeyFwd, cx, cy, ink),
+            }
+            if hover {
+                let name = if i == 2 && self.playback { "Pause" } else { NAMES[i] };
+                ui_label(items, cx, b.y + b.h + 9.0, 10.0, WORKSPACE_DIM, name, Align::Center, 120.0);
+            }
+        }
+    }
+    /// The footer bar every page has, at the Timeline's height: the mode
+    /// label, Render frame drawn as the cut footer's Split, the status line,
+    /// the key hints and the build stamp.
+    fn draw_footer(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
+        let f = Self::footer(vp);
+        let cy = f.y + f.h / 2.0;
+        items.push(Item::Rect(RectItem::new(f, WORKSPACE_PANEL)));
+        items.push(Item::Rect(RectItem::new(RectPx { h: 1.0, ..f }, WORKSPACE_RULE)));
+        ui_label(items, 16.0, cy, 10.0, ACCENT, "PROCESS", Align::Left, 68.0);
+        let b = Self::render_button(vp);
+        draw_cut_footer_button(
+            items,
+            b,
+            if self.busy { "Rendering…" } else { "Render frame" },
+            "R",
+            false,
+            hit(b, self.cursor.0, self.cursor.1),
+            false,
+        );
+        let build_w = status_build_width();
+        let hint = "[ ] source   + duplicate   ← → frame   native 8-bit SDR";
+        let hint_w = if vp.0 >= 1100.0 + build_w { 400.0 } else { 0.0 };
+        let x = b.x + b.w + 14.0;
+        ui_label(items, x, cy, 10.0, WORKSPACE_DIM, self.status.as_str(), Align::Left,
+            (vp.0 - x - 20.0 - hint_w - build_w).max(40.0));
+        if hint_w > 0.0 {
+            ui_label(items, vp.0 - 16.0 - build_w, cy, 10.0, WORKSPACE_MUTED, hint, Align::Right, hint_w);
+        }
+        status_build_label(items, vp, cy);
     }
 }
 fn hit(r: RectPx, x: f32, y: f32) -> bool {

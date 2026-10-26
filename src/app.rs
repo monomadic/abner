@@ -70,6 +70,10 @@ pub enum Key {
     /// ⇧← / ⇧→: cut mode's previous / next keyframe. Plain arrows elsewhere.
     KeyLeft,
     KeyRight,
+    /// ⌃⇧[ / ⌃⇧]: the previous / next header tab, in the header's order
+    /// (Sources · Timeline · Process · Crop · Mask), stopping at the ends.
+    PrevMode,
+    NextMode,
 }
 
 #[derive(Debug, Clone)]
@@ -1633,9 +1637,23 @@ impl App {
     }
 
     pub fn key(&mut self, mut k: Key) {
+        if matches!(k, Key::PrevMode | Key::NextMode) {
+            self.cycle_workspace_mode(if k == Key::NextMode { 1 } else { -1 });
+            return;
+        }
         if self.processors.key(k) {
             self.apply_processor_transport();
             return;
+        }
+        // The Process page's own keys: [ ] walk the sources, + duplicates
+        // (the arrows step a frame inside the panel).
+        if self.processors.open && self.ready() {
+            match k {
+                Key::Char('[') => { self.select((self.active + self.videos.len() - 1) % self.videos.len()); return; }
+                Key::Char(']') => { self.select((self.active + 1) % self.videos.len()); return; }
+                Key::Char('+' | '=') => { self.duplicate_sources(); return; }
+                _ => {}
+            }
         }
         if k == Key::OpenFiles {
             self.cmds.push(Cmd::OpenFiles);
@@ -1765,7 +1783,7 @@ impl App {
                 }
             }
             Key::Backspace => self.speed = 1.0,
-            Key::Close | Key::CmdDigit(_) | Key::Undo | Key::Render | Key::SaveProject | Key::KeyLeft | Key::KeyRight | Key::DuplicateSources | Key::SelectSources | Key::OpenFiles => {} // handled above
+            Key::Close | Key::CmdDigit(_) | Key::Undo | Key::Render | Key::SaveProject | Key::KeyLeft | Key::KeyRight | Key::DuplicateSources | Key::SelectSources | Key::OpenFiles | Key::PrevMode | Key::NextMode => {} // handled above
             Key::Char('V') => self.mode = self.mode.cycle(-1),
             Key::Char(c @ '1'..='9') => {
                 let idx = c as usize - '1' as usize;
@@ -2949,6 +2967,15 @@ impl App {
         }
     }
 
+    /// One tab left or right along the header (⌃⇧[ / ⌃⇧]), in the order
+    /// the header draws them; the ends don't wrap.
+    pub fn cycle_workspace_mode(&mut self, dir: i32) {
+        let order = ModeSelector::ORDER;
+        let Some(at) = order.iter().position(|m| *m == self.workspace_mode()) else { return };
+        let next = (at as i32 + dir).clamp(0, order.len() as i32 - 1) as usize;
+        self.select_workspace_mode(order[next]);
+    }
+
     /// Header (12:5): the mode selector starts at x=78, clear of the traffic
     /// lights; fullscreen has no lights, so it slides to the outer padding.
     fn header_left(&self) -> f32 {
@@ -3740,17 +3767,14 @@ struct ModeSelector {
 }
 
 impl ModeSelector {
+    /// The tabs' workspace modes in header order.
+    pub(crate) const ORDER: [usize; 5] = [0, 3, 4, 2, 1];
     /// MainNav (382:4686): five equal tabs on a `TAB_GAP`.
     fn controls(&self) -> Vec<Control> {
         let w = (self.rect.w - 4.0 * TAB_GAP) / 5.0;
-        [
-            ("Sources", 0),
-            ("Timeline", 3),
-            ("Process", 4),
-            ("Crop", 2),
-            ("Mask", 1),
-        ]
+        ["Sources", "Timeline", "Process", "Crop", "Mask"]
         .into_iter()
+        .zip(Self::ORDER)
         .enumerate()
         .map(|(index, (label, mode))| {
             Control::new(
@@ -5784,7 +5808,7 @@ impl App {
 /// The scrub panel's pictograms. The renderer draws rects and triangles,
 /// not paths, so each is built from those on a 16px box about its centre.
 #[derive(Clone, Copy)]
-enum Icon { Info, Keyframe, Bookmark, TrackFilm, TrackSpeaker, Subtitle, Segments, In, Out, Split, Trash, SnapKeyframe, Flag, Film, Speaker, Caption, List, Grid, StepBack, StepFwd, KeyBack, KeyFwd, ZoomOut, ZoomIn }
+pub(crate) enum Icon { Info, Keyframe, Bookmark, TrackFilm, TrackSpeaker, Subtitle, Segments, In, Out, Split, Trash, SnapKeyframe, Flag, Film, Speaker, Caption, List, Grid, StepBack, StepFwd, KeyBack, KeyFwd, ZoomOut, ZoomIn }
 
 /// Figma frame/type palette. Key status is independent of picture type.
 const FRAME_KEY: u32 = 0x00ff26;
@@ -5848,7 +5872,7 @@ fn draw_split_icon(items: &mut Vec<Item>, cx: f32, cy: f32, color: [f32; 4], sca
     }
 }
 
-fn draw_icon(items: &mut Vec<Item>, icon: Icon, cx: f32, cy: f32, color: [f32; 4]) {
+pub(crate) fn draw_icon(items: &mut Vec<Item>, icon: Icon, cx: f32, cy: f32, color: [f32; 4]) {
     let bar = |items: &mut Vec<Item>, x: f32, y: f32, w: f32, h: f32| {
         items.push(Item::Rect(RectItem { radius: 0.75, ..RectItem::new(RectPx { x: cx + x, y: cy + y, w, h }, color) }));
     };
@@ -6249,7 +6273,7 @@ pub(crate) fn ui_label(items: &mut Vec<Item>, x: f32, y: f32, px: f32, color: [f
     items.push(Item::Text(TextItem { interface: true, align, valign: VAlign::Middle, max_width: Some(width.max(0.0)),
         ..TextItem::new(x, y, px, color, text) }));
 }
-fn draw_cut_footer_button(items: &mut Vec<Item>, r: RectPx, label: &str, key_label: &str, icon: bool, hovered: bool, disabled: bool) {
+pub(crate) fn draw_cut_footer_button(items: &mut Vec<Item>, r: RectPx, label: &str, key_label: &str, icon: bool, hovered: bool, disabled: bool) {
     let border = if disabled { 0x252525 } else if hovered { 0x555555 } else { 0x303030 };
     let ink = hex_color(if disabled { 0x686868 } else if hovered { 0xffffff } else { 0xc8c8c8 });
     let cy = r.y + r.h / 2.0;
@@ -6421,7 +6445,7 @@ pub(crate) const WORKSPACE_PANEL: [f32; 4] = [0.0196, 0.0196, 0.0235, 1.0];
 const CANVAS_BG: [f32; 4] = [29.0 / 255.0, 27.0 / 255.0, 27.0 / 255.0, 1.0];
 pub(crate) const WORKSPACE_TEXT: [f32; 4] = [209.0 / 255.0, 209.0 / 255.0, 209.0 / 255.0, 1.0];
 pub(crate) const WORKSPACE_DIM: [f32; 4] = [0.57, 0.57, 0.57, 1.0];
-const WORKSPACE_MUTED: [f32; 4] = [0.43, 0.43, 0.43, 1.0];
+pub(crate) const WORKSPACE_MUTED: [f32; 4] = [0.43, 0.43, 0.43, 1.0];
 pub(crate) const WORKSPACE_RULE: [f32; 4] = [0.09, 0.09, 0.09, 1.0];
 const CONTROL_BG: [f32; 4] = [26.0 / 255.0, 26.0 / 255.0, 26.0 / 255.0, 1.0];
 
@@ -6619,6 +6643,22 @@ mod tests {
         assert_eq!(app.workspace_mode(), 0);
         app.select_workspace_mode(99);
         assert_eq!(app.workspace_mode(), 0);
+    }
+
+    #[test]
+    fn ctrl_shift_brackets_walk_the_header_tabs_without_wrapping() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        app.key(Key::PrevMode);
+        assert_eq!(app.workspace_mode(), 0, "Sources is the first tab");
+        app.key(Key::NextMode);
+        assert_eq!(app.workspace_mode(), 3, "Timeline follows Sources");
+        app.key(Key::NextMode);
+        assert_eq!(app.workspace_mode(), 4, "Process follows Timeline");
+        app.key(Key::PrevMode);
+        assert_eq!(app.workspace_mode(), 3);
+        for _ in 0..6 { app.key(Key::NextMode); }
+        assert_eq!(app.workspace_mode(), 1, "Mask is the last tab");
     }
 
     #[test]
@@ -8644,7 +8684,7 @@ const ASPECTS: [(&str, Option<f32>); 6] = [
     ("ratio 2.39:1", Some(2.39)),
 ];
 
-const ACCENT: [f32; 4] = [0.082, 0.502, 0.871, 1.0];
+pub(crate) const ACCENT: [f32; 4] = [0.082, 0.502, 0.871, 1.0];
 /// A rubber band smaller than this on both axes is still a click.
 const BAND_MIN: f32 = 4.0;
 /// Frame background / ink on the accent (#050506). Opaque: the window
@@ -8767,11 +8807,11 @@ const INK_FAINT: [f32; 4] = [0.478, 0.525, 0.580, 1.0];
 /// placement is measured by the renderer (one right-aligned run);
 /// `status_build_width` is the `MONO_ADV` estimate of the room it takes,
 /// plus its gap, so the hint beside it steps left.
-fn status_build_label(items: &mut Vec<Item>, vp: (f32, f32), cy: f32) {
+pub(crate) fn status_build_label(items: &mut Vec<Item>, vp: (f32, f32), cy: f32) {
     items.push(Item::Text(TextItem { interface: true, align: Align::Right, valign: VAlign::Middle, tracking: 0.4,
         ..TextItem::new(vp.0 - 16.0, cy, 9.5, INK_FAINT, format!("build {BUILD}")) }));
 }
-fn status_build_width() -> f32 {
+pub(crate) fn status_build_width() -> f32 {
     (6 + BUILD.chars().count()) as f32 * 9.5 * MONO_ADV + 16.0
 }
 
@@ -8806,7 +8846,7 @@ const TRANSPORT_H: f32 = 60.0;
 /// Persistent footer for tool, selection, zoom, export results and shortcut hints.
 const STATUS_H: f32 = 28.0;
 /// Timeline footer: 6px around its compact action buttons.
-const CUT_STATUS_H: f32 = 38.0;
+pub(crate) const CUT_STATUS_H: f32 = 38.0;
 /// Extra grab margin above/below the 5px seek track.
 const SEEK_GRAB: f32 = 9.0;
 /// Advance width of the monospace UI font, in em — used only to step
