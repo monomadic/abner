@@ -783,7 +783,7 @@ impl Panel {
         if let Some(saved) = self.saved.get_mut(self.selected) {
             *saved = self.settings.clone();
         }
-        self.status = "Preview current frame to inspect the enabled chain.".into();
+        self.status = "Render the current frame to inspect the enabled chain.".into();
     }
     fn toggle(&mut self) {
         self.dragging = None;
@@ -925,7 +925,7 @@ impl Panel {
         self.generation += 1;
         self.dirty = Some(Instant::now());
         self.toggle_play = self.playback;
-        self.status = "Preparing frame preview…".into();
+        self.status = "Preparing render…".into();
     }
     /// One source frame back or forward, clamped to the clip.
     fn step(&mut self, dir: i32) {
@@ -1426,7 +1426,7 @@ impl Panel {
                             self.status = e;
                         } else {
                             self.status =
-                                format!("Preview ready · {} saved frames", self.frames.len());
+                                format!("Render ready · {} saved frames", self.frames.len());
                         }
                     }
                     _ => {}
