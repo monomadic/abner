@@ -268,8 +268,8 @@ processors up to and including the focused processor. The returned frame replace
 source display at that position and gets a blue timeline mark. **Prev rendered** /
 **Next rendered** (Shift-Left / Shift-Right) jump between marked frames. Seeking
 preserves marks; settings, order, bypass, source or timeline edits invalidate them.
-Preview frames survive switching workspaces, within a 96 MiB cache budget; evicted
-frames lose their marks. Changing processor focus conservatively clears the cache.
+Preview frames survive switching workspaces, within the `processors.preview_cache_mb`
+budget (1024 MB by default); evicted frames lose their marks. Changing processor focus conservatively clears the cache.
 
 The right inspector uses runtime schemas: numeric sliders support exact entry by
 clicking their labels, enums cycle, booleans toggle, and text fields accept paths.
@@ -286,9 +286,14 @@ frame is cached. This can take time for distant frames; context preparation show
 frame progress. Reconfiguration cancels old work and rejects late results. Device
 calls already executing may finish before cancellation takes effect.
 
-These are **SDR display proxies**, at most 640×360 before processing, decoded as
-8-bit RGBA then expanded to RGB16. They are not full-resolution exports. The cache
-budget excludes model/session memory. Current previews require constant-rate,
+Plugins are fed the source at its **native size** (display dimensions, rotation
+applied), decoded as 8-bit SDR RGBA then expanded to RGB16, and their output is
+rounded back to 8 bits for display — so a preview is what the plugin makes of the
+real pixels, but not a 16-bit export. `processors.preview_cache_mb` bounds the paired
+before/after frames a section keeps (a 1080p pair with a 2× output is ~41 MB a
+frame, 4K ~166 MB; the number of frames decoded past the requested one shrinks to
+fit) and excludes model/session memory; a pair that does not fit at all is refused
+with the key's name. Current previews require constant-rate,
 timestamp-preserving processors and SDR Rec.709; incompatible tagged color is
 rejected. Persistent stack presets, auxiliary inputs, interpolation, full color
 negotiation and processor export remain future work. Process does not write media;

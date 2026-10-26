@@ -46,6 +46,14 @@ checker_size = 48.0
 # Brush diameter in image pixels (1–4096; [ / ] adjust it live).
 brush_size = 64.0
 
+[processors]
+# Memory budget for processor previews, in MB (64–65536). Plugins are fed the
+# source at its NATIVE size; this bounds the paired before/after frames kept per
+# preview section and the rendered frames retained across the timeline (a 1080p
+# pair with a 2× output is ~41 MB a frame, 4K ~166 MB). It excludes the plugin's
+# own model and session memory.
+preview_cache_mb = 1024
+
 [keys]
 # A key name (tab, enter, space, backspace) or a single character.
 # Flip to the next source video.

@@ -265,6 +265,8 @@ pub struct App {
     seek_step: f64,
     /// Per-clip decoded-frame cache budget (`playback.frame_cache_mb`).
     cache_bytes: usize,
+    /// Processor preview memory budget (`processors.preview_cache_mb`).
+    preview_bytes: usize,
     /// Rebindable keys (config `keys`).
     keys: crate::config::Keys,
     /// Loaded clips open paused on their first frame (config
@@ -713,6 +715,7 @@ impl App {
             speed: 1.0,
             seek_step: cfg.playback.seek_step,
             cache_bytes: cfg.frame_cache_bytes(),
+            preview_bytes: cfg.preview_cache_bytes(),
             keys: cfg.keys.clone(),
             start_paused: cfg.playback.start_paused,
             show_ui: true,
@@ -1626,6 +1629,7 @@ impl App {
     }
     pub fn set_processors(&mut self, registry: abner_processor_api::Registry) {
         self.processors = crate::processor_gui::Panel::new(registry);
+        self.processors.set_budget(self.preview_bytes);
     }
 
     pub fn key(&mut self, mut k: Key) {

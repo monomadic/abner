@@ -3,6 +3,25 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-26 — Processor previews at native size, budget in the config
+
+The processor preview used to hand every plugin a 640×360 proxy of the source
+(`proxy_dimensions`, a two-tap bilinear shrink of the 8-bit display frame), so a
+1080p clip reached Proteus at a third of its resolution and the "after" lost
+detail to the "before" by construction — on most settings the comparison read as
+a quality loss that was the host's, not the model's. `render` now opens its
+decoder at the clip's display size (rotation applied, as the Sources decoder
+does) and creates the session at that size. The fixed 96 MiB `PREVIEW_BYTES` is
+gone: `processors.preview_cache_mb` (new `[processors]` table, 1024 MB default,
+64–65536) rides each `Request` as `budget`, sizes the paired before/after frames
+a section may keep (the frame count follows from it, still capped at 24), bounds
+a stage's buffered batch, and is the panel's retention budget across the
+timeline; `Panel::set_budget` applies it from `App::set_processors`. A pair that
+does not fit at all is refused with the key named. Still 8-bit in and out and
+SDR-only — the display decoder emits RGBA8 — which the footer now says instead
+of "SDR proxy". The preview test asserts the delivered input is the fixture's
+own size and that a starved budget refuses by name.
+
 ## 2026-10-26 — Header tabs as outlined buttons, READY chip
 
 `ModeSelector` now draws the Figma `MainNav` (382:4686): five separate 110×30

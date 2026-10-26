@@ -23,6 +23,7 @@ pub struct Config {
     pub playback: Playback,
     pub compare: Compare,
     pub mask: MaskCfg,
+    pub processors: Processors,
     pub keys: Keys,
 }
 
@@ -55,6 +56,12 @@ pub struct Compare {
 #[serde(deny_unknown_fields)]
 pub struct MaskCfg {
     pub brush_size: f32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Processors {
+    pub preview_cache_mb: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -105,6 +112,11 @@ impl Config {
     /// `playback.frame_cache_mb` in bytes.
     pub fn frame_cache_bytes(&self) -> usize {
         (self.playback.frame_cache_mb * 1048576.0) as usize
+    }
+
+    /// `processors.preview_cache_mb` in bytes.
+    pub fn preview_cache_bytes(&self) -> usize {
+        (self.processors.preview_cache_mb * 1048576.0) as usize
     }
 
     /// Resolve and load the configuration for this run. `explicit` is
@@ -160,6 +172,7 @@ impl Config {
         range("compare.blend", self.compare.blend as f64, 0.0, 1.0)?;
         range("compare.checker_size", self.compare.checker_size as f64, 4.0, 512.0)?;
         range("mask.brush_size", self.mask.brush_size as f64, 1.0, 4096.0)?;
+        range("processors.preview_cache_mb", self.processors.preview_cache_mb, 64.0, 65536.0)?;
         Ok(())
     }
 }

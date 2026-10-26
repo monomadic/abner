@@ -442,6 +442,11 @@ builtins may be exceptions. Runtime registries may retain and expose complete
 processor information. Generated composition manifests, launcher source, lockfiles
 and provenance containing external processor identities live outside this repository.
 The normal executable supplies an empty registry to the library's `run` entry point.
+**Previews run at the source's native size** (2026-10-26; the 640×360 proxy
+made every plugin read as a quality loss): `processor_gui::render` decodes at the
+clip's display dimensions and `processors.preview_cache_mb` (default 1024) is the
+whole memory rule — paired frames per section, frames kept across the timeline.
+Still 8-bit RGBA in and out.
 The generic API lives in `crates/processor-api`; processor implementations are
 maintained independently. **`cargo build-with-plugins`** (alias → the committed,
 generic helper `tools/build-with-plugins`) is the sanctioned way to compose them

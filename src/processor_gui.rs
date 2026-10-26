@@ -23,7 +23,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-const PREVIEW_BYTES: usize = 96 * 1024 * 1024;
+/// `processors.preview_cache_mb`'s default, for a `Panel` nobody configured.
+pub const DEFAULT_PREVIEW_BYTES: usize = 1024 * 1024 * 1024;
 const FRAMES: usize = 24;
 const INK: [f32; 4] = [0.8, 0.8, 0.8, 1.0];
 const DIM: [f32; 4] = [0.43, 0.43, 0.43, 1.0];
@@ -140,6 +141,9 @@ struct Request {
     start: f64,
     end: Option<f64>,
     cancel: Cancellation,
+    /// Bytes allowed for the section's paired before/after frames
+    /// (`processors.preview_cache_mb`); the frame count follows from it.
+    budget: usize,
 }
 struct Mailbox {
     pending: Option<Request>,
@@ -307,15 +311,6 @@ impl Drop for Worker {
         cv.notify_one();
     }
 }
-fn proxy_dimensions(w: u32, h: u32) -> [u32; 2] {
-    let scale = (640.0 / w.max(1) as f64)
-        .min(360.0 / h.max(1) as f64)
-        .min(1.0);
-    [
-        (w as f64 * scale).round().max(2.0) as u32,
-        (h as f64 * scale).round().max(2.0) as u32,
-    ]
-}
 fn render(
     registry: &Registry,
     r: &Request,
@@ -323,10 +318,13 @@ fn render(
     active: Option<&Mutex<Vec<Cancellation>>>,
 ) -> Result<(), String> {
     r.cancel.check()?;
-    // The display decoder emits RGBA8. This preview is explicitly a proxy, not
-    // a full precision export or a color-managed HDR conversion.
+    // Plugins see the source at its NATIVE size (display dimensions, rotation
+    // applied, the same the Sources decoder uses) — pixels are the product here,
+    // and a proxy made every setting read as a loss. The display decoder emits
+    // RGBA8, so the preview is still 8-bit in and out, not a color-managed
+    // HDR conversion or a full-precision export.
     check_sdr(&r.info.path)?;
-    let [w, h] = proxy_dimensions(r.info.width, r.info.height);
+    let [w, h] = [r.info.width, r.info.height];
     let mut sessions = Vec::new();
     let mut dims = [w as usize, h as usize];
     for (id, settings) in &r.chain {
@@ -370,9 +368,12 @@ fn render(
         dims = session.output_dimensions();
         if dims.contains(&0)
             || dims.iter().any(|d| *d > 8192)
-            || dims[0] * dims[1] * 8 > PREVIEW_BYTES
+            || dims[0] * dims[1] * 8 > r.budget
         {
-            return Err("Processor output exceeds the preview memory budget".into());
+            return Err(
+                "Processor output exceeds the preview memory budget (processors.preview_cache_mb)"
+                    .into(),
+            );
         }
         if let Some(active) = active {
             active.lock().unwrap().push(session.cancellation());
@@ -385,10 +386,13 @@ fn render(
         return Err("Unsupported preview output dimensions".into());
     }
     let per_frame = (w as usize * h as usize + ow * oh) * 4;
-    if per_frame > PREVIEW_BYTES {
-        return Err("Preview output exceeds the display memory budget".into());
+    if per_frame > r.budget {
+        return Err(
+            "A native-size before/after pair exceeds the preview memory budget (processors.preview_cache_mb)"
+                .into(),
+        );
     }
-    let count = (PREVIEW_BYTES / per_frame).clamp(1, FRAMES);
+    let count = (r.budget / per_frame).clamp(1, FRAMES);
     let fps = r.info.fps;
     if !fps.is_finite() || fps <= 0.0 || fps > 1000.0 {
         return Err("Preview needs a valid frame rate".into());
@@ -515,6 +519,7 @@ fn render(
                     time_base: [1, 1_000_000],
                 }],
                 &r.cancel,
+                r.budget,
             )?,
             &mut originals,
         )?;
@@ -523,7 +528,7 @@ fn render(
     for i in 0..sessions.len() {
         let tail = sessions[i].finish()?;
         emit(
-            process_chain(&mut sessions, i + 1, tail, &r.cancel)?,
+            process_chain(&mut sessions, i + 1, tail, &r.cancel, r.budget)?,
             &mut originals,
         )?;
     }
@@ -540,6 +545,7 @@ fn process_chain(
     from: usize,
     mut frames: Vec<Frame>,
     cancel: &Cancellation,
+    budget: usize,
 ) -> Result<Vec<Frame>, String> {
     for session in &mut sessions[from..] {
         let mut outputs = Vec::new();
@@ -550,8 +556,8 @@ fn process_chain(
                 .iter()
                 .map(|f| f.pixels.len().saturating_mul(2))
                 .sum();
-            if bytes > PREVIEW_BYTES {
-                return Err("Processor batch exceeds preview budget".into());
+            if bytes > budget {
+                return Err("Processor batch exceeds the preview memory budget".into());
             }
         }
         frames = outputs;
@@ -619,6 +625,9 @@ pub struct Panel {
     fields: Vec<Field>,
     settings: Value,
     worker: Option<Worker>,
+    /// `processors.preview_cache_mb` in bytes: bounds each section's paired
+    /// frames on the worker and the rendered frames kept across the timeline.
+    budget: usize,
     generation: u64,
     cancel: Cancellation,
     dirty: Option<Instant>,
@@ -663,6 +672,7 @@ impl Default for Panel {
             fields: vec![],
             settings: json!({}),
             worker: None,
+            budget: DEFAULT_PREVIEW_BYTES,
             generation: 0,
             cancel: Cancellation::default(),
             dirty: None,
@@ -737,6 +747,10 @@ impl Panel {
         self.scroll = 0.0;
         self.editing = None;
         self.changed();
+    }
+    /// Apply the configured preview budget; the next render uses it.
+    pub fn set_budget(&mut self, bytes: usize) {
+        self.budget = bytes.max(1);
     }
     fn changed(&mut self) {
         self.cancel.cancel();
@@ -1317,6 +1331,7 @@ impl Panel {
                     start: self.segment_start,
                     end,
                     cancel: self.cancel.clone(),
+                    budget: self.budget,
                 });
             } else {
                 self.status = "No processors installed in this build.".into();
@@ -1336,7 +1351,7 @@ impl Panel {
                                 .map(|f| f.before.len() + f.after.len())
                                 .sum::<usize>()
                                 + needed
-                                > PREVIEW_BYTES
+                                > self.budget
                         {
                             self.frames.remove(0);
                         }
@@ -1652,7 +1667,7 @@ impl Panel {
             v.x,
             vp.1 - 23.0,
             9.0,
-            "Preview: SDR proxy · source untouched · no processor export yet",
+            "Preview: native size, 8-bit SDR · source untouched · no processor export yet",
             DIM,
             v.w,
         );
@@ -1929,12 +1944,6 @@ mod tests {
         assert_eq!(category_label(&p.categories[0]), "Uncategorized");
         assert_eq!(p.enabled, [false, true], "flags travel with their processor");
     }
-    #[test]
-    fn proxy_preserves_aspect_without_upscaling() {
-        assert_eq!(proxy_dimensions(1920, 1080), [640, 360]);
-        assert_eq!(proxy_dimensions(1080, 1920), [203, 360]);
-        assert_eq!(proxy_dimensions(64, 64), [64, 64]);
-    }
     struct BufferedFactory;
     impl abner_processor_api::Factory for BufferedFactory {
         fn descriptor(&self) -> Descriptor {
@@ -2077,6 +2086,7 @@ mod tests {
             start: 0.0,
             end: None,
             cancel: Cancellation::default(),
+            budget: DEFAULT_PREVIEW_BYTES,
         };
         let (tx, rx) = mpsc::sync_channel(FRAMES + 2);
         render(&registry(), &r, &tx, None).unwrap();
@@ -2084,11 +2094,27 @@ mod tests {
         while let Ok(Event::Frame(g, f)) = rx.try_recv() {
             assert_eq!(g, 7);
             assert_eq!(f.before, f.after);
+            // Plugins get the source at its native size, never a proxy.
+            assert_eq!(f.input, [info.width, info.height]);
+            assert_eq!(f.before.len(), (info.width * info.height * 4) as usize);
             frames.push(f);
         }
         assert_eq!(frames.len(), 6);
         assert_eq!(frames[0].pts, 0.0);
         assert!(frames.windows(2).all(|f| f[1].pts > f[0].pts));
+        // A budget too small for one native pair refuses, naming the config key.
+        let starved = Request {
+            generation: 8,
+            chain: r.chain.clone(),
+            target: None,
+            info: info.clone(),
+            start: 0.0,
+            end: None,
+            cancel: Cancellation::default(),
+            budget: 1024,
+        };
+        let err = render(&registry(), &starved, &tx, None).unwrap_err();
+        assert!(err.contains("preview_cache_mb"), "{err}");
         let limited = Request {
             generation: 9,
             chain: r.chain.clone(),
@@ -2097,6 +2123,7 @@ mod tests {
             start: 0.0,
             end: Some(0.1),
             cancel: Cancellation::default(),
+            budget: DEFAULT_PREVIEW_BYTES,
         };
         render(&registry(), &limited, &tx, None).unwrap();
         let mut limited_count = 0;
@@ -2120,6 +2147,7 @@ mod tests {
             start: 0.0,
             end: None,
             cancel: Cancellation::default(),
+            budget: DEFAULT_PREVIEW_BYTES,
         };
         render(&registry(), &single, &tx, None).unwrap();
         let mut selected = vec![];
@@ -2294,15 +2322,15 @@ mod tests {
         ];
         let cancel = Cancellation::default();
         assert_eq!(
-            process_chain(&mut sessions, 0, vec![make()], &cancel).unwrap()[0].pixels[0],
+            process_chain(&mut sessions, 0, vec![make()], &cancel, DEFAULT_PREVIEW_BYTES).unwrap()[0].pixels[0],
             23
         );
         sessions.swap(0, 1);
         assert_eq!(
-            process_chain(&mut sessions, 0, vec![make()], &cancel).unwrap()[0].pixels[0],
+            process_chain(&mut sessions, 0, vec![make()], &cancel, DEFAULT_PREVIEW_BYTES).unwrap()[0].pixels[0],
             26
         );
         cancel.cancel();
-        assert!(process_chain(&mut sessions, 0, vec![make()], &cancel).is_err());
+        assert!(process_chain(&mut sessions, 0, vec![make()], &cancel, DEFAULT_PREVIEW_BYTES).is_err());
     }
 }
