@@ -5,7 +5,7 @@ use crate::{
         ACCENT, CUT_HEADER_BLUE, CUT_STATUS_H, Canvas, DETAIL_SLIDE_S, HEADER_H, INSPECTOR_BG,
         INSPECTOR_PATH, Icon, Key, MONO_ADV, RAIL_ACTIONS_H, RAIL_FOOTER_H, RAIL_GRIP_H, RAIL_HEAD_H,
         RAIL_INSPECTOR_H, SOURCE_BORDER, SOURCE_INK, SOURCE_RING,
-        SOURCE_SECONDARY, SOURCE_SUBTLE, SOURCE_SURFACE, WORKSPACE_DIM, WORKSPACE_MUTED,
+        SOURCE_SUBTLE, SOURCE_SURFACE, WORKSPACE_DIM, WORKSPACE_MUTED,
         WORKSPACE_PANEL, WORKSPACE_RULE, WORKSPACE_TEXT, draw_cut_footer_button,
         draw_icon, draw_keycap, draw_rail_grip, footer_export_rect, hex_color, mix, rail_full_width,
         status_build_width, ui_label,
@@ -1256,12 +1256,12 @@ impl Panel {
             x: l + 16.0,
             y: 88.0,
             w: (vp.0 - l - r - 32.0).max(1.0),
-            h: (Self::transport_y(vp) - 124.0 - 88.0).max(1.0),
+            h: (Self::transport_y(vp) - 105.0 - 88.0).max(1.0),
         }
     }
     fn progress_button(vp: (f32, f32)) -> RectPx {
         let v = Self::viewer(vp);
-        RectPx { x: v.x + v.w - 104.0, y: Self::transport_y(vp) - 90.0, w: 92.0, h: 26.0 }
+        RectPx { x: v.x + v.w - 103.0, y: Self::transport_y(vp) - 70.0, w: 91.0, h: 26.0 }
     }
     fn timeline(vp: (f32, f32)) -> RectPx {
         // The viewer's span, computed directly: the viewer's height asks
@@ -1806,21 +1806,12 @@ impl Panel {
             .iter()
             .find(|f| (f.pts - self.time).abs() <= 0.51 / self.fps)
             .filter(|_| self.show_rendered);
-        let title = if cached.is_some() {
-            "RENDERED FRAME · Tab for source"
-        } else {
-            "SOURCE FRAME · Tab for render"
-        };
-        text(
-            items,
-            v.x,
-            61.0,
-            11.0,
-            title,
-            if cached.is_some() { BLUE } else { DIM },
-            v.w,
-        );
-        text(items, v.x, 78.0, 10.0, &self.filename, DIM, v.w);
+        let note = if cached.is_some() { "RENDERED · Tab for source" } else { "" };
+        let note_w = if note.is_empty() { 0.0 } else { 180.0 };
+        text(items, v.x, 76.0, 10.0, &self.filename, DIM, (v.w - note_w).max(1.0));
+        if !note.is_empty() {
+            ui_label(items, v.x + v.w, 81.0, 10.0, BLUE, note, Align::Right, note_w);
+        }
         if let Some(f) = cached {
             text(
                 items,
@@ -1866,7 +1857,7 @@ impl Panel {
                 h: 4.0,
                 ..t
             },
-            [0.08, 0.08, 0.08, 1.0],
+            hex_color(0x0a0a0a),
         )));
         let at = |pts: f64| t.x + t.w * (pts / self.duration.max(0.001)).clamp(0.0, 1.0) as f32;
         for f in &self.frames {
@@ -1922,7 +1913,7 @@ impl Panel {
                 self.duration,
                 self.frames.len()
             ),
-            INK,
+            hex_color(0xa4a7ad),
             t.w,
         );
         self.draw_footer(items, vp);
@@ -1974,9 +1965,9 @@ impl Panel {
     /// Kept outside the video canvas so zoom/pan cannot cover render feedback.
     fn draw_progress(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
         let v = Self::viewer(vp);
-        let r = RectPx { x: v.x, y: Self::transport_y(vp) - 98.0, w: v.w, h: 88.0 };
-        let ink = hex_color(SOURCE_INK);
-        let secondary = hex_color(SOURCE_SECONDARY);
+        let r = RectPx { x: v.x, y: Self::transport_y(vp) - 78.0, w: v.w, h: 67.0 };
+        let ink = hex_color(0xededed);
+        let secondary = hex_color(0xa4a7ad);
         let accent = hex_color(CUT_HEADER_BLUE);
         let elapsed = if self.busy { self.busy_since.elapsed() } else { self.render_elapsed };
         let title = if self.busy {
@@ -2006,24 +1997,23 @@ impl Panel {
             "Render frame to preview the enabled chain".into()
         };
         items.push(Item::Rect(RectItem { radius: 7.0, border_w: 1.0,
-            border_color: hex_color(SOURCE_BORDER),
-            ..RectItem::new(r, hex_color(0x0c1015)) }));
+            border_color: hex_color(0x303235),
+            ..RectItem::new(r, hex_color(0x0a0a0a)) }));
         let heading = if self.busy || self.render_result.is_some() {
             format!("{title} · {:.1}s", elapsed.as_secs_f64())
         } else { title.into() };
-        ui_label(items, r.x + 12.0, r.y + 16.0, 12.0, ink, &heading, Align::Left, (r.w - 128.0).max(1.0));
+        ui_label(items, r.x + 12.0, r.y + 16.0, 11.0, ink, &heading, Align::Left, (r.w - 128.0).max(1.0));
+        // The control is a bare label (the reference draws no box): grey at
+        // rest, white under the pointer, the rendering amber while it cancels.
         let control = Self::progress_button(vp);
         let hover = hit(control, self.cursor.0, self.cursor.1);
-        items.push(Item::Rect(RectItem { radius: 7.0, border_w: 1.0,
-            border_color: hex_color(if hover { 0x858585 } else { 0x606b79 }),
-            ..RectItem::new(control, if self.busy { accent } else { hex_color(SOURCE_SURFACE) }) }));
-        ui_label(items, control.x + control.w / 2.0, control.y + control.h / 2.0, 12.0,
-            ink, if self.busy { "Cancel" } else { "Render" }, Align::Center, control.w - 12.0);
-        ui_label(items, r.x + 12.0, r.y + 35.0, 10.0, secondary, &phase, Align::Left,
-            (r.w - if fraction.is_some() { 116.0 } else { 24.0 }).max(1.0));
+        let control_ink = hex_color(if self.busy { RENDERING } else if hover { 0xffffff } else { 0x919191 });
+        ui_label(items, control.x + control.w / 2.0, control.y + control.h / 2.0, 11.0,
+            control_ink, if self.busy { "Cancel" } else { "Render" }, Align::Center, control.w - 12.0);
+        let mut line = phase;
         if let Some(fraction) = fraction {
-            let label = if self.busy { format!("{:.0}% of stage", (fraction * 100.0).floor()) } else { "100%".into() };
-            ui_label(items, r.x + r.w - 12.0, r.y + 35.0, 10.0, ink, &label, Align::Right, 90.0);
+            line = format!("{line} · {}", if self.busy {
+                format!("{:.0}% of stage", (fraction * 100.0).floor()) } else { "100%".into() });
         }
         let metrics = if self.busy {
             let now = Instant::now();
@@ -2039,10 +2029,14 @@ impl Panel {
         } else if self.preview_count > 0 && self.render_elapsed.as_secs_f64() > 0.0 {
             format!("{:.2} preview FPS · {}", self.preview_count as f64 / self.render_elapsed.as_secs_f64(),
                 if self.render_result == Some(true) { "Remaining 0s" } else { "Stopped" })
-        } else { "Output FPS — · Stage ETA —".into() };
-        ui_label(items, r.x + 12.0, r.y + 55.0, 10.0, secondary, &metrics, Align::Left, (r.w - 24.0).max(1.0));
-        let track = RectPx { x: r.x + 12.0, y: r.y + 73.0, w: (r.w - 24.0).max(1.0), h: 6.0 };
-        items.push(Item::Rect(RectItem { radius: 3.0, ..RectItem::new(track, hex_color(0x252b33)) }));
+        } else { String::new() };
+        // One secondary row: the phase, then the rates while there are any.
+        if !metrics.is_empty() {
+            line = format!("{line} · {metrics}");
+        }
+        ui_label(items, r.x + 12.0, r.y + 35.0, 10.0, secondary, &line, Align::Left, (r.w - 24.0).max(1.0));
+        let track = RectPx { x: r.x + 12.0, y: r.y + 51.0, w: (r.w - 24.0).max(1.0), h: 6.0 };
+        items.push(Item::Rect(RectItem { radius: 3.0, ..RectItem::new(track, hex_color(0x303235)) }));
         let fill = if let Some(fraction) = fraction {
             Some(RectPx { w: track.w * fraction, ..track })
         } else if self.busy {
@@ -2058,14 +2052,10 @@ impl Panel {
         const NAMES: [&str; 5] = ["Prev rendered", "Frame back", "Play", "Frame on", "Next rendered"];
         for i in 0..5 {
             let b = Self::transport(vp, i);
+            // Bare glyphs, as the reference draws them: no box, the hover
+            // lifts the ink to white and names the control beneath.
             let hover = hit(b, self.cursor.0, self.cursor.1);
-            items.push(Item::Rect(RectItem {
-                radius: 5.0,
-                border_w: 1.0,
-                border_color: hex_color(if hover { 0x555555 } else { 0x303030 }),
-                ..RectItem::new(b, hex_color(0x050506))
-            }));
-            let ink = hex_color(if hover { 0xffffff } else { 0xc8c8c8 });
+            let ink = hex_color(if hover { 0xffffff } else { 0xc6c6c6 });
             let (cx, cy) = (b.x + b.w / 2.0, b.y + b.h / 2.0);
             match i {
                 0 => draw_icon(items, Icon::KeyBack, cx, cy, ink),
