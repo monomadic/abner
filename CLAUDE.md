@@ -164,7 +164,11 @@ from one to the other, keeping its number.
   The **workspace** (`Workspace`, `controls`, `build_hud`) shares geometry between
   drawing and pointer hit testing: a numbered source rail, focused inspector,
   Sources/Timeline/Crop/Mask toolbar, contextual controls, canvas, persistent transport and
-  status line. The rail is 280px (210 below 900px wide), the minimum window is 720×480, and
+  status line. The status line is 38px (`STATUS_H = CUT_STATUS_H`) on every page and
+  ends in an **Export** button (`footer_export`, `Action::Export` → `App::export`, the
+  File > Export path; dead when `can_export()` is false), drawn like cut mode's
+  Split / Join / Save / Render footer buttons (`draw_cut_footer_button`); the Process
+  page paints it after its own footer (`draw_footer_end`). The rail is 280px (210 below 900px wide), the minimum window is 720×480, and
   the rail's focused inspector exists only when the rail has room for one source
   card + footer + grip + inspector above its end (`Workspace::detail`) — the list
   never shrinks below a card, and cut mode's rail ends at the transport, so a

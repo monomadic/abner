@@ -7,7 +7,7 @@ use crate::{
         RAIL_INSPECTOR_H, SOURCE_BORDER, SOURCE_EDGE, SOURCE_EDGE_HOVER, SOURCE_INK, SOURCE_RING,
         SOURCE_SECONDARY, SOURCE_SUBTLE, SOURCE_SURFACE, WORKSPACE_DIM, WORKSPACE_MUTED,
         WORKSPACE_PANEL, WORKSPACE_RULE, WORKSPACE_TEXT, draw_cut_footer_button, draw_dashed_hairline,
-        draw_icon, draw_keycap, draw_rail_grip, hex_color, mix, rail_full_width, status_build_label,
+        draw_icon, draw_keycap, draw_rail_grip, footer_export_rect, hex_color, mix, rail_full_width,
         status_build_width, ui_label,
     },
     player::{Player, Rgba},
@@ -1071,7 +1071,7 @@ impl Panel {
         RectPx { x: 0.0, y: Self::bottom(vp), w: vp.0, h: FOOTER_H }
     }
     /// Render frame, where the Timeline's footer keeps Split.
-    fn render_button(vp: (f32, f32)) -> RectPx {
+    pub(crate) fn render_button(vp: (f32, f32)) -> RectPx {
         RectPx { x: 90.0, y: Self::bottom(vp) + 6.0, w: 132.0, h: 26.0 }
     }
     /// The Sources rail's width, so switching modes doesn't move the edge.
@@ -1878,8 +1878,8 @@ impl Panel {
         }
     }
     /// The footer bar every page has, at the Timeline's height: the mode
-    /// label, Render frame drawn as the cut footer's Split, the status line,
-    /// the key hints and the build stamp.
+    /// label, Render frame drawn as the cut footer's Split, the status line
+    /// and the key hints; `App` adds Export and the build stamp.
     fn draw_footer(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
         let f = Self::footer(vp);
         let cy = f.y + f.h / 2.0;
@@ -1896,16 +1896,16 @@ impl Panel {
             hit(b, self.cursor.0, self.cursor.1),
             false,
         );
-        let build_w = status_build_width();
+        // Export and the build stamp are `App::draw_footer_end`'s, painted after.
+        let export = footer_export_rect(vp, b.x + b.w + 8.0);
         let hint = "[ ] source   + duplicate   ← → frame   native 8-bit SDR";
-        let hint_w = if vp.0 >= 1100.0 + build_w { 400.0 } else { 0.0 };
+        let hint_w = if vp.0 >= 1220.0 + status_build_width() { 400.0 } else { 0.0 };
         let x = b.x + b.w + 14.0;
         ui_label(items, x, cy, 10.0, WORKSPACE_DIM, self.status.as_str(), Align::Left,
-            (vp.0 - x - 20.0 - hint_w - build_w).max(40.0));
+            (export.x - 12.0 - x - hint_w).max(40.0));
         if hint_w > 0.0 {
-            ui_label(items, vp.0 - 16.0 - build_w, cy, 10.0, WORKSPACE_MUTED, hint, Align::Right, hint_w);
+            ui_label(items, export.x - 12.0, cy, 10.0, WORKSPACE_MUTED, hint, Align::Right, hint_w);
         }
-        status_build_label(items, vp, cy);
     }
 }
 fn hit(r: RectPx, x: f32, y: f32) -> bool {

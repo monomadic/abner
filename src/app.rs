@@ -1942,6 +1942,10 @@ impl App {
     }
 
     pub fn mouse_down(&mut self, x: f32, y: f32) {
+        if self.ready() && self.processors.open && contains(self.footer_export(), x, y) {
+            self.export();
+            return;
+        }
         if self.ready() && self.processors.click(x, y, self.vp) {
             self.apply_processor_transport();
             return;
@@ -2542,6 +2546,7 @@ impl App {
             n,
         );
         self.processors.draw(&mut items, vp, n, self.view());
+        if self.processors.open { self.draw_footer_end(&mut items, vp); }
 
         let animating = self.processors.animating()
             || self.playing
@@ -2700,6 +2705,7 @@ impl App {
     fn controls(&self) -> Vec<Control> {
         let l = self.workspace();
         let mut out = self.mode_selector().controls();
+        out.push(Control { hint: "⌘E", ..Control::new(self.footer_export(), "Export", false, Action::Export) });
         if self.processors.open {
             return out;
         }
@@ -2879,7 +2885,7 @@ impl App {
             Action::View(mode) => self.mode = mode,
             Action::Brush(up) => self.resize_brush(if up { 1.25 } else { 0.8 }),
             Action::Save => self.save_mask(),
-            Action::Export => self.export_crop(),
+            Action::Export => self.export(),
             Action::Param(up) => self.adjust_param(up),
         }
     }
@@ -3007,10 +3013,10 @@ impl App {
     /// Header tabs (MainNav 382:4686, 2026-10-26): five 110×30 tabs on a
     /// 5px gap. They shrink together so the row ends 12px short of what
     /// the header carries at its right — the READY chip, or cut mode's
-    /// status chip and Export button.
+    /// status chip (under `CUT_COLUMNS_MIN_W`, nothing).
     fn mode_selector(&self) -> ModeSelector {
         let right = if self.cut_mode {
-            if self.vp.0 >= CUT_COLUMNS_MIN_W { self.cut_status_chip().x } else { self.vp.0 - 115.0 }
+            if self.vp.0 >= CUT_COLUMNS_MIN_W { self.cut_status_chip().x } else { self.vp.0 - 12.0 }
         } else { self.status_chip().x };
         let tab_w = ((right - 12.0 - self.header_left() - 4.0 * TAB_GAP) / 5.0).clamp(40.0, TAB_W);
         ModeSelector {
@@ -3032,13 +3038,12 @@ impl App {
         RectPx { x: self.vp.0 - 11.0 - 126.0, y: (HEADER_H - 28.0) / 2.0, w: 126.0, h: 28.0 }
     }
 
-    /// Cut mode's status chip: same chip, sized to its mono text, right
-    /// edge where the status line used to end (left of Export and the
-    /// inspector toggle).
+    /// Cut mode's status chip: same chip, sized to its mono text, 12px
+    /// left of the inspector toggle (Export and Render live in the footer).
     fn cut_status_chip(&self) -> RectPx {
         let (text, _) = self.cut_status();
         let w = 22.0 + text.chars().count() as f32 * (MONO_ADV * 10.0 + 0.5) + 12.0;
-        let right = self.vp.0 - 285.0 + 12.0;
+        let right = self.vp.0 - 43.0 - 12.0;
         RectPx { x: right - w, y: (HEADER_H - 28.0) / 2.0, w, h: 28.0 }
     }
 
@@ -3069,7 +3074,8 @@ impl App {
         draw_status_chip(items, self.status_chip(), HEADER_LAMP, "READY", hex_color(0xc8c8c8));
         for control in self.controls() {
             let hovered = contains(control.r, self.cursor.0, self.cursor.1) && self.cursor_inside;
-            if matches!(control.action, Action::Tool(_) | Action::ToggleSources | Action::ToggleInspector | Action::ToggleDetail) {
+            if matches!(control.action, Action::Tool(_) | Action::ToggleSources | Action::ToggleInspector | Action::ToggleDetail)
+                || control.r.y >= vp.1 - STATUS_H {
                 continue;
             }
             let disabled = matches!(control.action, Action::Save) && self.mask_save.is_some()
@@ -3353,16 +3359,11 @@ impl App {
         let build_w = status_build_width();
         if self.cut_mode {
             ui_label(items, 16.0, y + height / 2.0, 10.0, ACCENT, "TIMELINE", Align::Left, 68.0);
-            if let Some(split) = self.controls().iter().find(|c| matches!(c.action, Action::Cut(CutAction::Split)) && c.r.y >= y) {
-                self.draw_cut_control(items, split);
+            // Split · Join · Save · Render, in `cut_controls`' order.
+            for control in self.controls().iter().filter(|c| matches!(c.action, Action::Cut(_)) && c.r.y >= y) {
+                self.draw_cut_control(items, control);
             }
-            if let Some(join) = self.controls().iter().find(|c| matches!(c.action, Action::Cut(CutAction::Join))) {
-                self.draw_cut_control(items, join);
-            }
-            if let Some(save) = self.controls().iter().find(|c| matches!(c.action, Action::Cut(CutAction::SaveProject))) {
-                self.draw_cut_control(items, save);
-            }
-            status_build_label(items, vp, y + height / 2.0);
+            self.draw_footer_end(items, vp);
             return;
         }
         let mode = if !self.mask_mode { "SOURCES" } else if self.crop.is_some() { "CROP" } else { "MASK" };
@@ -3374,12 +3375,41 @@ impl App {
                 format!("a {}   drag move / resize   s save   e export", ASPECTS[self.aspect].0)
             } else { "drag paint   [ ] brush   s save".into() } }
             else { "1–9 clip   space play   < > step   [ ] speed".into() };
-        let hint_width = if vp.0 >= 1000.0 + build_w { 440.0 } else { 0.0 };
-        ui_label(items, 98.0, y + STATUS_H / 2.0, 10.0, WORKSPACE_DIM, status, Align::Left, vp.0 - 118.0 - hint_width - build_w);
+        let export = self.footer_export();
+        let hint_width = if vp.0 >= 1120.0 + build_w { 440.0 } else { 0.0 };
+        ui_label(items, 98.0, y + STATUS_H / 2.0, 10.0, WORKSPACE_DIM, status, Align::Left, export.x - 12.0 - 98.0 - hint_width);
         if hint_width > 0.0 {
-            ui_label(items, vp.0 - 16.0 - build_w, y + STATUS_H / 2.0, 10.0, WORKSPACE_MUTED, hint, Align::Right, hint_width);
+            ui_label(items, export.x - 12.0, y + STATUS_H / 2.0, 10.0, WORKSPACE_MUTED, hint, Align::Right, hint_width);
         }
-        status_build_label(items, vp, y + STATUS_H / 2.0);
+        self.draw_footer_end(items, vp);
+    }
+
+    /// The footer's Export button, on every page: the one File > Export
+    /// runs (`export`), drawn like the Timeline's Split / Join / Save,
+    /// dead when the page has nothing to export or an export is running.
+    /// Right-aligned ahead of the build stamp, but never left of the page's
+    /// own footer buttons (`footer_export_rect`).
+    fn footer_export(&self) -> RectPx {
+        let left = if self.cut_mode { self.cut_footer_render().x + 116.0 }
+            else if self.processors.open { crate::processor_gui::Panel::render_button(self.vp).x + 140.0 }
+            else { 90.0 };
+        footer_export_rect(self.vp, left)
+    }
+
+    fn export_busy(&self) -> bool {
+        self.crop_export.is_some()
+            || self.cut.as_ref().is_some_and(|cut| self.cut_mode && (cut.exporting() || cut.encoding() || cut.scanning()))
+    }
+
+    /// The footer's right end: Export, then the build stamp when it fits.
+    pub(crate) fn draw_footer_end(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
+        let r = self.footer_export();
+        let hovered = contains(r, self.cursor.0, self.cursor.1) && self.cursor_inside;
+        let disabled = !self.can_export() || self.export_busy();
+        draw_cut_footer_button(items, r, "Export", "⌘E", false, hovered && !disabled, disabled);
+        if r.x + r.w + 8.0 <= vp.0 - 16.0 - status_build_width() {
+            status_build_label(items, vp, vp.1 - STATUS_H / 2.0);
+        }
     }
 
     /// The launch window: the brand's grid-floor plate, the mark
@@ -4107,16 +4137,14 @@ impl App {
         }
     }
 
-    /// The header's Undo / Export and the scrub toolbar's icon buttons.
+    /// The scrub toolbar's icon buttons and the footer's Split / Join / Save / Render.
     /// `label` is what the button says when hovered; `hint` its key.
     fn cut_controls(&self, out: &mut Vec<Control>) {
         let Some(cut) = &self.cut else { return };
-        let (w, bar) = (self.vp.0, self.workspace().transport);
+        let bar = self.workspace().transport;
         let mut push = |r: RectPx, label: &str, selected: bool, action: CutAction, hint: &'static str| {
             out.push(Control { hint, ..Control::new(r, label, selected, Action::Cut(action)) });
         };
-        let export_x = if w >= 1000.0 { w - 154.0 } else { w - 115.0 };
-        push(RectPx { x: export_x, y: 8.5, w: 101.0, h: 26.0 }, "Export", false, CutAction::Export, "");
         let video = self.cut_lanes().video;
         push(RectPx { x: self.workspace().timeline.x + 19.0, y: video.y + video.h / 2.0 - 12.0, w: 24.0, h: 24.0 },
             if self.cut_posters { "Hide clip previews" } else { "Show clip previews" }, self.cut_posters, CutAction::TogglePosters, "");
@@ -4154,20 +4182,11 @@ impl App {
         }
         if self.cut_clock_x() - x >= 138.0 {
             push(RectPx { x, y: cy - 18.0, w: 130.0, h: 36.0 }, "Split", false, CutAction::Split, "S");
-            x += 138.0;
         }
-        let r = if w >= 1000.0 {
-            RectPx { x: export_x - 118.0, y: 8.5, w: 108.0, h: 26.0 }
-        } else if self.cut_clock_x() - x >= 120.0 {
-            RectPx { x, y: cy - 16.0, w: 112.0, h: 32.0 }
-        } else {
-            // Keep Render reachable without covering the clock on narrow windows.
-            RectPx { x: export_x - 118.0, y: 8.5, w: 108.0, h: 26.0 }
-        };
-        push(r, "Render", false, CutAction::EncodeAll, "⌘R");
         push(self.cut_footer_split(), "Split", false, CutAction::Split, "S");
         push(self.cut_footer_join(), "Join", false, CutAction::Join, "J");
         push(self.cut_footer_save(), "Save", false, CutAction::SaveProject, "⌘S");
+        push(self.cut_footer_render(), "Render", false, CutAction::EncodeAll, "⌘R");
         if bar.w >= 900.0 {
             let zoom = self.cut_zoom_bar();
             push(RectPx { x: zoom.x - 28.0, y: cy - 12.0, w: 24.0, h: 24.0 }, "Zoom out", false, CutAction::Zoom(false), "");
@@ -4190,6 +4209,11 @@ impl App {
 
     fn cut_footer_save(&self) -> RectPx {
         RectPx { x: self.cut_footer_join().x + 116.0, ..self.cut_footer_join() }
+    }
+
+    /// Render (encode every split GOP) sits after Save; Export follows it.
+    fn cut_footer_render(&self) -> RectPx {
+        RectPx { x: self.cut_footer_save().x + 116.0, ..self.cut_footer_save() }
     }
 
     /// The clock is right-aligned beside zoom, or the right edge on narrow windows.
@@ -5115,14 +5139,7 @@ impl App {
             }
             CutAction::EncodeAll => {
                 let disabled = cut.encoding() || cut.scanning() || cut.exporting() || cut.pending_gops().is_empty();
-                let border = if hovered && !disabled { 0x555555 } else { 0x303030 };
-                items.push(Item::Rect(RectItem { radius: 7.0, border_w: 1.0,
-                    border_color: hex_color(border), ..RectItem::new(r, hex_color(0x050506)) }));
-                let key = RectPx { x: r.x + r.w - 35.0, y: cy - 9.0, w: 29.0, h: 18.0 };
-                items.push(Item::Rect(RectItem { radius: 5.0, ..RectItem::new(key, hex_color(0x1b1b1b)) }));
-                let ink = hex_color(if disabled { 0x777777 } else { 0xc8c8c8 });
-                ui_label(items, r.x + 10.0, cy, 12.0, ink, &control.label, Align::Left, r.w - 48.0);
-                ui_label(items, key.x + key.w / 2.0, cy, 10.0, ink, control.hint, Align::Center, key.w);
+                draw_cut_footer_button(items, r, &control.label, control.hint, false, hovered && !disabled, disabled);
             }
             CutAction::Encode(_) => {
                 let disabled = cut.encoding() || cut.scanning() || cut.exporting() || cut.pending_gops().is_empty();
@@ -5130,12 +5147,7 @@ impl App {
                     hex_color(if disabled { 0x302839 } else if hovered { 0xd2b4ff } else { 0xb68aff })) }));
                 ui_label(items, cx, cy, 10.5, hex_color(if disabled { 0x8c7e9c } else { 0x28133f }), &control.label, Align::Center, r.w - 6.0);
             }
-            CutAction::Export => {
-                let busy = cut.exporting() || cut.encoding() || cut.scanning();
-                let fill = if busy { mix(0x050506, CUT_INK, 0.35) } else if hovered { hex_color(0xffffff) } else { hex_color(CUT_INK) };
-                items.push(Item::Rect(RectItem { radius: 7.0, ..RectItem::new(r, fill) }));
-                ui_label(items, cx, cy, 11.5, hex_color(CUT_BG), &control.label, Align::Center, r.w - 8.0);
-            }
+            CutAction::Export => unreachable!("Export is the footer's `Action::Export`"),
             CutAction::Undo => {
                 let dead = !cut.can_undo();
                 items.push(Item::Rect(RectItem { radius: 7.0, border_w: 1.0,
@@ -6273,6 +6285,15 @@ pub(crate) fn ui_label(items: &mut Vec<Item>, x: f32, y: f32, px: f32, color: [f
     items.push(Item::Text(TextItem { interface: true, align, valign: VAlign::Middle, max_width: Some(width.max(0.0)),
         ..TextItem::new(x, y, px, color, text) }));
 }
+/// The footer Export button's rect: 108×26 like its neighbours, right-aligned
+/// 8px ahead of the build stamp, never left of `left` (the end of the page's
+/// own footer buttons plus their gap), so a narrow window pushes the stamp
+/// out instead of stacking buttons.
+pub(crate) const FOOTER_BUTTON_W: f32 = 108.0;
+pub(crate) fn footer_export_rect(vp: (f32, f32), left: f32) -> RectPx {
+    let x = (vp.0 - 16.0 - status_build_width() - 8.0 - FOOTER_BUTTON_W).max(left);
+    RectPx { x, y: vp.1 - CUT_STATUS_H + 6.0, w: FOOTER_BUTTON_W, h: 26.0 }
+}
 pub(crate) fn draw_cut_footer_button(items: &mut Vec<Item>, r: RectPx, label: &str, key_label: &str, icon: bool, hovered: bool, disabled: bool) {
     let border = if disabled { 0x252525 } else if hovered { 0x555555 } else { 0x303030 };
     let ink = hex_color(if disabled { 0x686868 } else if hovered { 0xffffff } else { 0xc8c8c8 });
@@ -6561,7 +6582,10 @@ mod tests {
             let controls = app.controls();
             let all = controls.iter().find(|c| matches!(c.action, Action::Cut(CutAction::EncodeAll))).unwrap();
             assert!(all.r.x >= 0.0 && all.r.x + all.r.w <= width);
-            if all.r.y >= HEADER_H { assert!(all.r.x >= app.cut_tools_x() + 5.0*38.0 && all.r.x + all.r.w < app.cut_clock_x()); }
+            let footer = app.cut_footer_render();
+            assert!((all.r.x, all.r.y, all.r.w, all.r.h) == (footer.x, footer.y, footer.w, footer.h), "Render is a footer button");
+            let export = app.footer_export();
+            assert!(export.x >= all.r.x + all.r.w + 8.0 && export.x + export.w <= width - 16.0, "Export follows Render");
             assert!(!app.cut_encode_regions().is_empty());
         }
     }
@@ -7578,8 +7602,8 @@ mod tests {
         let footer_text: Vec<_> = frame.items.iter().filter_map(|item| match item {
             Item::Text(t) if t.y >= footer_y => Some(t.text.as_str()), _ => None,
         }).collect();
-        assert_eq!(footer_text[..7], ["TIMELINE", "Split", "S", "Join", "J", "Save", "⌘S"]);
-        assert!(footer_text[7].starts_with("build "), "the build stamp closes the footer");
+        assert_eq!(footer_text[..11], ["TIMELINE", "Split", "S", "Join", "J", "Save", "⌘S", "Render", "⌘R", "Export", "⌘E"]);
+        assert!(footer_text[11].starts_with("build "), "the build stamp closes the footer");
         app.mouse_down(toolbar.r.x + toolbar.r.w / 2.0, toolbar.r.y + toolbar.r.h / 2.0);
         app.mouse_up();
         assert_eq!(app.cut.as_ref().unwrap().splits(), &[1.0]);
@@ -8057,7 +8081,7 @@ mod tests {
         let all = controls.iter().find(|c| matches!(c.action, Action::Cut(CutAction::EncodeAll))).unwrap();
         assert_eq!(all.label, "Render");
         assert_eq!(all.hint, "⌘R");
-        assert!(all.r.y < HEADER_H);
+        assert!(all.r.y >= app.vp.1 - CUT_STATUS_H, "Render lives in the footer");
         // Empty batch is a no-op, not another generation of the source.
         app.key(Key::Render);
         assert!(!app.cut.as_ref().unwrap().encoding());
@@ -8844,7 +8868,8 @@ const CROP_LABEL_MIN: (f32, f32) = (130.0, 24.0);
 /// Transport strip: 13px pad + 32px controls + 11px gap + the status line.
 const TRANSPORT_H: f32 = 60.0;
 /// Persistent footer for tool, selection, zoom, export results and shortcut hints.
-const STATUS_H: f32 = 28.0;
+/// Every page's footer bar is the Timeline's height, so its buttons fit.
+const STATUS_H: f32 = CUT_STATUS_H;
 /// Timeline footer: 6px around its compact action buttons.
 pub(crate) const CUT_STATUS_H: f32 = 38.0;
 /// Extra grab margin above/below the 5px seek track.

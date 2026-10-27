@@ -3,6 +3,19 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-27 — Footer: Render joins Split / Join / Save, Export on every page
+
+Cut mode's Render button leaves the header for the footer, after Save, drawn like
+its neighbours (`draw_cut_footer_button`, dead while nothing is pending). The
+header's filled Export button is gone too: every page now ends its footer with an
+Export button in the same style (`App::footer_export`, `Action::Export`), right-
+aligned ahead of the build stamp and pushed left of it on narrow windows. It runs
+what File > Export runs (`App::export`): the timeline's cut, or the crop marquee's
+ProRes, and is dead elsewhere or while an export is running. The Process page
+draws it over its own footer (`draw_footer_end` after `Panel::draw`). The status
+line is the Timeline's 38px on every page (`STATUS_H = CUT_STATUS_H`) so the button
+fits; cut mode's status chip now ends 12px short of the inspector toggle.
+
 ## 2026-10-27 — Task 20: seek profiling and reproduction (investigation remains open)
 
 Added opt-in player stage timings, FilmCraft retained-byte/hardware counters, a
