@@ -3,6 +3,20 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-27 — Preview cancellation, panel action and source/render comparison
+
+The progress panel's outlined Render button becomes Cancel while a frame preview
+runs. Cancellation signals the request and active stages, removes queued work,
+invalidates late callbacks/output and preserves completed previews. Device calls
+remain cooperatively cancellable. Tab on Process toggles the current source and
+cached render without seeking or changing sources; the viewer labels both states.
+
+Targeted renders now stop as soon as the requested output reaches the end of the
+chain, including when delivered during buffered completion. Previously they kept
+feeding the context allowance and flushing later batches after already publishing
+the target. A buffered-stage regression verifies that no later process/finish work
+runs after delivery. Required pre-target context is still processed.
+
 ## 2026-10-27 — Filmcraft metadata, preview validation, thumbnails and waveforms
 
 Startup metadata and processor-preview color validation now share a Filmcraft read

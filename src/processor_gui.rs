@@ -445,7 +445,8 @@ fn render(
     let mut received = 0;
     let mut emit = |frames: Vec<Frame>,
                     originals: &mut BTreeMap<i64, (Rgba, f64)>|
-     -> Result<(), String> {
+     -> Result<bool, String> {
+        let mut delivered = false;
         for frame in frames {
             r.cancel.check()?;
             frame.validate()?;
@@ -470,6 +471,7 @@ fn render(
                 continue;
             }
             received += 1;
+            delivered = true;
             tx.send(Event::Frame(
                 r.generation,
                 Preview {
@@ -483,7 +485,7 @@ fn render(
             ))
             .map_err(|_| "Preview closed")?;
         }
-        Ok(())
+        Ok(delivered)
     };
     let read_frame = || -> Result<Option<(f64, Rgba)>, String> {
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -539,7 +541,7 @@ fn render(
             return Err("Processor buffered too many frames for preview".into());
         }
         originals.insert(pts, (rgba, source_pts));
-        emit(
+        let delivered = emit(
             process_chain(
                 &mut sessions,
                 0,
@@ -556,14 +558,18 @@ fn render(
             )?,
             &mut originals,
         )?;
+        // A targeted preview is complete once its output arrives. Dropping the
+        // sessions here avoids starting another batch or flushing unwanted tails.
+        if delivered && r.target.is_some() { return Ok(()); }
     }
     r.cancel.check()?;
     for i in 0..sessions.len() {
         let tail = sessions[i].finish()?;
-        emit(
+        let delivered = emit(
             process_chain(&mut sessions, i + 1, tail, &r.cancel, r.budget)?,
             &mut originals,
         )?;
+        if delivered && r.target.is_some() { return Ok(()); }
     }
     if received == 0 {
         return Err("No preview frames at this position".into());
@@ -646,6 +652,7 @@ pub struct Panel {
     busy: bool,
     feedback: Option<StageFeedback>,
     render_result: Option<bool>,
+    show_rendered: bool,
     render_elapsed: Duration,
     /// The frame the running render was asked for, and the worker's context
     /// progress (frames decoded, frames to decode): the amber marks.
@@ -699,6 +706,7 @@ impl Default for Panel {
             busy: false,
             feedback: None,
             render_result: None,
+            show_rendered: true,
             render_elapsed: Duration::ZERO,
             pending: None,
             progress: None,
@@ -934,7 +942,24 @@ impl Panel {
         self.toggle_play = self.playback;
         self.feedback = None;
         self.render_result = None;
+        self.show_rendered = true;
         self.status = "Preparing render…".into();
+    }
+    fn cancel_preview(&mut self) {
+        self.cancel.cancel();
+        if let Some(worker) = &self.worker {
+            worker.cancel();
+            worker.mailbox.0.lock().unwrap().pending = None;
+        }
+        self.generation += 1;
+        self.dirty = None;
+        self.busy = false;
+        self.pending = None;
+        self.progress = None;
+        self.feedback = None;
+        self.render_elapsed = self.busy_since.elapsed();
+        self.render_result = Some(false);
+        self.status = "Frame preview cancelled".into();
     }
     /// One source frame back or forward, clamped to the clip.
     fn step(&mut self, dir: i32) {
@@ -1031,6 +1056,14 @@ impl Panel {
             return false;
         }
         match key {
+            Key::Tab => {
+                if self.frames.iter().any(|f| (f.pts - self.time).abs() <= 0.51 / self.fps) {
+                    self.show_rendered = !self.show_rendered;
+                } else {
+                    self.status = "No rendered frame at this position · Render frame first".into();
+                }
+                true
+            }
             Key::Space => {
                 self.toggle_play = true;
                 true
@@ -1143,6 +1176,10 @@ impl Panel {
             h: (Self::transport_y(vp) - 104.0 - 88.0).max(1.0),
         }
     }
+    fn progress_button(vp: (f32, f32)) -> RectPx {
+        let v = Self::viewer(vp);
+        RectPx { x: v.x + v.w - 104.0, y: Self::transport_y(vp) - 70.0, w: 92.0, h: 26.0 }
+    }
     fn timeline(vp: (f32, f32)) -> RectPx {
         // The viewer's span, computed directly: the viewer's height asks
         // for the transport, which sits on this rect.
@@ -1212,6 +1249,10 @@ impl Panel {
             if hit(Self::render_button(vp), x, y) {
                 self.request_preview();
             }
+            return true;
+        }
+        if hit(Self::progress_button(vp), x, y) {
+            if self.busy { self.cancel_preview(); } else { self.request_preview(); }
             return true;
         }
         if x < Self::left(vp) {
@@ -1615,11 +1656,12 @@ impl Panel {
         let cached = self
             .frames
             .iter()
-            .find(|f| (f.pts - self.time).abs() <= 0.51 / self.fps);
+            .find(|f| (f.pts - self.time).abs() <= 0.51 / self.fps)
+            .filter(|_| self.show_rendered);
         let title = if cached.is_some() {
-            "RENDERED FRAME"
+            "RENDERED FRAME · Tab for source"
         } else {
-            "SOURCE FRAME"
+            "SOURCE FRAME · Tab for render"
         };
         text(
             items,
@@ -1893,11 +1935,17 @@ impl Panel {
         items.push(Item::Rect(RectItem { radius: 7.0, border_w: 1.0,
             border_color: hex_color(SOURCE_BORDER),
             ..RectItem::new(r, hex_color(0x0c1015)) }));
-        ui_label(items, r.x + 12.0, r.y + 16.0, 12.0, ink, title, Align::Left, (r.w - 85.0).max(1.0));
-        if self.busy || self.render_result.is_some() {
-            ui_label(items, r.x + r.w - 12.0, r.y + 16.0, 10.0, secondary,
-                &format!("{:.1}s", elapsed.as_secs_f64()), Align::Right, 60.0);
-        }
+        let heading = if self.busy || self.render_result.is_some() {
+            format!("{title} · {:.1}s", elapsed.as_secs_f64())
+        } else { title.into() };
+        ui_label(items, r.x + 12.0, r.y + 16.0, 12.0, ink, &heading, Align::Left, (r.w - 128.0).max(1.0));
+        let control = Self::progress_button(vp);
+        let hover = hit(control, self.cursor.0, self.cursor.1);
+        items.push(Item::Rect(RectItem { radius: 7.0, border_w: 1.0,
+            border_color: hex_color(if hover { 0x858585 } else { 0x606b79 }),
+            ..RectItem::new(control, if self.busy { accent } else { hex_color(SOURCE_SURFACE) }) }));
+        ui_label(items, control.x + control.w / 2.0, control.y + control.h / 2.0, 12.0,
+            ink, if self.busy { "Cancel" } else { "Render" }, Align::Center, control.w - 12.0);
         ui_label(items, r.x + 12.0, r.y + 35.0, 10.0, secondary, &phase, Align::Left,
             (r.w - if fraction.is_some() { 116.0 } else { 24.0 }).max(1.0));
         if let Some(fraction) = fraction {
@@ -2042,6 +2090,33 @@ mod tests {
         assert!(c.check().is_err());
         assert_eq!(p.generation, 1);
         assert!(p.frames.is_empty());
+    }
+    #[test]
+    fn preview_controls_cancel_without_losing_cached_frames_and_tab_compares() {
+        let mut p = Panel::default();
+        p.enter();
+        p.time = 1.0;
+        p.frames = vec![mark(1.0)];
+        assert!(p.key(Key::Tab));
+        assert!(!p.show_rendered);
+        assert!(p.key(Key::Tab));
+        assert!(p.show_rendered);
+        assert!(p.seek.is_none(), "A/B does not seek or switch sources");
+        let vp = (1280.0, 800.0);
+        let button = Panel::progress_button(vp);
+        p.click(button.x + 5.0, button.y + 5.0, vp);
+        assert!(p.dirty.is_some(), "the panel's Render button requests a preview");
+        p.busy = true;
+        let token = p.cancel.clone();
+        let generation = p.generation;
+        p.click(button.x + 5.0, button.y + 5.0, vp);
+        assert!(token.check().is_err());
+        assert!(p.generation > generation, "late output must be rejected");
+        assert!(!p.busy && p.dirty.is_none() && p.pending.is_none());
+        assert_eq!(p.frames.len(), 1, "Cancel preserves completed previews");
+        p.time = 2.0;
+        p.key(Key::Tab);
+        assert!(p.show_rendered, "no cached output must not toggle to an unrelated frame");
     }
     #[test]
     fn stage_feedback_never_invents_a_percentage() {
@@ -2343,6 +2418,40 @@ mod tests {
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].pts, frames[2].pts);
         assert_eq!(selected[0].before, selected[0].after);
+        // A buffered stage must not start more work or flush after the target
+        // has arrived. This models the expensive extra-batch regression.
+        struct GuardFactory(Arc<std::sync::atomic::AtomicUsize>);
+        struct GuardSession(Box<dyn Session>, Arc<std::sync::atomic::AtomicUsize>);
+        impl abner_processor_api::Factory for GuardFactory {
+            fn descriptor(&self) -> Descriptor { BufferedFactory.descriptor() }
+            fn create(&self, w: usize, h: usize, settings: &Value) -> Result<Box<dyn Session>, String> {
+                Ok(Box::new(GuardSession(BufferedFactory.create(w, h, settings)?, self.0.clone())))
+            }
+        }
+        impl Session for GuardSession {
+            fn process(&mut self, frame: Frame) -> Result<Vec<Frame>, String> {
+                self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.0.process(frame)
+            }
+            fn finish(&mut self) -> Result<Vec<Frame>, String> { panic!("target already delivered; do not flush") }
+            fn output_dimensions(&self) -> [usize; 2] { self.0.output_dimensions() }
+            fn cancellation(&self) -> Cancellation { self.0.cancellation() }
+            fn progress(&self) -> Progress { self.0.progress() }
+        }
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut guarded = Registry::default();
+        guarded.register(Box::new(GuardFactory(calls.clone()))).unwrap();
+        let first = Request {
+            generation: 12, chain: r.chain.clone(), target: Some(0.0),
+            info: info.clone(), start: 0.0, end: None, cancel: Cancellation::default(), budget: r.budget,
+        };
+        let (guard_tx, guard_rx) = mpsc::sync_channel(FRAMES + 2);
+        render(&guarded, &first, &guard_tx, None, None).unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+        let delivered: Vec<_> = guard_rx.try_iter().filter_map(|event| match event {
+            Event::Frame(g, f) => Some((g, f.pts)), _ => None,
+        }).collect();
+        assert_eq!(delivered, [(12, 0.0)]);
         // Already-cancelled requests must never publish output.
         r.cancel.cancel();
         assert!(render(&registry(), &r, &tx, None, None).is_err());
