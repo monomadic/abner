@@ -31,8 +31,8 @@ const FRAMES: usize = 24;
 const INK: [f32; 4] = [0.8, 0.8, 0.8, 1.0];
 const DIM: [f32; 4] = [0.43, 0.43, 0.43, 1.0];
 const BLUE: [f32; 4] = [0.04, 0.33, 0.7, 1.0];
-/// One processor card (64px) plus the Sources rail's 12px gap.
-const CARD_PITCH: f32 = 76.0;
+/// Compact processor rows: 48px of content plus an 8px gap.
+const CARD_PITCH: f32 = 56.0;
 /// The page's footer bar: the Timeline's height, since it carries the same
 /// kind of button (Render frame, drawn as the cut footer's Split).
 const FOOTER_H: f32 = CUT_STATUS_H;
@@ -1115,13 +1115,13 @@ impl Panel {
             x: 12.0,
             y: Self::list_top() + i as f32 * CARD_PITCH - self.list_scroll,
             w: Self::left(vp) - 24.0,
-            h: CARD_PITCH - 12.0,
+            h: CARD_PITCH - 8.0,
         }
     }
-    /// The enable box, where the Sources card keeps its batch checkbox.
-    fn card_check(&self, i: usize, vp: (f32, f32)) -> RectPx {
+    /// Switch geometry is shared by painting and hit testing.
+    fn card_switch(&self, i: usize, vp: (f32, f32)) -> RectPx {
         let r = self.card(i, vp);
-        RectPx { x: r.x + r.w - 32.0, y: r.y + (r.h - 20.0) / 2.0, w: 20.0, h: 20.0 }
+        RectPx { x: r.x + r.w - 74.0, y: r.y + (r.h - 28.0) / 2.0, w: 64.0, h: 28.0 }
     }
     fn move_button(vp: (f32, f32), down: bool) -> RectPx {
         let w = (Self::left(vp) - 32.0) / 2.0;
@@ -1222,7 +1222,7 @@ impl Panel {
             } else if hit(self.list(vp), x, y) {
                 let index = ((y - Self::list_top() + self.list_scroll) / CARD_PITCH) as usize;
                 if index < self.descriptors.len() && hit(self.card(index, vp), x, y) {
-                    if hit(self.card_check(index, vp), x, y) {
+                    if hit(self.card_switch(index, vp), x, y) {
                         self.enabled[index] = !self.enabled[index];
                         self.changed();
                     } else if index != self.selected {
@@ -1364,7 +1364,7 @@ impl Panel {
             self.dirty = None;
             let chain = self.chain();
             if chain.is_empty() && !self.descriptors.is_empty() {
-                self.status = "Nothing enabled · tick a processor to run it".into();
+                self.status = "Nothing enabled · switch a processor on to run it".into();
             } else if self
                 .descriptors
                 .iter()
@@ -1455,9 +1455,8 @@ impl Panel {
         }
     }
     /// The left column as the Sources rail draws it (278:584): a heading
-    /// strip, one card per processor (keycap, name, categories) ringed
-    /// orange on the focused one, the enable box where Sources keeps its
-    /// batch checkbox, then the folding focused inspector and the
+    /// strip, compact processor rows (name, categories, OFF/ON switch) ringed
+    /// orange on the focused one, then the folding focused inspector and the
     /// Move up / down row in the Duplicate / Add files strip.
     fn draw_rail(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
         let l = Self::left(vp);
@@ -1496,35 +1495,37 @@ impl Panel {
                 border_color: hex_color(if active { SOURCE_RING } else if hover { SOURCE_EDGE_HOVER } else { SOURCE_EDGE }),
                 ..RectItem::new(c, if active { WORKSPACE_PANEL } else { hex_color(0x000000) }) }));
             let on = self.enabled[i];
-            draw_keycap(items, RectPx { x: c.x + 12.0, y: c.y + 20.0, w: 24.0, h: 24.0 }, i + 1,
-                [1.0, 1.0, 1.0, if on { 0.85 } else { 0.3 }]);
-            let tx = c.x + 46.0;
-            let tw = c.w - 46.0 - 42.0;
+            let switch = self.card_switch(i, vp);
+            let tx = c.x + 12.0;
+            let tw = switch.x - tx - 10.0;
             items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(tw),
-                ..TextItem::new(tx, c.y + 23.0, 13.0, if on { ink } else { secondary }, d.name.as_str()) }));
+                ..TextItem::new(tx, c.y + 16.0, 12.0, if on { ink } else { secondary }, d.name.as_str()) }));
             let meta = if on && !self.supported[i] {
                 "No frame preview".to_string()
             } else {
                 category_label(&self.categories[i])
             };
             items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(tw),
-                ..TextItem::new(tx, c.y + 42.0, 11.0, if on { secondary } else { subtle }, meta) }));
-            let check = self.card_check(i, vp);
-            let fill = hex_color(if on { CUT_HEADER_BLUE } else { 0x080d14 });
-            items.push(Item::Rect(RectItem { radius: 4.0, border_w: 1.0,
-                border_color: if on { fill } else if over(check) { ink } else { secondary },
-                ..RectItem::new(check, fill) }));
-            if on {
-                for (x, y) in [(0., 3.), (2., 5.), (4., 3.), (6., 1.), (8., -1.)] {
-                    items.push(Item::Rect(RectItem::new(RectPx { x: check.x + 4.0 + x, y: check.y + 7.0 + y, w: 3.0, h: 3.0 }, ink)));
-                }
-            }
+                ..TextItem::new(tx, c.y + 33.0, 10.0, if on { secondary } else { subtle }, meta) }));
+            // The reference's sliding OFF/ON control: only the active side
+            // carries a label, with a blue ON thumb and a white outer contour.
+            items.push(Item::Rect(RectItem { radius: 9.0, border_w: 1.5,
+                border_color: if over(switch) { hex_color(0xffffff) } else { ink },
+                ..RectItem::new(switch, hex_color(0x0c0d0e)) }));
+            let thumb = RectPx { x: switch.x + if on { 33.0 } else { 3.0 },
+                y: switch.y + 3.0, w: 28.0, h: 22.0 };
+            items.push(Item::Rect(RectItem { radius: 6.0, border_w: 1.0,
+                border_color: hex_color(if on { 0x61b5ee } else { 0x606b79 }),
+                ..RectItem::new(thumb, hex_color(if on { CUT_HEADER_BLUE } else { 0x292e34 })) }));
+            items.push(Item::Text(TextItem { header: true, align: Align::Center, valign: VAlign::Middle,
+                max_width: Some(thumb.w), ..TextItem::new(thumb.x + thumb.w / 2.0,
+                    thumb.y + thumb.h / 2.0, 11.0, hex_color(0xffffff), if on { "ON" } else { "OFF" }) }));
         }
         items.push(Item::Clip(None));
         let footer = if self.descriptors.is_empty() {
             "No processors in this build"
         } else {
-            "Ticked processors run top to bottom"
+            "Enabled processors run top to bottom"
         };
         items.push(Item::Text(TextItem { interface: true, valign: VAlign::Middle, max_width: Some(l - 24.0),
             ..TextItem::new(12.0, list.y + list.h + 16.0, 11.0, subtle, footer) }));
@@ -2019,7 +2020,7 @@ mod tests {
         );
     }
     #[test]
-    fn rail_cards_select_tick_and_fold_like_sources() {
+    fn rail_cards_select_switch_and_fold_like_sources() {
         struct Tagged(&'static str, Vec<Category>);
         impl abner_processor_api::Factory for Tagged {
             fn categories(&self) -> Vec<Category> {
@@ -2045,10 +2046,10 @@ mod tests {
         assert!(p.click(card.x + 60.0, card.y + 20.0, vp));
         assert_eq!(p.selected, 1);
         assert_eq!(p.enabled, [false, false], "a card click focuses, never enables");
-        let check = p.card_check(0, vp);
+        let check = p.card_switch(0, vp);
         p.click(check.x + 5.0, check.y + 5.0, vp);
         assert_eq!(p.enabled, [true, false]);
-        assert_eq!(p.selected, 1, "the enable box doesn't move focus");
+        assert_eq!(p.selected, 1, "the enable switch doesn't move focus");
         let (grip, inspector) = p.detail(vp);
         assert!(inspector.h > 0.0);
         p.click(grip.x + 20.0, grip.y + 5.0, vp);

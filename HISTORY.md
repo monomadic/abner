@@ -3,6 +3,14 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-27 — Compact processor rows and OFF/ON switches
+
+Removed numbered keycaps from the processor list and replaced enable checkboxes
+with outlined, labelled OFF/ON switches. The active thumb sits left for OFF and
+right in blue for ON. Rows shrink from 64px with 12px gaps to 48px with 8px gaps;
+names and category lines keep their own space beside the switch. Drawing and hit
+testing share its bounds, and toggling keeps the focused processor unchanged.
+
 ## 2026-10-27 — Recurrent and batched processor declarations
 
 Extended generic input requirements to distinguish segment-history processors
