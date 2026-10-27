@@ -3,6 +3,14 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-28 — Process video fullscreen
+
+Video-only fullscreen now hides the Process panels and footer as well as the
+workspace header, and fits the selected source or cached rendered frame to the
+whole window. Hidden processor controls no longer intercept pointer input.
+Leaving fullscreen restores the processing workspace. A draw-list regression
+checks that the fullscreen picture reaches the top and panel controls are absent.
+
 ## 2026-10-27 — Preview throughput and stage time estimates
 
 The Process progress panel adds measured processor output FPS while rendering and

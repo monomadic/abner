@@ -1702,8 +1702,24 @@ impl Panel {
     }
     /// `view` is the app's shared zoom/center, which the viewer's canvas
     /// applies exactly as the timeline's does.
-    pub fn draw(&self, items: &mut Vec<Item>, vp: (f32, f32), slot: usize, view: (f32, (f32, f32))) {
+    pub fn draw(&self, items: &mut Vec<Item>, vp: (f32, f32), slot: usize, view: (f32, (f32, f32)), show_ui: bool) {
         if !self.open {
+            return;
+        }
+        if !show_ui {
+            let cached = self.frames.iter()
+                .find(|f| (f.pts - self.time).abs() <= 0.51 / self.fps)
+                .filter(|_| self.show_rendered);
+            let dims = cached.map_or(self.source_dims, |f| f.output);
+            let source = if cached.is_some() { slot + 1 } else { self.source };
+            let viewport = RectPx { x: 0.0, y: 0.0, w: vp.0, h: vp.1 };
+            let picture = crate::app::App::zoomed(
+                crate::app::App::fit_rect((dims[0], dims[1]), viewport), view.0, view.1);
+            items.push(Item::Clip(Some(viewport)));
+            items.push(Item::Rect(RectItem::new(viewport, [0.0, 0.0, 0.0, 1.0])));
+            items.push(Item::Video { a: source, b: source, r: picture,
+                uv: [0.0, 0.0, 1.0, 1.0], mode: VideoMode::Tex, p0: 0.0, p1: 0.0 });
+            items.push(Item::Clip(None));
             return;
         }
         let r = Self::bounds(vp);
@@ -2140,6 +2156,20 @@ fn button(items: &mut Vec<Item>, r: RectPx, label: &str, selected: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fullscreen_preview_covers_header_and_omits_panel_controls() {
+        let mut panel = Panel::new(Registry::default());
+        panel.open = true;
+        panel.source_dims = [720, 720];
+        panel.source = 2;
+        let mut items = Vec::new();
+        panel.draw(&mut items, (1920.0, 1080.0), 3, (1.0, (0.5, 0.5)), false);
+        assert_eq!(items.len(), 4);
+        assert!(matches!(&items[1], Item::Rect(r) if r.r.x == 0.0 && r.r.y == 0.0 && r.r.h == 1080.0));
+        assert!(matches!(&items[2], Item::Video { a: 2, r, .. } if r.y == 0.0 && r.h == 1080.0));
+        assert!(matches!(items.last(), Some(Item::Clip(None))));
+    }
+
     #[test]
     fn schema_defaults_do_not_invent_optional_values() {
         let f = fields(

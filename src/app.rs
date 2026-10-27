@@ -1854,7 +1854,7 @@ impl App {
     }
 
     pub fn cursor_moved(&mut self, x: f32, y: f32) {
-        if self.processors.pointer(x, y, self.vp) {
+        if self.show_ui && self.processors.pointer(x, y, self.vp) {
             self.cursor = (x, y);
             self.apply_processor_transport();
             return;
@@ -1942,11 +1942,11 @@ impl App {
     }
 
     pub fn mouse_down(&mut self, x: f32, y: f32) {
-        if self.ready() && self.processors.open && contains(self.footer_export(), x, y) {
+        if self.show_ui && self.ready() && self.processors.open && contains(self.footer_export(), x, y) {
             self.export();
             return;
         }
-        if self.ready() && self.processors.click(x, y, self.vp) {
+        if self.show_ui && self.ready() && self.processors.click(x, y, self.vp) {
             self.apply_processor_transport();
             return;
         }
@@ -2084,7 +2084,7 @@ impl App {
     }
 
     pub fn scroll(&mut self, dx: f32, dy: f32) {
-        if self.processors.scroll(dy, self.cursor, self.vp) { return; }
+        if self.show_ui && self.processors.scroll(dy, self.cursor, self.vp) { return; }
         self.stroke_last = None;
         if !self.ready() { return; }
         if self.processors.open { return self.pan_canvas(dx, dy); }
@@ -2165,7 +2165,7 @@ impl App {
         self.center.1 = self.center.1.clamp(half, 1.0 - half);
     }
 
-    fn fit_rect(dims: (u32, u32), c: RectPx) -> RectPx {
+    pub(crate) fn fit_rect(dims: (u32, u32), c: RectPx) -> RectPx {
         let (w, h) = (dims.0 as f32, dims.1 as f32);
         let s = (c.w / w).min(c.h / h);
         let (fw, fh) = (w * s, h * s);
@@ -2174,7 +2174,7 @@ impl App {
 
     /// The fit rect scaled by `zoom` with content point `center` at the
     /// base rect's middle — the one transform every video shares.
-    fn zoomed(base: RectPx, zoom: f32, center: (f32, f32)) -> RectPx {
+    pub(crate) fn zoomed(base: RectPx, zoom: f32, center: (f32, f32)) -> RectPx {
         let (w, h) = (base.w * zoom, base.h * zoom);
         RectPx {
             x: base.x + base.w / 2.0 - center.0 * w,
@@ -2207,7 +2207,7 @@ impl App {
     fn base_rect(&self, idx: usize) -> RectPx {
         let dims = (self.videos[idx].info.width, self.videos[idx].info.height);
         let cell = self.video_cell(idx);
-        if self.processors.open || self.cut_mode && self.show_ui {
+        if (self.processors.open || self.cut_mode) && self.show_ui {
             return Canvas { r: cell }.fit(dims);
         }
         Self::fit_rect(dims, inset_rect(cell, if self.show_ui { 24.0 } else { 0.0 }))
@@ -2217,7 +2217,7 @@ impl App {
     /// viewer while that mode is up (the same `Canvas` as the timeline's),
     /// the workspace canvas otherwise.
     fn canvas(&self) -> RectPx {
-        if self.processors.open { crate::processor_gui::Panel::viewer(self.vp) } else { self.workspace().canvas }
+        if self.processors.open && self.show_ui { crate::processor_gui::Panel::viewer(self.vp) } else { self.workspace().canvas }
     }
 
     /// Zoom and pan as the processors viewer draws them.
@@ -2545,8 +2545,8 @@ impl App {
             &mut uploads,
             n,
         );
-        self.processors.draw(&mut items, vp, n, self.view());
-        if self.processors.open { self.draw_footer_end(&mut items, vp); }
+        self.processors.draw(&mut items, vp, n, self.view(), self.show_ui);
+        if self.processors.open && self.show_ui { self.draw_footer_end(&mut items, vp); }
 
         let animating = self.processors.animating()
             || self.playing
