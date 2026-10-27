@@ -291,28 +291,31 @@ struct ReportingSession {
     inner: Box<dyn Session>,
     report: abner_processor_api::ProgressReporter,
     frames: Arc<AtomicU64>,
+    callbacks: Arc<AtomicU64>,
 }
 impl Session for ReportingSession {
     fn process(&mut self, input: Frame) -> Result<Vec<Frame>, String> {
-        (self.report)(Progress {
+        let before = self.callbacks.load(Ordering::Relaxed);
+        if before == 0 { (self.report)(Progress {
             phase: "Processing".into(),
             completed: 0,
             total: None,
-        });
+        }); }
         let result = self.inner.process(input);
         if let Ok(frames) = &result { self.frames.fetch_add(frames.len() as u64, Ordering::Relaxed); }
-        (self.report)(self.inner.progress());
+        if self.callbacks.load(Ordering::Relaxed) == before { (self.report)(self.inner.progress()); }
         result
     }
     fn finish(&mut self) -> Result<Vec<Frame>, String> {
-        (self.report)(Progress {
+        let before = self.callbacks.load(Ordering::Relaxed);
+        if before == 0 { (self.report)(Progress {
             phase: "Finishing buffered frames".into(),
             completed: 0,
             total: None,
-        });
+        }); }
         let result = self.inner.finish();
         if let Ok(frames) = &result { self.frames.fetch_add(frames.len() as u64, Ordering::Relaxed); }
-        (self.report)(self.inner.progress());
+        if self.callbacks.load(Ordering::Relaxed) == before { (self.report)(self.inner.progress()); }
         result
     }
     fn output_dimensions(&self) -> [usize; 2] {
@@ -454,11 +457,21 @@ fn render(
         });
         report(Progress { phase: "Preparing processor".into(), completed: 0, total: None });
         let mut session = factory.create(dims[0], dims[1], settings)?;
-        session.set_progress_reporter(report.clone());
+        if let Some(target) = r.target {
+            session.set_preview_target((target * 1e6).round() as i64, [1, 1_000_000]);
+        }
+        let callbacks = Arc::new(AtomicU64::new(0));
+        let observed = callbacks.clone();
+        let detailed = report.clone();
+        session.set_progress_reporter(Arc::new(move |progress| {
+            observed.fetch_add(1, Ordering::Relaxed);
+            detailed(progress);
+        }));
         let session: Box<dyn Session> = Box::new(ReportingSession {
             inner: session,
             report,
             frames,
+            callbacks,
         });
         dims = session.output_dimensions();
         if dims.contains(&0)
@@ -2284,6 +2297,37 @@ mod tests {
         assert!(clock.sample(&p, 1, now).eta(&p, now).is_none(), "first observed count has no measured rate");
         p.completed = 100;
         assert_eq!(clock.sample(&p, 2, now).eta(&p, now), Some(0.0));
+    }
+    #[test]
+    fn detailed_callbacks_are_not_overwritten_by_frame_counter_fallbacks() {
+        struct Detailed(abner_processor_api::ProgressReporter);
+        impl Session for Detailed {
+            fn process(&mut self, input: Frame) -> Result<Vec<Frame>, String> {
+                (self.0)(Progress { phase: "Continuous preview".into(), completed: 45, total: Some(100) });
+                Ok(vec![input])
+            }
+            fn finish(&mut self) -> Result<Vec<Frame>, String> { Ok(vec![]) }
+            fn output_dimensions(&self) -> [usize; 2] { [2, 2] }
+            fn cancellation(&self) -> Cancellation { Cancellation::default() }
+            fn progress(&self) -> Progress { Progress { phase: "legacy frame count".into(), completed: 1, total: None } }
+        }
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let report: abner_processor_api::ProgressReporter = Arc::new(move |p| captured.lock().unwrap().push(p));
+        let callbacks = Arc::new(AtomicU64::new(0));
+        let observed = callbacks.clone();
+        let detailed = report.clone();
+        let frames = Arc::new(AtomicU64::new(0));
+        let mut session = ReportingSession {
+            inner: Box::new(Detailed(Arc::new(move |p| { observed.fetch_add(1, Ordering::Relaxed); detailed(p); }))),
+            report, callbacks, frames: frames.clone(),
+        };
+        session.process(Frame { width: 2, height: 2, pixels: vec![0; 12], pts: 0, duration: 1, time_base: [1, 24] }).unwrap();
+        let events = events.lock().unwrap();
+        assert_eq!(events.last().unwrap().phase, "Continuous preview");
+        assert_eq!(events.last().unwrap().completed, 45);
+        assert!(!events.iter().any(|p| p.phase == "legacy frame count"));
+        assert_eq!(frames.load(Ordering::Relaxed), 1);
     }
     #[test]
     fn whole_clip_capability_is_visible_but_not_previewable() {

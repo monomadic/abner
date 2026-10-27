@@ -3,6 +3,14 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-28 — Continuous recurrent-preview progress
+
+Sessions may receive the requested preview timestamp to aggregate warmup and
+context work without changing output. The host now preserves detailed callbacks
+instead of overwriting them with fallback per-frame progress. Legacy sessions
+retain fallback feedback. Regression coverage verifies that detailed counts and
+the measured output-frame count remain independent.
+
 ## 2026-10-28 — Process video fullscreen
 
 Video-only fullscreen now hides the Process panels and footer as well as the

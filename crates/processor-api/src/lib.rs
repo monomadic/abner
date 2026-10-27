@@ -150,6 +150,10 @@ pub struct Capabilities {
 /// Errors are terminal: discard this session and any unpublished job output.
 /// CPU RGB16 only; this contract does not yet negotiate GPU/color/auxiliary inputs.
 pub trait Session {
+    /// Optional requested output timestamp for a timestamp-preserving preview.
+    /// Lets implementations aggregate required warmup/context work for progress;
+    /// it must not change the model's output or truncate required input history.
+    fn set_preview_target(&mut self, _pts: i64, _time_base: [u32; 2]) {}
     /// Implementations may retain this callback to report progress during work.
     fn set_progress_reporter(&mut self, _reporter: ProgressReporter) {}
     fn process(&mut self, input: Frame) -> Result<Vec<Frame>>;
