@@ -42,6 +42,20 @@ const RENDERING: u32 = 0xe6ac69;
 /// Transport buttons: five icon squares on a 6px gap, centred under the viewer.
 const TRANSPORT_W: f32 = 40.0;
 const TRANSPORT_GAP: f32 = 6.0;
+/// Figma Switch: a 27px thumb travel, settling in 180ms with ease-out.
+const SWITCH_SLIDE_S: f32 = 0.18;
+#[derive(Clone, Copy)]
+struct SwitchSlide {
+    from: f32,
+    at: Instant,
+}
+impl SwitchSlide {
+    fn position(self, on: bool, now: Instant) -> f32 {
+        let t = (now.duration_since(self.at).as_secs_f32() / SWITCH_SLIDE_S).clamp(0.0, 1.0);
+        let eased = 1.0 - (1.0 - t).powi(3);
+        self.from + (f32::from(on) - self.from) * eased
+    }
+}
 
 #[derive(Clone, Debug)]
 enum Kind {
@@ -694,6 +708,7 @@ pub struct Panel {
     selected: usize,
     saved: Vec<Value>,
     enabled: Vec<bool>,
+    switch_slides: Vec<Option<SwitchSlide>>,
     supported: Vec<bool>,
     capabilities: Vec<Capabilities>,
     categories: Vec<Vec<Category>>,
@@ -754,6 +769,7 @@ impl Default for Panel {
             selected: 0,
             saved: vec![],
             enabled: vec![],
+            switch_slides: vec![],
             supported: vec![],
             capabilities: vec![],
             categories: vec![],
@@ -839,6 +855,7 @@ impl Panel {
         s.descriptors = descriptors;
         s.saved = saved;
         s.enabled = enabled;
+        s.switch_slides = vec![None; s.descriptors.len()];
         s.supported = supported;
         s.capabilities = capabilities;
         s.categories = categories;
@@ -981,12 +998,22 @@ impl Panel {
             self.toggle();
         }
     }
-    /// Only the inspector's fold slide runs hot; the host polls the worker
-    /// at 100ms while paused.
+    /// Keep redraws hot only while work or a visible UI transition is running.
     pub fn animating(&self) -> bool {
-        self.busy
+        self.open && (self.busy
+            || self.switch_slides.iter().flatten().any(|s| s.at.elapsed().as_secs_f32() < SWITCH_SLIDE_S)
             || self.detail_at
-                .is_some_and(|t| t.elapsed().as_secs_f32() < DETAIL_SLIDE_S)
+                .is_some_and(|t| t.elapsed().as_secs_f32() < DETAIL_SLIDE_S))
+    }
+    fn switch_position(&self, index: usize, now: Instant) -> f32 {
+        self.switch_slides[index].map_or(f32::from(self.enabled[index]), |s| s.position(self.enabled[index], now))
+    }
+    fn toggle_enabled(&mut self, index: usize) {
+        let now = Instant::now();
+        let from = self.switch_position(index, now);
+        self.enabled[index] = !self.enabled[index];
+        self.switch_slides[index] = Some(SwitchSlide { from, at: now });
+        self.changed();
     }
     /// 0 folded … 1 open.
     fn detail_slide(&self) -> f32 {
@@ -1085,6 +1112,7 @@ impl Panel {
         self.descriptors.swap(self.selected, to);
         self.saved.swap(self.selected, to);
         self.enabled.swap(self.selected, to);
+        self.switch_slides.swap(self.selected, to);
         self.supported.swap(self.selected, to);
         self.capabilities.swap(self.selected, to);
         self.categories.swap(self.selected, to);
@@ -1240,7 +1268,7 @@ impl Panel {
     /// Switch geometry is shared by painting and hit testing.
     fn card_switch(&self, i: usize, vp: (f32, f32)) -> RectPx {
         let r = self.card(i, vp);
-        RectPx { x: r.x + r.w - 114.0, y: r.y + (r.h - 30.0) / 2.0, w: 104.0, h: 30.0 }
+        RectPx { x: r.x + r.w - 71.0, y: r.y + (r.h - 27.0) / 2.0, w: 61.0, h: 27.0 }
     }
     fn move_button(vp: (f32, f32), down: bool) -> RectPx {
         let w = (Self::left(vp) - 32.0) / 2.0;
@@ -1288,7 +1316,17 @@ impl Panel {
         }
     }
     fn settings_switch(vp: (f32, f32)) -> RectPx {
-        RectPx { x: vp.0 - 120.0, y: HEADER_H + 14.0, w: 104.0, h: 30.0 }
+        RectPx { x: vp.0 - 78.0, y: HEADER_H + 20.0, w: 61.0, h: 27.0 }
+    }
+    /// Preset controls use the same bounds for drawing and pointer input.
+    fn preset_buttons(vp: (f32, f32)) -> [RectPx; 3] {
+        let x = vp.0 - Self::right(vp) + 16.0;
+        let y = HEADER_H + 100.0;
+        [
+            RectPx { x: x + 49.0, y, w: (Self::right(vp) - 161.0).max(1.0), h: 23.0 },
+            RectPx { x: vp.0 - 86.0, y, w: 30.0, h: 23.0 },
+            RectPx { x: vp.0 - 46.0, y, w: 30.0, h: 23.0 },
+        ]
     }
     fn draw_settings(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
         let x = vp.0 - Self::right(vp) + 16.0;
@@ -1298,20 +1336,16 @@ impl Panel {
         let muted = hex_color(0xa3a5a8);
         let dim = hex_color(0x777b82);
         let blue = hex_color(0x007be5);
-        text(items, x, top + 20.0, 9.0, "PROCESSOR SETTINGS", dim, w - 112.0);
+        text(items, x, top + 20.0, 9.0, "PROCESSOR SETTINGS", dim, w - 70.0);
         let Some(d) = self.descriptors.get(self.selected) else { return; };
-        text(items, x, top + 44.0, 15.0, &d.name, ink, w);
-        text(items, x, top + 70.0, 10.0,
+        text(items, x, top + 40.0, 15.0, &d.name, ink, w);
+        text(items, x, top + 67.0, 10.0,
             &format!("{} · {}", category_label(&self.categories[self.selected]), input_label(self.capabilities[self.selected])), muted, w);
         let switch = Self::settings_switch(vp);
-        draw_processor_switch(items, switch, self.enabled[self.selected]);
+        draw_processor_switch(items, switch, self.enabled[self.selected], self.switch_position(self.selected, Instant::now()));
         text(items, x, top + 107.0, 9.0, "PRESET", dim, 48.0);
         let preset = d.presets.get(self.preset).map_or("Default", |p| p.name.as_str());
-        for (r, label) in [
-            (RectPx { x: x + 49.0, y: top + 100.0, w: (w - 129.0).max(1.0), h: 23.0 }, preset),
-            (RectPx { x: vp.0 - 86.0, y: top + 100.0, w: 30.0, h: 23.0 }, "‹"),
-            (RectPx { x: vp.0 - 46.0, y: top + 100.0, w: 30.0, h: 23.0 }, "›"),
-        ] {
+        for (r, label) in Self::preset_buttons(vp).into_iter().zip([preset, "‹", "›"]) {
             items.push(Item::Rect(RectItem { radius: 6.0, border_w: 1.0, border_color: hex_color(0x303234), ..RectItem::new(r, hex_color(0x0a0a0a)) }));
             ui_label(items, r.x + r.w / 2.0, r.y + r.h / 2.0, 10.0, muted, label, Align::Center, r.w - 8.0);
         }
@@ -1347,9 +1381,9 @@ impl Panel {
     fn row(&self, i: usize, vp: (f32, f32)) -> RectPx {
         let r = Self::bounds(vp);
         RectPx {
-            x: vp.0 - Self::right(vp) + 14.0,
-            y: r.y + 166.0 + i as f32 * 104.0 - self.scroll,
-            w: Self::right(vp) - 28.0,
+            x: vp.0 - Self::right(vp) + 16.0,
+            y: r.y + 164.0 + i as f32 * 104.0 - self.scroll,
+            w: Self::right(vp) - 32.0,
             h: 96.0,
         }
     }
@@ -1407,8 +1441,7 @@ impl Panel {
                 let index = ((y - Self::list_top() + self.list_scroll) / CARD_PITCH) as usize;
                 if index < self.descriptors.len() && hit(self.card(index, vp), x, y) {
                     if hit(self.card_switch(index, vp), x, y) {
-                        self.enabled[index] = !self.enabled[index];
-                        self.changed();
+                        self.toggle_enabled(index);
                     } else if index != self.selected {
                         self.select(index);
                     }
@@ -1438,16 +1471,16 @@ impl Panel {
             );
             return true;
         }
-        let right = vp.0 - Self::right(vp);
         if !self.descriptors.is_empty() && hit(Self::settings_switch(vp), x, y) {
-            self.enabled[self.selected] = !self.enabled[self.selected];
-            self.changed();
+            self.toggle_enabled(self.selected);
             return true;
         }
-        if !self.descriptors.is_empty() && y >= HEADER_H + 100.0 && y <= HEADER_H + 124.0 && x >= right + 64.0 {
+        if let Some(button) = Self::preset_buttons(vp).iter().position(|r| hit(*r, x, y))
+            && !self.descriptors.is_empty()
+        {
             let d = &self.descriptors[self.selected];
             if !d.presets.is_empty() {
-                self.preset = if x >= vp.0 - 86.0 && x < vp.0 - 46.0 {
+                self.preset = if button == 1 {
                     (self.preset + d.presets.len() - 1) % d.presets.len()
                 } else { (self.preset + 1) % d.presets.len() };
                 let p = &d.presets[self.preset];
@@ -1703,7 +1736,7 @@ impl Panel {
             };
             items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(tw),
                 ..TextItem::new(tx, c.y + 33.0, 10.0, secondary, meta) }));
-            draw_processor_switch(items, switch, on);
+            draw_processor_switch(items, switch, on, self.switch_position(i, Instant::now()));
         }
         items.push(Item::Clip(None));
         let footer = if self.descriptors.is_empty() { "No processors in this build" } else { "" };
@@ -1929,21 +1962,17 @@ impl Drop for Panel {
         }
     }
 }
-/// Figma 434:1036 / 434:1045: fixed OFF/ON segments, 3px inset and 2px gap.
-fn draw_processor_switch(items: &mut Vec<Item>, r: RectPx, on: bool) {
-    let well = hex_color(0x050608);
-    let inactive = hex_color(0x7e8b99);
-    items.push(Item::Rect(RectItem { radius: 7.0, border_w: 1.0,
-        border_color: hex_color(0x606b79), ..RectItem::new(r, well) }));
-    for (index, label) in ["OFF", "ON"].into_iter().enumerate() {
-        let selected = on == (index == 1);
-        let segment = RectPx { x: r.x + 3.0 + index as f32 * 50.0, y: r.y + 3.0, w: 48.0, h: 24.0 };
-        let fill = if selected { hex_color(if on { 0x00aeee } else { 0x1a1a1a }) } else { well };
-        items.push(Item::Rect(RectItem { radius: 4.0, ..RectItem::new(segment, fill) }));
-        items.push(Item::Text(TextItem { regular: true, align: Align::Center, valign: VAlign::Middle,
-            max_width: Some(48.0), ..TextItem::new(segment.x + 24.0, segment.y + 12.0, 12.0,
-                if selected && on { hex_color(0x070b0d) } else { inactive }, label) }));
-    }
+/// Figma Process Switch (103:2651): one thumb and its label travel together.
+fn draw_processor_switch(items: &mut Vec<Item>, r: RectPx, on: bool, position: f32) {
+    let ink = hex_color(0xededed);
+    items.push(Item::Rect(RectItem { radius: 8.0, border_w: 1.5,
+        border_color: hex_color(0xa4a7ad), ..RectItem::new(r, hex_color(0x0a0a0a)) }));
+    let thumb = RectPx { x: r.x + 3.0 + (r.w - 34.0) * position, y: r.y + 3.0, w: 28.0, h: 21.0 };
+    items.push(Item::Rect(RectItem { radius: 5.0, border_w: if on { 0.0 } else { 0.5 },
+        border_color: hex_color(0x757575),
+        ..RectItem::new(thumb, mix(0x535353, CUT_HEADER_BLUE, position)) }));
+    items.push(Item::Text(TextItem { header: true, align: Align::Center, valign: VAlign::Middle,
+        max_width: Some(28.0), ..TextItem::new(thumb.x + 14.0, thumb.y + 10.5, 12.0, ink, if on { "ON" } else { "OFF" }) }));
 }
 fn display_value(v: &Value) -> String {
     if let Some(n) = v.as_f64() {
@@ -2124,6 +2153,32 @@ fn text(items: &mut Vec<Item>, x: f32, y: f32, size: f32, s: &str, color: [f32; 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn switches_reverse_without_jumping_and_stop_redrawing() {
+        let mut p = Panel::new(registry());
+        p.enter();
+        let vp = (1280.0, 800.0);
+        let card = p.card_switch(0, vp);
+        p.click(card.x + 5.0, card.y + 5.0, vp);
+        assert!(p.enabled[0] && p.animating());
+        let half = Instant::now() - Duration::from_secs_f32(SWITCH_SLIDE_S / 2.0);
+        p.switch_slides[0].as_mut().unwrap().at = half;
+        let previous = p.switch_slides[0].unwrap();
+        let before = previous.position(true, half + Duration::from_secs_f32(SWITCH_SLIDE_S / 2.0));
+        assert!(before > 0.5 && before < 1.0);
+        let right = Panel::settings_switch(vp);
+        p.click(right.x + 5.0, right.y + 5.0, vp);
+        assert!(!p.enabled[0]);
+        let reversed = p.switch_slides[0].unwrap();
+        assert_eq!(reversed.from, previous.position(true, reversed.at));
+        assert_eq!(reversed.position(false, reversed.at), reversed.from);
+        p.switch_slides[0].as_mut().unwrap().at = Instant::now() - Duration::from_secs_f32(SWITCH_SLIDE_S + 0.01);
+        assert_eq!(p.switch_position(0, Instant::now()), 0.0);
+        assert!(!p.animating());
+        p.toggle_enabled(0);
+        p.close();
+        assert!(!p.animating(), "hidden controls never keep the loop hot");
+    }
     #[test]
     fn fullscreen_preview_covers_header_and_omits_panel_controls() {
         let mut panel = Panel::new(Registry::default());

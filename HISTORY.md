@@ -3,6 +3,20 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-28 — Process inspector and animated switches
+
+The right inspector follows the current Figma Process panel (97:2651): compact
+preset controls, aligned schema fields, numeric slider and range readouts, and a
+61×27 enable switch. Preset drawing and hit testing share their bounds.
+Both the processor cards and inspector use the same 180ms ease-out sliding thumb;
+reversing mid-slide continues from its current position. Enable/bypass takes effect
+immediately, animation follows each processor when reordered, and settled or hidden
+switches do not keep the redraw loop hot. The plugin-enabled build and 15 focused
+Process tests pass; a targeted native-window capture verifies the panel and settled
+switch appearance. Animation reversal and idle behavior are covered by tests.
+The existing preview decoder regression still fails with
+`Preview decoder failed` and is separate from these control changes.
+
 ## 2026-10-28 — Figma processor switches
 
 Both Process panels share the OFF/ON segmented switch from Timeline Edit nodes

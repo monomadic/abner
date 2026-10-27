@@ -411,3 +411,15 @@ white/12% border with an SF Pro Medium 12px label (#ededec, tracking
 JetBrains Mono Medium 10px "READY" in #c8c8c8) ends 11px from the right edge;
 the header's `Toggle Inspector` instance is hidden, not deleted. Not yet
 implemented in `ModeSelector`.
+
+### Process inspector and switch animation (2026-10-28)
+
+The current right panel is [Settings inspector · RIFE 97:2651](https://www.figma.com/design/uQBG2iP285riqFV7PTUjxS?node-id=97-2651).
+Its fields remain schema-driven for every processor; plugin bounds and descriptions
+remain authoritative. [Switch 103:2651](https://www.figma.com/design/uQBG2iP285riqFV7PTUjxS?node-id=103-2651)
+is a 61×27 housing with a 28×21 thumb, 3px inset and 27px horizontal travel.
+`Panel::switch_position` supplies the shared progress for the card and inspector;
+`draw_processor_switch` paints the thumb and label together. The native 180ms
+cubic ease-out slide reverses from its current position and requests continuous
+redraws only until settled. Click bounds are `card_switch` / `settings_switch`;
+presets share `preset_buttons` between drawing and hit testing.
