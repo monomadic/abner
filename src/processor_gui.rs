@@ -4,9 +4,9 @@ use crate::{
     app::{
         ACCENT, CUT_HEADER_BLUE, CUT_STATUS_H, Canvas, DETAIL_SLIDE_S, HEADER_H, INSPECTOR_BG,
         INSPECTOR_PATH, Icon, Key, MONO_ADV, RAIL_ACTIONS_H, RAIL_FOOTER_H, RAIL_GRIP_H, RAIL_HEAD_H,
-        RAIL_INSPECTOR_H, SOURCE_BORDER, SOURCE_EDGE, SOURCE_EDGE_HOVER, SOURCE_INK, SOURCE_RING,
+        RAIL_INSPECTOR_H, SOURCE_BORDER, SOURCE_INK, SOURCE_RING,
         SOURCE_SECONDARY, SOURCE_SUBTLE, SOURCE_SURFACE, WORKSPACE_DIM, WORKSPACE_MUTED,
-        WORKSPACE_PANEL, WORKSPACE_RULE, WORKSPACE_TEXT, draw_cut_footer_button, draw_dashed_hairline,
+        WORKSPACE_PANEL, WORKSPACE_RULE, WORKSPACE_TEXT, draw_cut_footer_button,
         draw_icon, draw_keycap, draw_rail_grip, footer_export_rect, hex_color, mix, rail_full_width,
         status_build_width, ui_label,
     },
@@ -1237,7 +1237,7 @@ impl Panel {
     /// Switch geometry is shared by painting and hit testing.
     fn card_switch(&self, i: usize, vp: (f32, f32)) -> RectPx {
         let r = self.card(i, vp);
-        RectPx { x: r.x + r.w - 74.0, y: r.y + (r.h - 28.0) / 2.0, w: 64.0, h: 28.0 }
+        RectPx { x: r.x + r.w - 70.0, y: r.y + (r.h - 26.0) / 2.0, w: 60.0, h: 26.0 }
     }
     fn move_button(vp: (f32, f32), down: bool) -> RectPx {
         let w = (Self::left(vp) - 32.0) / 2.0;
@@ -1590,13 +1590,13 @@ impl Panel {
     /// Move up / down row in the Duplicate / Add files strip.
     fn draw_rail(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
         let l = Self::left(vp);
-        let ink = hex_color(SOURCE_INK);
-        let secondary = hex_color(SOURCE_SECONDARY);
+        let ink = hex_color(0xe6e6e6);
+        let secondary = hex_color(0xa3a5a8);
         let subtle = hex_color(SOURCE_SUBTLE);
         let over = |r: RectPx| hit(r, self.cursor.0, self.cursor.1);
         items.push(Item::Rect(RectItem::new(
             RectPx { x: 0.0, y: HEADER_H, w: l, h: Self::bottom(vp) - HEADER_H },
-            WORKSPACE_PANEL,
+            hex_color(0x050505),
         )));
         items.push(Item::Rect(RectItem::new(
             RectPx { x: l - 1.0, y: HEADER_H, w: 1.0, h: Self::bottom(vp) - HEADER_H },
@@ -1610,7 +1610,7 @@ impl Panel {
         let on = self.enabled.iter().filter(|e| **e).count();
         if !self.descriptors.is_empty() {
             items.push(Item::Text(TextItem { regular: true, align: Align::Right, valign: VAlign::Middle, max_width: Some(70.0),
-                ..TextItem::new(l - 14.0, hy, 11.0, if on > 0 { hex_color(CUT_HEADER_BLUE) } else { subtle }, format!("{on} on")) }));
+                ..TextItem::new(l - 14.0, hy, 11.0, if on > 0 { hex_color(CUT_HEADER_BLUE) } else { subtle }, format!("{on} ACTIVE")) }));
         }
         let list = self.list(vp);
         items.push(Item::Clip(Some(list)));
@@ -1621,42 +1621,37 @@ impl Panel {
             }
             let active = i == self.selected;
             let hover = over(c) && over(list);
-            items.push(Item::Rect(RectItem { radius: 10.0, border_w: 2.0,
-                border_color: hex_color(if active { SOURCE_RING } else if hover { SOURCE_EDGE_HOVER } else { SOURCE_EDGE }),
-                ..RectItem::new(c, if active { WORKSPACE_PANEL } else { hex_color(0x000000) }) }));
+            items.push(Item::Rect(RectItem { radius: 10.0, border_w: if active { 2.0 } else { 0.0 },
+                border_color: hex_color(SOURCE_RING),
+                ..RectItem::new(c, hex_color(if hover && !active { 0x0a0a0a } else { 0x050505 })) }));
             let on = self.enabled[i];
             let switch = self.card_switch(i, vp);
             let tx = c.x + 12.0;
             let tw = switch.x - tx - 10.0;
             items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(tw),
-                ..TextItem::new(tx, c.y + 16.0, 12.0, if on { ink } else { secondary }, d.name.as_str()) }));
+                ..TextItem::new(tx, c.y + 16.0, 12.0, ink, d.name.as_str()) }));
             let meta = if on && !self.supported[i] {
                 "No frame preview".to_string()
             } else {
                 category_label(&self.categories[i])
             };
             items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(tw),
-                ..TextItem::new(tx, c.y + 33.0, 10.0, if on { secondary } else { subtle }, meta) }));
+                ..TextItem::new(tx, c.y + 33.0, 10.0, secondary, meta) }));
             // The reference's sliding OFF/ON control: only the active side
             // carries a label, with a blue ON thumb and a white outer contour.
             items.push(Item::Rect(RectItem { radius: 9.0, border_w: 1.5,
-                border_color: if over(switch) { hex_color(0xffffff) } else { ink },
-                ..RectItem::new(switch, hex_color(0x0c0d0e)) }));
-            let thumb = RectPx { x: switch.x + if on { 33.0 } else { 3.0 },
-                y: switch.y + 3.0, w: 28.0, h: 22.0 };
-            items.push(Item::Rect(RectItem { radius: 6.0, border_w: 1.0,
-                border_color: hex_color(if on { 0x61b5ee } else { 0x606b79 }),
-                ..RectItem::new(thumb, hex_color(if on { CUT_HEADER_BLUE } else { 0x292e34 })) }));
+                border_color: if over(switch) { hex_color(0xffffff) } else { secondary },
+                ..RectItem::new(switch, hex_color(0x0a0a0a)) }));
+            let thumb = RectPx { x: switch.x + if on { 31.0 } else { 3.0 },
+                y: switch.y + 2.0, w: 26.0, h: 22.0 };
+            items.push(Item::Rect(RectItem { radius: 6.0,
+                ..RectItem::new(thumb, hex_color(if on { 0x007be5 } else { 0x1a1a1a })) }));
             items.push(Item::Text(TextItem { header: true, align: Align::Center, valign: VAlign::Middle,
                 max_width: Some(thumb.w), ..TextItem::new(thumb.x + thumb.w / 2.0,
                     thumb.y + thumb.h / 2.0, 11.0, hex_color(0xffffff), if on { "ON" } else { "OFF" }) }));
         }
         items.push(Item::Clip(None));
-        let footer = if self.descriptors.is_empty() {
-            "No processors in this build"
-        } else {
-            "Enabled processors run top to bottom"
-        };
+        let footer = if self.descriptors.is_empty() { "No processors in this build" } else { "" };
         items.push(Item::Text(TextItem { interface: true, valign: VAlign::Middle, max_width: Some(l - 24.0),
             ..TextItem::new(12.0, list.y + list.h + 16.0, 11.0, subtle, footer) }));
         self.draw_detail(items, vp);
@@ -1671,7 +1666,7 @@ impl Panel {
         }
     }
     /// Focused inspector (278:609), for the focused processor: keycap and
-    /// name as the title row, five mono rows between dashed hairlines
+    /// name as the title row, five mono rows between solid hairlines
     /// (categories first) and the registry ID where Sources puts the path.
     fn draw_detail(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
         let (grip, inspector) = self.detail(vp);
@@ -1691,7 +1686,8 @@ impl Panel {
             items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(l - 80.0),
                 ..TextItem::new(x0 + 32.0, y + 28.0, 13.0, hex_color(SOURCE_INK), d.name.as_str()) }));
             for ry in [y + 49.0, y + 178.0] {
-                draw_dashed_hairline(items, x0, x1, ry);
+                items.push(Item::Rect(RectItem::new(
+                    RectPx { x: x0, y: ry, w: x1 - x0, h: 1.0 }, hex_color(0x303234))));
             }
             let settings = format!("{} fields · {} presets", self.fields.len(), d.presets.len());
             for (k, (key, value)) in [
@@ -1705,7 +1701,7 @@ impl Panel {
                 items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(78.0),
                     ..TextItem::new(x0, ry, 11.0, WORKSPACE_DIM, key) }));
                 items.push(Item::Text(TextItem { regular: true, align: Align::Right, valign: VAlign::Middle, max_width: Some(l - 110.0),
-                    ..TextItem::new(x1, ry, 11.0, WORKSPACE_TEXT, value) }));
+                    ..TextItem::new(x1, ry, 11.0, hex_color(0xa3a5a8), value) }));
             }
             items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(l - 32.0),
                 ..TextItem::new(x0, y + 195.0, 10.0, hex_color(INSPECTOR_PATH), d.id.as_str()) }));

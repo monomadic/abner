@@ -3,6 +3,14 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-28 — Process sidebar reference styling
+
+Processor rows now sit on a black rail with an orange outline only on the focused
+row, neutral name/category text, and simple blue ON / dark OFF sliding switches.
+The heading reports the active count. The focused inspector uses solid separators
+and neutral values. Shared switch geometry preserves enable hit testing; selection,
+reordering, scrolling, and the folding inspector retain their existing behavior.
+
 ## 2026-10-28 — Continuous recurrent-preview progress
 
 Sessions may receive the requested preview timestamp to aggregate warmup and
