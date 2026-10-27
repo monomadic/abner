@@ -3,6 +3,16 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-27 — Preview throughput and stage time estimates
+
+The Process progress panel adds measured processor output FPS while rendering and
+end-to-end preview FPS after completion. Only completed output frames count toward
+FPS. Stage ETA extrapolates observed work against a reported total, waits for usable
+samples, and resets on phase, total or batch-counter changes. Unknown totals show
+unavailable rather than a fabricated remaining time. The estimate is explicitly for
+the current stage, not the full chain. The metrics have a dedicated line above the
+bar. Deterministic tests cover rates, phase resets and unmeasurable work.
+
 ## 2026-10-27 — Preview cancellation, panel action and source/render comparison
 
 The progress panel's outlined Render button becomes Cancel while a frame preview

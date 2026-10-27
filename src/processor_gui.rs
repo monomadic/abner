@@ -22,6 +22,7 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Condvar, Mutex, mpsc},
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
@@ -171,6 +172,56 @@ struct StageFeedback {
     index: usize,
     count: usize,
     progress: Progress,
+    rates: RateSnapshot,
+}
+#[derive(Clone, Copy)]
+struct RateSnapshot {
+    frames: u64,
+    started: Instant,
+    phase_started: Instant,
+    baseline: u64,
+}
+impl RateSnapshot {
+    fn output_fps(&self, now: Instant) -> Option<f64> {
+        let seconds = now.saturating_duration_since(self.started).as_secs_f64();
+        (self.frames > 0 && seconds > 0.0).then(|| self.frames as f64 / seconds)
+    }
+    fn eta(&self, p: &Progress, now: Instant) -> Option<f64> {
+        let total = p.total.filter(|t| *t > 0)?;
+        if p.completed >= total { return Some(0.0); }
+        let done = p.completed.checked_sub(self.baseline)?;
+        let seconds = now.saturating_duration_since(self.phase_started).as_secs_f64();
+        (done > 0 && seconds >= 0.25).then(|| seconds / done as f64 * (total - p.completed) as f64)
+    }
+}
+struct StageClock {
+    rates: RateSnapshot,
+    phase: String,
+    completed: u64,
+    total: Option<u64>,
+}
+impl StageClock {
+    fn new(now: Instant) -> Self {
+        Self { rates: RateSnapshot { frames: 0, started: now, phase_started: now, baseline: 0 },
+            phase: String::new(), completed: 0, total: None }
+    }
+    fn sample(&mut self, p: &Progress, frames: u64, now: Instant) -> RateSnapshot {
+        if p.phase != self.phase || p.total != self.total || p.completed < self.completed {
+            self.rates.phase_started = now;
+            self.rates.baseline = p.completed;
+        }
+        self.phase.clone_from(&p.phase);
+        self.completed = p.completed;
+        self.total = p.total;
+        self.rates.frames = frames;
+        self.rates
+    }
+}
+fn remaining_label(seconds: f64) -> String {
+    let seconds = seconds.ceil().max(0.0) as u64;
+    if seconds >= 3600 { format!("{}h {:02}m", seconds / 3600, seconds / 60 % 60) }
+    else if seconds >= 60 { format!("{}m {:02}s", seconds / 60, seconds % 60) }
+    else { format!("{seconds}s") }
 }
 impl StageFeedback {
     fn fraction(&self) -> Option<f32> {
@@ -239,6 +290,7 @@ fn category_label(categories: &[Category]) -> String {
 struct ReportingSession {
     inner: Box<dyn Session>,
     report: abner_processor_api::ProgressReporter,
+    frames: Arc<AtomicU64>,
 }
 impl Session for ReportingSession {
     fn process(&mut self, input: Frame) -> Result<Vec<Frame>, String> {
@@ -248,6 +300,7 @@ impl Session for ReportingSession {
             total: None,
         });
         let result = self.inner.process(input);
+        if let Ok(frames) = &result { self.frames.fetch_add(frames.len() as u64, Ordering::Relaxed); }
         (self.report)(self.inner.progress());
         result
     }
@@ -257,7 +310,10 @@ impl Session for ReportingSession {
             completed: 0,
             total: None,
         });
-        self.inner.finish()
+        let result = self.inner.finish();
+        if let Ok(frames) = &result { self.frames.fetch_add(frames.len() as u64, Ordering::Relaxed); }
+        (self.report)(self.inner.progress());
+        result
     }
     fn output_dimensions(&self) -> [usize; 2] {
         self.inner.output_dimensions()
@@ -382,12 +438,17 @@ fn render(
         let generation = r.generation;
         let count = r.chain.len();
         let live = live.cloned();
+        let frames = Arc::new(AtomicU64::new(0));
+        let counted = frames.clone();
+        let clock = Mutex::new(StageClock::new(Instant::now()));
         let report: abner_processor_api::ProgressReporter = Arc::new(move |progress| {
             if let Some(live) = &live {
                 // One latest snapshot: tile callbacks never fill the frame channel
                 // or leave the UI displaying a queue of obsolete percentages.
                 *live.lock().unwrap() = Some((generation, StageFeedback {
-                    name: name.clone(), index, count, progress,
+                    name: name.clone(), index, count,
+                    rates: clock.lock().unwrap().sample(&progress, counted.load(Ordering::Relaxed), Instant::now()),
+                    progress,
                 }));
             }
         });
@@ -397,6 +458,7 @@ fn render(
         let session: Box<dyn Session> = Box::new(ReportingSession {
             inner: session,
             report,
+            frames,
         });
         dims = session.output_dimensions();
         if dims.contains(&0)
@@ -654,6 +716,7 @@ pub struct Panel {
     render_result: Option<bool>,
     show_rendered: bool,
     render_elapsed: Duration,
+    preview_count: u64,
     /// The frame the running render was asked for, and the worker's context
     /// progress (frames decoded, frames to decode): the amber marks.
     pending: Option<f64>,
@@ -708,6 +771,7 @@ impl Default for Panel {
             render_result: None,
             show_rendered: true,
             render_elapsed: Duration::ZERO,
+            preview_count: 0,
             pending: None,
             progress: None,
             busy_since: Instant::now(),
@@ -794,6 +858,8 @@ impl Panel {
         self.busy = false;
         self.feedback = None;
         self.render_result = None;
+        self.preview_count = 0;
+        self.render_elapsed = Duration::ZERO;
         self.dirty = None;
         if let Some(saved) = self.saved.get_mut(self.selected) {
             *saved = self.settings.clone();
@@ -943,6 +1009,7 @@ impl Panel {
         self.feedback = None;
         self.render_result = None;
         self.show_rendered = true;
+        self.preview_count = 0;
         self.status = "Preparing render…".into();
     }
     fn cancel_preview(&mut self) {
@@ -1173,12 +1240,12 @@ impl Panel {
             x: l + 16.0,
             y: 88.0,
             w: (vp.0 - l - r - 32.0).max(1.0),
-            h: (Self::transport_y(vp) - 104.0 - 88.0).max(1.0),
+            h: (Self::transport_y(vp) - 124.0 - 88.0).max(1.0),
         }
     }
     fn progress_button(vp: (f32, f32)) -> RectPx {
         let v = Self::viewer(vp);
-        RectPx { x: v.x + v.w - 104.0, y: Self::transport_y(vp) - 70.0, w: 92.0, h: 26.0 }
+        RectPx { x: v.x + v.w - 104.0, y: Self::transport_y(vp) - 90.0, w: 92.0, h: 26.0 }
     }
     fn timeline(vp: (f32, f32)) -> RectPx {
         // The viewer's span, computed directly: the viewer's height asks
@@ -1442,6 +1509,7 @@ impl Panel {
             while let Ok(event) = worker.rx.try_recv() {
                 match event {
                     Event::Frame(g, f) if g == self.generation => {
+                        self.preview_count += 1;
                         self.frames
                             .retain(|old| (old.pts - f.pts).abs() > 0.5 / self.fps);
                         let needed = f.before.len() + f.after.len();
@@ -1901,7 +1969,7 @@ impl Panel {
     /// Kept outside the video canvas so zoom/pan cannot cover render feedback.
     fn draw_progress(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
         let v = Self::viewer(vp);
-        let r = RectPx { x: v.x, y: Self::transport_y(vp) - 78.0, w: v.w, h: 68.0 };
+        let r = RectPx { x: v.x, y: Self::transport_y(vp) - 98.0, w: v.w, h: 88.0 };
         let ink = hex_color(SOURCE_INK);
         let secondary = hex_color(SOURCE_SECONDARY);
         let accent = hex_color(CUT_HEADER_BLUE);
@@ -1952,7 +2020,23 @@ impl Panel {
             let label = if self.busy { format!("{:.0}% of stage", (fraction * 100.0).floor()) } else { "100%".into() };
             ui_label(items, r.x + r.w - 12.0, r.y + 35.0, 10.0, ink, &label, Align::Right, 90.0);
         }
-        let track = RectPx { x: r.x + 12.0, y: r.y + 51.0, w: (r.w - 24.0).max(1.0), h: 6.0 };
+        let metrics = if self.busy {
+            let now = Instant::now();
+            let fps = self.feedback.as_ref().and_then(|f| f.rates.output_fps(now))
+                .map_or_else(|| "Output FPS —".into(), |fps| format!("{fps:.2} output FPS"));
+            let eta = self.feedback.as_ref().and_then(|f| f.rates.eta(&f.progress, now))
+                .map_or_else(|| {
+                    if self.feedback.as_ref().is_some_and(|f| f.progress.total.is_none_or(|n| n == 0)) {
+                        "Stage ETA unavailable".into()
+                    } else { "Stage ETA estimating…".into() }
+                }, |seconds| format!("Stage ETA ~{}", remaining_label(seconds)));
+            format!("{fps} · {eta}")
+        } else if self.preview_count > 0 && self.render_elapsed.as_secs_f64() > 0.0 {
+            format!("{:.2} preview FPS · {}", self.preview_count as f64 / self.render_elapsed.as_secs_f64(),
+                if self.render_result == Some(true) { "Remaining 0s" } else { "Stopped" })
+        } else { "Output FPS — · Stage ETA —".into() };
+        ui_label(items, r.x + 12.0, r.y + 55.0, 10.0, secondary, &metrics, Align::Left, (r.w - 24.0).max(1.0));
+        let track = RectPx { x: r.x + 12.0, y: r.y + 73.0, w: (r.w - 24.0).max(1.0), h: 6.0 };
         items.push(Item::Rect(RectItem { radius: 3.0, ..RectItem::new(track, hex_color(0x252b33)) }));
         let fill = if let Some(fraction) = fraction {
             Some(RectPx { w: track.w * fraction, ..track })
@@ -2137,6 +2221,39 @@ mod tests {
         assert!(stage_status("Example", &progress).ends_with("100% of stage"));
         progress.phase.clear();
         assert!(stage_status("Example", &progress).contains("Processing"));
+    }
+    #[test]
+    fn throughput_and_eta_use_measured_work_and_reset_at_phase_boundaries() {
+        let start = Instant::now();
+        let mut clock = StageClock::new(start);
+        let mut p = Progress { phase: "Tiles".into(), completed: 0, total: Some(10) };
+        assert!(clock.sample(&p, 0, start).eta(&p, start).is_none());
+        p.completed = 2;
+        let now = start + Duration::from_secs(2);
+        let rate = clock.sample(&p, 0, now);
+        assert_eq!(rate.eta(&p, now), Some(8.0));
+        assert!(rate.output_fps(now).is_none(), "tiles are not output frames");
+        p.completed = 4;
+        let now = start + Duration::from_secs(4);
+        let rate = clock.sample(&p, 1, now);
+        assert_eq!(rate.output_fps(now), Some(0.25));
+        assert_eq!(rate.eta(&p, now), Some(6.0));
+        // A batch restarting the same phase must not inherit the previous rate.
+        p.completed = 0;
+        let now = start + Duration::from_secs(5);
+        assert!(clock.sample(&p, 1, now).eta(&p, now).is_none());
+        p.completed = 1;
+        let now = start + Duration::from_secs(6);
+        assert_eq!(clock.sample(&p, 1, now).eta(&p, now), Some(9.0));
+        p.phase = "Opaque device call".into();
+        p.total = None;
+        assert!(clock.sample(&p, 1, now).eta(&p, now).is_none());
+        p.phase = "Next pass".into();
+        p.total = Some(100);
+        p.completed = 50;
+        assert!(clock.sample(&p, 1, now).eta(&p, now).is_none(), "first observed count has no measured rate");
+        p.completed = 100;
+        assert_eq!(clock.sample(&p, 2, now).eta(&p, now), Some(0.0));
     }
     #[test]
     fn whole_clip_capability_is_visible_but_not_previewable() {
@@ -2486,6 +2603,7 @@ mod tests {
         let feedback = |done, total| StageFeedback {
             name: "Example stage".into(), index: 1, count: 2,
             progress: Progress { phase: "Tiles".into(), completed: done, total },
+            rates: StageClock::new(Instant::now()).rates,
         };
         panel.busy = true;
         *live.lock().unwrap() = Some((generation - 1, feedback(10, Some(10))));
