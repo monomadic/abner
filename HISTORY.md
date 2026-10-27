@@ -3,6 +3,15 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-28 — Simplified Process settings panel
+
+The right panel follows the supplied settings reference: a quiet processor heading,
+enable switch, named preset with previous/next controls, solid divider, and spaced
+schema-driven controls. Numeric settings use a blue slider with a round thumb and
+minimum/current/maximum labels; other values sit in outlined rounded controls.
+Schema descriptions appear alongside their settings, and long forms remain scrollable.
+The 14 non-decoder Process tests pass; the previously failing decoder test was excluded.
+
 ## 2026-10-28 — Process sidebar reference styling
 
 Processor rows now sit on a black rail with an orange outline only on the focused

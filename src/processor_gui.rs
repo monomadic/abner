@@ -55,6 +55,7 @@ enum Kind {
 struct Field {
     key: String,
     title: String,
+    description: String,
     kind: Kind,
     default: Option<Value>,
     required: bool,
@@ -94,6 +95,7 @@ fn fields(schema: &Value) -> Vec<Field> {
             Field {
                 key: key.clone(),
                 title: s["title"].as_str().unwrap_or(key).into(),
+                description: s["description"].as_str().unwrap_or("").into(),
                 kind,
                 default: s.get("default").cloned(),
                 required: schema["required"]
@@ -272,6 +274,7 @@ fn input_label(c: Capabilities) -> String {
         }
     }
 }
+#[cfg(test)]
 fn capability_label(c: Capabilities) -> String {
     format!("{} · {}", role_label(c), input_label(c))
 }
@@ -1284,13 +1287,75 @@ impl Panel {
             h: 30.0,
         }
     }
+    fn settings_switch(vp: (f32, f32)) -> RectPx {
+        RectPx { x: vp.0 - 78.0, y: HEADER_H + 20.0, w: 60.0, h: 26.0 }
+    }
+    fn draw_settings(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
+        let x = vp.0 - Self::right(vp) + 16.0;
+        let w = Self::right(vp) - 32.0;
+        let top = HEADER_H;
+        let ink = hex_color(0xe6e6e6);
+        let muted = hex_color(0xa3a5a8);
+        let dim = hex_color(0x777b82);
+        let blue = hex_color(0x007be5);
+        text(items, x, top + 20.0, 9.0, "PROCESSOR SETTINGS", dim, w - 72.0);
+        let Some(d) = self.descriptors.get(self.selected) else { return; };
+        text(items, x, top + 44.0, 15.0, &d.name, ink, w);
+        text(items, x, top + 70.0, 10.0,
+            &format!("{} · {}", category_label(&self.categories[self.selected]), input_label(self.capabilities[self.selected])), muted, w);
+        let switch = Self::settings_switch(vp);
+        items.push(Item::Rect(RectItem { radius: 8.0, border_w: 1.5, border_color: muted,
+            ..RectItem::new(switch, hex_color(0x0a0a0a)) }));
+        let on = self.enabled[self.selected];
+        let thumb = RectPx { x: switch.x + if on { 29.0 } else { 3.0 }, y: switch.y + 3.0, w: 28.0, h: 20.0 };
+        items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(thumb, if on { blue } else { hex_color(0x1a1a1a) }) }));
+        ui_label(items, thumb.x + thumb.w / 2.0, thumb.y + 10.0, 11.0, ink, if on { "ON" } else { "OFF" }, Align::Center, thumb.w);
+        text(items, x, top + 107.0, 9.0, "PRESET", dim, 48.0);
+        let preset = d.presets.get(self.preset).map_or("Default", |p| p.name.as_str());
+        for (r, label) in [
+            (RectPx { x: x + 49.0, y: top + 100.0, w: (w - 129.0).max(1.0), h: 23.0 }, preset),
+            (RectPx { x: vp.0 - 86.0, y: top + 100.0, w: 30.0, h: 23.0 }, "‹"),
+            (RectPx { x: vp.0 - 46.0, y: top + 100.0, w: 30.0, h: 23.0 }, "›"),
+        ] {
+            items.push(Item::Rect(RectItem { radius: 6.0, border_w: 1.0, border_color: hex_color(0x303234), ..RectItem::new(r, hex_color(0x0a0a0a)) }));
+            ui_label(items, r.x + r.w / 2.0, r.y + r.h / 2.0, 10.0, muted, label, Align::Center, r.w - 8.0);
+        }
+        items.push(Item::Rect(RectItem::new(RectPx { x, y: top + 136.0, w, h: 1.0 }, hex_color(0x303234))));
+        let clip = RectPx { x: x - 16.0, y: top + 158.0, w: Self::right(vp), h: (Self::bottom(vp) - top - 158.0).max(1.0) };
+        items.push(Item::Clip(Some(clip)));
+        for (i, f) in self.fields.iter().enumerate() {
+            let row = self.row(i, vp);
+            if row.y + row.h < clip.y || row.y > clip.y + clip.h { continue; }
+            text(items, row.x, row.y, 11.0, &f.title, ink, row.w);
+            let value = &self.settings[&f.key];
+            let editing = self.editing.as_ref().filter(|(n, _)| *n == i);
+            let shown = editing.map_or_else(|| if value.is_null() { "Automatic".into() } else { display_value(value) }, |(_, s)| format!("{s}▏"));
+            if let Kind::Number { min, max, .. } = f.kind {
+                text(items, row.x, row.y + 15.0, 9.0, &f.description, muted, row.w);
+                let amount = ((value.as_f64().unwrap_or(min) - min) / (max - min)).clamp(0.0, 1.0) as f32;
+                let track = RectPx { x: row.x, y: row.y + 43.0, w: row.w, h: 4.0 };
+                items.push(Item::Rect(RectItem { radius: 2.0, ..RectItem::new(track, hex_color(0x303234)) }));
+                items.push(Item::Rect(RectItem { radius: 2.0, ..RectItem::new(RectPx { w: track.w * amount, ..track }, blue) }));
+                items.push(Item::Rect(RectItem { radius: 8.0, ..RectItem::new(RectPx { x: track.x + track.w * amount - 8.0, y: track.y - 6.0, w: 16.0, h: 16.0 }, ink) }));
+                for (at, label, align) in [(row.x, display_value(&json!(min)), Align::Left), (row.x + row.w / 2.0, shown, Align::Center), (row.x + row.w, display_value(&json!(max)), Align::Right)] {
+                    ui_label(items, at, row.y + 72.0, 9.0, muted, &label, align, row.w / 3.0);
+                }
+            } else {
+                let r = RectPx { x: row.x, y: row.y + 21.0, w: row.w, h: 31.0 };
+                items.push(Item::Rect(RectItem { radius: 6.0, border_w: 1.0, border_color: hex_color(0x303234), ..RectItem::new(r, hex_color(0x0a0a0a)) }));
+                ui_label(items, r.x + r.w / 2.0, r.y + r.h / 2.0, 10.0, if editing.is_some() { blue } else { muted }, &shown, Align::Center, r.w - 12.0);
+                text(items, row.x, row.y + 65.0, 9.0, &f.description, muted, row.w);
+            }
+        }
+        items.push(Item::Clip(None));
+    }
     fn row(&self, i: usize, vp: (f32, f32)) -> RectPx {
         let r = Self::bounds(vp);
         RectPx {
             x: vp.0 - Self::right(vp) + 14.0,
-            y: r.y + 88.0 + i as f32 * 51.0 - self.scroll,
+            y: r.y + 166.0 + i as f32 * 104.0 - self.scroll,
             w: Self::right(vp) - 28.0,
-            h: 45.0,
+            h: 96.0,
         }
     }
     pub fn scroll(&mut self, dy: f32, cursor: (f32, f32), vp: (f32, f32)) -> bool {
@@ -1311,7 +1376,7 @@ impl Panel {
             }
             self.scroll = (self.scroll - dy).clamp(
                 0.0,
-                (self.fields.len() as f32 * 51.0 - (Self::bottom(vp) - 151.0)).max(0.0),
+                (self.fields.len() as f32 * 104.0 - (Self::bottom(vp) - 210.0)).max(0.0),
             );
             return true;
         }
@@ -1379,21 +1444,27 @@ impl Panel {
             return true;
         }
         let right = vp.0 - Self::right(vp);
-        if (50.0..86.0).contains(&y) && x >= right && !self.descriptors.is_empty() {
+        if !self.descriptors.is_empty() && hit(Self::settings_switch(vp), x, y) {
+            self.enabled[self.selected] = !self.enabled[self.selected];
+            self.changed();
+            return true;
+        }
+        if !self.descriptors.is_empty() && y >= HEADER_H + 100.0 && y <= HEADER_H + 124.0 && x >= right + 64.0 {
             let d = &self.descriptors[self.selected];
-            if let Some(p) = d.presets.get(self.preset % d.presets.len().max(1)) {
-                self.preset += 1;
+            if !d.presets.is_empty() {
+                self.preset = if x >= vp.0 - 86.0 && x < vp.0 - 46.0 {
+                    (self.preset + d.presets.len() - 1) % d.presets.len()
+                } else { (self.preset + 1) % d.presets.len() };
+                let p = &d.presets[self.preset];
                 self.settings = defaults(&self.fields);
                 if let Some(map) = p.settings.as_object() {
-                    for (k, v) in map {
-                        self.settings[k] = v.clone();
-                    }
+                    for (k, v) in map { self.settings[k] = v.clone(); }
                 }
                 self.changed();
             }
             return true;
         }
-        if y < r.y + r.h - 60.0 && y >= r.y + 102.0 {
+        if y < Self::bottom(vp) && y >= HEADER_H + 158.0 {
             for i in 0..self.fields.len() {
                 let row = self.row(i, vp);
                 if !hit(row, x, y) {
@@ -1742,7 +1813,7 @@ impl Panel {
                 w: vp.0 - right,
                 h: r.h,
             },
-            [0.006, 0.006, 0.006, 1.0],
+            hex_color(0x0f0f0f),
         )));
         self.draw_rail(items, vp);
         let v = Self::viewer(vp);
@@ -1871,99 +1942,8 @@ impl Panel {
             t.w,
         );
         self.draw_footer(items, vp);
-        button(
-            items,
-            RectPx {
-                x: right + 14.0,
-                y: 53.0,
-                w: Self::right(vp) - 28.0,
-                h: 29.0,
-            },
-            "Cycle processor presets",
-            false,
-        );
-        let name = self
-            .descriptors
-            .get(self.selected)
-            .map_or("Settings", |d| d.name.as_str());
-        text(
-            items,
-            right + 14.0,
-            94.0,
-            11.0,
-            name,
-            INK,
-            Self::right(vp) - 28.0,
-        );
-        if let Some(c) = self.capabilities.get(self.selected) {
-            text(
-                items,
-                right + 14.0,
-                110.0,
-                9.0,
-                &capability_label(*c),
-                DIM,
-                Self::right(vp) - 28.0,
-            );
-        }
-        let clip = RectPx {
-            x: right,
-            y: 129.0,
-            w: Self::right(vp),
-            h: (Self::bottom(vp) - 151.0).max(1.0),
-        };
-        items.push(Item::Clip(Some(clip)));
-        for (i, f) in self.fields.iter().enumerate() {
-            let row = self.row(i, vp);
-            if row.y + row.h < clip.y || row.y > clip.y + clip.h {
-                continue;
-            }
-            text(items, row.x, row.y, 11.0, &f.title, INK, row.w);
-            let value = &self.settings[&f.key];
-            let editing = self.editing.as_ref().filter(|(n, _)| *n == i);
-            let shown = if let Some((_, s)) = editing {
-                format!("{s}▏")
-            } else if matches!(f.kind, Kind::Unsupported) {
-                "Unsupported input".into()
-            } else if value.is_null() {
-                "Automatic (click to edit)".into()
-            } else {
-                value
-                    .as_str()
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| display_value(value))
-            };
-            let boxr = RectPx {
-                x: row.x,
-                y: row.y + 17.0,
-                w: row.w,
-                h: 24.0,
-            };
-            items.push(Item::Rect(RectItem::new(boxr, [0.04, 0.04, 0.04, 1.0])));
-            if let Kind::Number { min, max, .. } = f.kind {
-                let amount =
-                    ((value.as_f64().unwrap_or(min) - min) / (max - min)).clamp(0.0, 1.0) as f32;
-                items.push(Item::Rect(RectItem::new(
-                    RectPx {
-                        w: row.w * amount,
-                        h: 3.0,
-                        y: boxr.y + 21.0,
-                        ..boxr
-                    },
-                    BLUE,
-                )));
-            }
-            text(
-                items,
-                row.x + 5.0,
-                row.y + 20.0,
-                11.0,
-                &shown,
-                if editing.is_some() { BLUE } else { INK },
-                row.w - 10.0,
-            );
-        }
-        items.push(Item::Clip(None));
+        self.draw_settings(items, vp);
+
     }
 }
 impl Drop for Panel {
@@ -2149,17 +2129,6 @@ fn text(items: &mut Vec<Item>, x: f32, y: f32, size: f32, s: &str, color: [f32; 
     let mut t = TextItem::new(x, y, size, color, s);
     t.max_width = Some(width.max(1.0));
     items.push(Item::Text(t));
-}
-fn button(items: &mut Vec<Item>, r: RectPx, label: &str, selected: bool) {
-    items.push(Item::Rect(RectItem::new(
-        r,
-        if selected {
-            BLUE
-        } else {
-            [0.055, 0.055, 0.055, 1.0]
-        },
-    )));
-    text(items, r.x + 7.0, r.y + 6.0, 11.0, label, INK, r.w - 14.0);
 }
 
 #[cfg(test)]
