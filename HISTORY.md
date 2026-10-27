@@ -3,6 +3,13 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-28 — Playhead grab tolerance
+
+Dragging within 8 logical pixels on either side of the visible Cut playhead in
+vacant timeline lanes now scrubs instead of starting a rubber-band selection.
+Clip selection, trim grips and other explicit targets retain priority. Scrubbing
+pauses playback until release and preserves the existing clip selection.
+
 ## 2026-10-28 — Process inspector and animated switches
 
 The right inspector follows the current Figma Process panel (97:2651): compact

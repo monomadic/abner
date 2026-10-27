@@ -4424,6 +4424,11 @@ impl App {
                 let cut = self.cut.as_mut().unwrap();
                 self.cut_restore = Some((seg.start, seg.end));
                 cut.status.clear();
+            } else if self.cut_near_playhead(x, y) {
+                // Grab the playhead through vacant lanes instead of starting a band.
+                self.cut_restore = None;
+                self.begin_cut_scrub();
+                self.cut_drag_to(x);
             } else if self.cut_band_rows().is_some_and(|r| contains(r, x, y)) {
                 // A vacant part of the lanes: a rubber band. ⌘ adds to the
                 // picks; otherwise a plain click here lets go of them and
@@ -4777,6 +4782,14 @@ impl App {
 
     fn same_pick(a: (f64, f64, bool), b: (f64, f64, bool)) -> bool {
         a.2 == b.2 && (a.0 - b.0).abs() < 1e-3 && (a.1 - b.1).abs() < 1e-3
+    }
+
+    fn cut_near_playhead(&self, x: f32, y: f32) -> bool {
+        let Some(rows) = self.cut_band_rows() else { return false };
+        let Some(cut) = &self.cut else { return false };
+        let px = rows.x + ((self.t - cut.t0) * cut.pps) as f32;
+        contains(rows, x, y) && px >= rows.x && px <= rows.x + rows.w
+            && (x - px).abs() <= PLAYHEAD_GRAB
     }
 
     /// The block a rubber band can start on and sweep: the chapter row
@@ -8173,7 +8186,7 @@ mod tests {
         // The band also starts from the chapter row above the picture.
         let chapters = lanes.chapters.expect("the test window is tall enough for a chapter row");
         app.cut_picks.clear();
-        app.mouse_down(x_of(&app, 0.5), chapters.y + chapters.h / 2.0);
+        app.mouse_down(x_of(&app, 0.75), chapters.y + chapters.h / 2.0);
         assert!(matches!(app.cut_drag, Some(CutDrag::Band { .. })), "a drag from the chapter row is a band");
         app.cursor_moved(x_of(&app, 2.5), v.y + v.h / 2.0);
         assert_eq!(app.cut_picks, vec![(0.0, 1.0, false), (1.0, 2.0, false), (2.0, 3.0, false)]);
@@ -8250,6 +8263,38 @@ mod tests {
             app.mouse_up();
             for _ in 0..5 { app.tick(0.01, (1280.0, 800.0), 2.0); assert_eq!(app.t, target); }
         }
+    }
+
+    #[test]
+    fn dragging_near_playhead_scrubs_instead_of_selecting() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        assert!(tick_until(&mut app, Duration::from_secs(5), |a| a.started));
+        app.key(Key::Char('t'));
+        assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.cut.as_ref().is_some_and(|c| !c.scanning() && c.pps > 0.0)));
+        let lanes = app.cut_lanes();
+        let y = lanes.subs.y + 2.0;
+        for offset in [-PLAYHEAD_GRAB, 0.0, PLAYHEAD_GRAB] {
+            app.t = 2.0;
+            app.playing = true;
+            let cut = app.cut.as_ref().unwrap();
+            let x = lanes.video.x + ((app.t - cut.t0) * cut.pps) as f32;
+            app.mouse_down(x + offset, y);
+            assert!(matches!(app.cut_drag, Some(CutDrag::Scrub)));
+            assert!(!app.playing);
+            let before = app.t;
+            app.cursor_moved(x + 30.0, y);
+            assert!(app.t > before);
+            assert!(app.cut_band_rect().is_none());
+            app.mouse_up();
+            assert!(app.playing);
+        }
+        app.t = 2.0;
+        let cut = app.cut.as_ref().unwrap();
+        let x = lanes.video.x + ((app.t - cut.t0) * cut.pps) as f32;
+        app.mouse_down(x + PLAYHEAD_GRAB + 2.0, y);
+        assert!(matches!(app.cut_drag, Some(CutDrag::Band { .. })));
+        app.mouse_up();
     }
 
     #[test]
@@ -8711,6 +8756,8 @@ const ASPECTS: [(&str, Option<f32>); 6] = [
 pub(crate) const ACCENT: [f32; 4] = [0.082, 0.502, 0.871, 1.0];
 /// A rubber band smaller than this on both axes is still a click.
 const BAND_MIN: f32 = 4.0;
+/// Logical pixels on each side of the playhead that start scrubbing in vacant lanes.
+const PLAYHEAD_GRAB: f32 = 8.0;
 /// Frame background / ink on the accent (#050506). Opaque: the window
 /// no longer lets the desktop through.
 const FRAME_BG: [f32; 4] = [0.0196, 0.0196, 0.0235, 1.0];
