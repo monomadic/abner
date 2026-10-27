@@ -118,12 +118,15 @@ from one to the other, keeping its number.
   window opens, naming the file and dotted key. A new setting = a key in the default
   file + a field in the struct (the `default_is_complete_and_valid` test catches a
   mismatch); CLI flags (`--view`) override the config.
-- `src/probe.rs` — one ffprobe per input at startup, synchronous on the main thread
-  before any window exists, so it runs under a hard deadline (`run_deadlined`): a child
-  stuck on a dead volume otherwise looks exactly like a crash.
+- `src/probe.rs` / `src/media_metadata.rs` — Filmcraft metadata under a deadline.
+  Common MP4/MOV and declared-timing MKV/WebM files use headers only; other supported
+  sources use the Filmcraft reader. Raw container/VUI color declarations remain distinct
+  from inferred playback defaults. Startup and processor SDR checks share this path.
+  `fc::deadlined` bounds the caller and signals cooperative cancellation; a stuck kernel
+  read is abandoned rather than joined. Reference helper deadlines remain test-only; export/analysis have separate process owners.
 - `src/recent.rs` — the launch window's recent entries: `~/.config/abner/recent`
   (written by lib.rs on every load, never by `App` — tests must not touch it) and the
-  per-file thumbnail workers (probe + one `ffmpeg` frame, no cache). **An entry is a
+  per-file Filmcraft thumbnail workers (probe + decoded frame, no cache). **An entry is a
   GROUP** (2026-10-20): the whole clip list as it stood after a load, one group a
   line, paths tab-separated, so a comparison comes back as one tile that reopens it
   whole; the tile is a stack of up to `STACK` (3) frames, each tile owns `STACK`
@@ -259,8 +262,8 @@ from one to the other, keeping its number.
   export read the same numbers. Keyframe snap is the default and the whole point: in
   snaps back, out snaps forward, every kept range starts on a keyframe, and the export
   is a stream copy through the concat demuxer; frame snap (`K`) re-encodes and the
-  header says so. Keyframes/chapters (`ffprobe` packet flags), the waveform (streamed
-  `ffmpeg`, 20 peaks/s) and subtitles each load on a worker and are drained by
+  header says so. Keyframes/chapters (Filmcraft packet tables for MP4/MOV/MKV/WebM), the waveform (streamed
+  Filmcraft audio, 20 peaks/s) and subtitles each load on a worker and are drained by
   `Cut::poll` in `tick`. `App` keeps the model across leaving the mode and drops it
   when the clip list changes. The UI is the second `impl App` block in `app.rs`
   (`cut_lanes` is the one geometry for drawing AND hit testing; `Workspace` grows
@@ -407,8 +410,9 @@ the "VIDEO QUALITY TESTING TOOLKIT" line that used to be a second text run.
 - Building needs no ffmpeg headers or libraries: decoding is FilmCraft's pure-Rust codecs,
   git-pinned in `Cargo.toml` to the same fork revision switchblade uses (it carries the VP9 and
   AV1 VideoToolbox decoders until storytold/filmcraft#2180 and #2608 merge; move the pin to
-  upstream `main` once they do, together with switchblade's). The startup `ffprobe` is a
-  separate process and any ffmpeg version will do. The only other non-obvious dependency is
+  upstream `main` once they do, together with switchblade's). Startup probing, preview
+  color validation, thumbnails and waveform decoding need no FFmpeg/FFprobe process.
+  Other-container packet analysis, decoded-frame inspection, subtitles and export still use media helpers. The only other non-obvious dependency is
   `png`, for the wordmark texture.
 - **`./packaging/build-app.sh [--open|--install]` builds `Abner.app`** — switchblade's
   recipe: release build, `assets/app-icon.png` → `AppIcon.icns`, `Info.plist.in` with
@@ -421,8 +425,8 @@ the "VIDEO QUALITY TESTING TOOLKIT" line that used to be a second text run.
   whatever a future dependency brings), ad-hoc codesign (mandatory on Apple Silicon after
   `install_name_tool`), then `lsregister -f` so an in-place reinstall doesn't keep the
   old icon. `CFBundleExecutable` is a thin launcher that prepends the Homebrew bin dirs
-  to PATH, because a Finder-launched app gets no PATH and the startup `ffprobe` would
-  fail. **Open With / double-click** is `src/open.rs` + `src/open_shim.m` (switchblade's,
+  to PATH, because a Finder-launched app gets no PATH and media export/inspection helpers
+  would fail. **Open With / double-click** is `src/open.rs` + `src/open_shim.m` (switchblade's,
   compiled by `build.rs`): LaunchServices delivers opened files as an Apple Event, never
   argv, and winit 0.30 panics if its `NSApplicationDelegate` is replaced, so the shim
   grafts `application:openURLs:` onto winit's delegate class before the run loop starts.

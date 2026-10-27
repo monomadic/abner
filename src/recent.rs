@@ -14,13 +14,12 @@
 //! and whenever the launch window comes up again.
 //!
 //! Thumbnails are not cached (abner keeps no cache): each launch window
-//! probes the files again and pulls one frame from each with an ffmpeg
-//! child, on worker threads, under the probe's deadline. A file that has
+//! probes the files again and decodes Filmcraft frames on worker threads
+//! under a deadline. A file that has
 //! moved, or sits on a volume that has gone away, drops out of its
 //! group's stack; a group with no file left drops out of the row.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
 
@@ -208,46 +207,41 @@ fn thumb(path: &Path) -> anyhow::Result<Thumb> {
     Ok(Thumb { info, rgba })
 }
 
-/// One frame at `at` seconds, scaled to cover `THUMB_W × THUMB_H` and
-/// centre-cropped, as raw RGBA on stdout. ffmpeg applies the display
-/// rotation itself, so a phone clip comes out upright.
+/// Filmcraft-decoded recent poster, display rotation applied and cover-cropped.
 pub fn frame(path: &Path, at: f64) -> anyhow::Result<Vec<u8>> {
-    let vf = format!(
-        "scale={THUMB_W}:{THUMB_H}:force_original_aspect_ratio=increase:flags=bicubic,crop={THUMB_W}:{THUMB_H}"
-    );
-    let mut cmd = Command::new("ffmpeg");
-    cmd.args(["-nostdin", "-v", "error", "-ss", &format!("{at:.3}"), "-i"])
-        .arg(path)
-        .args(["-map", "0:v:0", "-frames:v", "1", "-vf", &vf, "-f", "rawvideo", "-pix_fmt", "rgba", "-"]);
-    let out = probe::run_deadlined(&mut cmd, THUMB_DEADLINE)?
-        .ok_or_else(|| anyhow::anyhow!("no frame within {}s", THUMB_DEADLINE.as_secs()))?;
-    let want = (THUMB_W * THUMB_H * 4) as usize;
-    if !out.success || out.stdout.len() != want {
-        let err = String::from_utf8_lossy(&out.stderr);
-        anyhow::bail!("ffmpeg: {}", err.lines().last().unwrap_or("no frame").trim());
-    }
-    Ok(out.stdout)
+    decoded(path, at, true)
 }
-
-/// A timeline frame, without the poster's cover crop. The atlas rectangle is
-/// stretched here and restored to the source aspect ratio by the UI. Seeking
-/// just before the indexed PTS avoids skipping a frame through decimal rounding.
+fn decoded(path: &Path, at: f64, cover: bool) -> anyhow::Result<Vec<u8>> {
+    let path = path.to_owned();
+    crate::fc::deadlined("thumbnail", THUMB_DEADLINE, move || {
+        let source = crate::fc::open(&path)?;
+        let time = filmcraft_time::Tick::from_seconds_f64(at.max(0.));
+        let picture = filmcraft_media::cancel::with_background(true, || {
+            source.video_frame(filmcraft_media::FrameRequest::full(time))
+        })
+        .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        if cover {
+            crate::fc::cover_rgba_into(&picture, THUMB_W, THUMB_H, &mut out);
+        } else {
+            crate::fc::fit_rgba_into(
+                &picture,
+                crate::fc::Fit::Exact {
+                    w: THUMB_W,
+                    h: THUMB_H,
+                },
+                &mut out,
+            );
+        }
+        Ok(out)
+    })
+    .map_err(anyhow::Error::msg)
+}
+/// A timeline frame on its actual presentation timestamp. Filmcraft handles B-frame order.
 pub fn timeline_frame(path: &Path, at: f64, previous: Option<f64>) -> anyhow::Result<Vec<u8>> {
-    fn decoded(path: &Path, at: f64) -> anyhow::Result<Vec<u8>> {
-        let mut cmd = Command::new("ffmpeg");
-        cmd.args(["-nostdin", "-v", "error", "-threads", "1", "-ss", &format!("{:.9}", (at - 0.000001).max(0.0)), "-i"])
-            .arg(path).args(["-map", "0:v:0", "-frames:v", "1", "-vf",
-                &format!("scale={THUMB_W}:{THUMB_H}:flags=area"),
-                "-threads", "1", "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "rgba", "-"]);
-        let out = probe::run_deadlined(&mut cmd, THUMB_DEADLINE)?
-            .ok_or_else(|| anyhow::anyhow!("frame preview timed out"))?;
-        anyhow::ensure!(out.success && out.stdout.len() == (THUMB_W * THUMB_H * 4) as usize,
-            "frame preview: {}", String::from_utf8_lossy(&out.stderr));
-        Ok(out.stdout)
-    }
-    let mut current = decoded(path, at)?;
+    let mut current = decoded(path, at, false)?;
     if let Some(t) = previous {
-        let before = decoded(path, t)?;
+        let before = decoded(path, t, false)?;
         mask_unchanged(&mut current, &before);
     }
     Ok(current)
@@ -256,7 +250,7 @@ pub fn timeline_frame(path: &Path, at: f64, previous: Option<f64>) -> anyhow::Re
 /// Changes is a decoded-image comparison, never a claim about codec residuals.
 /// A small threshold suppresses quantization noise; unchanged pixels turn white.
 fn mask_unchanged(current: &mut [u8], previous: &[u8]) {
-    for (a, b) in current.chunks_exact_mut(4).zip(previous.chunks_exact(4)) {
+    for (a, b) in current.as_chunks_mut::<4>().0.iter_mut().zip(previous.as_chunks::<4>().0.iter()) {
         if (0..3).all(|c| a[c].abs_diff(b[c]) <= 12) { a.copy_from_slice(&[255; 4]); }
     }
 }
@@ -291,17 +285,27 @@ mod tests {
     #[test]
     fn timeline_preview_seeks_the_requested_b_frame() {
         use std::process::Command;
-        if Command::new("ffmpeg").arg("-version").output().is_err() {return;}
+                if Command::new("ffmpeg").arg("-version").output().is_err() {return;}
         let path=std::env::temp_dir().join(format!("abner-frame-preview-{}.mp4",std::process::id()));
         assert!(Command::new("ffmpeg").args(["-y","-v","error","-f","lavfi","-i","testsrc2=size=96x64:rate=8:duration=1","-c:v","libx264","-threads","1","-g","4","-bf","2"]).arg(&path).status().unwrap().success());
         let all=Command::new("ffmpeg").args(["-v","error","-i"]).arg(&path).args(["-vf","scale=320:180:flags=area","-threads","1","-f","rawvideo","-pix_fmt","rgba","-"]).output().unwrap();
         assert!(all.status.success());
         let size=(super::THUMB_W*super::THUMB_H*4) as usize;
         let frame=super::timeline_frame(&path,0.375,None).unwrap();
-        assert_eq!(frame,&all.stdout[size*3..size*4]);
+        let error=|reference:&[u8]| frame.iter().zip(reference).map(|(a,b)|f64::from(*a)-f64::from(*b)).map(|d|d*d).sum::<f64>()/frame.len() as f64;
+        let correct=error(&all.stdout[size*3..size*4]);
+        assert!(correct<400.,"thumbnail conversion diverged grossly from reference: MSE {correct}");
+        eprintln!("Filmcraft thumbnail reference MSE={correct}");
+        if let Some(prefix)=std::env::var_os("ABNER_TEST_THUMB_OUTPUT"){
+            for (suffix,pixels) in [("timeline.png",frame.clone()),("poster.png",super::frame(&path,0.375).unwrap())]{
+                let path=std::path::PathBuf::from(&prefix).with_extension(suffix);let file=std::fs::File::options().write(true).create_new(true).open(path).unwrap();let mut encoder=png::Encoder::new(file,super::THUMB_W,super::THUMB_H);encoder.set_color(png::ColorType::Rgba);encoder.set_depth(png::BitDepth::Eight);encoder.write_header().unwrap().write_image_data(&pixels).unwrap();
+            }
+        }
+        assert!(correct<error(&all.stdout[size*2..size*3]),"requested B-frame must be closer than previous picture");
+        assert!(correct<error(&all.stdout[size*4..size*5]),"requested B-frame must be closer than next picture");
         let changes=super::timeline_frame(&path,0.375,Some(0.25)).unwrap();
         let mut expected=frame;
-        super::mask_unchanged(&mut expected,&all.stdout[size*2..size*3]);
+        super::mask_unchanged(&mut expected,&super::timeline_frame(&path,0.25,None).unwrap());
         assert_eq!(changes,expected);
         assert!(changes.chunks_exact(4).any(|p|p==[255;4]));
         std::fs::remove_file(path).unwrap();

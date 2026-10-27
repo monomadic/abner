@@ -178,9 +178,12 @@ covering the image.
 ## Requirements
 
 - macOS (first target; the shader/loop are portable, fullscreen + font paths are mac-specific)
-- ffmpeg — the `ffprobe` CLI for metadata, any version (`brew install ffmpeg`). Nothing is
-  linked: decoding is pure Rust, so the build needs no ffmpeg headers and the bundle carries
-  no ffmpeg libraries.
+- Filmcraft supplies in-process startup metadata, preview color validation, playback,
+  recent/timeline thumbnails and waveform decoding. Those paths need no FFmpeg/FFprobe.
+- MP4/MOV and MKV/WebM timeline packets, chapters and stream facts also use Filmcraft.
+- FFmpeg/FFprobe remain optional feature dependencies for other-container packet analysis,
+  decoded-frame inspection, subtitle extraction and media export (`brew install ffmpeg`).
+  Nothing links FFmpeg libraries; tests also use its CLI for synthetic/reference fixtures.
 
 ## Build
 
@@ -192,8 +195,8 @@ cargo build --release
 ```
 
 The bundle links no third-party libraries, so it runs on a machine without Homebrew; the
-`ffprobe` CLI it shells out to at startup is still looked up on PATH (`--with-cli-tools`
-copies that in too). The app icon is `assets/app-icon.png` —
+media helper CLIs used for export and detailed inspection are still looked up on PATH
+(`--with-cli-tools` copies them in too). The app icon is `assets/app-icon.png` —
 drop a new square PNG there and both the bundle's `.icns` and the bare binary's Dock
 icon follow. Double-clicking a video on the bundle doesn't load it yet (see TASKS.md).
 
@@ -201,8 +204,8 @@ icon follow. Double-clicking a video on the bundle doesn't load it yet (see TASK
 sync, framestep adoption, reader-thread cleanup (including a source that cannot be read,
 which fails at once instead of wedging a reader), redraw cadence. It generates tiny test clips with ffmpeg under `$TMPDIR`.
 
-A startup `ffprobe` that doesn't return within 30s (a file on a volume that has gone
-away) is an error rather than a hang; a decoder whose seek fails is marked failed in
+A Filmcraft startup metadata read that doesn't return within 30s (a file on a volume
+that has gone away) fails without joining the blocked read; a decoder whose seek fails is marked failed in
 the HUD rather than silently drifting out of sync.
 
 ## License

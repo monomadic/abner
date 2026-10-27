@@ -3,6 +3,34 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-27 — Filmcraft metadata, preview validation, thumbnails and waveforms
+
+Startup metadata and processor-preview color validation now share a Filmcraft read
+path with bounded caller latency and cooperative cancellation. MP4/MOV and ordinary
+MKV/WebM metadata are header-only; missing container timing uses Filmcraft's reader.
+Canonical codec/pixel labels, display rotation and MP4 average VFR rate are retained.
+Raw color declarations remain distinct from inferred SD playback defaults: untagged
+SDR remains accepted, while declared non-Rec.709/HDR/ICC metadata fails validation.
+
+Recent posters and timeline frame/change thumbnails use Filmcraft decoding and the
+player's pixel conversion, box reduction and bilinear fitting. Posters center-crop in
+display aspect ratio before resizing, avoiding oversized intermediates. This replaces
+FFmpeg's thumbnail scaler, so exact RGB equality with its bicubic/area filters is not
+promised. B-frame selection and unchanged-pixel masking are tested independently.
+Waveforms stream Filmcraft audio on the presentation clock at 4 kHz, average channels
+into mono and emit 20 peak bins per second, retaining bounded buffers and cancellation.
+The first stream is used; a shorter audio stream yields silence for its remaining
+video timeline. MP4/MOV and MKV/WebM timeline packets, chapters and stream facts also
+come from Filmcraft; clips without subtitle tracks skip subtitle extraction. Other
+container packet analysis, decoded-frame inspection, subtitles and export retain
+helper-based paths.
+
+Synthetic tests cover raw metadata without a decodable payload, VFR/rotation, color
+acceptance/rejection, reference thumbnail frame selection, poster cropping, PCM stereo
+mixing, partial peak bins, cancellation, and fractional-rate MP4/MKV packet and chapter
+comparison against FFprobe. The full library suite passes (144 tests,
+3 existing ignores). No recent-file history or user configuration was changed by tests.
+
 ## 2026-10-27 — Visible frame-preview progress
 
 The Process page reserves a panel below the viewer for the working processor,

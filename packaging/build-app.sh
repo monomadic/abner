@@ -23,7 +23,7 @@
 #   6. ad-hoc codesigns the whole bundle (required on Apple Silicon —
 #      install_name_tool invalidates any prior signature)
 #
-# The app still shells out to the `ffprobe` CLI at startup (probe.rs) —
+# The app still shells out to media CLIs for export and detailed inspection —
 # that isn't linked, so it isn't bundled here. The launcher script
 # prepends the common Homebrew bin dirs to PATH before exec'ing the real
 # binary so a Finder-launched app (which gets a minimal PATH, no ~/.zshrc)
@@ -127,14 +127,14 @@ mkdir -p "$MACOS" "$RESOURCES" "$FRAMEWORKS"
 # --- binary + launcher -------------------------------------------------
 # CFBundleExecutable is a thin launcher, not the real binary: Finder gives
 # a launched app almost no PATH (no /opt/homebrew/bin), which is exactly
-# where the ffprobe CLI the startup probe shells out to usually lives.
+# where the export/inspection helper CLIs usually live.
 cp "$BIN" "$MACOS/$BIN_NAME-bin"
 chmod +w "$MACOS/$BIN_NAME-bin"
 
 cat > "$MACOS/$BIN_NAME" <<'LAUNCHER'
 #!/bin/bash
 # Thin launcher: a GUI-launched app inherits almost no PATH, so the
-# ffprobe lookup (probe.rs) would otherwise fail even though the exact
+# media helper lookup would otherwise fail even though the exact
 # same binary works fine from a terminal.
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PATH="$DIR:/opt/homebrew/bin:/usr/local/bin:$PATH"

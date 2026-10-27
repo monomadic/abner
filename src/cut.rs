@@ -12,7 +12,7 @@
 //! subtitle track) runs on its own worker and lands through a receiver
 //! drained by `poll`, so entering the mode never blocks the loop.
 
-use std::io::{Read, BufRead, BufReader};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 /// Waveform resolution: peaks per second of audio.
 pub const WAVE_HZ: f64 = 20.0;
-/// Sample rate the waveform worker asks ffmpeg for; a multiple of `WAVE_HZ`.
+/// Sample rate the waveform worker asks Filmcraft for; a multiple of `WAVE_HZ`.
 const WAVE_RATE: usize = 4000;
 /// Two times closer than this are the same boundary.
 const EPS: f64 = 1e-3;
@@ -217,7 +217,7 @@ pub struct Cut {
     cue_rx: Option<Receiver<Vec<Cue>>>,
     wave_rx: Option<Receiver<Vec<u8>>>,
     export: Option<Receiver<Result<String, String>>>,
-    /// Stops the waveform worker's ffmpeg when the mode is dropped.
+    /// Cancels Filmcraft waveform decoding when the mode is dropped.
     cancel: Arc<AtomicBool>,
 }
 
@@ -1017,6 +1017,14 @@ fn parse_gops(data: &str) -> Vec<Gop> {
 }
 
 fn scan(path: &Path) -> anyhow::Result<Scan> {
+    let owned=path.to_owned();
+    if let Some(native)=crate::fc::deadlined("timeline metadata",std::time::Duration::from_secs(30),move||crate::media_metadata::timeline(&owned)).map_err(anyhow::Error::msg)? {
+        let mut gops:Vec<Gop>=Vec::new();let mut frames=Vec::with_capacity(native.packets.len());
+        for p in native.packets{frames.push(p.pts);if p.key{if let Some(g)=gops.last_mut(){g.end=p.pts;}gops.push(Gop{start:p.pts,end:p.pts,..Default::default()});}if let Some(g)=gops.last_mut(){g.packets+=1;g.bytes+=p.size;g.end=g.end.max(p.pts+p.duration);}}
+        frames.sort_by(f64::total_cmp);frames.dedup_by(|a,b|(*a-*b).abs()<1e-7);
+        let keys=gops.iter().map(|g|g.start).collect();let chapters=native.chapters.into_iter().map(|(start,title)|Chapter{start,title}).collect();
+        return Ok(Scan{keys,chapters,gops,frames,facts:parse_facts(&native.facts)});
+    }
     use anyhow::Context;
     let out = Command::new("ffprobe")
         .args(["-v", "error", "-select_streams", "v:0"])
@@ -1144,6 +1152,7 @@ fn trim_rate(fps: f64) -> String {
 /// The first subtitle stream as cues. A clip with none (or with bitmap
 /// subtitles, which have no text to show) yields nothing.
 fn read_cues(path: &Path) -> Vec<Cue> {
+    if matches!(crate::media_metadata::has_subtitles(path),Ok(Some(false))){return Vec::new();}
     let out = Command::new("ffmpeg")
         .args(["-nostdin", "-v", "error", "-i"])
         .arg(path)
@@ -1185,57 +1194,71 @@ fn parse_srt(text: &str) -> Vec<Cue> {
     cues
 }
 
-/// The first audio stream as one peak per `1 / WAVE_HZ` s. Decodes the
-/// whole track (mono, 4 kHz), streaming: memory is the peaks alone.
-fn read_wave(path: &Path, cancel: &AtomicBool, tx: &std::sync::mpsc::Sender<Vec<u8>>) {
-    let child = Command::new("ffmpeg")
-        .args(["-nostdin", "-v", "error", "-i"])
-        .arg(path)
-        .args(["-vn", "-map", "0:a:0", "-ac", "1", "-ar", &WAVE_RATE.to_string(), "-f", "s16le", "-"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn();
-    let Ok(mut child) = child else { return };
-    let Some(mut pipe) = child.stdout.take() else { return };
-    let bucket = WAVE_RATE / WAVE_HZ as usize;
-    let mut peaks: Vec<u8> = Vec::new();
-    let (mut peak, mut count) = (0u16, 0usize);
-    let mut buf = [0u8; 1 << 15];
-    let mut odd: Option<u8> = None;
-    loop {
-        if cancel.load(Ordering::Relaxed) {
-            let _ = child.kill();
-            break;
-        }
-        let n = match pipe.read(&mut buf) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => n,
+/// Filmcraft's first audio stream on the presentation clock, mixed to mono at 4 kHz.
+/// Bounded requests retain streaming memory use; cancellation is checked between packets/blocks.
+fn read_wave(path: &Path, cancel: &Arc<AtomicBool>, tx: &std::sync::mpsc::Sender<Vec<u8>>) {
+    if cancel.load(Ordering::Relaxed) {
+        return;
+    }
+    filmcraft_media::cancel::with_cancel(cancel, || {
+        let source = match crate::fc::open(path) {
+            Ok(s) => s,
+            Err(e) => {
+                log::debug!("waveform open: {e}");
+                return;
+            }
         };
-        // Ship what has been read so far, ten seconds of peaks at a time.
-        if peaks.len() >= (WAVE_HZ as usize) * 10 && tx.send(std::mem::take(&mut peaks)).is_err() {
-            let _ = child.kill();
-            break;
+        if source.info().audio_streams.is_empty() {
+            return;
         }
-        let mut bytes = buf[..n].iter().copied();
-        loop {
-            let lo = match odd.take() {
-                Some(b) => b,
-                None => match bytes.next() { Some(b) => b, None => break },
+        let total = (source.info().duration.seconds().max(0.) * WAVE_RATE as f64).ceil() as usize;
+        let mut peaks = Vec::new();
+        let (mut peak, mut count) = (0f32, 0usize);
+        let bucket = WAVE_RATE / (WAVE_HZ as usize);
+        for start in (0..total).step_by(WAVE_RATE) {
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            let audio = match source.audio(
+                start as i64,
+                (total - start).min(WAVE_RATE),
+                WAVE_RATE as u32,
+            ) {
+                Ok(a) => a,
+                Err(e) => {
+                    log::debug!("waveform decode: {e}");
+                    return;
+                }
             };
-            let Some(hi) = bytes.next() else { odd = Some(lo); break };
-            peak = peak.max(i16::from_le_bytes([lo, hi]).unsigned_abs());
-            count += 1;
-            if count == bucket {
-                peaks.push((peak >> 7).min(255) as u8);
-                (peak, count) = (0, 0);
+            let Some(first) = audio.channels.first() else {
+                return;
+            };
+            for i in 0..first.len() {
+                let sample = audio
+                    .channels
+                    .iter()
+                    .map(|c| c.get(i).copied().unwrap_or(0.))
+                    .sum::<f32>()
+                    / audio.channels.len() as f32;
+                if sample.is_finite() {
+                    peak = peak.max(sample.abs());
+                }
+                count += 1;
+                if count == bucket {
+                    peaks.push((peak * 256.).floor().clamp(0., 255.) as u8);
+                    peak = 0.;
+                    count = 0;
+                }
+            }
+            if peaks.len() >= WAVE_HZ as usize * 10 && tx.send(std::mem::take(&mut peaks)).is_err()
+            {
+                return;
             }
         }
-    }
-    let _ = child.wait();
-    if !peaks.is_empty() {
-        let _ = tx.send(peaks);
-    }
+        if !cancel.load(Ordering::Relaxed) && !peaks.is_empty() {
+            let _ = tx.send(peaks);
+        }
+    });
 }
 
 /// Write `keeps` (source-time ranges) of `source` to `dest`, through a
@@ -1650,7 +1673,7 @@ mod tests {
         let mut cut = Cut::new(&clip, 6.0);
         cut.set_keys(found.keys);
         let (tx, rx) = channel();
-        read_wave(&clip, &AtomicBool::new(false), &tx);
+        read_wave(&clip, &Arc::new(AtomicBool::new(false)), &tx);
         drop(tx);
         let wave: Vec<u8> = rx.iter().flatten().collect();
         assert!((wave.len() as f64 - 6.0 * WAVE_HZ).abs() <= 4.0, "{} peaks", wave.len());
@@ -1734,5 +1757,20 @@ mod tests {
         // 50 s in the source is 30 s out (20 s were cut before it).
         let meta = ffmetadata(&out);
         assert!(meta.starts_with(";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=10000\nEND=30000\ntitle=Chapter 2"));
+    }
+}
+#[cfg(test)]
+mod native_wave_tests {
+    use super::*;
+    #[test]
+    fn pcm_stereo_mixing_peak_bins_and_pre_cancel_need_no_media_tools(){
+        use filmcraft_isobmff::{Brand,Mp4Writer,PcmConfig,SampleEntry,TrackConfig,WriteSample,WriterOptions};
+        let path=std::env::temp_dir().join(format!("abner-native-wave-{}.mov",std::process::id()));
+        let file=std::fs::File::create(&path).unwrap();let mut mux=Mp4Writer::new(file,WriterOptions::new(Brand::Mov)).unwrap();
+        let a=mux.add_track(TrackConfig::new(SampleEntry::pcm(PcmConfig{bits:16,float:false,big_endian:false,signed:true,channels:2,sample_rate:4000.}),4000)).unwrap();
+        let mut data=Vec::new();for (left,right,count) in [(8192i16,8192i16,200),(16384,16384,200),(32767,-32767,200),(1000,1000,100)]{for _ in 0..count{data.extend_from_slice(&left.to_le_bytes());data.extend_from_slice(&right.to_le_bytes());}}
+        mux.write_sample(a,WriteSample{data:&data,duration:700,composition_offset:0,is_sync:true}).unwrap();mux.finish().unwrap();
+        let(tx,rx)=channel();read_wave(&path,&Arc::new(AtomicBool::new(false)),&tx);drop(tx);let peaks:Vec<_>=rx.iter().flatten().collect();assert_eq!(peaks,vec![64,128,0]);
+        let(tx,rx)=channel();read_wave(Path::new("missing"),&Arc::new(AtomicBool::new(true)),&tx);drop(tx);assert!(rx.iter().next().is_none());std::fs::remove_file(path).unwrap();
     }
 }

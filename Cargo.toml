@@ -19,9 +19,6 @@ pollster = "1"
 bytemuck = { version = "1", features = ["derive"] }
 ab_glyph = "0.2"
 serde_json = "1"
-# A Matroska file's duration, codec and size from its headers, so probing
-# one does not need an ffprobe run (src/probe.rs).
-fastmkv = { path = "../fastmkv" }
 # The config file (src/config.rs): abner.default.toml overlaid by a user file.
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
@@ -32,7 +29,8 @@ png = "0.18"
 # FilmCraft's pure-Rust demuxers and decoders with its VideoToolbox path (H.264, HEVC, VP9,
 # AV1 on Apple silicon; `filmcraft-platform` holds the OS FFI). Same pin as switchblade: a fork
 # revision carrying the VP9 (storytold/filmcraft#2180) and AV1 (#2608) VideoToolbox decoders
-# until they merge upstream. Nothing links ffmpeg: `ffprobe` stays an external process.
+# until they merge upstream. Metadata, playback, thumbnails and waveforms run
+# in-process; external media helpers remain for export and detailed timeline analysis.
 filmcraft-codecs = { git = "https://github.com/monomadic/filmcraft", rev = "3be5ba26da4578cc973eb8f0ab070df1bda9a1f6" }
 filmcraft-media = { git = "https://github.com/monomadic/filmcraft", rev = "3be5ba26da4578cc973eb8f0ab070df1bda9a1f6" }
 filmcraft-frame = { git = "https://github.com/monomadic/filmcraft", rev = "3be5ba26da4578cc973eb8f0ab070df1bda9a1f6" }
@@ -40,6 +38,10 @@ filmcraft-color = { git = "https://github.com/monomadic/filmcraft", rev = "3be5b
 filmcraft-time = { git = "https://github.com/monomadic/filmcraft", rev = "3be5ba26da4578cc973eb8f0ab070df1bda9a1f6" }
 filmcraft-isobmff = { git = "https://github.com/monomadic/filmcraft", rev = "3be5ba26da4578cc973eb8f0ab070df1bda9a1f6" }
 filmcraft-matroska = { git = "https://github.com/monomadic/filmcraft", rev = "3be5ba26da4578cc973eb8f0ab070df1bda9a1f6" }
+filmcraft-h264 = { git = "https://github.com/monomadic/filmcraft", rev = "3be5ba26da4578cc973eb8f0ab070df1bda9a1f6" }
+filmcraft-hevc = { git = "https://github.com/monomadic/filmcraft", rev = "3be5ba26da4578cc973eb8f0ab070df1bda9a1f6" }
+filmcraft-av1 = { git = "https://github.com/monomadic/filmcraft", rev = "3be5ba26da4578cc973eb8f0ab070df1bda9a1f6" }
+filmcraft-bitstream = { git = "https://github.com/monomadic/filmcraft", rev = "3be5ba26da4578cc973eb8f0ab070df1bda9a1f6" }
 rayon = "1"
 resvg = { version = "0.45", default-features = false }
 

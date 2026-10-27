@@ -598,35 +598,11 @@ fn process_chain(
     Ok(frames)
 }
 fn check_sdr(path: &std::path::Path) -> Result<(), String> {
-    let mut cmd = std::process::Command::new("ffprobe");
-    cmd.args([
-        "-v",
-        "error",
-        "-select_streams",
-        "v:0",
-        "-show_entries",
-        "stream=color_transfer,color_primaries,color_space",
-        "-of",
-        "json",
-    ])
-    .arg(path);
-    let out = crate::probe::run_deadlined(&mut cmd, Duration::from_secs(5))
+    crate::probe::metadata(path, Duration::from_secs(5))
         .map_err(|e| e.to_string())?
-        .ok_or("Color probe timed out")?;
-    if !out.success {
-        return Err("Could not check preview color metadata".into());
-    }
-    let v: Value = serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())?;
-    let stream = &v["streams"][0];
-    for key in ["color_transfer", "color_primaries", "color_space"] {
-        if let Some(s) = stream[key].as_str()
-            && !matches!(s, "bt709" | "unknown" | "unspecified")
-        {
-            return Err(format!("Preview supports SDR Rec.709 only; {key} is {s}"));
-        }
-    }
-    Ok(())
+        .check_sdr()
 }
+
 
 pub struct Panel {
     pub open: bool,

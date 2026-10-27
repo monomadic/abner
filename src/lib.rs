@@ -18,6 +18,7 @@ mod open;
 mod fc;
 mod player;
 mod probe;
+mod media_metadata;
 mod recent;
 mod render;
 mod schedule;
@@ -313,7 +314,7 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
 }
 
 /// Probe one path and start its decoder. The probe is a synchronous
-/// ffprobe under a hard deadline (`probe::run_deadlined`), which is what
+/// Filmcraft metadata read under a deadline, which is what
 /// makes it safe to call straight from the event loop on a drop: a file
 /// on a dead mount fails in bounded time instead of hanging the window.
 /// `in,out[,in,out…]` in seconds, for `--cut`.

@@ -39,7 +39,7 @@ pub(crate) fn hw_frames() -> u64 {
 
 /// Positional reads of a file for FilmCraft's in-place container readers, so a 4K clip is not
 /// read whole to show one frame.
-struct FileReader {
+pub(crate) struct FileReader {
     file: std::fs::File,
     len: u64,
 }
@@ -49,6 +49,12 @@ impl filmcraft_media::ByteReader for FileReader {
         self.len
     }
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        if filmcraft_media::cancel::cancelled() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "media read cancelled",
+            ));
+        }
         #[cfg(unix)]
         {
             std::os::unix::fs::FileExt::read_exact_at(&self.file, buf, offset)
@@ -143,6 +149,44 @@ impl filmcraft_matroska::ByteSource for FileReader {
     }
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
         filmcraft_media::ByteReader::read_at(self, offset, buf)
+    }
+}
+
+/// Regular-file reader shared by metadata and playback; never opens a FIFO.
+pub(crate) fn reader(path: &Path) -> Result<FileReader, String> {
+    let meta = std::fs::metadata(path).map_err(|e| format!("stat: {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("{} is not a regular file", path.display()));
+    }
+    let file = std::fs::File::open(path).map_err(|e| format!("open: {e}"))?;
+    Ok(FileReader {
+        file,
+        len: meta.len(),
+    })
+}
+/// Bound caller latency and propagate cooperative cancellation into Filmcraft.
+/// A kernel read on unavailable storage cannot be interrupted; the worker is abandoned.
+pub(crate) fn deadlined<T: Send + 'static>(
+    label: &'static str,
+    deadline: std::time::Duration,
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = cancel.clone();
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name(label.into())
+        .spawn(move || {
+            let result = filmcraft_media::cancel::with_cancel(&flag, work);
+            let _ = tx.send(result);
+        })
+        .map_err(|e| e.to_string())?;
+    match rx.recv_timeout(deadline) {
+        Ok(r) => r,
+        Err(e) => {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            Err(format!("{label}: {e}; storage may be unavailable"))
+        }
     }
 }
 
@@ -370,81 +414,81 @@ fn fused_decimate_rgba(frame: &VideoFrame, n: usize, out: &mut Vec<u8>) -> Optio
     // on the calling thread than as a few hundred pool tasks contending with other players.
     let parallel = ow * oh >= 512 * 1024;
     let convert_row = |(oy, row): (usize, &mut [u8])| {
-            if n == 1 {
-                // Native size: one luma sample per pixel, chroma shared by 2×2 (nearest, as the
-                // direct display conversion in `VideoFrame::to_rgba8`).
-                let yr = &yp[oy * w..oy * w + ow];
-                let (ur, vr) = (
-                    &up[(oy / 2) * cw..(oy / 2) * cw + cw],
-                    &vp[(oy / 2) * cw..(oy / 2) * cw + cw],
-                );
-                for (ox, o) in row.chunks_exact_mut(4).enumerate() {
-                    let yy = (yr[ox] as i64 - off_y) * ky;
-                    let u = ur[ox / 2] as i64 - off_c;
-                    let v = vr[ox / 2] as i64 - off_c;
-                    o[0] = clamp8(yy + k_rv * v);
-                    o[1] = clamp8(yy - k_gv * v - k_gu * u);
-                    o[2] = clamp8(yy + k_bu * u);
-                    o[3] = 255;
-                }
-                return;
-            }
-            if n == 2 {
-                // The common case (4K to a 1080p view): 2×2 luma, one chroma sample per pixel.
-                let (y0, y1) = (
-                    &yp[oy * 2 * w..oy * 2 * w + ow * 2],
-                    &yp[(oy * 2 + 1) * w..(oy * 2 + 1) * w + ow * 2],
-                );
-                let (ur, vr) = (&up[oy * cw..oy * cw + ow], &vp[oy * cw..oy * cw + ow]);
-                for (ox, o) in row.chunks_exact_mut(4).enumerate() {
-                    let ysum = y0[ox * 2] as i64
-                        + y0[ox * 2 + 1] as i64
-                        + y1[ox * 2] as i64
-                        + y1[ox * 2 + 1] as i64;
-                    let yy = (ysum - off_y) * ky;
-                    let u = ur[ox] as i64 - off_c;
-                    let v = vr[ox] as i64 - off_c;
-                    o[0] = clamp8(yy + k_rv * v);
-                    o[1] = clamp8(yy - k_gv * v - k_gu * u);
-                    o[2] = clamp8(yy + k_bu * u);
-                    o[3] = 255;
-                }
-                return;
-            }
-            // Luma rows of this output row and chroma rows under them.
-            let yrows: Vec<&[u8]> = (oy * n..oy * n + n)
-                .map(|y| &yp[y * w..y * w + ow * n])
-                .collect();
-            let urows: Vec<&[u8]> = (oy * m..oy * m + m)
-                .map(|y| &up[y * cw..y * cw + ow * m])
-                .collect();
-            let vrows: Vec<&[u8]> = (oy * m..oy * m + m)
-                .map(|y| &vp[y * cw..y * cw + ow * m])
-                .collect();
+        if n == 1 {
+            // Native size: one luma sample per pixel, chroma shared by 2×2 (nearest, as the
+            // direct display conversion in `VideoFrame::to_rgba8`).
+            let yr = &yp[oy * w..oy * w + ow];
+            let (ur, vr) = (
+                &up[(oy / 2) * cw..(oy / 2) * cw + cw],
+                &vp[(oy / 2) * cw..(oy / 2) * cw + cw],
+            );
             for (ox, o) in row.chunks_exact_mut(4).enumerate() {
-                let mut ysum = 0i64;
-                for r in &yrows {
-                    ysum += r[ox * n..ox * n + n].iter().map(|&v| v as i64).sum::<i64>();
-                }
-                let (mut usum, mut vsum) = (0i64, 0i64);
-                for (ur, vr) in urows.iter().zip(&vrows) {
-                    usum += ur[ox * m..ox * m + m]
-                        .iter()
-                        .map(|&v| v as i64)
-                        .sum::<i64>();
-                    vsum += vr[ox * m..ox * m + m]
-                        .iter()
-                        .map(|&v| v as i64)
-                        .sum::<i64>();
-                }
-                let yy = (ysum - off_y) * ky;
-                let u = usum - off_c;
-                let v = vsum - off_c;
+                let yy = (yr[ox] as i64 - off_y) * ky;
+                let u = ur[ox / 2] as i64 - off_c;
+                let v = vr[ox / 2] as i64 - off_c;
                 o[0] = clamp8(yy + k_rv * v);
                 o[1] = clamp8(yy - k_gv * v - k_gu * u);
                 o[2] = clamp8(yy + k_bu * u);
                 o[3] = 255;
             }
+            return;
+        }
+        if n == 2 {
+            // The common case (4K to a 1080p view): 2×2 luma, one chroma sample per pixel.
+            let (y0, y1) = (
+                &yp[oy * 2 * w..oy * 2 * w + ow * 2],
+                &yp[(oy * 2 + 1) * w..(oy * 2 + 1) * w + ow * 2],
+            );
+            let (ur, vr) = (&up[oy * cw..oy * cw + ow], &vp[oy * cw..oy * cw + ow]);
+            for (ox, o) in row.chunks_exact_mut(4).enumerate() {
+                let ysum = y0[ox * 2] as i64
+                    + y0[ox * 2 + 1] as i64
+                    + y1[ox * 2] as i64
+                    + y1[ox * 2 + 1] as i64;
+                let yy = (ysum - off_y) * ky;
+                let u = ur[ox] as i64 - off_c;
+                let v = vr[ox] as i64 - off_c;
+                o[0] = clamp8(yy + k_rv * v);
+                o[1] = clamp8(yy - k_gv * v - k_gu * u);
+                o[2] = clamp8(yy + k_bu * u);
+                o[3] = 255;
+            }
+            return;
+        }
+        // Luma rows of this output row and chroma rows under them.
+        let yrows: Vec<&[u8]> = (oy * n..oy * n + n)
+            .map(|y| &yp[y * w..y * w + ow * n])
+            .collect();
+        let urows: Vec<&[u8]> = (oy * m..oy * m + m)
+            .map(|y| &up[y * cw..y * cw + ow * m])
+            .collect();
+        let vrows: Vec<&[u8]> = (oy * m..oy * m + m)
+            .map(|y| &vp[y * cw..y * cw + ow * m])
+            .collect();
+        for (ox, o) in row.chunks_exact_mut(4).enumerate() {
+            let mut ysum = 0i64;
+            for r in &yrows {
+                ysum += r[ox * n..ox * n + n].iter().map(|&v| v as i64).sum::<i64>();
+            }
+            let (mut usum, mut vsum) = (0i64, 0i64);
+            for (ur, vr) in urows.iter().zip(&vrows) {
+                usum += ur[ox * m..ox * m + m]
+                    .iter()
+                    .map(|&v| v as i64)
+                    .sum::<i64>();
+                vsum += vr[ox * m..ox * m + m]
+                    .iter()
+                    .map(|&v| v as i64)
+                    .sum::<i64>();
+            }
+            let yy = (ysum - off_y) * ky;
+            let u = usum - off_c;
+            let v = vsum - off_c;
+            o[0] = clamp8(yy + k_rv * v);
+            o[1] = clamp8(yy - k_gv * v - k_gu * u);
+            o[2] = clamp8(yy + k_bu * u);
+            o[3] = 255;
+        }
     };
     if parallel {
         out.par_chunks_mut(ow * 4).enumerate().for_each(convert_row);
@@ -647,5 +691,75 @@ mod register_timing {
         let t = std::time::Instant::now();
         super::register_hardware();
         eprintln!("second call: {:.3} ms", t.elapsed().as_secs_f64() * 1000.0);
+    }
+}
+
+/// Display-aspect cover crop for recent posters, before reduction to avoid giant intermediates.
+pub(crate) fn cover_rgba_into(frame: &VideoFrame, w: u32, h: u32, out: &mut Vec<u8>) {
+    let par = frame.par.0.max(1) as f64 / frame.par.1.max(1) as f64;
+    let source = frame.width as f64 * par / frame.height.max(1) as f64;
+    let target = w.max(1) as f64 / h.max(1) as f64;
+    let (cw, ch) = if source > target {
+        (
+            ((frame.height as f64 * target / par).round() as usize).clamp(1, frame.width as usize),
+            frame.height as usize,
+        )
+    } else {
+        (
+            frame.width as usize,
+            ((frame.width as f64 * par / target).round() as usize).clamp(1, frame.height as usize),
+        )
+    };
+    let cropped = frame.cropped(filmcraft_frame::Region {
+        x: (frame.width as usize - cw) / 2,
+        y: (frame.height as usize - ch) / 2,
+        w: cw,
+        h: ch,
+    });
+    fit_rgba_into(&cropped, Fit::Exact { w, h }, out);
+}
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+    #[test]
+    fn deadline_bounds_caller_and_signals_cooperative_work() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let start = std::time::Instant::now();
+        let r: Result<(), _> = deadlined(
+            "test-read",
+            std::time::Duration::from_millis(5),
+            move || {
+                std::thread::sleep(std::time::Duration::from_millis(40));
+                tx.send(filmcraft_media::cancel::cancelled()).unwrap();
+                Ok(())
+            },
+        );
+        assert!(r.is_err());
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        assert!(rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap());
+    }
+    #[test]
+    fn poster_cover_crops_center_without_stretching_or_losing_alpha() {
+        let mut rgba = vec![0; 160 * 64 * 4];
+        for y in 0..64 {
+            for x in 0..160 {
+                let p = (y * 160 + x) * 4;
+                rgba[p..p + 4].copy_from_slice(if (48..112).contains(&x) {
+                    &[0, 255, 0, 255]
+                } else {
+                    &[255, 0, 0, 255]
+                });
+            }
+        }
+        let frame = VideoFrame::rgba8(160, 64, rgba);
+        let mut out = Vec::new();
+        cover_rgba_into(&frame, 64, 64, &mut out);
+        assert_eq!(out.len(), 64 * 64 * 4);
+        assert!(
+            out.as_chunks::<4>()
+                .0
+                .iter()
+                .all(|p| *p == [0, 255, 0, 255])
+        );
     }
 }
