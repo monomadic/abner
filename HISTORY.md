@@ -3,6 +3,17 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-27 — Visible frame-preview progress
+
+The Process page reserves a panel below the viewer for the working processor,
+its position in the enabled chain, phase and elapsed time. Measured plugin totals
+drive a bar labelled as stage progress; phases without totals use a moving
+indicator. Successful previews finish at 100%, while failures stay stopped.
+Progress callbacks coalesce into one latest snapshot independently of the bounded
+frame channel, so rapid tile updates cannot queue obsolete percentages. Old job
+generations are ignored. Tests cover stale updates, coalescing, unknown totals,
+failure and restart; a native frame preview verified the working/ready states.
+
 ## 2026-10-27 — Compact processor rows and OFF/ON switches
 
 Removed numbered keycaps from the processor list and replaced enable checkboxes

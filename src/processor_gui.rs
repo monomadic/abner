@@ -163,11 +163,25 @@ struct Worker {
     active: Arc<Mutex<Vec<Cancellation>>>,
     mailbox: Arc<(Mutex<Mailbox>, Condvar)>,
     rx: mpsc::Receiver<Event>,
+    live: LiveProgress,
+}
+type LiveProgress = Arc<Mutex<Option<(u64, StageFeedback)>>>;
+struct StageFeedback {
+    name: String,
+    index: usize,
+    count: usize,
+    progress: Progress,
+}
+impl StageFeedback {
+    fn fraction(&self) -> Option<f32> {
+        self.progress.total.filter(|total| *total > 0).map(|total| {
+            (self.progress.completed.min(total) as f64 / total as f64) as f32
+        })
+    }
 }
 enum Event {
     Frame(u64, Preview),
     Progress(u64, usize, usize),
-    Stage(u64, String),
     Done(u64, Result<(), String>),
 }
 fn stage_status(name: &str, progress: &Progress) -> String {
@@ -277,6 +291,8 @@ impl Worker {
         let shared = mailbox.clone();
         let active = Arc::new(Mutex::new(Vec::new()));
         let active_worker = active.clone();
+        let live = LiveProgress::default();
+        let live_worker = live.clone();
         std::thread::spawn(move || {
             loop {
                 let request = {
@@ -292,7 +308,7 @@ impl Worker {
                 };
                 let generation = request.generation;
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    render(&registry, &request, &tx, Some(&active_worker))
+                    render(&registry, &request, &tx, Some(&active_worker), Some(&live_worker))
                 }))
                 .unwrap_or_else(|_| Err("Processor panicked; preview stopped".into()));
                 active_worker.lock().unwrap().clear();
@@ -305,6 +321,7 @@ impl Worker {
             mailbox,
             rx,
             active,
+            live,
         }
     }
     fn cancel(&self) {
@@ -332,6 +349,7 @@ fn render(
     r: &Request,
     tx: &mpsc::SyncSender<Event>,
     active: Option<&Mutex<Vec<Cancellation>>>,
+    live: Option<&LiveProgress>,
 ) -> Result<(), String> {
     r.cancel.check()?;
     // Plugins see the source at its NATIVE size (display dimensions, rotation
@@ -343,7 +361,7 @@ fn render(
     let [w, h] = [r.info.width, r.info.height];
     let mut sessions = Vec::new();
     let mut dims = [w as usize, h as usize];
-    for (id, settings) in &r.chain {
+    for (index, (id, settings)) in r.chain.iter().enumerate() {
         let factory = registry.get(id)?;
         let caps = factory.capabilities();
         if !matches!(caps.role, Role::Processor)
@@ -361,21 +379,20 @@ fn render(
             ));
         }
         let name = factory.descriptor().name;
-        let feedback = active.is_some();
-        if feedback {
-            let _ = tx.try_send(Event::Stage(
-                r.generation,
-                format!("{name} · Preparing processor"),
-            ));
-        }
-        let mut session = factory.create(dims[0], dims[1], settings)?;
-        let sender = tx.clone();
         let generation = r.generation;
+        let count = r.chain.len();
+        let live = live.cloned();
         let report: abner_processor_api::ProgressReporter = Arc::new(move |progress| {
-            if feedback {
-                let _ = sender.try_send(Event::Stage(generation, stage_status(&name, &progress)));
+            if let Some(live) = &live {
+                // One latest snapshot: tile callbacks never fill the frame channel
+                // or leave the UI displaying a queue of obsolete percentages.
+                *live.lock().unwrap() = Some((generation, StageFeedback {
+                    name: name.clone(), index, count, progress,
+                }));
             }
         });
+        report(Progress { phase: "Preparing processor".into(), completed: 0, total: None });
+        let mut session = factory.create(dims[0], dims[1], settings)?;
         session.set_progress_reporter(report.clone());
         let session: Box<dyn Session> = Box::new(ReportingSession {
             inner: session,
@@ -651,6 +668,9 @@ pub struct Panel {
     frames: Vec<Preview>,
     status: String,
     busy: bool,
+    feedback: Option<StageFeedback>,
+    render_result: Option<bool>,
+    render_elapsed: Duration,
     /// The frame the running render was asked for, and the worker's context
     /// progress (frames decoded, frames to decode): the amber marks.
     pending: Option<f64>,
@@ -701,6 +721,9 @@ impl Default for Panel {
             frames: vec![],
             status: String::new(),
             busy: false,
+            feedback: None,
+            render_result: None,
+            render_elapsed: Duration::ZERO,
             pending: None,
             progress: None,
             busy_since: Instant::now(),
@@ -785,6 +808,8 @@ impl Panel {
         self.frames.clear();
         self.selected_frame = 0;
         self.busy = false;
+        self.feedback = None;
+        self.render_result = None;
         self.dirty = None;
         if let Some(saved) = self.saved.get_mut(self.selected) {
             *saved = self.settings.clone();
@@ -931,6 +956,8 @@ impl Panel {
         self.generation += 1;
         self.dirty = Some(Instant::now());
         self.toggle_play = self.playback;
+        self.feedback = None;
+        self.render_result = None;
         self.status = "Preparing render…".into();
     }
     /// One source frame back or forward, clamped to the clip.
@@ -1137,7 +1164,7 @@ impl Panel {
             x: l + 16.0,
             y: 88.0,
             w: (vp.0 - l - r - 32.0).max(1.0),
-            h: (Self::transport_y(vp) - 10.0 - 88.0).max(1.0),
+            h: (Self::transport_y(vp) - 104.0 - 88.0).max(1.0),
         }
     }
     fn timeline(vp: (f32, f32)) -> RectPx {
@@ -1419,13 +1446,13 @@ impl Panel {
                     }
                     Event::Progress(g, done, total) if g == self.generation => {
                         self.progress = Some((done, total));
+                        self.feedback = None;
                         self.status = format!("Preparing temporal context · {done}/{total} frames");
-                    }
-                    Event::Stage(g, status) if g == self.generation => {
-                        self.status = status;
                     }
                     Event::Done(g, result) if g == self.generation => {
                         self.busy = false;
+                        self.render_result = Some(result.is_ok());
+                        self.render_elapsed = self.busy_since.elapsed();
                         self.pending = None;
                         self.progress = None;
                         if let Err(e) = result {
@@ -1437,6 +1464,11 @@ impl Panel {
                     }
                     _ => {}
                 }
+            }
+            if let Some((g, feedback)) = worker.live.lock().unwrap().take()
+                && g == self.generation && self.busy {
+                self.status = stage_status(&feedback.name, &feedback.progress);
+                self.feedback = Some(feedback);
             }
         }
         if let Some(i) = self
@@ -1659,6 +1691,7 @@ impl Panel {
         });
         board.recess(items);
         items.push(Item::Clip(Some(r)));
+        self.draw_progress(items, vp);
         self.draw_transport(items, vp);
         let t = Self::timeline(vp);
         items.push(Item::Rect(RectItem::new(
@@ -1847,6 +1880,67 @@ impl Panel {
     /// pause, a frame on, next rendered frame — the cut toolbar's step and
     /// keyframe glyphs, a triangle / two bars for the transport. The one
     /// under the pointer names itself beneath the row.
+    /// Kept outside the video canvas so zoom/pan cannot cover render feedback.
+    fn draw_progress(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
+        let v = Self::viewer(vp);
+        let r = RectPx { x: v.x, y: Self::transport_y(vp) - 78.0, w: v.w, h: 68.0 };
+        let ink = hex_color(SOURCE_INK);
+        let secondary = hex_color(SOURCE_SECONDARY);
+        let accent = hex_color(CUT_HEADER_BLUE);
+        let elapsed = if self.busy { self.busy_since.elapsed() } else { self.render_elapsed };
+        let title = if self.busy {
+            self.feedback.as_ref().map_or("Preparing frame preview", |f| f.name.as_str())
+        } else {
+            match self.render_result {
+                Some(true) => "Frame preview ready",
+                Some(false) => "Frame preview stopped",
+                None => "Frame preview",
+            }
+        };
+        let fraction = if self.busy {
+            self.feedback.as_ref().and_then(StageFeedback::fraction)
+        } else {
+            self.render_result.filter(|ok| *ok).map(|_| 1.0)
+        };
+        let phase = if self.busy {
+            self.feedback.as_ref().map_or_else(|| self.progress.map_or_else(
+                || "Preparing input and processors".into(),
+                |(done, total)| format!("Preparing input · {done}/{total} frames")), |f| {
+                format!("{}/{} · {}", f.index + 1, f.count,
+                    if f.progress.phase.trim().is_empty() { "Processing" } else { &f.progress.phase })
+            })
+        } else if self.render_result.is_some() {
+            self.status.clone()
+        } else {
+            "Render frame to preview the enabled chain".into()
+        };
+        items.push(Item::Rect(RectItem { radius: 7.0, border_w: 1.0,
+            border_color: hex_color(SOURCE_BORDER),
+            ..RectItem::new(r, hex_color(0x0c1015)) }));
+        ui_label(items, r.x + 12.0, r.y + 16.0, 12.0, ink, title, Align::Left, (r.w - 85.0).max(1.0));
+        if self.busy || self.render_result.is_some() {
+            ui_label(items, r.x + r.w - 12.0, r.y + 16.0, 10.0, secondary,
+                &format!("{:.1}s", elapsed.as_secs_f64()), Align::Right, 60.0);
+        }
+        ui_label(items, r.x + 12.0, r.y + 35.0, 10.0, secondary, &phase, Align::Left,
+            (r.w - if fraction.is_some() { 116.0 } else { 24.0 }).max(1.0));
+        if let Some(fraction) = fraction {
+            let label = if self.busy { format!("{:.0}% of stage", (fraction * 100.0).floor()) } else { "100%".into() };
+            ui_label(items, r.x + r.w - 12.0, r.y + 35.0, 10.0, ink, &label, Align::Right, 90.0);
+        }
+        let track = RectPx { x: r.x + 12.0, y: r.y + 51.0, w: (r.w - 24.0).max(1.0), h: 6.0 };
+        items.push(Item::Rect(RectItem { radius: 3.0, ..RectItem::new(track, hex_color(0x252b33)) }));
+        let fill = if let Some(fraction) = fraction {
+            Some(RectPx { w: track.w * fraction, ..track })
+        } else if self.busy {
+            let w = track.w * 0.25;
+            let sweep = 0.5 + 0.5 * (elapsed.as_secs_f32() * 2.5).sin();
+            Some(RectPx { x: track.x + (track.w - w) * sweep, w, ..track })
+        } else { None };
+        if let Some(fill) = fill && fill.w > 0.0 {
+            items.push(Item::Rect(RectItem { radius: 3.0, ..RectItem::new(fill, accent) }));
+        }
+    }
     fn draw_transport(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
         const NAMES: [&str; 5] = ["Prev rendered", "Frame back", "Play", "Frame on", "Next rendered"];
         for i in 0..5 {
@@ -2203,7 +2297,7 @@ mod tests {
             budget: DEFAULT_PREVIEW_BYTES,
         };
         let (tx, rx) = mpsc::sync_channel(FRAMES + 2);
-        render(&registry(), &r, &tx, None).unwrap();
+        render(&registry(), &r, &tx, None, None).unwrap();
         let mut frames = vec![];
         while let Ok(Event::Frame(g, f)) = rx.try_recv() {
             assert_eq!(g, 7);
@@ -2227,7 +2321,7 @@ mod tests {
             cancel: Cancellation::default(),
             budget: 1024,
         };
-        let err = render(&registry(), &starved, &tx, None).unwrap_err();
+        let err = render(&registry(), &starved, &tx, None, None).unwrap_err();
         assert!(err.contains("preview_cache_mb"), "{err}");
         let limited = Request {
             generation: 9,
@@ -2239,7 +2333,7 @@ mod tests {
             cancel: Cancellation::default(),
             budget: DEFAULT_PREVIEW_BYTES,
         };
-        render(&registry(), &limited, &tx, None).unwrap();
+        render(&registry(), &limited, &tx, None, None).unwrap();
         let mut limited_count = 0;
         while let Ok(Event::Frame(_, f)) = rx.try_recv() {
             assert!(f.pts < 0.1);
@@ -2263,7 +2357,7 @@ mod tests {
             cancel: Cancellation::default(),
             budget: DEFAULT_PREVIEW_BYTES,
         };
-        render(&registry(), &single, &tx, None).unwrap();
+        render(&registry(), &single, &tx, None, None).unwrap();
         let mut selected = vec![];
         while let Ok(event) = rx.try_recv() {
             if let Event::Frame(_, f) = event {
@@ -2275,7 +2369,7 @@ mod tests {
         assert_eq!(selected[0].before, selected[0].after);
         // Already-cancelled requests must never publish output.
         r.cancel.cancel();
-        assert!(render(&registry(), &r, &tx, None).is_err());
+        assert!(render(&registry(), &r, &tx, None, None).is_err());
         assert!(rx.try_recv().is_err());
         // Late events from an old settings generation must never become uploads.
         let mut panel = Panel::default();
@@ -2292,6 +2386,7 @@ mod tests {
                 Condvar::new(),
             )),
             rx,
+            live: LiveProgress::default(),
         });
         tx.send(Event::Frame(7, frames.remove(0))).unwrap();
         let mut uploads = vec![];
@@ -2301,6 +2396,33 @@ mod tests {
         panel.frames = vec![mark(0.0), mark(0.1)];
         panel.tick(&info, 0.2, None, &mut uploads, 1);
         assert_eq!(panel.frames.len(), 2, "seeking must preserve valid marks");
+        let generation = panel.generation;
+        let live = panel.worker.as_ref().unwrap().live.clone();
+        let feedback = |done, total| StageFeedback {
+            name: "Example stage".into(), index: 1, count: 2,
+            progress: Progress { phase: "Tiles".into(), completed: done, total },
+        };
+        panel.busy = true;
+        *live.lock().unwrap() = Some((generation - 1, feedback(10, Some(10))));
+        panel.tick(&info, 0.2, None, &mut uploads, 1);
+        assert!(panel.feedback.is_none(), "cancelled jobs must not replace live progress");
+        for done in 0..=50 {
+            *live.lock().unwrap() = Some((generation, feedback(done, Some(100))));
+        }
+        // Input-channel updates cannot hide a newer in-flight tile update.
+        tx.send(Event::Progress(generation, 1, 24)).unwrap();
+        panel.tick(&info, 0.2, None, &mut uploads, 1);
+        assert_eq!(panel.feedback.as_ref().unwrap().fraction(), Some(0.5));
+        *live.lock().unwrap() = Some((generation, feedback(0, None)));
+        panel.tick(&info, 0.2, None, &mut uploads, 1);
+        assert!(panel.feedback.as_ref().unwrap().fraction().is_none());
+        tx.send(Event::Done(generation, Err("example failure".into()))).unwrap();
+        *live.lock().unwrap() = Some((generation, feedback(100, Some(100))));
+        panel.tick(&info, 0.2, None, &mut uploads, 1);
+        assert_eq!(panel.render_result, Some(false), "a failed preview is never 100% complete");
+        assert!(!panel.busy);
+        panel.request_preview();
+        assert!(panel.feedback.is_none() && panel.render_result.is_none());
         panel.close();
         panel.enter();
         assert_eq!(
