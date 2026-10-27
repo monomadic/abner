@@ -1240,7 +1240,7 @@ impl Panel {
     /// Switch geometry is shared by painting and hit testing.
     fn card_switch(&self, i: usize, vp: (f32, f32)) -> RectPx {
         let r = self.card(i, vp);
-        RectPx { x: r.x + r.w - 70.0, y: r.y + (r.h - 26.0) / 2.0, w: 60.0, h: 26.0 }
+        RectPx { x: r.x + r.w - 114.0, y: r.y + (r.h - 30.0) / 2.0, w: 104.0, h: 30.0 }
     }
     fn move_button(vp: (f32, f32), down: bool) -> RectPx {
         let w = (Self::left(vp) - 32.0) / 2.0;
@@ -1288,7 +1288,7 @@ impl Panel {
         }
     }
     fn settings_switch(vp: (f32, f32)) -> RectPx {
-        RectPx { x: vp.0 - 78.0, y: HEADER_H + 20.0, w: 60.0, h: 26.0 }
+        RectPx { x: vp.0 - 120.0, y: HEADER_H + 14.0, w: 104.0, h: 30.0 }
     }
     fn draw_settings(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
         let x = vp.0 - Self::right(vp) + 16.0;
@@ -1298,18 +1298,13 @@ impl Panel {
         let muted = hex_color(0xa3a5a8);
         let dim = hex_color(0x777b82);
         let blue = hex_color(0x007be5);
-        text(items, x, top + 20.0, 9.0, "PROCESSOR SETTINGS", dim, w - 72.0);
+        text(items, x, top + 20.0, 9.0, "PROCESSOR SETTINGS", dim, w - 112.0);
         let Some(d) = self.descriptors.get(self.selected) else { return; };
         text(items, x, top + 44.0, 15.0, &d.name, ink, w);
         text(items, x, top + 70.0, 10.0,
             &format!("{} · {}", category_label(&self.categories[self.selected]), input_label(self.capabilities[self.selected])), muted, w);
         let switch = Self::settings_switch(vp);
-        items.push(Item::Rect(RectItem { radius: 8.0, border_w: 1.5, border_color: muted,
-            ..RectItem::new(switch, hex_color(0x0a0a0a)) }));
-        let on = self.enabled[self.selected];
-        let thumb = RectPx { x: switch.x + if on { 29.0 } else { 3.0 }, y: switch.y + 3.0, w: 28.0, h: 20.0 };
-        items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(thumb, if on { blue } else { hex_color(0x1a1a1a) }) }));
-        ui_label(items, thumb.x + thumb.w / 2.0, thumb.y + 10.0, 11.0, ink, if on { "ON" } else { "OFF" }, Align::Center, thumb.w);
+        draw_processor_switch(items, switch, self.enabled[self.selected]);
         text(items, x, top + 107.0, 9.0, "PRESET", dim, 48.0);
         let preset = d.presets.get(self.preset).map_or("Default", |p| p.name.as_str());
         for (r, label) in [
@@ -1708,18 +1703,7 @@ impl Panel {
             };
             items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(tw),
                 ..TextItem::new(tx, c.y + 33.0, 10.0, secondary, meta) }));
-            // The reference's sliding OFF/ON control: only the active side
-            // carries a label, with a blue ON thumb and a white outer contour.
-            items.push(Item::Rect(RectItem { radius: 9.0, border_w: 1.5,
-                border_color: if over(switch) { hex_color(0xffffff) } else { secondary },
-                ..RectItem::new(switch, hex_color(0x0a0a0a)) }));
-            let thumb = RectPx { x: switch.x + if on { 31.0 } else { 3.0 },
-                y: switch.y + 2.0, w: 26.0, h: 22.0 };
-            items.push(Item::Rect(RectItem { radius: 6.0,
-                ..RectItem::new(thumb, hex_color(if on { 0x007be5 } else { 0x1a1a1a })) }));
-            items.push(Item::Text(TextItem { header: true, align: Align::Center, valign: VAlign::Middle,
-                max_width: Some(thumb.w), ..TextItem::new(thumb.x + thumb.w / 2.0,
-                    thumb.y + thumb.h / 2.0, 11.0, hex_color(0xffffff), if on { "ON" } else { "OFF" }) }));
+            draw_processor_switch(items, switch, on);
         }
         items.push(Item::Clip(None));
         let footer = if self.descriptors.is_empty() { "No processors in this build" } else { "" };
@@ -1952,6 +1936,22 @@ impl Drop for Panel {
         if let Some(worker) = &self.worker {
             worker.cancel();
         }
+    }
+}
+/// Figma 434:1036 / 434:1045: fixed OFF/ON segments, 3px inset and 2px gap.
+fn draw_processor_switch(items: &mut Vec<Item>, r: RectPx, on: bool) {
+    let well = hex_color(0x050608);
+    let inactive = hex_color(0x7e8b99);
+    items.push(Item::Rect(RectItem { radius: 7.0, border_w: 1.0,
+        border_color: hex_color(0x606b79), ..RectItem::new(r, well) }));
+    for (index, label) in ["OFF", "ON"].into_iter().enumerate() {
+        let selected = on == (index == 1);
+        let segment = RectPx { x: r.x + 3.0 + index as f32 * 50.0, y: r.y + 3.0, w: 48.0, h: 24.0 };
+        let fill = if selected { hex_color(if on { 0x00aeee } else { 0x1a1a1a }) } else { well };
+        items.push(Item::Rect(RectItem { radius: 4.0, ..RectItem::new(segment, fill) }));
+        items.push(Item::Text(TextItem { regular: true, align: Align::Center, valign: VAlign::Middle,
+            max_width: Some(48.0), ..TextItem::new(segment.x + 24.0, segment.y + 12.0, 12.0,
+                if selected && on { hex_color(0x070b0d) } else { inactive }, label) }));
     }
 }
 fn display_value(v: &Value) -> String {

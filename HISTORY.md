@@ -3,6 +3,13 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-28 — Figma processor switches
+
+Both Process panels share the OFF/ON segmented switch from Timeline Edit nodes
+434:1036 and 434:1045: 104×30 housing, 48×24 segments, muted inactive labels,
+cyan ON with dark ink, and a dark selected OFF segment. Click geometry follows
+the new dimensions; existing enable/bypass behavior is preserved.
+
 ## 2026-10-28 — Simplified Process settings panel
 
 The right panel follows the supplied settings reference: a quiet processor heading,
