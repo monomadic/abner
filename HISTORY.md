@@ -3,6 +3,14 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-27 — Recurrent and batched processor declarations
+
+Extended generic input requirements to distinguish segment-history processors
+with startup context from bounded-batch processors with padded tails. The Process
+inspector displays both declarations. These are reporting capabilities: the host
+retains its existing segment-boundary decoding and streaming execution rules.
+External implementations adopt declarations and in-flight progress independently.
+
 ## 2026-10-27 — Footer: Render joins Split / Join / Save, Export on every page
 
 Cut mode's Render button leaves the header for the footer, after Save, drawn like

@@ -91,6 +91,15 @@ pub enum InputRequirement {
         before: u32,
         after: u32,
     },
+    /// History must be replayed from the segment boundary; startup may look ahead.
+    Recurrent {
+        startup_frames: u32,
+    },
+    /// Bounded batches, with short tails padded by the implementation.
+    Batch {
+        min_frames: u32,
+        max_frames: u32,
+    },
     WholeClip,
 }
 /// What a plugin is for. A plugin declares one or more; the host groups and

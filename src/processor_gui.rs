@@ -199,6 +199,12 @@ fn input_label(c: Capabilities) -> String {
             format!("context −{before} / +{after} frames")
         }
         InputRequirement::WholeClip => "needs entire clip".into(),
+        InputRequirement::Recurrent { startup_frames } => {
+            format!("segment history · {startup_frames}-frame startup")
+        }
+        InputRequirement::Batch { min_frames, max_frames } => {
+            format!("batches {min_frames}–{max_frames} frames · padded tails")
+        }
     }
 }
 fn capability_label(c: Capabilities) -> String {
