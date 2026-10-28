@@ -13,7 +13,8 @@
 //! drained by `poll`, so entering the mode never blocks the loop.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+#[cfg(test)]
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
@@ -965,6 +966,7 @@ impl Cut {
 /// Keyframes (the first video stream's packets flagged `K`) and chapters.
 /// Reading packets is an index walk for MP4/MOV and a demux for the rest;
 /// either way nothing is decoded.
+#[cfg(test)]
 fn parse_gops(data: &str) -> Vec<Gop> {
     let mut gops: Vec<Gop> = Vec::new();
     for line in data.lines() {
@@ -995,57 +997,49 @@ fn parse_gops(data: &str) -> Vec<Gop> {
 }
 
 fn scan(path: &Path) -> anyhow::Result<Scan> {
-    let owned=path.to_owned();
-    if let Some(native)=crate::fc::deadlined("timeline metadata",std::time::Duration::from_secs(30),move||crate::media_metadata::timeline(&owned)).map_err(anyhow::Error::msg)? {
-        let mut gops:Vec<Gop>=Vec::new();let mut frames=Vec::with_capacity(native.packets.len());
-        for p in native.packets{frames.push(p.pts);if p.key{if let Some(g)=gops.last_mut(){g.end=p.pts;}gops.push(Gop{start:p.pts,end:p.pts,..Default::default()});}if let Some(g)=gops.last_mut(){g.packets+=1;g.bytes+=p.size;g.end=g.end.max(p.pts+p.duration);}}
-        frames.sort_by(f64::total_cmp);frames.dedup_by(|a,b|(*a-*b).abs()<1e-7);
-        let keys=gops.iter().map(|g|g.start).collect();let chapters=native.chapters.into_iter().map(|(start,title)|Chapter{start,title}).collect();
-        return Ok(Scan{keys,chapters,gops,frames,facts:parse_facts(&native.facts)});
-    }
-    use anyhow::Context;
-    let out = Command::new("ffprobe")
-        .args(["-v", "error", "-select_streams", "v:0"])
-        .args(["-show_entries", "packet=pts_time,duration_time,size,flags", "-of", "compact=p=0"])
-        .arg(path)
-        .stdin(Stdio::null())
-        .output()
-        .context("running ffprobe (is ffmpeg installed?)")?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        anyhow::bail!("ffprobe: {}", err.lines().last().unwrap_or("failed").trim());
-    }
-    let packets = String::from_utf8_lossy(&out.stdout);
-    let mut frames: Vec<f64> = packets.lines().filter_map(|l| l.split('|').find_map(|f| f.strip_prefix("pts_time=")?.parse().ok())).collect();
-    frames.sort_by(f64::total_cmp); frames.dedup_by(|a,b| (*a-*b).abs() < 1e-7);
-    let gops = parse_gops(&packets);
-    let keys = gops.iter().map(|g| g.start).collect();
-    let mut chapters = Vec::new();
-    let out = Command::new("ffprobe")
-        .args(["-v", "error", "-show_chapters", "-of", "json"])
-        .arg(path)
-        .stdin(Stdio::null())
-        .output();
-    if let Ok(out) = out
-        && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&out.stdout)
-        && let Some(list) = json["chapters"].as_array()
-    {
-        for (i, c) in list.iter().enumerate() {
-            let Some(start) = c["start_time"].as_str().and_then(|s| s.parse().ok()) else { continue };
-            let title = c["tags"]["title"].as_str().map(str::to_string).unwrap_or_else(|| format!("Chapter {}", i + 1));
-            chapters.push(Chapter { start, title });
+    let owned = path.to_owned();
+    let native = crate::fc::deadlined(
+        "timeline metadata",
+        std::time::Duration::from_secs(30),
+        move || crate::media_metadata::timeline(&owned),
+    )
+    .map_err(anyhow::Error::msg)?
+    .ok_or_else(|| anyhow::anyhow!("No Filmcraft packet metadata for this source"))?;
+    let mut gops: Vec<Gop> = Vec::new();
+    let mut frames = Vec::with_capacity(native.packets.len());
+    for p in native.packets {
+        frames.push(p.pts);
+        if p.key {
+            if let Some(g) = gops.last_mut() {
+                g.end = p.pts;
+            }
+            gops.push(Gop {
+                start: p.pts,
+                end: p.pts,
+                ..Default::default()
+            });
+        }
+        if let Some(g) = gops.last_mut() {
+            g.packets += 1;
+            g.bytes += p.size;
+            g.end = g.end.max(p.pts + p.duration);
         }
     }
-    let facts = Command::new("ffprobe")
-        .args(["-v", "error", "-show_format", "-show_streams", "-of", "json"])
-        .arg(path)
-        .stdin(Stdio::null())
-        .output()
-        .ok()
-        .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok())
-        .map(|v| parse_facts(&v))
-        .unwrap_or_default();
-    Ok(Scan { keys, chapters, facts, gops, frames })
+    frames.sort_by(f64::total_cmp);
+    frames.dedup_by(|a, b| (*a - *b).abs() < 1e-7);
+    let keys = gops.iter().map(|g| g.start).collect();
+    let chapters = native
+        .chapters
+        .into_iter()
+        .map(|(start, title)| Chapter { start, title })
+        .collect();
+    Ok(Scan {
+        keys,
+        chapters,
+        gops,
+        frames,
+        facts: parse_facts(&native.facts),
+    })
 }
 
 fn codec_name(raw: &str) -> String {
@@ -1065,7 +1059,7 @@ fn codec_name(raw: &str) -> String {
     }
 }
 
-/// ffprobe's `-show_streams -show_format` JSON as the inspector's rows.
+/// Normalized native stream/format metadata as the inspector's rows.
 pub fn parse_facts(v: &serde_json::Value) -> Facts {
     let streams = v["streams"].as_array().cloned().unwrap_or_default();
     let first = |kind: &str| streams.iter().find(|s| s["codec_type"].as_str() == Some(kind));

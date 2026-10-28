@@ -180,13 +180,13 @@ covering the image.
 - macOS (first target; the shader/loop are portable, fullscreen + font paths are mac-specific)
 - Filmcraft supplies in-process startup metadata, preview color validation, playback,
   recent/timeline thumbnails and waveform decoding. Those paths need no FFmpeg/FFprobe.
-- MP4/MOV and MKV/WebM timeline packets, chapters and stream facts also use Filmcraft.
+- Timeline packet/stream metadata also uses Filmcraft, including AVI, MXF, MPEG TS/PS,
+  raw MPEG-1/2, Y4M and APV; MP4/MOV and MKV/WebM chapters retain their native paths.
 - Filmcraft also supplies native cut export, selective H.264 GOP rendering, ProRes crop
   export, text subtitle extraction and decoded frame inspection for indexed MP4/MOV/MKV/WebM
   inputs. See [native media coverage](docs/NATIVE-MEDIA.md) for codec and preservation limits.
-- FFprobe remains optional for packet/chapter/stream inspection of other containers
-  (`brew install ffmpeg`). Nothing links FFmpeg libraries; tests use its CLI for
-  synthetic fixtures and independent reference comparisons.
+- FFmpeg/FFprobe are not runtime requirements. Tests use their CLIs for synthetic
+  fixtures and independent reference comparisons.
 
 ## Build
 
@@ -197,9 +197,8 @@ cargo build --release
 ./packaging/build-app.sh --install   # …and copy it to /Applications
 ```
 
-The bundle links no third-party libraries, so it runs on a machine without Homebrew; the
-optional FFprobe fallback for other-container timeline metadata is looked up on PATH
-(`--with-cli-tools` copies them in too). The app icon is `assets/app-icon.png` —
+The bundle links no third-party libraries and needs no Homebrew media helpers.
+`--with-cli-tools` is retained for explicitly bundling diagnostic tools. The app icon is `assets/app-icon.png` —
 drop a new square PNG there and both the bundle's `.icns` and the bare binary's Dock
 icon follow. Double-clicking a video on the bundle doesn't load it yet (see TASKS.md).
 

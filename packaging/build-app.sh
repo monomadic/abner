@@ -23,12 +23,9 @@
 #   6. ad-hoc codesigns the whole bundle (required on Apple Silicon —
 #      install_name_tool invalidates any prior signature)
 #
-# Other-container timeline metadata still has an optional FFprobe fallback —
-# that isn't linked, so it isn't bundled here. The launcher script
-# prepends the common Homebrew bin dirs to PATH before exec'ing the real
-# binary so a Finder-launched app (which gets a minimal PATH, no ~/.zshrc)
-# can still find it if Homebrew is installed. Ship it alongside the app
-# (see --with-cli-tools) for an install that doesn't depend on Homebrew.
+# Media I/O runs in-process through Filmcraft. The optional --with-cli-tools
+# flag remains for diagnostic bundles. The existing launcher PATH is retained
+# for compatibility; ordinary media operations do not look up external helpers.
 #
 # Flags:
 #   --debug           build the debug profile instead of release
@@ -126,16 +123,15 @@ mkdir -p "$MACOS" "$RESOURCES" "$FRAMEWORKS"
 
 # --- binary + launcher -------------------------------------------------
 # CFBundleExecutable is a thin launcher, not the real binary: Finder gives
-# a launched app almost no PATH (no /opt/homebrew/bin), which is exactly
-# where the optional timeline-metadata helper usually lives.
+# a launched app almost no PATH. Preserve the existing environment for
+# compatibility with explicitly bundled diagnostic tools.
 cp "$BIN" "$MACOS/$BIN_NAME-bin"
 chmod +w "$MACOS/$BIN_NAME-bin"
 
 cat > "$MACOS/$BIN_NAME" <<'LAUNCHER'
 #!/bin/bash
-# Thin launcher: a GUI-launched app inherits almost no PATH, so the
-# media helper lookup would otherwise fail even though the exact
-# same binary works fine from a terminal.
+# Thin launcher: preserve the historical PATH for optional diagnostic tools.
+# Filmcraft media I/O itself needs no helper executable.
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PATH="$DIR:/opt/homebrew/bin:/usr/local/bin:$PATH"
 exec "$DIR/abner-bin" "$@"

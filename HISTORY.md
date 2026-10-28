@@ -3,6 +3,31 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-28 — Remove the final FFprobe packet-metadata fallback
+
+Timeline packets and stream facts now use Filmcraft for AVI, MXF, MPEG TS/PS,
+raw MPEG-1/2, Y4M, standalone APV and still images. MP4/MOV and Matroska retain
+native packet/chapter readers. `cut::scan` has no subprocess fallback: an unsupported
+adapter fails explicitly under the existing 30-second deadline and cooperative reads.
+
+AVI respects timing slots, indexed flags and H.264 picture-order recovery. MXF uses
+edit units and presentation order; MPEG picture headers repair incorrect index key
+flags. AVC-in-MXF without composition offsets follows Filmcraft's bitstream POC
+recovery rather than treating stored-order FFprobe packet timestamps as display time.
+MPEG transport/program metadata is normalized to the first presented picture, with
+Filmcraft interpolation for missing timestamps. Raw MPEG unit indexing adds no second
+whole-file payload copy. Bounded Y4M/APV adapters retain real encoded packet sizes.
+
+Synthetic reference cases cover MJPEG/H.264 AVI, MPEG-2/H.264 TS, HEVC M2TS,
+MPEG-2 PS, MPEG-2/AVC MXF, raw MPEG and 10-bit Y4M. Packet payload sizes/key flags
+and valid timestamp tables are compared to FFprobe; missing MXF composition offsets
+are checked against decoded display order. Every reference fixture is also read in a
+child process with external tools absent from PATH. The full suite passes (159 tests,
+three existing ignores). Native-generated MXF/Y4M tests
+cover packet tables and truncated Y4M rejection without a fixture helper. Production
+media I/O now needs no FFmpeg/FFprobe executable; export/inspection coverage limits
+remain documented in docs/NATIVE-MEDIA.md.
+
 ## 2026-10-28 — Native export, text subtitles and frame inspection
 
 Filmcraft now handles indexed MP4/MOV/MKV/WebM export and inspection in-process.

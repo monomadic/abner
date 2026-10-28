@@ -19,6 +19,7 @@ mod fc;
 mod player;
 mod probe;
 mod media_metadata;
+mod media_packets;
 mod media_io;
 mod recent;
 mod render;

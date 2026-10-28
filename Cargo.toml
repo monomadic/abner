@@ -30,7 +30,7 @@ png = "0.18"
 # AV1 on Apple silicon; `filmcraft-platform` holds the OS FFI). Same pin as switchblade: a fork
 # revision carrying the VP9 (storytold/filmcraft#2180) and AV1 (#2608) VideoToolbox decoders
 # until they merge upstream. Metadata, playback, thumbnails and waveforms run
-# in-process; FFprobe remains for timeline packet metadata in other containers.
+# in-process, including timeline packet metadata; no FFmpeg/FFprobe runtime helper.
 filmcraft-codecs = { git = "https://github.com/monomadic/filmcraft", rev = "3be5ba26da4578cc973eb8f0ab070df1bda9a1f6" }
 filmcraft-media = { git = "https://github.com/monomadic/filmcraft", rev = "3be5ba26da4578cc973eb8f0ab070df1bda9a1f6" }
 filmcraft-frame = { git = "https://github.com/monomadic/filmcraft", rev = "3be5ba26da4578cc973eb8f0ab070df1bda9a1f6" }
@@ -46,6 +46,10 @@ filmcraft-export = { git = "https://github.com/monomadic/filmcraft", rev = "3be5
 filmcraft-h264enc = { git = "https://github.com/monomadic/filmcraft", rev = "3be5ba26da4578cc973eb8f0ab070df1bda9a1f6" }
 filmcraft-prores = { git = "https://github.com/monomadic/filmcraft", rev = "3be5ba26da4578cc973eb8f0ab070df1bda9a1f6" }
 filmcraft-aac = { git = "https://github.com/monomadic/filmcraft", rev = "3be5ba26da4578cc973eb8f0ab070df1bda9a1f6" }
+filmcraft-avi = { git = "https://github.com/monomadic/filmcraft", rev = "3be5ba26da4578cc973eb8f0ab070df1bda9a1f6" }
+filmcraft-mxf = { git = "https://github.com/monomadic/filmcraft", rev = "3be5ba26da4578cc973eb8f0ab070df1bda9a1f6" }
+filmcraft-mpegts = { git = "https://github.com/monomadic/filmcraft", rev = "3be5ba26da4578cc973eb8f0ab070df1bda9a1f6" }
+filmcraft-mpeg2v = { git = "https://github.com/monomadic/filmcraft", rev = "3be5ba26da4578cc973eb8f0ab070df1bda9a1f6" }
 rayon = "1"
 resvg = { version = "0.45", default-features = false }
 

@@ -123,7 +123,8 @@ from one to the other, keeping its number.
   sources use the Filmcraft reader. Raw container/VUI color declarations remain distinct
   from inferred playback defaults. Startup and processor SDR checks share this path.
   `fc::deadlined` bounds the caller and signals cooperative cancellation; a stuck kernel
-  read is abandoned rather than joined. Reference helper deadlines remain test-only; other-container packet metadata retains its compatibility helper.
+  read is abandoned rather than joined. Reference helper deadlines remain test-only. Packet metadata is native throughout;
+  additional container adapters live in `src/media_packets.rs`.
 - `src/recent.rs` — the launch window's recent entries: `~/.config/abner/recent`
   (written by lib.rs on every load, never by `App` — tests must not touch it) and the
   per-file Filmcraft thumbnail workers (probe + decoded frame, no cache). **An entry is a
@@ -262,7 +263,7 @@ from one to the other, keeping its number.
   export read the same numbers. Keyframe snap is the default and the whole point: in
   snaps back, out snaps forward, every kept range starts on a keyframe, and the export
   is a native Filmcraft packet copy; frame snap (`K`) re-encodes and the
-  header says so. Keyframes/chapters (Filmcraft packet tables for MP4/MOV/MKV/WebM), the waveform (streamed
+  header says so. Keyframes/chapters (Filmcraft packet readers and native chapter tables), the waveform (streamed
   Filmcraft audio, 20 peaks/s) and subtitles each load on a worker and are drained by
   `Cut::poll` in `tick`. `App` keeps the model across leaving the mode and drops it
   when the clip list changes. The UI is the second `impl App` block in `app.rs`
@@ -414,7 +415,8 @@ the "VIDEO QUALITY TESTING TOOLKIT" line that used to be a second text run.
   color validation, thumbnails and waveform decoding need no FFmpeg/FFprobe process.
   Native export, text subtitle extraction and decoded-frame inspection live in `src/media_io.rs`;
   see `docs/NATIVE-MEDIA.md` for supported containers/codecs and preservation limits.
-  Only other-container packet/chapter/stream metadata still uses FFprobe. The only other non-obvious dependency is
+  Timeline packet/chapter/stream metadata is native too; AVI/MXF/MPEG/Y4M/APV adapters
+  live in `src/media_packets.rs`. There is no production FFmpeg/FFprobe process. The only other non-obvious dependency is
   `png`, for the wordmark texture.
 - **`./packaging/build-app.sh [--open|--install]` builds `Abner.app`** — switchblade's
   recipe: release build, `assets/app-icon.png` → `AppIcon.icns`, `Info.plist.in` with
@@ -427,8 +429,8 @@ the "VIDEO QUALITY TESTING TOOLKIT" line that used to be a second text run.
   whatever a future dependency brings), ad-hoc codesign (mandatory on Apple Silicon after
   `install_name_tool`), then `lsregister -f` so an in-place reinstall doesn't keep the
   old icon. `CFBundleExecutable` is a thin launcher that prepends the Homebrew bin dirs
-  to PATH, because a Finder-launched app gets no PATH and media export/inspection helpers
-  would fail. **Open With / double-click** is `src/open.rs` + `src/open_shim.m` (switchblade's,
+  to PATH for compatibility with explicitly bundled diagnostic tools; media I/O needs
+  no helper executable. **Open With / double-click** is `src/open.rs` + `src/open_shim.m` (switchblade's,
   compiled by `build.rs`): LaunchServices delivers opened files as an Apple Event, never
   argv, and winit 0.30 panics if its `NSApplicationDelegate` is replaced, so the shim
   grafts `application:openURLs:` onto winit's delegate class before the run loop starts.

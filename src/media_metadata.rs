@@ -197,7 +197,7 @@ fn config(c: &CodecConfig) -> (String, Declared) {
     }
     (pix, color)
 }
-fn canonical_codec(label: &str) -> String {
+pub(crate) fn canonical_codec(label: &str) -> String {
     let s = label.to_ascii_lowercase();
     for (need, name) in [
         ("h.264", "h264"),
@@ -212,6 +212,7 @@ fn canonical_codec(label: &str) -> String {
         ("vp9", "vp9"),
         ("vp8", "vp8"),
         ("mpeg-2", "mpeg2video"),
+        ("mpeg-1", "mpeg1video"),
         ("mjpeg", "mjpeg"),
         ("motion jpeg", "mjpeg"),
     ] {
@@ -221,13 +222,15 @@ fn canonical_codec(label: &str) -> String {
     }
     s
 }
-fn pix_label(label: &str) -> String {
+pub(crate) fn pix_label(label: &str) -> String {
     let chroma = if label.contains("4:2:0") {
         1
     } else if label.contains("4:2:2") {
         2
     } else if label.contains("4:4:4") {
         3
+    } else if label.to_ascii_lowercase().contains("monochrome") {
+        0
     } else {
         return "?".into();
     };
@@ -781,7 +784,7 @@ fn video_facts(m: &Metadata) -> serde_json::Value {
     };
     serde_json::json!({"codec_type":"video","codec_name":m.info.codec,"width":m.info.width,"height":m.info.height,"pix_fmt":m.info.pix_fmt,"avg_frame_rate":format!("{}/1",m.info.fps),"bit_rate":m.info.bit_rate,"color_space":matrix})
 }
-fn profile(codec: &CodecConfig, v: &mut serde_json::Value) {
+pub(crate) fn profile(codec: &CodecConfig, v: &mut serde_json::Value) {
     match codec {
         CodecConfig::Avc(a) => {
             v["level"] = a.level.into();
@@ -975,8 +978,7 @@ fn mp4_chapters(
     }
     Ok(out)
 }
-/// Native timeline packet and stream metadata for the two indexed container families.
-/// `None` leaves other containers on their existing detailed-analysis compatibility path.
+/// Native packet, chapter and stream metadata. Other containers use Filmcraft packet adapters.
 pub(crate) fn timeline(path: &Path) -> Result<Option<Timeline>, String> {
     let ext = path
         .extension()
@@ -984,7 +986,7 @@ pub(crate) fn timeline(path: &Path) -> Result<Option<Timeline>, String> {
         .unwrap_or("")
         .to_ascii_lowercase();
     if !matches!(ext.as_str(), "mp4" | "m4v" | "mov" | "3gp" | "mkv" | "webm") {
-        return Ok(None);
+        return crate::media_packets::timeline(path);
     }
     let metadata = read(path)?;
     let mut streams = vec![video_facts(&metadata)];

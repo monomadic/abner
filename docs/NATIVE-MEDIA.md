@@ -42,9 +42,30 @@ Selective rendering checks cancellation between packets/frames and rechecks sour
 frame dependencies, output PTS, forced key boundaries and complete decoder delivery
 before publishing a new working file. Export does not overwrite its source.
 
-The remaining production media-tool calls are the FFprobe packet/chapter/stream
-metadata fallback for other containers in `cut::scan`. Playback and initial probing
-of those containers still use Filmcraft. The native export/inspection API reports
-unsupported indexed input instead of quietly restoring an FFmpeg dependency.
-Tests use FFmpeg/FFprobe only to generate synthetic fixtures or as an independent
-reference; two native pipeline/subtitle tests also run with PATH=/nonexistent.
+Timeline packet metadata for AVI, MXF, MPEG transport/program streams, raw MPEG-1/2,
+Y4M, standalone APV and still images uses `src/media_packets.rs`. AVI uses indexed
+chunk sizes and timing slots; H.264 picture order is recovered when B-frames require
+it. Unknown AVI index key flags remain false unless the codec headers or an intra-only
+format establish a random-access picture. MXF uses edit units, material-package origin,
+index offsets and Filmcraft AVC picture-order recovery; MPEG picture headers repair
+index key flags when available. MPEG transport/program timestamps are interpolated by
+Filmcraft and normalized to the first presented picture, matching the playback clock.
+Raw MPEG picture order comes from Filmcraft access-unit/GOP/temporal-reference parsing.
+Y4M/APV frame tables use bounded byte-reader adapters around Filmcraft source metadata.
+Raw APV uses Filmcraft's default 24 fps clock; that elementary stream carries no rate.
+Packet granularity and codec coverage follow the pinned Filmcraft readers.
+
+All packet paths retain the 30-second caller deadline and cooperative read cancellation.
+The elementary MPEG index buffer is capped at 128 MiB; AVI/MXF header probes are bounded
+at 8/16 KiB. AVI H.264 checks the first 300 nonempty chunks for reordering, matching
+Filmcraft playback, then reads all bounded headers when reordering is found.
+Unknown color declarations remain unknown in stream facts; decoder defaults
+are not presented as declared tags. Formats without a native packet adapter fail explicitly.
+Additional containers do not gain export or subtitle support from this metadata migration.
+Only MP4/MOV and Matroska currently expose chapter tables through these adapters.
+
+There are no production FFmpeg/FFprobe media-tool calls. Tests use them to generate
+synthetic fixtures and obtain independent packet/decode references. The AVI, MXF,
+MPEG TS/PS, raw MPEG and Y4M fixtures are also read in child test processes with
+PATH=/nonexistent; native-generated MXF/Y4M tests need no fixture helper at all.
+The optional packaging flag that bundles diagnostic tools remains compatible.
