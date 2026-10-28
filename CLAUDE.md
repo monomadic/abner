@@ -123,7 +123,7 @@ from one to the other, keeping its number.
   sources use the Filmcraft reader. Raw container/VUI color declarations remain distinct
   from inferred playback defaults. Startup and processor SDR checks share this path.
   `fc::deadlined` bounds the caller and signals cooperative cancellation; a stuck kernel
-  read is abandoned rather than joined. Reference helper deadlines remain test-only; export/analysis have separate process owners.
+  read is abandoned rather than joined. Reference helper deadlines remain test-only; other-container packet metadata retains its compatibility helper.
 - `src/recent.rs` — the launch window's recent entries: `~/.config/abner/recent`
   (written by lib.rs on every load, never by `App` — tests must not touch it) and the
   per-file Filmcraft thumbnail workers (probe + decoded frame, no cache). **An entry is a
@@ -241,7 +241,7 @@ from one to the other, keeping its number.
   dimmed. While it is up the pointer moves/resizes it and `brush_cursor_visible()` is
   false, so painting can't run into a drag; `C` again drops it. `S` then writes the mask
   AND the video pixels under it at the same size (`<name>.mask.png` + `<name>.crop.png`). `E` (marquee up) re-encodes the whole clip cut to the same rectangle
-  (floored to even sides) as ProRes 422 Proxy, `<name>.crop.mov`, via an `ffmpeg` child
+  (floored to even sides) as ProRes 422 Proxy, `<name>.crop.mov`, via Filmcraft
   on a worker (`mask::export_prores`, its own `crop_export` receiver). With the marquee up the mask
   tint is NOT drawn (the footage shows plain, everything outside dimmed near-black at
   `CROP_DIM` 0.95 — linear blending, so lower reads grey). `A`/Shift-A step the ratio
@@ -261,7 +261,7 @@ from one to the other, keeping its number.
   are ranges removed in SOURCE time (nothing ripples), so the lanes, the player and the
   export read the same numbers. Keyframe snap is the default and the whole point: in
   snaps back, out snaps forward, every kept range starts on a keyframe, and the export
-  is a stream copy through the concat demuxer; frame snap (`K`) re-encodes and the
+  is a native Filmcraft packet copy; frame snap (`K`) re-encodes and the
   header says so. Keyframes/chapters (Filmcraft packet tables for MP4/MOV/MKV/WebM), the waveform (streamed
   Filmcraft audio, 20 peaks/s) and subtitles each load on a worker and are drained by
   `Cut::poll` in `tick`. `App` keeps the model across leaving the mode and drops it
@@ -412,7 +412,9 @@ the "VIDEO QUALITY TESTING TOOLKIT" line that used to be a second text run.
   AV1 VideoToolbox decoders until storytold/filmcraft#2180 and #2608 merge; move the pin to
   upstream `main` once they do, together with switchblade's). Startup probing, preview
   color validation, thumbnails and waveform decoding need no FFmpeg/FFprobe process.
-  Other-container packet analysis, decoded-frame inspection, subtitles and export still use media helpers. The only other non-obvious dependency is
+  Native export, text subtitle extraction and decoded-frame inspection live in `src/media_io.rs`;
+  see `docs/NATIVE-MEDIA.md` for supported containers/codecs and preservation limits.
+  Only other-container packet/chapter/stream metadata still uses FFprobe. The only other non-obvious dependency is
   `png`, for the wordmark texture.
 - **`./packaging/build-app.sh [--open|--install]` builds `Abner.app`** — switchblade's
   recipe: release build, `assets/app-icon.png` → `AppIcon.icns`, `Info.plist.in` with

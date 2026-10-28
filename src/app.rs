@@ -181,7 +181,7 @@ pub struct App {
     cursor_inside: bool,
     mask_status: String,
     mask_save: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
-    /// The ProRes crop export (`E`), an ffmpeg child on a worker. Separate
+    /// The ProRes crop export (`E`), a Filmcraft render on a worker. Separate
     /// from `mask_save` because it runs for as long as the clip takes to
     /// encode, and a PNG save shouldn't queue behind it.
     crop_export: Option<std::sync::mpsc::Receiver<Result<String, String>>>,

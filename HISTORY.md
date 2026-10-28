@@ -3,6 +3,31 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-10-28 — Native export, text subtitles and frame inspection
+
+Filmcraft now handles indexed MP4/MOV/MKV/WebM export and inspection in-process.
+Keyframe cuts copy coded packets (PCM can be sliced sample-exactly); frame cuts use
+Filmcraft H.264 CRF 16 and AAC-LC. Crop export uses ProRes 422 Proxy with PCM, while
+selective H.264 GOP rendering copies untouched slices and auxiliary streams and
+verifies frame timing, requested random-access boundaries and a full native decode
+before publishing. Original audio edit lists survive selective rendering. Temporary
+outputs are removed on failure; sources are never overwritten.
+
+Native text extraction handles MP4 timed text/WebVTT and Matroska SubRip, ASS/SSA
+and WebVTT. Decoded frame inspection combines actual decoder delivery with parsed
+H.264/HEVC/VP9 picture types and independent container key flags; unknown picture
+types stay unknown and cannot authorize partial GOP copies. Native copies retain
+MP4 display matrices, declared sample-entry color, text metadata and chapter titles.
+The current muxer needs small Rust adapters for track matrices, subtitle handlers and chapter boxes.
+
+Synthetic tests cover frame types and packet payloads against FFprobe, fractional
+rates and rotation, text captions, multiple audio streams, decoded crop pixels,
+chapters, cancellation and failure cleanup. The full suite passes (155 tests, three
+existing ignores). The native pipeline and subtitle tests
+also pass with external tools absent from PATH. See docs/NATIVE-MEDIA.md for scope:
+this does not promise the FFmpeg codec/container long tail or byte-identical encoder
+quality. Other-container packet/chapter/stream metadata retains FFprobe.
+
 ## 2026-10-28 — Playhead grab tolerance
 
 Dragging within 8 logical pixels on either side of the visible Cut playhead in

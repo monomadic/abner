@@ -12,11 +12,10 @@
 //! subtitle track) runs on its own worker and lands through a receiver
 //! drained by `poll`, so entering the mode never blocks the loop.
 
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use serde::{Deserialize, Serialize};
 
@@ -27,7 +26,6 @@ const WAVE_RATE: usize = 4000;
 /// Two times closer than this are the same boundary.
 const EPS: f64 = 1e-3;
 
-static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Snap {
@@ -118,6 +116,7 @@ pub struct FrameInfo {
     pub key: bool,
 }
 
+#[cfg(test)]
 fn parse_frame(line: &str) -> Option<FrameInfo> {
     let mut frame = FrameInfo { pts: f64::NAN, kind: '?', key: false };
     for field in line.split('|') {
@@ -128,32 +127,11 @@ fn parse_frame(line: &str) -> Option<FrameInfo> {
     frame.pts.is_finite().then_some(frame)
 }
 
-/// Stream decoded metadata in small batches. A separate owner watches cancellation
-/// even while the reader is blocked in a pipe (for example on an unavailable disk).
+/// Decode and stream native metadata in small batches, checking cancellation between packets.
 fn read_frames(path: &Path, cancel: &AtomicBool, tx: std::sync::mpsc::Sender<Vec<FrameInfo>>) {
-    let Ok(mut child) = Command::new("ffprobe")
-        .args(["-v", "error", "-select_streams", "v:0", "-show_frames", "-show_entries",
-            "frame=best_effort_timestamp_time,pict_type,key_frame", "-of", "compact=p=0"])
-        .arg(path).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() else { return };
-    let pipe = child.stdout.take().unwrap();
-    let reader = std::thread::spawn(move || {
-        let mut batch = Vec::new();
-        for line in BufReader::new(pipe).lines() {
-            let Ok(line) = line else { break };
-            if let Some(frame) = parse_frame(&line) { batch.push(frame); }
-            if batch.len() >= 64 && tx.send(std::mem::take(&mut batch)).is_err() { return; }
-        }
-        if !batch.is_empty() { let _ = tx.send(batch); }
-    });
-    loop {
-        if cancel.load(Ordering::Relaxed) || reader.is_finished() {
-            let _ = child.kill(); break;
-        }
-        match child.try_wait() { Ok(Some(_)) => break, Err(_) => { let _ = child.kill(); break; }, _ => {} }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+    if let Err(e) = crate::media_io::inspect(path, cancel, |batch| tx.send(batch).is_ok()) {
+        log::warn!("frame inspection: {e}");
     }
-    let _ = child.wait();
-    let _ = reader.join();
 }
 
 struct Scan {
@@ -1152,19 +1130,10 @@ fn trim_rate(fps: f64) -> String {
 /// The first subtitle stream as cues. A clip with none (or with bitmap
 /// subtitles, which have no text to show) yields nothing.
 fn read_cues(path: &Path) -> Vec<Cue> {
-    if matches!(crate::media_metadata::has_subtitles(path),Ok(Some(false))){return Vec::new();}
-    let out = Command::new("ffmpeg")
-        .args(["-nostdin", "-v", "error", "-i"])
-        .arg(path)
-        .args(["-map", "0:s:0", "-f", "srt", "-"])
-        .stdin(Stdio::null())
-        .output();
-    match out {
-        Ok(out) if out.status.success() => parse_srt(&String::from_utf8_lossy(&out.stdout)),
-        _ => Vec::new(),
-    }
+    crate::media_io::cues(path).unwrap_or_else(|e| { log::warn!("subtitle extraction: {e}"); Vec::new() })
 }
 
+#[cfg(test)]
 fn parse_srt(text: &str) -> Vec<Cue> {
     fn stamp(s: &str) -> Option<f64> {
         let (hms, ms) = s.trim().split_once([',', '.'])?;
@@ -1261,14 +1230,6 @@ fn read_wave(path: &Path, cancel: &Arc<AtomicBool>, tx: &std::sync::mpsc::Sender
     });
 }
 
-/// Write `keeps` (source-time ranges) of `source` to `dest`, through a
-/// temporary beside it that is renamed only on success.
-///
-/// `Snap::Keyframe` is a stream copy through the concat demuxer — one
-/// `inpoint`/`outpoint` entry per range, valid because every range starts
-/// on a keyframe. `Snap::Frame` selects the frames inside the ranges and
-/// re-encodes (H.264 CRF 16 + AAC), since a range that starts between
-/// keyframes has nothing to copy its first frames from.
 /// The chapters an export carries, on the OUTPUT's clock: a chapter that
 /// starts inside a kept range moves up by what was cut before it; one that
 /// starts inside a cut is dropped. Each runs to the next start (the last to
@@ -1290,6 +1251,7 @@ pub fn output_chapters(chapters: &[Chapter], keeps: &[(f64, f64)]) -> Vec<(f64, 
         .collect()
 }
 
+#[cfg(test)]
 fn ffmetadata(chapters: &[(f64, f64, String)]) -> String {
     let mut text = String::from(";FFMETADATA1\n");
     for (a, b, title) in chapters {
@@ -1299,63 +1261,10 @@ fn ffmetadata(chapters: &[(f64, f64, String)]) -> String {
     text
 }
 
+/// Native Filmcraft export. Keyframe mode copies coded packets; frame mode encodes
+/// selected pictures as H.264 and audio as AAC. Publish only a completed temporary.
 pub fn export(source: &Path, dest: &Path, keeps: &[(f64, f64)], snap: Snap, chapters: &[Chapter]) -> anyhow::Result<()> {
-    use anyhow::Context;
-    let nonce = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    let ext = dest.extension().unwrap_or_default().to_string_lossy().into_owned();
-    let tag = format!("{}.{nonce}.tmp", std::process::id());
-    let temporary = dest.with_extension(format!("{tag}.{ext}"));
-    let list = dest.with_extension(format!("{tag}.txt"));
-    let meta = dest.with_extension(format!("{tag}.ffmeta"));
-    let carried = output_chapters(chapters, keeps);
-    let mut cmd = Command::new("ffmpeg");
-    cmd.args(["-nostdin", "-y", "-v", "error"]);
-    match snap {
-        Snap::Keyframe => {
-            let source = source.canonicalize().unwrap_or_else(|_| source.to_path_buf());
-            let quoted = source.to_string_lossy().replace('\'', "'\\''");
-            let mut text = String::from("ffconcat version 1.0\n");
-            for (a, b) in keeps {
-                text.push_str(&format!("file '{quoted}'\ninpoint {a:.6}\noutpoint {b:.6}\n"));
-            }
-            std::fs::write(&list, text).context("writing the segment list")?;
-            cmd.args(["-f", "concat", "-safe", "0", "-i"]).arg(&list);
-            if !carried.is_empty() {
-                std::fs::write(&meta, ffmetadata(&carried)).context("writing the chapter list")?;
-                cmd.arg("-i").arg(&meta);
-            }
-            cmd.args(["-map", "0:v:0", "-map", "0:a?", "-c", "copy", "-avoid_negative_ts", "make_zero"]);
-            if !carried.is_empty() { cmd.args(["-map_metadata", "0", "-map_chapters", "1"]); }
-        }
-        Snap::Frame => {
-            let expr = keeps.iter().map(|(a, b)| format!("gte(t,{a:.6})*lt(t,{b:.6})")).collect::<Vec<_>>().join("+");
-            cmd.arg("-i").arg(source);
-            if !carried.is_empty() {
-                std::fs::write(&meta, ffmetadata(&carried)).context("writing the chapter list")?;
-                cmd.arg("-i").arg(&meta);
-                cmd.args(["-map_metadata", "0", "-map_chapters", "1"]);
-            }
-            cmd.args(["-map", "0:v:0", "-map", "0:a?"]);
-            cmd.args(["-vf", &format!("select='{expr}',setpts=N/FRAME_RATE/TB")]);
-            cmd.args(["-af", &format!("aselect='{expr}',asetpts=N/SR/TB")]);
-            cmd.args(["-c:v", "libx264", "-crf", "16", "-preset", "medium", "-pix_fmt", "yuv420p"]);
-            cmd.args(["-c:a", "aac", "-b:a", "192k"]);
-        }
-    }
-    let out = cmd.arg(&temporary).stdin(Stdio::null()).output().context("running ffmpeg (is ffmpeg installed?)");
-    let _ = std::fs::remove_file(&list);
-    let _ = std::fs::remove_file(&meta);
-    let out = out?;
-    if !out.status.success() {
-        let _ = std::fs::remove_file(&temporary);
-        let err = String::from_utf8_lossy(&out.stderr);
-        anyhow::bail!("ffmpeg: {}", err.lines().last().unwrap_or("failed").trim());
-    }
-    if let Err(e) = std::fs::rename(&temporary, dest) {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(e.into());
-    }
-    Ok(())
+    crate::media_io::export(source, dest, keeps, snap == Snap::Keyframe, &output_chapters(chapters, keeps), None)
 }
 
 #[cfg(test)]

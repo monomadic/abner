@@ -1,12 +1,18 @@
 //! Selective H.264 GOP rendering. Originals are never overwritten. A verified
 //! working file is published only after all requested regions succeed.
-use std::{path::{Path, PathBuf}, process::{Command, Stdio}, sync::atomic::{AtomicBool, Ordering}, time::{Duration, Instant}};
-use anyhow::{Context, ensure};
+use std::{path::{Path, PathBuf}, sync::atomic::AtomicBool};
+#[cfg(test)]
+use std::{process::{Command, Stdio}, sync::atomic::Ordering, time::{Duration, Instant}};
+#[cfg(test)]
+use anyhow::ensure;
 
 pub struct Region { pub start: f64, pub encode_start: f64, pub end: f64, pub boundaries: Vec<f64> }
+#[cfg(test)]
 struct Work(PathBuf);
+#[cfg(test)]
 impl Drop for Work { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
 
+#[cfg(test)]
 fn run(cmd: &mut Command, dir: &Path, cancel: &AtomicBool) -> anyhow::Result<()> {
     let log = dir.join("stderr");
     let stderr = std::fs::File::create(&log)?;
@@ -24,9 +30,11 @@ fn run(cmd: &mut Command, dir: &Path, cancel: &AtomicBool) -> anyhow::Result<()>
         std::thread::sleep(Duration::from_millis(25));
     }
 }
+#[cfg(test)]
 fn ffmpeg() -> Command {
     let mut c = Command::new("ffmpeg"); c.args(["-nostdin", "-y", "-v", "error", "-xerror"]); c.stdout(Stdio::null()); c
 }
+#[cfg(test)]
 fn probe(path: &Path, dir: &Path, cancel: &AtomicBool) -> anyhow::Result<serde_json::Value> {
     let json = dir.join("probe.json");
     run(Command::new("ffprobe").args(["-v", "error", "-select_streams", "v:0", "-show_streams", "-show_packets", "-show_entries", "stream=codec_name,pix_fmt,has_b_frames,width,height:packet=pts_time,duration_time,flags", "-of", "json"])
@@ -34,112 +42,14 @@ fn probe(path: &Path, dir: &Path, cancel: &AtomicBool) -> anyhow::Result<serde_j
     Ok(serde_json::from_slice(&std::fs::read(json)?)?)
 }
 
+#[cfg(test)]
 fn frames(v: &serde_json::Value) -> Vec<f64> {
     let mut pts: Vec<_> = v["packets"].as_array().into_iter().flatten().filter_map(|p| p["pts_time"].as_str()?.parse::<f64>().ok()).collect();
     pts.sort_by(f64::total_cmp); pts
 }
 
 pub fn encode(source: &Path, regions: &[Region], cancel: &AtomicBool) -> anyhow::Result<PathBuf> {
-    ensure!(!regions.is_empty(), "No GOPs need encoding");
-    let id = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
-    let dir = source.parent().unwrap_or(Path::new(".")).join(format!(".abner-encode-{}-{id}", std::process::id()));
-    std::fs::create_dir(&dir).context("Creating encoding workspace beside the source")?;
-    let work = Work(dir);
-    let input = probe(source, &work.0, cancel)?;
-    let stream = &input["streams"][0];
-    ensure!(stream["codec_name"] == "h264" && stream["pix_fmt"] == "yuv420p", "GOP encoding currently supports 8-bit H.264 4:2:0 video");
-    let b_frames = stream["has_b_frames"].as_u64().unwrap_or(0).to_string();
-    let pts = frames(&input);
-    ensure!(pts.len() >= 2 && pts[0].abs() < 0.0001, "GOP encoding requires a zero-based video timeline");
-    let period = pts[1] - pts[0];
-    let last_duration = input["packets"].as_array().unwrap().iter().filter_map(|p| {
-        let t: f64 = p["pts_time"].as_str()?.parse().ok()?;
-        let d: f64 = p["duration_time"].as_str()?.parse().ok()?;
-        ((t-pts.last().unwrap()).abs() < 0.00001).then_some(d)
-    }).next().unwrap_or(period);
-    let duration = pts.last().unwrap() + last_duration;
-    for r in regions {
-        for t in std::iter::once(&r.start).chain(std::iter::once(&r.encode_start)).chain(std::iter::once(&r.end)).chain(&r.boundaries) {
-            ensure!((*t-duration).abs() < 0.0001 || pts.binary_search_by(|p| if (*p-*t).abs() < 0.0001 { std::cmp::Ordering::Equal } else { p.total_cmp(t) }).is_ok(), "An edit is between frames; move it to a frame boundary before encoding");
-        }
-    }
-    // Recheck the source before copying a partial GOP: the UI's asynchronous
-    // metadata must never authorize copying unknown or B-frame dependencies.
-    if regions.iter().any(|r| r.encode_start > r.start + 0.0001) {
-        let json = work.0.join("types.json");
-        run(Command::new("ffprobe").args(["-v", "error", "-select_streams", "v:0", "-show_frames",
-            "-show_entries", "frame=best_effort_timestamp_time,pict_type", "-of", "json"])
-            .arg(source).stdout(std::fs::File::create(&json)?), &work.0, cancel)?;
-        let types: serde_json::Value = serde_json::from_slice(&std::fs::read(json)?)?;
-        for r in regions.iter().filter(|r| r.encode_start > r.start + 0.0001) {
-            let decoded: Vec<_> = types["frames"].as_array().into_iter().flatten().filter_map(|f| {
-                let t: f64 = f["best_effort_timestamp_time"].as_str()?.parse().ok()?;
-                (t >= r.start-0.0001 && t < r.end-0.0001).then_some((t, f["pict_type"].as_str().unwrap_or("")))
-            }).collect();
-            let expected: Vec<_> = pts.iter().filter(|t| **t >= r.start-0.0001 && **t < r.end-0.0001).collect();
-            ensure!(!expected.is_empty() && decoded.len() == expected.len() &&
-                decoded.iter().zip(expected).all(|((t,k), p)| (t-p).abs() < 0.0001 && matches!(*k, "I" | "P")),
-                "Partial GOP copy requires complete I/P frame analysis; source unchanged");
-        }
-    }
-    let mut spans = Vec::new(); let mut at = 0.0;
-    for r in regions {
-        if r.start > at + 0.0001 { spans.push((at, r.start, None)); }
-        spans.push((r.start, r.end.min(duration), Some(r))); at = r.end;
-    }
-    if at < duration - 0.0001 { spans.push((at, duration, None)); }
-    // Split on key packets in decode order. Trimming copied B-frame streams
-    // with -t would instead drop trailing pictures or include the next GOP.
-    let base = work.0.join("copy-%d.mp4");
-    let times = spans.iter().skip(1).map(|(a,_,_)| format!("{a:.9}")).collect::<Vec<_>>().join(",");
-    let mut split = ffmpeg();
-    split.arg("-i").arg(source).args(["-map", "0:v:0", "-c", "copy", "-f", "segment", "-reset_timestamps", "1", "-segment_format_options", "video_track_timescale=90000"]);
-    if !times.is_empty() { split.args(["-segment_time_delta", "0.0001", "-segment_times", &times]); }
-    else { split.args(["-segment_time", &format!("{}", duration + 1.0)]); }
-    run(split.arg(&base), &work.0, cancel)?;
-    let mut list = String::from("ffconcat version 1.0\n");
-    for (i, (a, b, region)) in spans.iter().enumerate() {
-        let copied = work.0.join(format!("copy-{i}.mp4"));
-        let part = work.0.join(format!("part-{i}.mp4"));
-        if let Some(r) = region {
-            let prefix = r.encode_start - a;
-            if prefix > 0.0001 {
-                let head = work.0.join(format!("head-{i}.mp4"));
-                run(ffmpeg().arg("-i").arg(&copied).args(["-map", "0:v:0", "-c", "copy", "-t",
-                    &format!("{prefix:.9}"), "-video_track_timescale", "90000"]).arg(&head), &work.0, cancel)?;
-                list.push_str(&format!("file 'head-{i}.mp4'\nduration {prefix:.9}\n"));
-            }
-            let first = pts.partition_point(|t| *t < r.encode_start - 0.0001);
-            let forced = r.boundaries.iter().filter(|t| **t > r.encode_start && **t < *b)
-                .map(|t| format!("eq(n,{})", pts.partition_point(|p| *p < *t - 0.0001) - first)).collect::<Vec<_>>().join("+");
-            let mut cmd = ffmpeg();
-            cmd.arg("-noautorotate").arg("-i").arg(&copied).args(["-map", "0:v:0", "-fps_mode", "passthrough", "-enc_time_base", "1:90000", "-c:v", "libx264", "-preset", "medium", "-crf", "16", "-bf", &b_frames, "-forced-idr", "1", "-x264-params", "open-gop=0:repeat-headers=1", "-sc_threshold", "0", "-pix_fmt", "yuv420p"]);
-            if prefix > 0.0001 {
-                cmd.args(["-vf", &format!("trim=start={prefix:.9},setpts=PTS-STARTPTS"), "-bf", "0"]);
-            }
-            if !forced.is_empty() { cmd.args(["-force_key_frames", &format!("expr:{forced}")]); }
-            cmd.args(["-video_track_timescale", "90000"]).arg(&part);
-            run(&mut cmd, &work.0, cancel)?;
-        } else { std::fs::rename(copied, &part)?; }
-        list.push_str(&format!("file 'part-{i}.mp4'\nduration {:.9}\n", b-region.map_or(*a, |r| r.encode_start)));
-    }
-    let playlist = work.0.join("concat.txt"); std::fs::write(&playlist, list)?;
-    let output = work.0.join("output.mp4");
-    run(ffmpeg().args(["-f", "concat", "-safe", "0", "-i"]).arg(&playlist).arg("-i").arg(source)
-        .args(["-map", "0:v:0", "-map", "1:a?", "-map", "1:s?", "-map_metadata", "1", "-map_chapters", "1", "-c", "copy", "-video_track_timescale", "90000"]).arg(&output), &work.0, cancel)?;
-    let result = probe(&output, &work.0, cancel)?;
-    ensure!(result["streams"][0]["width"] == stream["width"] && result["streams"][0]["height"] == stream["height"], "Rendered dimensions changed; source unchanged");
-    let rendered = frames(&result);
-    ensure!(pts.len() == rendered.len() && pts.iter().zip(&rendered).all(|(a,b)| (a-b).abs() < 0.0001), "Rendered video failed frame timing verification; source unchanged");
-    let keys: Vec<f64> = result["packets"].as_array().unwrap().iter().filter(|p| p["flags"].as_str().unwrap_or("").contains('K')).filter_map(|p| p["pts_time"].as_str()?.parse().ok()).collect();
-    ensure!(regions.iter().flat_map(|r| &r.boundaries).all(|t| keys.iter().any(|k| (t-k).abs() < 0.0001)), "Rendered boundaries are not keyframes; source unchanged");
-    run(ffmpeg().arg("-i").arg(&output).args(["-map", "0:v:0", "-f", "null", "-"]), &work.0, cancel)?;
-    ensure!(!cancel.load(Ordering::Relaxed), "Encoding cancelled");
-    let stem = source.file_stem().unwrap_or_default().to_string_lossy();
-    let stem = stem.rsplit_once(".encoded-").filter(|(_, suffix)| suffix.chars().all(|c| c.is_ascii_digit())).map_or(stem.as_ref(), |(base, _)| base);
-    let dest = source.with_file_name(format!("{stem}.encoded-{id}.mp4"));
-    std::fs::rename(output, &dest)?;
-    Ok(dest)
+    crate::media_io::smart(source, regions, cancel)
 }
 
 #[cfg(test)]

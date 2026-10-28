@@ -379,35 +379,13 @@ pub fn even_rect((x, y, w, h): (u32, u32, u32, u32)) -> (u32, u32, u32, u32) {
 }
 
 /// Re-encode the whole of `source`, cut to `rect` (display pixels, rotation
-/// applied — ffmpeg autorotates before the filter, same as the decoder), as
+/// applied by Filmcraft before cropping), as
 /// ProRes 422 Proxy with the audio as PCM. Writes a temporary beside the
 /// destination and renames only on success, like the PNGs. Blocks for as
 /// long as the encode takes, so it runs on a worker.
 pub fn export_prores(source: &Path, dest: &Path, rect: (u32, u32, u32, u32)) -> anyhow::Result<()> {
-    use anyhow::Context;
-    let (x, y, w, h) = even_rect(rect);
-    let nonce = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    let temporary = dest.with_extension(format!("mov.{}.{nonce}.tmp", std::process::id()));
-    let out = std::process::Command::new("ffmpeg")
-        .args(["-nostdin", "-y", "-v", "error", "-i"])
-        .arg(source)
-        .args(["-map", "0:v:0", "-map", "0:a?"])
-        .args(["-vf", &format!("crop={w}:{h}:{x}:{y}")])
-        .args(["-c:v", "prores_ks", "-profile:v", "0", "-pix_fmt", "yuv422p10le"])
-        .args(["-c:a", "pcm_s16le", "-f", "mov"])
-        .arg(&temporary)
-        .output()
-        .context("running ffmpeg (is ffmpeg installed?)")?;
-    if !out.status.success() {
-        let _ = std::fs::remove_file(&temporary);
-        let err = String::from_utf8_lossy(&out.stderr);
-        anyhow::bail!("ffmpeg: {}", err.lines().last().unwrap_or("failed").trim());
-    }
-    if let Err(e) = std::fs::rename(&temporary, dest) {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(e.into());
-    }
-    Ok(())
+    let metadata = crate::probe::probe(source)?;
+    crate::media_io::export(source, dest, &[(0., metadata.duration)], false, &[], Some(even_rect(rect)))
 }
 
 #[cfg(test)]

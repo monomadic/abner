@@ -834,7 +834,7 @@ fn profile(codec: &CodecConfig, v: &mut serde_json::Value) {
         _ => {}
     }
 }
-fn atoms(
+pub(crate) fn atoms(
     src: &impl filmcraft_isobmff::ByteSource,
     start: u64,
     end: u64,
@@ -1213,6 +1213,7 @@ mod timeline_tests {
         assert!(nero_chapters(&[1, 0, 0, 0, 0, 0, 0, 0, 1]).is_err());
     }
 }
+#[cfg(test)]
 pub(crate) fn has_subtitles(path: &Path) -> Result<Option<bool>, String> {
     match path
         .extension()

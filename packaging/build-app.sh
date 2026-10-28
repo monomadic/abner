@@ -23,7 +23,7 @@
 #   6. ad-hoc codesigns the whole bundle (required on Apple Silicon —
 #      install_name_tool invalidates any prior signature)
 #
-# The app still shells out to media CLIs for export and detailed inspection —
+# Other-container timeline metadata still has an optional FFprobe fallback —
 # that isn't linked, so it isn't bundled here. The launcher script
 # prepends the common Homebrew bin dirs to PATH before exec'ing the real
 # binary so a Finder-launched app (which gets a minimal PATH, no ~/.zshrc)
@@ -127,7 +127,7 @@ mkdir -p "$MACOS" "$RESOURCES" "$FRAMEWORKS"
 # --- binary + launcher -------------------------------------------------
 # CFBundleExecutable is a thin launcher, not the real binary: Finder gives
 # a launched app almost no PATH (no /opt/homebrew/bin), which is exactly
-# where the export/inspection helper CLIs usually live.
+# where the optional timeline-metadata helper usually lives.
 cp "$BIN" "$MACOS/$BIN_NAME-bin"
 chmod +w "$MACOS/$BIN_NAME-bin"
 
