@@ -7,7 +7,7 @@ use crate::{
         RAIL_INSPECTOR_H, SOURCE_BORDER, SOURCE_INK, SOURCE_RING,
         SOURCE_SUBTLE, SOURCE_SURFACE, WORKSPACE_DIM, WORKSPACE_MUTED,
         WORKSPACE_PANEL, WORKSPACE_RULE, WORKSPACE_TEXT, draw_cut_footer_button,
-        draw_icon, draw_keycap, draw_rail_grip, footer_export_rect, hex_color, mix, rail_full_width,
+        draw_icon, draw_rail_grip, footer_export_rect, hex_color, mix, rail_full_width,
         status_build_width, ui_label,
     },
     player::{Player, Rgba},
@@ -1753,8 +1753,8 @@ impl Panel {
                     if down { "Move down" } else { "Move up" }) }));
         }
     }
-    /// Focused inspector (278:609), for the focused processor: keycap and
-    /// name as the title row, five mono rows between solid hairlines
+    /// Focused inspector (278:609), for the focused processor: the name as
+    /// the title row (the position keycap went 2026-10-29), five mono rows between solid hairlines
     /// (categories first) and the registry ID where Sources puts the path.
     fn draw_detail(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
         let (grip, inspector) = self.detail(vp);
@@ -1770,9 +1770,8 @@ impl Panel {
             // Full layout anchored at the top, clipped while it folds.
             items.push(Item::Clip(Some(inspector)));
             items.push(Item::Rect(RectItem::new(RectPx { h: RAIL_INSPECTOR_H, ..inspector }, hex_color(INSPECTOR_BG))));
-            draw_keycap(items, RectPx { x: x0, y: y + 16.0, w: 24.0, h: 24.0 }, i + 1, mix(INSPECTOR_BG, 0xffffff, 0.5));
-            items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(l - 80.0),
-                ..TextItem::new(x0 + 32.0, y + 28.0, 13.0, hex_color(SOURCE_INK), d.name.as_str()) }));
+            items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(l - 48.0),
+                ..TextItem::new(x0, y + 28.0, 13.0, hex_color(SOURCE_INK), d.name.as_str()) }));
             for ry in [y + 49.0, y + 178.0] {
                 items.push(Item::Rect(RectItem::new(
                     RectPx { x: x0, y: ry, w: x1 - x0, h: 1.0 }, hex_color(0x303234))));
