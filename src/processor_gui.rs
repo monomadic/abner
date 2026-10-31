@@ -2761,11 +2761,11 @@ mod tests {
                 "testsrc2=size=64x64:rate=24000/1001",
                 "-frames:v",
                 "6",
-                // lossless H.264 (FFV1 is not a codec the FilmCraft player decodes)
+                // Supported H.264: lossless transform bypass has no software decode path.
                 "-c:v",
                 "libx264",
-                "-qp",
-                "0",
+                "-crf",
+                "18",
                 "-pix_fmt",
                 "yuv420p",
             ])
@@ -3080,7 +3080,7 @@ mod tests {
         let path = dir.join("retime.mp4");
         let status = std::process::Command::new("ffmpeg")
             .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=24", "-frames:v", "6",
-                "-c:v", "libx264", "-qp", "0", "-pix_fmt", "yuv420p"])
+                "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p"])
             .arg(&path)
             .status()
             .unwrap();

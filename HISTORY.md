@@ -3,6 +3,13 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-11-01 — Supported processor-preview fixtures
+
+The fractional-rate and retiming preview regressions now encode ordinary H.264
+at CRF 18 instead of lossless transform bypass, which Filmcraft's software decoder
+explicitly rejects when VideoToolbox declines the stream. All 20 Process tests
+pass, including buffered delivery, original/output pixel identity and retimed pairing.
+
 ## 2026-11-01 — Retiming previews; settings tooltips
 
 Frame-rate changes are previewable. The API gains `Rate` and
