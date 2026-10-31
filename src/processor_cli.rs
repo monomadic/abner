@@ -21,6 +21,10 @@ pub fn handle(registry: &Registry) -> anyhow::Result<bool> {
             anyhow::ensure!(args.len() == 3, "usage: --check-processor ID SETTINGS_JSON");
             let settings = serde_json::from_str(&args[2])?;
             let factory = registry.get(&args[1]).map_err(anyhow::Error::msg)?;
+            let retimed = factory
+                .output_rate(&settings, [24, 1])
+                .map_err(anyhow::Error::msg)?;
+            let retimed = u64::from(retimed[0]) != u64::from(retimed[1]) * 24;
             let mut session = factory
                 .create(64, 64, &settings)
                 .map_err(anyhow::Error::msg)?;
@@ -39,22 +43,34 @@ pub fn handle(registry: &Registry) -> anyhow::Result<bool> {
                 outputs.extend(session.process(input).map_err(anyhow::Error::msg)?);
             }
             outputs.extend(session.finish().map_err(anyhow::Error::msg)?);
+            // A retimer declares a new rate, so its count and timing differ by
+            // design; it must still emit valid frames in strictly rising order.
             anyhow::ensure!(
-                outputs.len() == 4,
+                retimed || outputs.len() == 4,
                 "processor changed frame count in this one-to-one probe"
             );
             let mut frames = Vec::new();
+            let mut last: Option<(i64, [u32; 2])> = None;
             for (i, out) in outputs.into_iter().enumerate() {
                 out.validate().map_err(anyhow::Error::msg)?;
-                anyhow::ensure!(
-                    out.pts == i as i64 && out.duration == 1 && out.time_base == [1, 24],
-                    "processor changed timing"
-                );
+                if retimed {
+                    let at = |(pts, tb): (i64, [u32; 2])| pts as f64 * tb[0] as f64 / tb[1] as f64;
+                    anyhow::ensure!(
+                        last.is_none_or(|l| at(l) < at((out.pts, out.time_base))),
+                        "retimed output timestamps must strictly increase"
+                    );
+                    last = Some((out.pts, out.time_base));
+                } else {
+                    anyhow::ensure!(
+                        out.pts == i as i64 && out.duration == 1 && out.time_base == [1, 24],
+                        "processor changed timing"
+                    );
+                }
                 let checksum = out
                     .pixels
                     .iter()
                     .fold(0u64, |v, &p| v.wrapping_mul(31).wrapping_add(u64::from(p)));
-                frames.push(serde_json::json!({"width":out.width,"height":out.height,"pts":out.pts,"checksum":checksum,"progress":session.progress()}));
+                frames.push(serde_json::json!({"width":out.width,"height":out.height,"pts":out.pts,"duration":out.duration,"time_base":out.time_base,"checksum":checksum,"progress":session.progress()}));
             }
             println!("{}", serde_json::to_string_pretty(&frames)?);
         }

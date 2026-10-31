@@ -249,6 +249,40 @@ impl TextCtx {
         result
     }
 
+    /// Break `text` into lines no wider than `limit`, by real font advances.
+    /// Breaks fall between words; `\n` forces one; a word wider than the
+    /// limit is ellipsized on its own line rather than split mid-glyph.
+    pub fn wrap(&self, text: &str, px: f32, tracking: f32, limit: f32) -> Vec<String> {
+        let rpx = self.raster_size(px);
+        let Some(font) = self.face() else { return Vec::new() };
+        let sf = font.as_scaled(rpx);
+        let width = |s: &str| {
+            s.chars().map(|c| sf.h_advance(sf.glyph_id(c)) + tracking).sum::<f32>()
+                - if s.is_empty() { 0.0 } else { tracking }
+        };
+        let mut lines = Vec::new();
+        for para in text.split('\n') {
+            let mut line = String::new();
+            for word in para.split_whitespace() {
+                let candidate = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
+                if width(&candidate) <= limit || line.is_empty() {
+                    line = candidate;
+                } else {
+                    lines.push(std::mem::take(&mut line));
+                    line = word.to_string();
+                }
+                if width(&line) > limit {
+                    lines.push(self.fit(&line, px, tracking, limit));
+                    line.clear();
+                }
+            }
+            if !line.is_empty() || para.trim().is_empty() {
+                lines.push(line);
+            }
+        }
+        lines
+    }
+
     /// Lay out one line at `px` physical pixels, adding `tracking` px of
     /// extra advance per glyph (CSS letter-spacing). Quads are relative
     /// to the line box's top-left.
@@ -315,6 +349,14 @@ mod tests {
             for scale in [1.0, 1.5, 2.0] {
                 let fitted = text.fit("Sources Timeline Crop Mask", 12.0 * scale, 0.0, 90.0 * scale);
                 assert!(text.layout(&fitted, 12.0 * scale, 0.0).w <= 90.0 * scale + 0.001);
+            }
+        }
+        for scale in [1.0, 2.0] {
+            let lines = text.wrap("Leave-one-out rebuilds each frame from its neighbours, so A/B shows the error.\nSecond paragraph", 11.0 * scale, 0.0, 120.0 * scale);
+            assert!(lines.len() > 2, "a long sentence wraps: {lines:?}");
+            assert_eq!(lines.last().unwrap(), "Second paragraph", "a newline forces a break");
+            for l in &lines {
+                assert!(text.layout(l, 11.0 * scale, 0.0).w <= 120.0 * scale + 0.001, "{l:?} overflows");
             }
         }
         text.set_header(true);

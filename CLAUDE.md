@@ -464,6 +464,22 @@ made every plugin read as a quality loss): `processor_gui::render` decodes at th
 clip's display dimensions and `processors.preview_cache_mb` (default 1024) is the
 whole memory rule — paired frames per section, frames kept across the timeline.
 Still 8-bit RGBA in and out.
+**Retiming previews** (2026-11-01): a stage that changes the frame rate declares it
+with `Factory::output_rate(settings, input) -> Rate` (identity by default; a
+`[num, den]` rational) and emits frames on that grid in any time base (the host
+converts to µs). `render` then pairs each output frame with the LATEST original at
+or before it instead of requiring the input's timestamps; a render at the playhead
+returns every output frame its source frame owns. The page asks the chain's rate on
+the UI thread (`update_rate`, `try_lock` on the registry the worker holds for a
+render) and steps, scrubs and picks the shown frame (`Panel::shown`, the output
+frame whose span holds the playhead) on the OUTPUT grid, while `source_seek` sends
+the players half a source frame before the original that precedes the playhead —
+so an exact seek lands on it — and the clock stays on the output time.
+**Settings explain themselves**: a property's `description` is its hover tooltip,
+and `oneOf: [{const, title, description}]` names and explains each choice of a
+selector (plain `enum` still works); the tooltip is the setting's text then the
+current choice's. Long text is wrapped by the renderer (`TextItem::wrap`, measured
+like `max_width`), never app-side.
 The generic API lives in `crates/processor-api`; processor implementations are
 maintained independently. **`cargo build-with-plugins`** (alias → the committed,
 generic helper `tools/build-with-plugins`) is the sanctioned way to compose them

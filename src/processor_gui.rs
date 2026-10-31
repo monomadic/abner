@@ -12,11 +12,11 @@ use crate::{
     },
     player::{Player, Rgba},
     probe::VideoInfo,
-    render::{Align, Item, RectItem, RectPx, TextItem, Upload, VAlign, VideoMode},
+    render::{Align, Item, RectItem, RectPx, TextBg, TextItem, Upload, VAlign, VideoMode},
 };
 use abner_processor_api::{
-    Cancellation, Capabilities, Category, Descriptor, Frame, InputRequirement, Progress, Registry, Role,
-    Session,
+    Cancellation, Capabilities, Category, Descriptor, Frame, InputRequirement, Progress, Rate,
+    Registry, Role, Session,
 };
 use serde_json::{Value, json};
 use std::{
@@ -57,10 +57,18 @@ impl SwitchSlide {
     }
 }
 
+/// One choice of a selector: `enum` gives bare values, `oneOf` of
+/// `{"const", "title", "description"}` names and explains each.
+#[derive(Clone, Debug)]
+struct Choice {
+    value: Value,
+    title: Option<String>,
+    description: Option<String>,
+}
 #[derive(Clone, Debug)]
 enum Kind {
     Number { min: f64, max: f64, integer: bool },
-    Enum(Vec<Value>),
+    Enum(Vec<Choice>),
     Bool,
     Text,
     Unsupported,
@@ -69,10 +77,57 @@ enum Kind {
 struct Field {
     key: String,
     title: String,
-    description: String,
     kind: Kind,
     default: Option<Value>,
     required: bool,
+    /// The schema's `description`: the setting's hover tooltip.
+    description: Option<String>,
+}
+impl Field {
+    fn choice(&self, value: &Value) -> Option<&Choice> {
+        match &self.kind {
+            Kind::Enum(choices) => choices.iter().find(|c| &c.value == value),
+            _ => None,
+        }
+    }
+    /// The tooltip for this setting at `value`: what the setting does, then
+    /// what the current choice does. None when the schema explains neither.
+    fn tooltip(&self, value: &Value) -> Option<String> {
+        let choice = self.choice(value).and_then(|c| {
+            c.description.as_ref().map(|d| match &c.title {
+                Some(t) => format!("{t}: {d}"),
+                None => format!("{}: {d}", display_value(&c.value)),
+            })
+        });
+        match (&self.description, choice) {
+            (Some(d), Some(c)) => Some(format!("{d}\n\n{c}")),
+            (Some(d), None) => Some(d.clone()),
+            (None, c) => c,
+        }
+    }
+    /// The value as the editor shows it: a choice's title when it has one.
+    fn shown(&self, value: &Value) -> String {
+        self.choice(value)
+            .and_then(|c| c.title.clone())
+            .unwrap_or_else(|| value.as_str().map(str::to_owned).unwrap_or_else(|| display_value(value)))
+    }
+}
+fn choices(s: &Value) -> Option<Vec<Choice>> {
+    let text = |v: &Value| v.as_str().map(str::to_owned);
+    if let Some(e) = s["enum"].as_array().filter(|v| !v.is_empty()) {
+        return Some(e.iter().map(|v| Choice { value: v.clone(), title: None, description: None }).collect());
+    }
+    let one_of = s["oneOf"].as_array().filter(|v| !v.is_empty())?;
+    one_of
+        .iter()
+        .map(|c| {
+            c.get("const").map(|v| Choice {
+                value: v.clone(),
+                title: text(&c["title"]),
+                description: text(&c["description"]),
+            })
+        })
+        .collect()
 }
 fn fields(schema: &Value) -> Vec<Field> {
     schema["properties"]
@@ -80,8 +135,8 @@ fn fields(schema: &Value) -> Vec<Field> {
         .into_iter()
         .flat_map(|p| p.iter())
         .map(|(key, s)| {
-            let kind = if let Some(e) = s["enum"].as_array().filter(|v| !v.is_empty()) {
-                Kind::Enum(e.clone())
+            let kind = if let Some(c) = choices(s) {
+                Kind::Enum(c)
             } else {
                 match s["type"].as_str() {
                     Some("number" | "integer") => {
@@ -109,12 +164,12 @@ fn fields(schema: &Value) -> Vec<Field> {
             Field {
                 key: key.clone(),
                 title: s["title"].as_str().unwrap_or(key).into(),
-                description: s["description"].as_str().unwrap_or("").into(),
                 kind,
                 default: s.get("default").cloned(),
                 required: schema["required"]
                     .as_array()
                     .is_some_and(|a| a.iter().any(|v| v == key)),
+                description: s["description"].as_str().filter(|d| !d.trim().is_empty()).map(str::to_owned),
             }
         })
         .collect()
@@ -126,6 +181,40 @@ fn defaults(fields: &[Field]) -> Value {
             .filter_map(|f| f.default.clone().map(|v| (f.key.clone(), v)))
             .collect(),
     )
+}
+/// A probed rate as the rational the API speaks: integer and NTSC rates
+/// exactly, anything else to a thousandth.
+fn rational(fps: f64) -> Rate {
+    for den in [1u32, 1001, 1000] {
+        let num = (fps * den as f64).round();
+        if num >= 1.0 && num < u32::MAX as f64 && (num / den as f64 - fps).abs() < 1e-6 * fps.max(1.0) {
+            return [num as u32, den];
+        }
+    }
+    [((fps * 1000.0).round() as u32).max(1), 1000]
+}
+fn rate_fps(r: Rate) -> f64 {
+    r[0] as f64 / r[1] as f64
+}
+fn same_rate(a: Rate, b: Rate) -> bool {
+    u64::from(a[0]) * u64::from(b[1]) == u64::from(b[0]) * u64::from(a[1])
+}
+/// The rate the chain delivers for a source at `fps`, each stage declaring
+/// its output for the one before it.
+fn chain_rate(registry: &Registry, chain: &[(String, Value)], fps: f64) -> Result<Rate, String> {
+    let mut rate = rational(fps);
+    for (id, settings) in chain {
+        let factory = registry.get(id)?;
+        rate = factory.output_rate(settings, rate)?;
+        if rate.contains(&0) || rate_fps(rate) > 1000.0 {
+            return Err(format!("{}: unsupported output frame rate", factory.descriptor().name));
+        }
+    }
+    Ok(rate)
+}
+/// A frame rate as the UI writes it: 60, 29.97, 23.976.
+fn fps_label(fps: f64) -> String {
+    format!("{fps:.3}").trim_end_matches('0').trim_end_matches('.').to_owned()
 }
 fn numeric(min: f64, max: f64, integer: bool, fraction: f64) -> Value {
     let v = min + fraction.clamp(0.0, 1.0) * (max - min);
@@ -350,11 +439,17 @@ struct Preview {
     after: Rgba,
     input: [u32; 2],
     output: [u32; 2],
+    /// The output frame's own time and length, seconds: a retimed chain
+    /// puts new frames between the source's.
     pts: f64,
+    duration: f64,
+    /// The original paired with it: the latest source frame at or before
+    /// `pts` (the same frame unless the chain retimes).
+    source_pts: f64,
     elapsed: f64,
 }
 impl Worker {
-    fn new(registry: Registry) -> Self {
+    fn new(registry: Arc<Mutex<Registry>>) -> Self {
         let mailbox = Arc::new((
             Mutex::new(Mailbox {
                 pending: None,
@@ -384,6 +479,7 @@ impl Worker {
                 };
                 let generation = request.generation;
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let registry = registry.lock().unwrap_or_else(|e| e.into_inner());
                     render(&registry, &request, &tx, Some(&active_worker), Some(&live_worker))
                 }))
                 .unwrap_or_else(|_| Err("Processor panicked; preview stopped".into()));
@@ -522,6 +618,10 @@ fn render(
     if !fps.is_finite() || fps <= 0.0 || fps > 1000.0 {
         return Err("Preview needs a valid frame rate".into());
     }
+    // A retimed chain emits frames on its own grid; each is paired with the
+    // latest original at or before it instead of the original it replaces.
+    let retimed = !same_rate(chain_rate(registry, &r.chain, fps)?, rational(fps));
+    let mut last_out: Option<i64> = None;
     let player = Player::spawn(
         &r.info.path,
         w,
@@ -542,12 +642,39 @@ fn render(
         for frame in frames {
             r.cancel.check()?;
             frame.validate()?;
-            if frame.width != ow || frame.height != oh || frame.time_base != [1, 1_000_000] {
+            if frame.width != ow || frame.height != oh || (!retimed && frame.time_base != [1, 1_000_000]) {
                 return Err("Preview processor changed its declared geometry or time base".into());
             }
-            let (before, source_pts) = originals
-                .remove(&frame.pts)
-                .ok_or("Preview requires timestamp-preserving output frames")?;
+            // A retimer may count in its own time base (1/rate is natural);
+            // everything here keys on the microseconds the inputs carry.
+            let micros = |t: i64| {
+                (t as i128 * frame.time_base[0] as i128 * 1_000_000 + frame.time_base[1] as i128 / 2)
+                    .div_euclid(frame.time_base[1] as i128) as i64
+            };
+            let frame = Frame {
+                pts: micros(frame.pts),
+                duration: micros(frame.pts + frame.duration) - micros(frame.pts),
+                time_base: [1, 1_000_000],
+                ..frame
+            };
+            let (before, source_pts) = if retimed {
+                if last_out.is_some_and(|l| frame.pts <= l) {
+                    return Err("Retimed output timestamps must strictly increase".into());
+                }
+                last_out = Some(frame.pts);
+                let (&key, (before, source_pts)) = originals
+                    .range(..=frame.pts)
+                    .next_back()
+                    .ok_or("Retimed output frame precedes every source frame")?;
+                let paired = (before.clone(), *source_pts);
+                // Outputs arrive in order: nothing older can pair again.
+                *originals = originals.split_off(&key);
+                paired
+            } else {
+                originals
+                    .remove(&frame.pts)
+                    .ok_or("Preview requires timestamp-preserving output frames (or a declared output rate)")?
+            };
             let mut rgba = Vec::with_capacity(ow * oh * 4);
             for rgb in frame.pixels.as_chunks::<3>().0 {
                 rgba.extend([
@@ -571,7 +698,9 @@ fn render(
                     after: Arc::new(rgba),
                     input: [w, h],
                     output: [ow as u32, oh as u32],
-                    pts: source_pts,
+                    pts: frame.pts as f64 / 1e6,
+                    duration: frame.duration as f64 / 1e6,
+                    source_pts,
                     elapsed: started.elapsed().as_secs_f64(),
                 },
             ))
@@ -666,7 +795,7 @@ fn render(
     if received == 0 {
         return Err("No preview frames at this position".into());
     }
-    if !originals.is_empty() {
+    if !retimed && !originals.is_empty() {
         return Err("Processor did not return all preview frames".into());
     }
     Ok(())
@@ -733,6 +862,14 @@ pub struct Panel {
     fields: Vec<Field>,
     settings: Value,
     worker: Option<Worker>,
+    /// Shared with the worker (locked for a whole render), so the page can
+    /// ask the chain's output rate without waiting on one.
+    registry: Option<Arc<Mutex<Registry>>>,
+    /// The chain's output rate, the cadence the page steps and scrubs at,
+    /// and what it was computed for (source rate + chain).
+    rate: f64,
+    retimed: bool,
+    rate_key: String,
     /// `processors.preview_cache_mb` in bytes: bounds each section's paired
     /// frames on the worker and the rendered frames kept across the timeline.
     budget: usize,
@@ -753,7 +890,6 @@ pub struct Panel {
     pending: Option<f64>,
     progress: Option<(usize, usize)>,
     busy_since: Instant,
-    selected_frame: usize,
     playback: bool,
     editing: Option<(usize, String)>,
     scroll: f32,
@@ -791,6 +927,10 @@ impl Default for Panel {
             fields: vec![],
             settings: json!({}),
             worker: None,
+            registry: None,
+            rate: 24.0,
+            retimed: false,
+            rate_key: String::new(),
             budget: DEFAULT_PREVIEW_BYTES,
             generation: 0,
             cancel: Cancellation::default(),
@@ -807,7 +947,6 @@ impl Default for Panel {
             pending: None,
             progress: None,
             busy_since: Instant::now(),
-            selected_frame: 0,
             playback: true,
             editing: None,
             scroll: 0.0,
@@ -850,7 +989,8 @@ impl Panel {
             .collect();
         // Plugins start bypassed: running one is always the user's choice.
         let enabled = vec![false; descriptors.len()];
-        let worker = (!descriptors.is_empty()).then(|| Worker::new(registry));
+        let registry = Arc::new(Mutex::new(registry));
+        let worker = (!descriptors.is_empty()).then(|| Worker::new(registry.clone()));
         let mut s = Self::default();
         s.descriptors = descriptors;
         s.saved = saved;
@@ -860,6 +1000,7 @@ impl Panel {
         s.capabilities = capabilities;
         s.categories = categories;
         s.worker = worker;
+        s.registry = Some(registry);
         s.select(0);
         s
     }
@@ -887,7 +1028,6 @@ impl Panel {
         }
         self.generation += 1;
         self.frames.clear();
-        self.selected_frame = 0;
         self.busy = false;
         self.feedback = None;
         self.render_result = None;
@@ -970,8 +1110,8 @@ impl Panel {
         if self.scrubbing {
             let t = Self::timeline(vp);
             self.seek = Some(
-                (((x - t.x) / t.w).clamp(0.0, 1.0) as f64 * self.duration * self.fps).floor()
-                    / self.fps,
+                (((x - t.x) / t.w).clamp(0.0, 1.0) as f64 * self.duration * self.rate).floor()
+                    / self.rate,
             );
             return true;
         }
@@ -1071,16 +1211,36 @@ impl Panel {
         self.render_result = Some(false);
         self.status = "Frame preview cancelled".into();
     }
-    /// One source frame back or forward, clamped to the clip.
+    /// One frame back or forward on the chain's OUTPUT grid (the source's
+    /// unless a stage retimes), clamped to the clip.
     fn step(&mut self, dir: i32) {
-        self.seek = Some(if dir < 0 {
-            (self.time - 1.0 / self.fps).max(0.0)
-        } else {
-            (self.time + 1.0 / self.fps).min((self.duration - 1.0 / self.fps).max(0.0))
-        });
+        let r = self.rate;
+        let n = (self.time * r + 0.1).floor() + dir as f64;
+        self.seek = Some((n / r).clamp(0.0, (self.duration - 1.0 / r).max(0.0)));
+    }
+    /// The source frame the original shows at output time `t`: the latest
+    /// one at or before it.
+    fn source_frame(&self, t: f64) -> f64 {
+        (t * self.fps + 0.1 * self.fps / self.rate).floor().max(0.0) / self.fps
+    }
+    /// Where the app seeks its players for output time `t`: half a source
+    /// frame before `source_frame`, so the exact seek ("first frame at or
+    /// after") lands on it whatever the pts rounding.
+    pub fn source_seek(&self, t: f64) -> f64 {
+        (self.source_frame(t) - 0.5 / self.fps).max(0.0)
+    }
+    /// The rendered frame on screen at the playhead: the output frame whose
+    /// span holds it (a tenth of a frame early, so grid rounding can't fall
+    /// into the previous frame's span).
+    fn shown(&self) -> Option<&Preview> {
+        let lead = 0.1 / self.rate;
+        self.frames
+            .iter()
+            .rev()
+            .find(|f| f.pts - lead <= self.time && self.time < f.pts + f.duration - lead)
     }
     fn jump(&mut self, next: bool) {
-        let tolerance = 0.5 / self.fps.max(1.0);
+        let tolerance = 0.5 / self.rate.max(1.0);
         self.seek = if next {
             self.frames.iter().find(|f| f.pts > self.time + tolerance)
         } else {
@@ -1168,7 +1328,7 @@ impl Panel {
         }
         match key {
             Key::Tab => {
-                if self.frames.iter().any(|f| (f.pts - self.time).abs() <= 0.51 / self.fps) {
+                if self.shown().is_some() {
                     self.show_rendered = !self.show_rendered;
                 } else {
                     self.status = "No rendered frame at this position · Render frame first".into();
@@ -1358,9 +1518,9 @@ impl Panel {
             text(items, row.x, row.y, 11.0, &f.title, ink, row.w);
             let value = &self.settings[&f.key];
             let editing = self.editing.as_ref().filter(|(n, _)| *n == i);
-            let shown = editing.map_or_else(|| if value.is_null() { "Automatic".into() } else { display_value(value) }, |(_, s)| format!("{s}▏"));
+            let shown = editing.map_or_else(|| if value.is_null() { "Automatic".into() } else { f.shown(value) }, |(_, s)| format!("{s}▏"));
             if let Kind::Number { min, max, .. } = f.kind {
-                text(items, row.x, row.y + 15.0, 9.0, &f.description, muted, row.w);
+                text(items, row.x, row.y + 15.0, 9.0, f.description.as_deref().unwrap_or(""), muted, row.w);
                 let amount = ((value.as_f64().unwrap_or(min) - min) / (max - min)).clamp(0.0, 1.0) as f32;
                 let track = RectPx { x: row.x, y: row.y + 43.0, w: row.w, h: 4.0 };
                 items.push(Item::Rect(RectItem { radius: 2.0, ..RectItem::new(track, hex_color(0x303234)) }));
@@ -1373,10 +1533,11 @@ impl Panel {
                 let r = RectPx { x: row.x, y: row.y + 21.0, w: row.w, h: 31.0 };
                 items.push(Item::Rect(RectItem { radius: 6.0, border_w: 1.0, border_color: hex_color(0x303234), ..RectItem::new(r, hex_color(0x0a0a0a)) }));
                 ui_label(items, r.x + r.w / 2.0, r.y + r.h / 2.0, 10.0, if editing.is_some() { blue } else { muted }, &shown, Align::Center, r.w - 12.0);
-                text(items, row.x, row.y + 65.0, 9.0, &f.description, muted, row.w);
+                text(items, row.x, row.y + 65.0, 9.0, f.description.as_deref().unwrap_or(""), muted, row.w);
             }
         }
         items.push(Item::Clip(None));
+        self.draw_tooltip(items, vp, clip);
     }
     fn row(&self, i: usize, vp: (f32, f32)) -> RectPx {
         let r = Self::bounds(vp);
@@ -1465,9 +1626,9 @@ impl Panel {
         if hit(timeline, x, y) {
             self.scrubbing = true;
             self.seek = Some(
-                (((x - timeline.x) / timeline.w).clamp(0.0, 1.0) as f64 * self.duration * self.fps)
+                (((x - timeline.x) / timeline.w).clamp(0.0, 1.0) as f64 * self.duration * self.rate)
                     .floor()
-                    / self.fps,
+                    / self.rate,
             );
             return true;
         }
@@ -1510,12 +1671,12 @@ impl Panel {
                         self.settings[&f.key] =
                             numeric(*min, *max, *integer, ((x - row.x) / row.w) as f64)
                     }
-                    Kind::Enum(values) => {
-                        let n = values
+                    Kind::Enum(choices) => {
+                        let n = choices
                             .iter()
-                            .position(|v| v == &self.settings[&f.key])
-                            .map_or(0, |i| (i + 1) % values.len());
-                        self.settings[&f.key] = values[n].clone();
+                            .position(|c| c.value == self.settings[&f.key])
+                            .map_or(0, |i| (i + 1) % choices.len());
+                        self.settings[&f.key] = choices[n].value.clone();
                     }
                     Kind::Bool => {
                         self.settings[&f.key] =
@@ -1551,6 +1712,36 @@ impl Panel {
         }
         true
     }
+    /// Re-ask the chain's output rate when the source rate or the chain
+    /// changed. The worker holds the registry for a whole render, so this
+    /// only tries; a busy registry keeps the old rate until the next tick.
+    fn update_rate(&mut self, info: &VideoInfo) {
+        let chain = self.chain();
+        let key = format!("{}|{chain:?}", info.fps);
+        if key == self.rate_key {
+            return;
+        }
+        let source = rational(self.fps);
+        let rate = match &self.registry {
+            None => Ok(source),
+            Some(r) => match r.try_lock() {
+                Ok(registry) => chain_rate(&registry, &chain, self.fps),
+                Err(_) => return,
+            },
+        };
+        self.rate_key = key;
+        match rate {
+            Ok(rate) => {
+                self.rate = rate_fps(rate);
+                self.retimed = !same_rate(rate, source);
+            }
+            Err(e) => {
+                self.rate = self.fps;
+                self.retimed = false;
+                self.status = e;
+            }
+        }
+    }
     pub fn tick(
         &mut self,
         info: &VideoInfo,
@@ -1583,6 +1774,7 @@ impl Panel {
             self.context = Some(context);
             self.changed();
         }
+        self.update_rate(info);
         if self.dirty.is_some() && self.editing.is_none() {
             self.dirty = None;
             let chain = self.chain();
@@ -1606,7 +1798,9 @@ impl Panel {
                 worker.submit(Request {
                     generation: self.generation,
                     chain,
-                    target: Some(start),
+                    // The source frame under the playhead: a retimed chain
+                    // returns every output frame paired with it.
+                    target: Some(self.source_frame(start)),
                     info: info.clone(),
                     start: self.segment_start,
                     end,
@@ -1623,7 +1817,7 @@ impl Panel {
                     Event::Frame(g, f) if g == self.generation => {
                         self.preview_count += 1;
                         self.frames
-                            .retain(|old| (old.pts - f.pts).abs() > 0.5 / self.fps);
+                            .retain(|old| (old.pts - f.pts).abs() > 0.5 * f.duration);
                         let needed = f.before.len() + f.after.len();
                         while !self.frames.is_empty()
                             && self
@@ -1668,13 +1862,7 @@ impl Panel {
                 self.feedback = Some(feedback);
             }
         }
-        if let Some(i) = self
-            .frames
-            .iter()
-            .position(|f| (f.pts - start).abs() <= 0.51 / self.fps)
-        {
-            self.selected_frame = i;
-            let f = &self.frames[i];
+        if let Some(f) = self.shown() {
             uploads.push(Upload {
                 idx: slot + 1,
                 w: f.output[0],
@@ -1803,9 +1991,7 @@ impl Panel {
             return;
         }
         if !show_ui {
-            let cached = self.frames.iter()
-                .find(|f| (f.pts - self.time).abs() <= 0.51 / self.fps)
-                .filter(|_| self.show_rendered);
+            let cached = self.shown().filter(|_| self.show_rendered);
             let dims = cached.map_or(self.source_dims, |f| f.output);
             let source = if cached.is_some() { slot + 1 } else { self.source };
             let viewport = RectPx { x: 0.0, y: 0.0, w: vp.0, h: vp.1 };
@@ -1833,27 +2019,46 @@ impl Panel {
         )));
         self.draw_rail(items, vp);
         let v = Self::viewer(vp);
-        let cached = self
-            .frames
-            .iter()
-            .find(|f| (f.pts - self.time).abs() <= 0.51 / self.fps)
-            .filter(|_| self.show_rendered);
-        let note = if cached.is_some() { "RENDERED · Tab for source" } else { "" };
-        let note_w = if note.is_empty() { 0.0 } else { 180.0 };
-        text(items, v.x, 76.0, 10.0, &self.filename, DIM, (v.w - note_w).max(1.0));
-        if !note.is_empty() {
-            ui_label(items, v.x + v.w, 81.0, 10.0, BLUE, note, Align::Right, note_w);
+        let cached = self.shown().filter(|_| self.show_rendered);
+        // A retimed chain's new frames say so, and name the original the
+        // A side is holding for them.
+        let new_frame = cached.is_some_and(|f| (f.pts - f.source_pts).abs() > 0.5 / self.rate);
+        let mut title = match (cached.is_some(), new_frame) {
+            (true, true) => "NEW FRAME".to_string(),
+            (true, false) => "RENDERED FRAME".to_string(),
+            _ => "SOURCE FRAME".to_string(),
+        };
+        if self.retimed {
+            title = format!("{title} · {} → {} FPS", fps_label(self.fps), fps_label(self.rate));
         }
+        let title = title.as_str();
+        text(
+            items,
+            v.x,
+            61.0,
+            11.0,
+            title,
+            if cached.is_some() { BLUE } else { DIM },
+            v.w,
+        );
+        text(items, v.x, 78.0, 10.0, &self.filename, DIM, v.w);
         if let Some(f) = cached {
             text(
                 items,
                 v.x,
                 v.y + v.h + 10.0,
                 10.0,
-                &format!(
-                    "{}×{} → {}×{} · through focused processor",
-                    f.input[0], f.input[1], f.output[0], f.output[1]
-                ),
+                &if self.retimed {
+                    format!(
+                        "{}×{} → {}×{} · frame at {:.3}s · original holds {:.3}s",
+                        f.input[0], f.input[1], f.output[0], f.output[1], f.pts, f.source_pts
+                    )
+                } else {
+                    format!(
+                        "{}×{} → {}×{} · through focused processor",
+                        f.input[0], f.input[1], f.output[0], f.output[1]
+                    )
+                },
                 DIM,
                 v.w,
             );
@@ -1940,17 +2145,49 @@ impl Panel {
             t.y + 32.0,
             11.0,
             &format!(
-                "{:.3}s / {:.3}s · {} rendered frames",
+                "{:.3}s / {:.3}s · {} rendered frames{}",
                 self.time,
                 self.duration,
-                self.frames.len()
+                self.frames.len(),
+                if self.retimed { format!(" · stepping at {} fps", fps_label(self.rate)) } else { String::new() }
             ),
             hex_color(0xa4a7ad),
             t.w,
         );
         self.draw_footer(items, vp);
         self.draw_settings(items, vp);
-
+    }
+    /// The hovered setting explains itself: its schema `description`, then
+    /// the current choice's, wrapped by the renderer to the left of the
+    /// settings column so it covers the picture, never another setting.
+    fn draw_tooltip(&self, items: &mut Vec<Item>, vp: (f32, f32), clip: RectPx) {
+        if self.dragging.is_some() || !hit(clip, self.cursor.0, self.cursor.1) {
+            return;
+        }
+        let Some((i, f)) = self
+            .fields
+            .iter()
+            .enumerate()
+            .find(|(i, _)| hit(self.row(*i, vp), self.cursor.0, self.cursor.1))
+        else {
+            return;
+        };
+        if self.editing.as_ref().is_some_and(|(n, _)| *n == i) {
+            return;
+        }
+        let Some(tip) = f.tooltip(&self.settings[&f.key]) else {
+            return;
+        };
+        let right = vp.0 - Self::right(vp);
+        let wrap = (right - Self::left(vp) - 40.0).clamp(120.0, 300.0);
+        let row = self.row(i, vp);
+        items.push(Item::Text(TextItem {
+            interface: true,
+            align: Align::Right,
+            wrap: Some(wrap),
+            bg: Some(TextBg { radius: 5.0, pad_x: 10.0, pad_y: 8.0, ..TextBg::new(hex_color(0x26282b)) }),
+            ..TextItem::new(right - 18.0, row.y + 8.0, 11.0, hex_color(SOURCE_INK), tip)
+        }));
     }
 }
 impl Drop for Panel {
@@ -2740,8 +2977,170 @@ mod tests {
             input: [2, 2],
             output: [2, 2],
             pts,
+            duration: 1.0 / 24.0,
+            source_pts: pts,
             elapsed: 1.0,
         }
+    }
+    #[test]
+    fn retimed_comparison_uses_output_span_in_window_and_fullscreen() {
+        let mut p = Panel::default();
+        p.open = true;
+        p.fps = 24.0;
+        p.rate = 12.0;
+        p.retimed = true;
+        let mut frame = mark(0.0);
+        frame.duration = 1.0 / 12.0;
+        p.frames.push(frame);
+        // Still inside this output frame, beyond the source-grid tolerance.
+        p.time = 0.06;
+        for show_ui in [true, false] {
+            let mut items = vec![];
+            p.draw(&mut items, (1280.0, 720.0), 1, (1.0, (0.5, 0.5)), show_ui);
+            assert!(items.iter().any(|i| matches!(i, Item::Video { a: 2, .. })));
+        }
+        p.key(Key::Tab);
+        assert!(!p.show_rendered);
+        p.key(Key::Tab);
+        assert!(p.show_rendered);
+    }
+    #[test]
+    fn choices_explain_themselves_in_the_tooltip() {
+        let f = fields(&json!({"properties":{"mode":{
+            "title":"Mode","description":"What the preview shows.","default":"loo",
+            "oneOf":[
+                {"const":"loo","title":"Leave-one-out","description":"Rebuilds each frame from its neighbours."},
+                {"const":"mid","title":"In-between"}
+            ]}}}));
+        let mode = &f[0];
+        assert!(matches!(&mode.kind, Kind::Enum(c) if c.len() == 2));
+        assert_eq!(defaults(&f), json!({"mode":"loo"}));
+        assert_eq!(mode.shown(&json!("loo")), "Leave-one-out");
+        assert_eq!(
+            mode.tooltip(&json!("loo")).unwrap(),
+            "What the preview shows.\n\nLeave-one-out: Rebuilds each frame from its neighbours."
+        );
+        // A choice without its own text still shows the setting's.
+        assert_eq!(mode.tooltip(&json!("mid")).unwrap(), "What the preview shows.");
+        let bare = fields(&json!({"properties":{"n":{"type":"integer","minimum":0,"maximum":4}}}));
+        assert_eq!(bare[0].tooltip(&json!(2)), None, "no description, no tooltip");
+    }
+    #[test]
+    fn rates_stay_exact_rationals() {
+        assert_eq!(rational(24.0), [24, 1]);
+        assert_eq!(rational(24000.0 / 1001.0), [24000, 1001]);
+        assert_eq!(rational(30000.0 / 1001.0), [30000, 1001]);
+        assert_eq!(rational(12.5), [12500, 1000], "else to a thousandth");
+    }
+    /// A retimer: every input frame, then a copy half a period later with
+    /// its pixels inverted, so a new frame is told from an original.
+    struct Doubler;
+    impl abner_processor_api::Factory for Doubler {
+        fn descriptor(&self) -> Descriptor {
+            Descriptor { id: "example.double".into(), name: "Double rate".into(), settings_schema: json!({}), presets: vec![] }
+        }
+        fn output_rate(&self, _: &Value, r: Rate) -> Result<Rate, String> {
+            Ok([r[0] * 2, r[1]])
+        }
+        fn create(&self, w: usize, h: usize, _: &Value) -> Result<Box<dyn Session>, String> {
+            struct S([usize; 2], Cancellation);
+            impl Session for S {
+                fn process(&mut self, f: Frame) -> Result<Vec<Frame>, String> {
+                    let half = f.duration / 2;
+                    let between = Frame {
+                        width: f.width,
+                        height: f.height,
+                        pixels: f.pixels.iter().map(|p| u16::MAX - p).collect(),
+                        pts: f.pts + half,
+                        duration: f.duration - half,
+                        time_base: f.time_base,
+                    };
+                    Ok(vec![Frame { duration: half, ..f }, between])
+                }
+                fn finish(&mut self) -> Result<Vec<Frame>, String> {
+                    Ok(vec![])
+                }
+                fn output_dimensions(&self) -> [usize; 2] {
+                    self.0
+                }
+                fn cancellation(&self) -> Cancellation {
+                    self.1.clone()
+                }
+                fn progress(&self) -> Progress {
+                    Progress { phase: String::new(), completed: 0, total: None }
+                }
+            }
+            Ok(Box::new(S([w, h], Cancellation::default())))
+        }
+    }
+    #[test]
+    fn retimed_chain_pairs_new_frames_with_the_previous_original() {
+        let dir = std::env::temp_dir().join(format!("abner-retime-{}", std::process::id()));
+        let _ = std::fs::create_dir(&dir);
+        let path = dir.join("retime.mp4");
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=24", "-frames:v", "6",
+                "-c:v", "libx264", "-qp", "0", "-pix_fmt", "yuv420p"])
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let info = crate::probe::probe(&path).unwrap();
+        let mut reg = Registry::default();
+        reg.register(Box::new(Doubler)).unwrap();
+        let chain = vec![("example.double".to_string(), json!({}))];
+        assert_eq!(chain_rate(&reg, &chain, info.fps).unwrap(), [48, 1]);
+        let request = |generation, target| Request {
+            generation,
+            chain: chain.clone(),
+            target,
+            info: info.clone(),
+            start: 0.0,
+            end: None,
+            cancel: Cancellation::default(),
+            budget: DEFAULT_PREVIEW_BYTES,
+        };
+        let (tx, rx) = mpsc::sync_channel(64);
+        render(&reg, &request(1, None), &tx, None, None).unwrap();
+        let frames: Vec<Preview> = rx.try_iter().filter_map(|e| match e { Event::Frame(_, f) => Some(f), _ => None }).collect();
+        assert_eq!(frames.len(), 12, "two output frames per source frame");
+        let period = 1.0 / 24.0;
+        for (k, pair) in frames.chunks(2).enumerate() {
+            let source = k as f64 * period;
+            assert!((pair[0].pts - source).abs() < 1e-3 && (pair[0].source_pts - source).abs() < 1e-3);
+            assert!((pair[1].pts - (source + period / 2.0)).abs() < 1e-3, "new frame lands mid-period");
+            // The new frame's A side is the original it follows, not a gap.
+            assert!((pair[1].source_pts - source).abs() < 1e-3);
+            assert!(Arc::ptr_eq(&pair[0].before, &pair[1].before));
+            assert_ne!(pair[1].after, pair[1].before);
+        }
+        // A frame render returns every output frame its source frame owns.
+        render(&reg, &request(2, Some(2.0 * period)), &tx, None, None).unwrap();
+        let owned: Vec<Preview> = rx.try_iter().filter_map(|e| match e { Event::Frame(_, f) => Some(f), _ => None }).collect();
+        assert_eq!(owned.len(), 2);
+        assert!(owned.iter().all(|f| (f.source_pts - 2.0 * period).abs() < 1e-3));
+
+        // The page steps and shows frames at the OUTPUT rate, and seeks the
+        // players to the original at or before the playhead.
+        let mut p = Panel::new(reg);
+        p.open = true;
+        let mut uploads = vec![];
+        p.tick(&info, 0.0, None, &mut uploads, 1);
+        assert!(!p.retimed, "a bypassed retimer leaves the source rate");
+        p.enabled[0] = true;
+        p.frames = frames;
+        p.tick(&info, 2.5 * period, None, &mut uploads, 1);
+        assert!(p.retimed && (p.rate - 48.0).abs() < 1e-9);
+        let shown = p.shown().unwrap();
+        assert!((shown.pts - 2.5 * period).abs() < 1e-3, "the in-between frame is on screen");
+        assert_eq!(uploads.len(), 1);
+        let seek = p.source_seek(2.5 * period);
+        assert!((seek - 1.5 * period).abs() < 1e-9, "half a frame before source frame 2, so the exact seek lands on 2, not 3: {seek}");
+        p.step(1);
+        assert!((p.take_seek().unwrap() - 3.0 * period).abs() < 1e-9, "one output frame on");
+        p.step(-1);
+        assert!((p.take_seek().unwrap() - 2.0 * period).abs() < 1e-9, "one output frame back");
+        let _ = std::fs::remove_dir_all(&dir);
     }
     #[test]
     fn ordered_chain_bypass_settings_and_frame_navigation() {

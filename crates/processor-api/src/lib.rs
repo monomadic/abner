@@ -28,10 +28,18 @@ pub struct Preset {
     pub settings: serde_json::Value,
 }
 pub type Result<T> = std::result::Result<T, String>;
+/// Frames per second as `[numerator, denominator]`, e.g. `[30000, 1001]`.
+pub type Rate = [u32; 2];
 #[derive(Clone, Serialize)]
 pub struct Descriptor {
     pub id: String,
     pub name: String,
+    /// A JSON Schema object. The host builds its editor from `properties`:
+    /// `enum` or `oneOf` choices, `number`/`integer` with `minimum`/`maximum`,
+    /// `boolean`, `string`. Each property's `title` labels it and its
+    /// `description` is shown as a tooltip. To explain each choice of a
+    /// selector, use `oneOf` with one `{"const", "title", "description"}`
+    /// per choice; the hovered setting shows the current choice's text.
     pub settings_schema: serde_json::Value,
     pub presets: Vec<Preset>,
 }
@@ -143,7 +151,8 @@ pub struct Capabilities {
     pub role: Role,
     pub input: InputRequirement,
 }
-/// Ordered streaming frames. Calls may emit zero or several outputs. After EOF,
+/// Ordered streaming frames. Calls may emit zero or several outputs; outputs keep
+/// their inputs' timestamps unless `Factory::output_rate` changes the rate. After EOF,
 /// call finish once and consume all returned frames. Drop/recreate a session at
 /// cuts, seeks or configuration changes: recurrent history must not cross them.
 /// Construct and use on one thread; only the cancellation handle is thread-safe.
@@ -179,6 +188,17 @@ pub trait Factory: Send {
     /// uncategorized until they declare.
     fn categories(&self) -> Vec<Category> {
         Vec::new()
+    }
+
+    /// The output frame rate for an `input` rate under `settings`. Identity
+    /// by default. A retiming processor (frame-rate conversion, 2x
+    /// interpolation, ...) returns its target and emits frames on that grid,
+    /// each with its own `pts` and `duration`, strictly increasing. The host
+    /// pairs every output frame with the latest input frame at or before it,
+    /// so an A/B shows each new frame against the original it follows.
+    /// Called on the UI thread: keep it cheap and free of side effects.
+    fn output_rate(&self, _settings: &serde_json::Value, input: Rate) -> Result<Rate> {
+        Ok(input)
     }
 
     fn descriptor(&self) -> Descriptor;

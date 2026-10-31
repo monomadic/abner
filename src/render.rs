@@ -327,6 +327,10 @@ pub struct TextItem {
     pub bg: Option<TextBg>,
     /// Maximum logical width, ellipsized using the renderer's font metrics.
     pub max_width: Option<f32>,
+    /// Word-wrap into lines no wider than this (logical px), measured by the
+    /// renderer; `\n` forces a break. The block is aligned as one box, its
+    /// lines left-aligned inside it, and `bg` covers the whole block.
+    pub wrap: Option<f32>,
 }
 
 impl TextItem {
@@ -343,6 +347,7 @@ impl TextItem {
             tracking: 0.0,
             bg: None,
             max_width: None,
+            wrap: None,
         }
     }
 }
@@ -1390,11 +1395,20 @@ impl Gpu {
                     self.text.set_header(t.header);
                     self.text.set_regular(t.regular);
                     self.text.set_inspector(t.inspector);
-                    let fitted = t.max_width.map(|w| self.text.fit(&t.text, t.px * scale, t.tracking * scale, w * scale));
-                    let laid = self.text.layout(fitted.as_deref().unwrap_or(&t.text), t.px * scale, t.tracking * scale);
-                    let (tw, th) = (laid.w / scale, laid.h / scale);
-                    // The anchor names an edge; the run is measured, so
-                    // centring is exact rather than estimated.
+                    let lines: Vec<String> = match t.wrap {
+                        Some(w) => self.text.wrap(&t.text, t.px * scale, t.tracking * scale, w * scale),
+                        None => vec![t.max_width.map_or_else(
+                            || t.text.clone(),
+                            |w| self.text.fit(&t.text, t.px * scale, t.tracking * scale, w * scale),
+                        )],
+                    };
+                    let laid: Vec<_> = lines.iter().map(|l| self.text.layout(l, t.px * scale, t.tracking * scale)).collect();
+                    // Lines advance by 1.3x the line box, a readable lead for
+                    // tooltip paragraphs; a single line is exactly its box.
+                    let line_h = laid.first().map_or(0.0, |l| l.h) / scale;
+                    let lead = (line_h * 1.3).round();
+                    let tw = laid.iter().map(|l| l.w).fold(0.0, f32::max) / scale;
+                    let th = line_h + lead * laid.len().saturating_sub(1) as f32;
                     let x0 = match t.align {
                         Align::Left => t.x,
                         Align::Center => t.x - tw / 2.0,
@@ -1429,17 +1443,20 @@ impl Gpu {
                             ..Default::default()
                         }));
                     }
-                    for q in &laid.quads {
-                        push(&mut data, &mut batches, clip, None, Instance {
-                            pos: [((x0 * scale + q.x).round()) / scale, ((y0 * scale + q.y).round()) / scale],
-                            size: [q.w / scale, q.h / scale],
-                            uv: q.uv,
-                            color: t.color,
-                            mode: 6.0,
-                            p0: 0.0,
-                            p1: 0.0,
-                            pad: 0.0,
-                        });
+                    for (n, line) in laid.iter().enumerate() {
+                        let ly = y0 + lead * n as f32;
+                        for q in &line.quads {
+                            push(&mut data, &mut batches, clip, None, Instance {
+                                pos: [((x0 * scale + q.x).round()) / scale, ((ly * scale + q.y).round()) / scale],
+                                size: [q.w / scale, q.h / scale],
+                                uv: q.uv,
+                                color: t.color,
+                                mode: 6.0,
+                                p0: 0.0,
+                                p1: 0.0,
+                                pad: 0.0,
+                            });
+                        }
                     }
                 }
             }

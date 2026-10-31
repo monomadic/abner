@@ -1618,10 +1618,12 @@ impl App {
         }
         if let Some(t) = self.processors.take_seek() {
             self.playing = false;
-            self.seek_all(
-                t.min((self.videos[self.active].info.duration - 1.0 / self.fps.max(1.0)).max(0.0)),
-                true,
-            );
+            let t = t.min((self.videos[self.active].info.duration - 1.0 / self.fps.max(1.0)).max(0.0));
+            // The panel's time is on the chain's OUTPUT grid, which a retimed
+            // chain puts between source frames: the players land on the latest
+            // original at or before it while the clock stays on the output time.
+            self.seek_all(self.processors.source_seek(t), true);
+            self.t = t;
             self.adopt_seek = false;
         }
     }

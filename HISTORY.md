@@ -3,6 +3,31 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-11-01 — Retiming previews; settings tooltips
+
+Frame-rate changes are previewable. The API gains `Rate` and
+`Factory::output_rate(settings, input)` (identity default, so existing processors
+are untouched). The preview worker computes the chain's rate; when it differs from
+the source's, output frames may carry new timestamps (any time base, converted to
+µs) and each is paired with the latest original at or before it, pruning older
+originals as ordered output arrives; the "did not return all frames" check applies
+only to rate-preserving chains. A frame render asks for the source frame under the
+playhead and returns every output frame it owns. The Process page reads the
+chain's rate without blocking (`try_lock`; the worker holds the registry for a
+render) and steps, scrubs and shows frames on the output grid; the app seeks the
+players to `source_seek(t)` — half a source frame before the preceding original,
+so the exact seek lands on it — and keeps the clock at `t`, which is "the original
+holds its nearest previous frame". The viewer title reads `NEW FRAME` / `RENDERED
+FRAME · 24 → 60 FPS` and the caption names the original being held.
+`--check-processor` accepts a declared retime (count and timing may change,
+timestamps must rise). Settings now explain themselves: `description` is a hover
+tooltip, `oneOf` const/title/description choices show their title and explain
+themselves, wrapped by a new measured `TextItem::wrap`. Tests: tooltip text,
+rational rates, a doubling retimer through `render` and the page (pairing,
+in-between frame on screen, output-grid steps, source seek), renderer wrap widths.
+A window capture to check it by eye came out blank, and so did unmodified HEAD:
+the capture setup, not the change.
+
 ## 2026-10-28 — Remove the final FFprobe packet-metadata fallback
 
 Timeline packets and stream facts now use Filmcraft for AVI, MXF, MPEG TS/PS,
