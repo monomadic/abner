@@ -248,6 +248,13 @@ fn rotation(q: Option<u8>) -> Option<f64> {
         _ => Some(90.),
     }
 }
+// Average over the sample timing table, rather than mdhd's declared duration:
+// muxers can pad that duration beyond the encoded samples (especially VFR).
+fn mp4_average_rate(track: &filmcraft_isobmff::Track) -> Option<f64> {
+    let ticks: u64 = track.samples.iter().map(|s| u64::from(s.duration)).sum();
+    (track.timescale > 0 && ticks > 0)
+        .then(|| track.samples.len() as f64 * track.timescale as f64 / ticks as f64)
+}
 // Common containers are header-only: no decoder construction or frame read on the UI's probe path.
 fn headers(path: &Path, size: u64) -> Result<Option<Metadata>, String> {
     let ext = path
@@ -333,7 +340,7 @@ fn headers(path: &Path, size: u64) -> Result<Option<Metadata>, String> {
             Ok(Some(make(
                 w,
                 h,
-                t.samples.len() as f64 * t.timescale as f64 / t.duration as f64,
+                mp4_average_rate(t).ok_or("invalid video sample timing")?,
                 duration,
                 canonical_codec(e.codec.name()),
                 if pix.is_empty() { "?".into() } else { pix },
@@ -473,8 +480,8 @@ pub(crate) fn read(path: &Path) -> Result<Metadata, String> {
                 .find(|t| t.kind == filmcraft_isobmff::TrackKind::Video)
                 .ok_or("no video track")?;
             result.info.rotation = rotation(t.display_rotation());
-            if t.duration > 0 && t.timescale > 0 {
-                result.info.fps = t.samples.len() as f64 * t.timescale as f64 / t.duration as f64;
+            if let Some(rate) = mp4_average_rate(t) {
+                result.info.fps = rate;
             }
             if file.timescale > 0 {
                 result.info.duration = t.tkhd_duration as f64 / file.timescale as f64;
@@ -698,7 +705,7 @@ mod tests {
         let rate = json["streams"][0]["avg_frame_rate"].as_str().unwrap();
         let (n, d) = rate.split_once('/').unwrap();
         let expected = n.parse::<f64>().unwrap() / d.parse::<f64>().unwrap();
-        assert!((ours.fps - expected).abs() < 1e-6);
+        assert!((ours.fps - expected).abs() < 1e-6, "ours={} expected={expected}", ours.fps);
         let rotated = path.with_extension("rotated.mov");
         assert!(
             Command::new("ffmpeg")

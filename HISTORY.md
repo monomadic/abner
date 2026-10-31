@@ -3,6 +3,14 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-11-01 — MP4 average rate follows sample timing
+
+MP4/MOV metadata computes average FPS from the sample timing table rather than
+the declared media duration, which can include padding beyond those samples.
+Both the header-only probe and the decoder-backed metadata path share the rule.
+The VFR/rotation comparison against FFprobe now passes; the full library suite
+passes (163 tests, three existing ignores), and all targets compile.
+
 ## 2026-11-01 — Supported processor-preview fixtures
 
 The fractional-rate and retiming preview regressions now encode ordinary H.264
