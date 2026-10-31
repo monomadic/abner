@@ -2519,65 +2519,75 @@ pub(crate) fn pipeline_export(
             }
             Ok(())
         };
-        let mut last: Option<f64> = None;
-        let mut deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        loop {
-            cancel.check().map_err(anyhow::Error::msg)?;
-            if let Some((pts, rgba)) = player.take_next() {
-                deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-                if pts >= end - 1e-6 {
-                    break;
+        // A rounded nominal duration cannot join independently rounded PTS values:
+        // 24 fps alternates between 41,666 and 41,667 microseconds. Look ahead
+        // once, as the Process preview does, so every input ends at the next PTS.
+        let read_next = || -> Result<Option<(f64, crate::player::Rgba)>> {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                cancel.check().map_err(anyhow::Error::msg)?;
+                if let Some(frame) = player.take_next() {
+                    return Ok(Some(frame));
                 }
-                if let Some(prev) = last {
-                    ensure!(
-                        (pts - prev - 1. / info.fps).abs() < 0.002,
-                        "Export currently requires constant-rate input"
-                    );
+                ensure!(!player.failed(), "Export decoder failed");
+                if player.exhausted() {
+                    return Ok(None);
                 }
-                last = Some(pts);
-                let pixels = (cy..cy + ch)
-                    .flat_map(|y| {
-                        let start = ((y * info.width + cx) * 4) as usize;
-                        rgba[start..start + (cw * 4) as usize]
-                            .chunks_exact(4)
-                            .flat_map(|p| {
-                                [
-                                    u16::from(p[0]) * 257,
-                                    u16::from(p[1]) * 257,
-                                    u16::from(p[2]) * 257,
-                                ]
-                            })
-                    })
-                    .collect();
-                let f = Frame {
-                    width: cw as usize,
-                    height: ch as usize,
-                    pixels,
-                    pts: (pts * 1e6).round() as i64,
-                    duration: (1e6 / info.fps).round() as i64,
-                    time_base: [1, 1_000_000],
-                };
-                accept(
-                    crate::processor_gui::process_chain(
-                        &mut sessions,
-                        0,
-                        vec![f],
-                        cancel,
-                        512 * 1024 * 1024,
-                    )
-                    .map_err(anyhow::Error::msg)?,
-                )?;
-            } else if player.failed() {
-                anyhow::bail!("Export decoder failed");
-            } else if player.exhausted() {
-                break;
-            } else {
                 ensure!(
                     std::time::Instant::now() < deadline,
                     "Export decoder timed out"
                 );
                 std::thread::sleep(std::time::Duration::from_millis(2));
             }
+        };
+        let nominal = (1e6 / info.fps).round().max(1.) as i64;
+        let mut next = read_next()?;
+        while let Some((pts, rgba)) = next.take() {
+            cancel.check().map_err(anyhow::Error::msg)?;
+            if pts >= end - 1e-6 {
+                break;
+            }
+            next = read_next()?;
+            let timestamp = (pts * 1e6).round() as i64;
+            let duration = next.as_ref().map_or(nominal, |(next_pts, _)| {
+                (next_pts * 1e6).round() as i64 - timestamp
+            });
+            ensure!(
+                duration > 0 && (duration - nominal).abs() < 2000,
+                "Export currently requires constant-rate input"
+            );
+            let pixels = (cy..cy + ch)
+                .flat_map(|y| {
+                    let start = ((y * info.width + cx) * 4) as usize;
+                    rgba[start..start + (cw * 4) as usize]
+                        .chunks_exact(4)
+                        .flat_map(|p| {
+                            [
+                                u16::from(p[0]) * 257,
+                                u16::from(p[1]) * 257,
+                                u16::from(p[2]) * 257,
+                            ]
+                        })
+                })
+                .collect();
+            let f = Frame {
+                width: cw as usize,
+                height: ch as usize,
+                pixels,
+                pts: timestamp,
+                duration,
+                time_base: [1, 1_000_000],
+            };
+            accept(
+                crate::processor_gui::process_chain(
+                    &mut sessions,
+                    0,
+                    vec![f],
+                    cancel,
+                    512 * 1024 * 1024,
+                )
+                .map_err(anyhow::Error::msg)?,
+            )?;
         }
         for i in 0..sessions.len() {
             let tail = sessions[i].finish().map_err(anyhow::Error::msg)?;

@@ -856,6 +856,7 @@ mod tests {
     use abner_processor_api::{Descriptor, Factory, Frame, Progress, Session};
     struct Red;
     struct RedSession {
+        next_time: Option<(i64, [u32; 2])>,
         double: bool,
         dims: [usize; 2],
         cancel: Cancellation,
@@ -876,6 +877,7 @@ mod tests {
             settings: &serde_json::Value,
         ) -> Result<Box<dyn Session>, String> {
             Ok(Box::new(RedSession {
+                next_time: None,
                 double: settings["double"].as_bool().unwrap_or(false),
                 dims: [w, h],
                 cancel: Cancellation::default(),
@@ -884,6 +886,13 @@ mod tests {
     }
     impl Session for RedSession {
         fn process(&mut self, mut f: Frame) -> Result<Vec<Frame>, String> {
+            if self
+                .next_time
+                .is_some_and(|next| next != (f.pts, f.time_base))
+            {
+                return Err("non-contiguous timing; create a new session at cuts or seeks".into());
+            }
+            self.next_time = Some((f.pts + f.duration, f.time_base));
             for p in f.pixels.chunks_exact_mut(3) {
                 p.copy_from_slice(&[65535, 0, 0]);
             }

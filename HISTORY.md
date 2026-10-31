@@ -3,6 +3,19 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-11-01 — Contiguous processor timing during export
+
+Fixed the export failure “non-contiguous timing; create a new session at cuts or
+seeks.” Independently rounded microsecond PTS values at 24 fps do not join a
+repeated 41,667 µs duration. Export now uses one-frame lookahead to derive each
+input duration from the next rounded PTS, matching the Process preview; only the
+last source frame uses a nominal duration. Cancellation and decoder deadlines
+remain active while looking ahead, and each kept range still creates fresh sessions.
+
+The native export regression processor now enforces exact timestamp continuity,
+reproducing the reported error before the fix. HEVC/MP4, HEVC/MKV, ProRes/MKV,
+cropped kept ranges and changed-frame-rate output all pass with this strict check.
+
 ## 2026-11-01 — Minimal Export workspace
 
 Added the sixth header tab and native View menu entry, reachable with `--export`.
