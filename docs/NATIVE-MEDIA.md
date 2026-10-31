@@ -70,7 +70,7 @@ MPEG TS/PS, raw MPEG and Y4M fixtures are also read in child test processes with
 PATH=/nonexistent; native-generated MXF/Y4M tests need no fixture helper at all.
 The optional packaging flag that bundles diagnostic tools remains compatible.
 
-### Exact trims and pixel edits
+## Exact trims and pixel edits
 
 Without pixel edits, keyframe-aligned exports copy coded packets. Frame-accurate
 trims encode only GOPs intersected by trim boundaries, then copy the kept ranges;
@@ -79,4 +79,29 @@ SDR 8-bit H.264 4:2:0 on a zero-based timeline. Unsupported inputs fail explicit
 rather than silently transcoding the whole clip. Automatic repair files are
 removed after export, including failed exports. Pixel edits such as cropping
 require encoding every kept frame and override a copy request. Process-chain
-media export is not yet supported and is rejected explicitly by the Process page.
+media export is not part of this copy/repair path: it belongs to the Export
+workspace below, which always encodes.
+
+## Minimal Export workspace
+
+The Export tab (`--export INPUT`) writes the focused source through **all enabled
+processors in their displayed order**, including the current Timeline kept ranges and
+an active crop carried into Export. HEVC uses macOS VideoToolbox at 35 Mb/s; ProRes
+uses native ProRes 422 Standard. HEVC supports MP4 and MKV; choosing ProRes selects
+MKV and disables MP4. Audio is encoded to AAC-LC at 48 kHz / 192 kb/s with the kept
+ranges' timing. This path does not carry subtitles, chapters, attachments or arbitrary
+source metadata. Existing Timeline packet-copy and selective-GOP paths remain separate.
+
+This first pipeline export path is explicitly SDR and constant-rate: native RGBA8
+decode is expanded to the processor API's RGB16, then encoded from RGBA8 output.
+It is not a high-bit-depth/HDR mastering path. Streaming frame-count/rate changes are
+supported when output timestamps are contiguous and output durations are constant;
+whole-clip/generator processors are rejected. Sessions restart at kept-range boundaries.
+
+The UI follows the latest completed output frame until the user scrubs or frame-steps;
+TAB compares the matching source timestamp. The review cache is bounded to 128 MiB of
+recent rendered frames, plus the manually held frame. It is a recent-frame inspector,
+not an archive of the full output. The latest-frame mailbox drops obsolete display
+updates without dropping any encoded frames. Export, Cancel and Reveal output are the
+only footer actions. Output is staged beside its destination, removed on error/cancel,
+and published without replacing an existing file. The save dialog chooses the filename.

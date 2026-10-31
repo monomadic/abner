@@ -22,7 +22,7 @@ pub enum MenuAction {
     Open,
     /// File > Reveal in Finder (⇧⌘R): the focused clip, selected in Finder.
     Reveal,
-    /// File > Export (⌘E): the timeline's export, or the crop marquee's ProRes.
+    /// File > Export (⌘E): open Export, or start it when already on that page.
     Export,
     /// File > Close (⌘W): the focused clip; the empty window quits.
     Close,
@@ -178,3 +178,17 @@ mod imp {
 }
 
 pub use imp::{paste_text, choose_files, copy_png, drain, install, reveal, sync_menus, take_menu_requests, take_view_request};
+
+pub(crate) fn export_destination(name: &str) -> Option<std::path::PathBuf> {
+    #[cfg(target_os="macos")]
+    unsafe {
+        unsafe extern "C" { fn ab_export_destination(name:*const std::ffi::c_char)->*mut std::ffi::c_char; fn ab_free_text(text:*mut std::ffi::c_char); }
+        let name=std::ffi::CString::new(name).ok()?;
+        let path=ab_export_destination(name.as_ptr());
+        if path.is_null(){return None;}
+        let value=std::path::PathBuf::from(std::ffi::CStr::from_ptr(path).to_string_lossy().into_owned());
+        ab_free_text(path);Some(value)
+    }
+    #[cfg(not(target_os="macos"))]
+    { Some(std::path::PathBuf::from(name)) }
+}

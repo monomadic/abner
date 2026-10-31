@@ -84,8 +84,8 @@ void ab_sync_menus(int mode, bool has_clips, bool can_export, AbViewCallback vie
 
         view = [[NSMenu alloc] initWithTitle:@"View"];
         view.autoenablesItems = NO;
-        NSArray<NSString *> *names = @[@"Sources", @"Timeline", @"Process", @"Mask", @"Crop"];
-        const NSInteger modes[] = {0, 3, 4, 1, 2};
+        NSArray<NSString *> *names = @[@"Sources", @"Timeline", @"Process", @"Mask", @"Crop", @"Export"];
+        const NSInteger modes[] = {0, 3, 4, 1, 2, 5};
         for (NSUInteger i = 0; i < names.count; i++) {
             ab_item(view, names[i], @selector(selectMode:), @"", 0, modes[i], target);
         }
@@ -282,3 +282,12 @@ char *ab_paste_text(void) {
     return text ? strdup([text UTF8String]) : NULL;
 }
 void ab_free_text(char *text) { free(text); }
+
+// The export page owns codec/container choices; this panel only chooses a destination.
+char *ab_export_destination(const char *name) {
+    NSSavePanel *panel = [NSSavePanel savePanel];
+    panel.nameFieldStringValue = [NSString stringWithUTF8String:name];
+    panel.canCreateDirectories = YES;
+    if ([panel runModal] != NSModalResponseOK) return NULL;
+    return strdup(panel.URL.path.UTF8String);
+}

@@ -5,7 +5,7 @@ use filmcraft_isobmff::{self as mp4, CodecConfig, SampleEntry};
 use std::{
     path::Path,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -997,9 +997,12 @@ impl H264 {
 fn audio_encode(
     source: &filmcraft_media::SharedSource,
     mux: &mut mp4::Mp4Writer<std::fs::File>,
-    keeps: &[(f64, f64)],
-    pcm: bool,
-    cancel: &AtomicBool,
+    keeps: &[(f64, f64)], pcm: bool, cancel: &AtomicBool,
+) -> Result<()> { audio_encode_checked(source,mux,keeps,pcm,||cancelled(cancel)) }
+fn audio_encode_checked(
+    source: &filmcraft_media::SharedSource,
+    mux: &mut mp4::Mp4Writer<std::fs::File>,
+    keeps: &[(f64, f64)], pcm: bool, mut check: impl FnMut()->Result<()>,
 ) -> Result<()> {
     for (stream, a) in source.info().audio_streams.iter().enumerate() {
         let rate = 48000u32;
@@ -1038,7 +1041,7 @@ fn audio_encode(
             let start = (a * rate as f64).round() as i64;
             let end = (b * rate as f64).round() as i64;
             for pos in (start..end).step_by(rate as usize) {
-                cancelled(cancel)?;
+                check()?;
                 let count = (end - pos).min(rate as i64) as usize;
                 let audio = source.audio_stream(stream, pos, count, rate)?;
                 if pcm {
@@ -2320,5 +2323,427 @@ mod tests {
         })
         .unwrap();
         assert_eq!(frames.len(), 12);
+    }
+}
+
+/// Export the enabled processor chain. Output is published only after mux finalization.
+pub(crate) fn pipeline_export(
+    info: &crate::probe::VideoInfo,
+    dest: &Path,
+    keeps: &[(f64, f64)],
+    registry: &abner_processor_api::Registry,
+    chain: &[(String, serde_json::Value)],
+    prores: bool,
+    crop: Option<(u32, u32, u32, u32)>,
+    cancel: &abner_processor_api::Cancellation,
+    active: &Mutex<Vec<abner_processor_api::Cancellation>>,
+    mut emit: impl FnMut(crate::export_page::Rendered) -> Result<(), String>,
+) -> Result<()> {
+    use abner_processor_api::{Frame, InputRequirement, Role};
+    validate_ranges(keeps)?;
+    ensure!(
+        !dest.exists(),
+        "Output already exists; choose another filename"
+    );
+    crate::media_metadata::read(&info.path)
+        .map_err(anyhow::Error::msg)?
+        .check_sdr()
+        .map_err(anyhow::Error::msg)?;
+    let mkv = dest
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("mkv"));
+    ensure!(
+        mkv || dest
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("mp4")),
+        "Choose MP4 or MKV for pipeline export"
+    );
+    ensure!(!prores || mkv, "ProRes requires MKV");
+    let temp = pending(dest)?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .truncate(true)
+        .open(&temp.0)?;
+    let mut mux = mp4::Mp4Writer::new(
+        file,
+        mp4::WriterOptions::new(if prores {
+            mp4::Brand::Mov
+        } else {
+            mp4::Brand::Mp4
+        }),
+    )?;
+    ensure!(
+        info.fps.is_finite() && info.fps > 0. && info.fps <= 1000.,
+        "Export requires a valid constant frame rate"
+    );
+    let (cx, cy, cw, ch) = crop.unwrap_or((0, 0, info.width, info.height));
+    ensure!(
+        cw >= 2
+            && ch >= 2
+            && cx.checked_add(cw).is_some_and(|x| x <= info.width)
+            && cy.checked_add(ch).is_some_and(|y| y <= info.height),
+        "Crop lies outside the source"
+    );
+    let mut encoder: Option<PipelineEncoder> = None;
+    let mut track = None;
+    let mut index = 0u64;
+    let mut output_time = 0.;
+    let mut expected_duration: Option<f64> = None;
+    for &(start, end) in keeps {
+        cancel.check().map_err(anyhow::Error::msg)?;
+        active.lock().unwrap().clear();
+        let mut dims = [cw as usize, ch as usize];
+        let mut sessions = Vec::new();
+        for (id, settings) in chain {
+            let f = registry.get(id).map_err(anyhow::Error::msg)?;
+            ensure!(
+                matches!(f.capabilities().role, Role::Processor)
+                    && !matches!(f.capabilities().input, InputRequirement::WholeClip),
+                "{} requires whole-clip execution",
+                f.descriptor().name
+            );
+            let session = f
+                .create(dims[0], dims[1], settings)
+                .map_err(anyhow::Error::msg)?;
+            active.lock().unwrap().push(session.cancellation());
+            dims = session.output_dimensions();
+            ensure!(
+                dims.iter().all(|&d| d >= 2 && d <= 8192),
+                "Unsupported processor output size"
+            );
+            sessions.push(session);
+        }
+        let player = crate::player::Player::spawn(
+            &info.path,
+            info.width,
+            info.height,
+            crate::probe::vt_accel(&info.codec),
+            info.rotation,
+            16 * 1024 * 1024,
+        )
+        .context("Could not open export decoder")?;
+        player.seek(start, true);
+        let mut previous_end: Option<f64> = None;
+        let mut accept = |frames: Vec<Frame>| -> Result<()> {
+            for f in frames {
+                cancel.check().map_err(anyhow::Error::msg)?;
+                f.validate().map_err(anyhow::Error::msg)?;
+                ensure!(
+                    f.width == dims[0] && f.height == dims[1],
+                    "Processor changed declared dimensions"
+                );
+                let unit = f.time_base[0] as f64 / f.time_base[1] as f64;
+                let source_pts = f.pts as f64 * unit;
+                if source_pts < start - 1e-6 || source_pts >= end - 1e-6 {
+                    continue;
+                }
+                let duration = f.duration as f64 * unit;
+                ensure!(
+                    duration > 0. && duration.is_finite(),
+                    "Invalid processor output duration"
+                );
+                if let Some(previous) = previous_end {
+                    ensure!(
+                        (source_pts - previous).abs() < 0.002,
+                        "Processor returned missing, reordered, or discontinuous output timestamps"
+                    );
+                }
+                previous_end = Some(source_pts + duration);
+                if let Some(expected) = expected_duration {
+                    ensure!(
+                        (expected - duration).abs() < 0.00001,
+                        "Export currently requires constant-rate output"
+                    );
+                } else {
+                    expected_duration = Some(duration);
+                }
+                let rgba: Vec<u8> = f
+                    .pixels
+                    .chunks_exact(3)
+                    .flat_map(|rgb| {
+                        [
+                            ((rgb[0] as u32 + 128) / 257) as u8,
+                            ((rgb[1] as u32 + 128) / 257) as u8,
+                            ((rgb[2] as u32 + 128) / 257) as u8,
+                            255,
+                        ]
+                    })
+                    .collect();
+                if encoder.is_none() {
+                    encoder = Some(PipelineEncoder::new(
+                        f.width as u32,
+                        f.height as u32,
+                        duration,
+                        prores,
+                    )?);
+                }
+                let e = encoder.as_mut().unwrap();
+                ensure!(
+                    e.dims() == [f.width as u32, f.height as u32],
+                    "Output dimensions changed between segments"
+                );
+                let packets = e.encode(&rgba, index)?;
+                let ti = match track {
+                    Some(t) => t,
+                    None => {
+                        let mut config = cfg(e.entry(), "und");
+                        config.timescale = e.scale();
+                        let t = mux.add_track(config)?;
+                        track = Some(t);
+                        t
+                    }
+                };
+                for packet in packets {
+                    write_packet_scaled(
+                        &mut mux,
+                        ti,
+                        e.scale(),
+                        &packet.data,
+                        packet.duration as f64 / e.scale() as f64,
+                        packet.composition_offset as f64 / e.scale() as f64,
+                        packet.key,
+                    )?;
+                }
+                index += 1;
+                output_time += duration;
+                emit(crate::export_page::Rendered {
+                    pixels: Arc::new(rgba),
+                    dims: [f.width as u32, f.height as u32],
+                    source_pts,
+                    output_time,
+                    count: index,
+                    frame_duration: duration,
+                })
+                .map_err(anyhow::Error::msg)?;
+            }
+            Ok(())
+        };
+        let mut last: Option<f64> = None;
+        let mut deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            cancel.check().map_err(anyhow::Error::msg)?;
+            if let Some((pts, rgba)) = player.take_next() {
+                deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                if pts >= end - 1e-6 {
+                    break;
+                }
+                if let Some(prev) = last {
+                    ensure!(
+                        (pts - prev - 1. / info.fps).abs() < 0.002,
+                        "Export currently requires constant-rate input"
+                    );
+                }
+                last = Some(pts);
+                let pixels = (cy..cy + ch)
+                    .flat_map(|y| {
+                        let start = ((y * info.width + cx) * 4) as usize;
+                        rgba[start..start + (cw * 4) as usize]
+                            .chunks_exact(4)
+                            .flat_map(|p| {
+                                [
+                                    u16::from(p[0]) * 257,
+                                    u16::from(p[1]) * 257,
+                                    u16::from(p[2]) * 257,
+                                ]
+                            })
+                    })
+                    .collect();
+                let f = Frame {
+                    width: cw as usize,
+                    height: ch as usize,
+                    pixels,
+                    pts: (pts * 1e6).round() as i64,
+                    duration: (1e6 / info.fps).round() as i64,
+                    time_base: [1, 1_000_000],
+                };
+                accept(
+                    crate::processor_gui::process_chain(
+                        &mut sessions,
+                        0,
+                        vec![f],
+                        cancel,
+                        512 * 1024 * 1024,
+                    )
+                    .map_err(anyhow::Error::msg)?,
+                )?;
+            } else if player.failed() {
+                anyhow::bail!("Export decoder failed");
+            } else if player.exhausted() {
+                break;
+            } else {
+                ensure!(
+                    std::time::Instant::now() < deadline,
+                    "Export decoder timed out"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+        for i in 0..sessions.len() {
+            let tail = sessions[i].finish().map_err(anyhow::Error::msg)?;
+            accept(
+                crate::processor_gui::process_chain(
+                    &mut sessions,
+                    i + 1,
+                    tail,
+                    cancel,
+                    512 * 1024 * 1024,
+                )
+                .map_err(anyhow::Error::msg)?,
+            )?;
+        }
+    }
+    cancel.check().map_err(anyhow::Error::msg)?;
+    let e = encoder
+        .as_mut()
+        .context("Pipeline returned no output frames")?;
+    for packet in e.flush()? {
+        write_packet_scaled(
+            &mut mux,
+            track.unwrap(),
+            e.scale(),
+            &packet.data,
+            packet.duration as f64 / e.scale() as f64,
+            packet.composition_offset as f64 / e.scale() as f64,
+            packet.key,
+        )?;
+    }
+    let source = crate::fc::open(&info.path).map_err(anyhow::Error::msg)?;
+    // The existing audio path preserves kept-range timing and encodes AAC for MP4/MKV.
+    audio_encode_checked(&source, &mut mux, keeps, false, || {
+        cancel.check().map_err(anyhow::Error::msg)
+    })?;
+    cancel.check().map_err(anyhow::Error::msg)?;
+    mux.finish()?;
+    if dest
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("mkv"))
+    {
+        let remuxed = pending(dest)?;
+        remux_mkv(&temp.0, &remuxed.0, &[])?;
+        cancel.check().map_err(anyhow::Error::msg)?;
+        std::fs::hard_link(&remuxed.0, dest)?;
+    } else {
+        std::fs::hard_link(&temp.0, dest)?;
+    }
+    Ok(())
+}
+
+enum PipelineEncoder {
+    ProRes {
+        encoder: filmcraft_prores::Encoder,
+        dims: [u32; 2],
+        duration: u32,
+    },
+    #[cfg(target_os = "macos")]
+    Hevc {
+        encoder: Box<dyn filmcraft_export::VideoEncoder>,
+        dims: [u32; 2],
+    },
+}
+impl PipelineEncoder {
+    fn new(w: u32, h: u32, duration: f64, prores: bool) -> Result<Self> {
+        ensure!(
+            w.is_multiple_of(2) && h.is_multiple_of(2),
+            "Export requires even output dimensions"
+        );
+        if prores {
+            return Ok(Self::ProRes {
+                encoder: filmcraft_prores::Encoder::new(filmcraft_prores::Profile::Standard, w, h),
+                dims: [w, h],
+                duration: (duration * SCALE as f64).round() as u32,
+            });
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let settings = filmcraft_export::ExportSettings {
+                format: filmcraft_export::Format::Hevc,
+                bitrate_kbps: 35000,
+                ..Default::default()
+            };
+            let encoder = filmcraft_platform::hardware_encode::videotoolbox_encoder_factory(
+                filmcraft_export::Format::Hevc,
+                w,
+                h,
+                filmcraft_time::FrameRate::new(1_000_000, (duration * 1e6).round() as i64),
+                &settings,
+            )
+            .context("HEVC encoder unavailable on this machine")??;
+            Ok(Self::Hevc {
+                encoder,
+                dims: [w, h],
+            })
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            anyhow::bail!("HEVC export requires macOS VideoToolbox")
+        }
+    }
+    fn dims(&self) -> [u32; 2] {
+        match self {
+            Self::ProRes { dims, .. } => *dims,
+            #[cfg(target_os = "macos")]
+            Self::Hevc { dims, .. } => *dims,
+        }
+    }
+    fn scale(&self) -> u32 {
+        match self {
+            Self::ProRes { .. } => SCALE,
+            #[cfg(target_os = "macos")]
+            Self::Hevc { encoder, .. } => encoder.timescale(),
+        }
+    }
+    fn entry(&self) -> SampleEntry {
+        match self {
+            Self::ProRes { dims, .. } => {
+                SampleEntry::prores(mp4::FourCc(*b"apcn"), dims[0] as u16, dims[1] as u16)
+            }
+            #[cfg(target_os = "macos")]
+            Self::Hevc { encoder, .. } => encoder.sample_entry(),
+        }
+    }
+    fn encode(&mut self, rgba: &[u8], index: u64) -> Result<Vec<filmcraft_export::EncodedPacket>> {
+        match self {
+            Self::ProRes {
+                encoder,
+                dims,
+                duration,
+            } => {
+                let [w, h] = *dims;
+                let mut p = filmcraft_prores::Frame::new(
+                    w,
+                    h,
+                    filmcraft_prores::ChromaFormat::Yuv422,
+                    10,
+                    false,
+                );
+                filmcraft_export::rgba_to_yuv422_10(
+                    rgba, w as usize, h as usize, &mut p.y, &mut p.cb, &mut p.cr,
+                );
+                Ok(vec![filmcraft_export::EncodedPacket {
+                    data: encoder.encode(&p)?,
+                    duration: *duration,
+                    composition_offset: 0,
+                    key: true,
+                }])
+            }
+            #[cfg(target_os = "macos")]
+            Self::Hevc { encoder, dims } => {
+                Ok(encoder.encode(&filmcraft_export::EncoderFrame {
+                    width: dims[0],
+                    height: dims[1],
+                    rgba,
+                    hdr: None,
+                    index,
+                })?)
+            }
+        }
+    }
+    fn flush(&mut self) -> Result<Vec<filmcraft_export::EncodedPacket>> {
+        match self {
+            Self::ProRes { .. } => Ok(vec![]),
+            #[cfg(target_os = "macos")]
+            Self::Hevc { encoder, .. } => Ok(encoder.flush()?),
+        }
     }
 }

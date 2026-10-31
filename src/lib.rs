@@ -9,6 +9,7 @@
 
 mod processor_cli;
 mod processor_gui;
+mod export_page;
 mod app;
 mod config;
 mod cut;
@@ -64,6 +65,7 @@ config: abner.default.toml (built in) overlaid by the first of
 processor previews (composed launcher):
   --processor ID                    open the runtime settings and preview panel
   --processor-settings JSON         optional initial settings object
+  --export                          open the minimal Export workspace
   --process                         open the Process workspace
   R                                 preview current frame in Process
   Shift-Left / Shift-Right           previous / next rendered frame
@@ -131,6 +133,7 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
     let mut mask_mode = false;
     let mut processor = None;
     let mut process_workspace = false;
+    let mut export_workspace = false;
     let mut processor_settings = serde_json::json!({});
     // The Sources sidebar hidden, as the header toggle leaves it: for captures.
     let mut no_sources = false;
@@ -144,7 +147,8 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
     let mut paths: Vec<PathBuf> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
-        if a == "--process" {
+        if a == "--export" { export_workspace=true; }
+        else if a == "--process" {
             process_workspace = true;
         } else if a == "--processor" {
             processor = Some(
@@ -272,6 +276,7 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
         app.start_processor(&id, processor_settings)
             .map_err(anyhow::Error::msg)?;
     }
+    if export_workspace { app.select_workspace_mode(5); }
     app.set_recent(recent::load());
     app.set_video_splash(video_splash);
     if let Some(path) = video_splash.then(backdrop_path).flatten() {

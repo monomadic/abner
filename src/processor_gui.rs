@@ -800,7 +800,7 @@ fn render(
     }
     Ok(())
 }
-fn process_chain(
+pub(crate) fn process_chain(
     sessions: &mut [Box<dyn abner_processor_api::Session>],
     from: usize,
     mut frames: Vec<Frame>,
@@ -832,6 +832,10 @@ fn check_sdr(path: &std::path::Path) -> Result<(), String> {
 
 
 pub struct Panel {
+    /// Shared with the worker (locked for a whole render), so the page can
+    /// ask the chain's output rate without waiting on one, and Export can
+    /// hand the same registry to its own job.
+    registry: Arc<Mutex<Registry>>,
     pub open: bool,
     descriptors: Vec<Descriptor>,
     selected: usize,
@@ -862,9 +866,6 @@ pub struct Panel {
     fields: Vec<Field>,
     settings: Value,
     worker: Option<Worker>,
-    /// Shared with the worker (locked for a whole render), so the page can
-    /// ask the chain's output rate without waiting on one.
-    registry: Option<Arc<Mutex<Registry>>>,
     /// The chain's output rate, the cadence the page steps and scrubs at,
     /// and what it was computed for (source rate + chain).
     rate: f64,
@@ -900,6 +901,7 @@ pub struct Panel {
 impl Default for Panel {
     fn default() -> Self {
         Self {
+            registry: Arc::new(Mutex::new(Registry::default())),
             open: false,
             descriptors: vec![],
             selected: 0,
@@ -927,7 +929,6 @@ impl Default for Panel {
             fields: vec![],
             settings: json!({}),
             worker: None,
-            registry: None,
             rate: 24.0,
             retimed: false,
             rate_key: String::new(),
@@ -992,6 +993,7 @@ impl Panel {
         let registry = Arc::new(Mutex::new(registry));
         let worker = (!descriptors.is_empty()).then(|| Worker::new(registry.clone()));
         let mut s = Self::default();
+        s.registry = registry;
         s.descriptors = descriptors;
         s.saved = saved;
         s.enabled = enabled;
@@ -1000,7 +1002,6 @@ impl Panel {
         s.capabilities = capabilities;
         s.categories = categories;
         s.worker = worker;
-        s.registry = Some(registry);
         s.select(0);
         s
     }
@@ -1254,6 +1255,14 @@ impl Panel {
     /// An enabled stage in the current chain requires encoding output pixels.
     pub fn modifies_video(&self) -> bool {
         self.enabled.iter().take(self.selected + 1).any(|enabled| *enabled)
+    }
+
+    /// Export runs every enabled stage in its displayed order, not just the
+    /// chain up to the selected one the preview shows.
+    pub(crate) fn export_setup(&self) -> (Arc<Mutex<Registry>>, Vec<(String, Value)>) {
+        let chain = self.descriptors.iter().enumerate().filter(|(i, _)| self.enabled[*i])
+            .map(|(i,d)| (d.id.clone(), if i == self.selected { self.settings.clone() } else { self.saved[i].clone() })).collect();
+        (self.registry.clone(), chain)
     }
 
     fn chain(&self) -> Vec<(String, Value)> {
@@ -1727,12 +1736,11 @@ impl Panel {
             return;
         }
         let source = rational(self.fps);
-        let rate = match &self.registry {
-            None => Ok(source),
-            Some(r) => match r.try_lock() {
-                Ok(registry) => chain_rate(&registry, &chain, self.fps),
-                Err(_) => return,
-            },
+        // An empty chain declares the source's own rate, so a panel with no
+        // processors needs no special case here.
+        let rate = match self.registry.try_lock() {
+            Ok(registry) => chain_rate(&registry, &chain, self.fps),
+            Err(_) => return,
         };
         self.rate_key = key;
         match rate {

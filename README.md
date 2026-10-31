@@ -8,6 +8,7 @@ they play in frame-locked sync.
 abner original.mp4 encoded.mp4
 abner --view delta original.mp4 encoded.mp4
 abner a.mp4 b.mp4 c.mp4          # three-way works too
+abner --export original.mp4       # minimal pipeline export workspace
 abner                            # launch window — drag clips onto it
 abner --no-video-splash           # just the centered logo — drag clips onto it
 ```
@@ -18,6 +19,20 @@ mode is reachable from the command line.
 The animated splash appears only when launched with no arguments. Video paths
 start playback directly without probing or decoding the splash video. Any arguments
 also make the empty window logo-only, including after closing the last clip.
+
+## Export
+
+Open the **Export** tab to write the enabled processor pipeline, or launch with
+`abner --export INPUT`. Choose HEVC or ProRes and MP4 or MKV, then Export to pick
+a destination. ProRes selects MKV automatically. The large output viewer follows
+new rendered frames; scrubbing or arrow keys holds a recent frame for inspection,
+TAB compares its original, and Follow render returns to the latest frame. Progress
+shows encoded frames, FPS, elapsed time and estimated remaining time. The footer
+contains Export, Cancel and Reveal output.
+
+This initial exporter supports SDR constant-rate video, current Timeline kept ranges,
+an active crop and streaming processors. Recent-frame review is memory bounded;
+see [native media limits](docs/NATIVE-MEDIA.md#minimal-export-workspace).
 
 ## Configuration
 

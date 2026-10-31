@@ -168,6 +168,7 @@ pub struct Video {
 
 pub struct App {
     processors: crate::processor_gui::Panel,
+    export_page: crate::export_page::Page,
     pub videos: Vec<Video>,
     active: usize,
     source_scroll: usize,
@@ -667,6 +668,7 @@ impl App {
         let wrap = Self::wrap_of(&videos);
         Self {
             processors: crate::processor_gui::Panel::default(),
+            export_page: crate::export_page::Page::default(),
             masks: (0..videos.len()).map(|_| None).collect(),
             mask_mode: false,
             brush_diameter: cfg.mask.brush_size,
@@ -1466,19 +1468,30 @@ impl App {
         }
     }
 
-    /// Whether File > Export has anything to export: the timeline's cut,
-    /// or the crop marquee's ProRes. Plain playback exports nothing.
+    /// Any loaded source can be written through the Export workspace.
     pub fn can_export(&self) -> bool {
-        (self.cut_mode && self.cut.is_some()) || (self.mask_mode && self.crop.is_some())
+        self.ready()
     }
 
-    /// File > Export: the same export the mode's own button runs.
+    /// File > Export opens the workspace; on that page it starts the job.
     fn export(&mut self) {
-        if self.cut_mode && self.cut.is_some() {
-            self.cut_action(CutAction::Export);
-        } else if self.mask_mode && self.crop.is_some() {
-            self.export_crop();
-        }
+        if self.export_page.open { self.start_pipeline_export(); }
+        else { self.select_workspace_mode(5); }
+    }
+
+    fn start_pipeline_export(&mut self) {
+        if !self.ready() { return; }
+        let info = self.videos[self.active].info.clone();
+        let keeps = self.cut.as_ref().filter(|_| self.active == self.cut_video)
+            .map(|c| c.segments().into_iter().map(|s| (s.start,s.end)).collect())
+            .unwrap_or_else(|| vec![(0.,info.duration)]);
+        let (registry, chain) = self.processors.export_setup();
+        self.export_page.start(info, keeps, registry, chain);
+    }
+
+    fn export_action(&mut self, action: crate::export_page::Action) {
+        if action == crate::export_page::Action::Export { self.start_pipeline_export(); }
+        else if let Some(path) = self.export_page.apply(action) { self.cmds.push(Cmd::Reveal(path)); }
     }
 
     /// Frame > Copy Frame as PNG: the focused clip's frame on screen, at
@@ -1643,6 +1656,8 @@ impl App {
             self.cycle_workspace_mode(if k == Key::NextMode { 1 } else { -1 });
             return;
         }
+        if self.export_page.open && self.ready() && self.export_page.key(k) { return; }
+        if self.export_page.open && matches!(k, Key::Space | Key::Render) { self.start_pipeline_export(); return; }
         if self.processors.key(k) {
             self.apply_processor_transport();
             return;
@@ -1856,6 +1871,7 @@ impl App {
     }
 
     pub fn cursor_moved(&mut self, x: f32, y: f32) {
+        if self.export_page.open { self.cursor=(x,y);self.cursor_inside=true;return; }
         if self.show_ui && self.processors.pointer(x, y, self.vp) {
             self.cursor = (x, y);
             self.apply_processor_transport();
@@ -1944,6 +1960,14 @@ impl App {
     }
 
     pub fn mouse_down(&mut self, x: f32, y: f32) {
+        if self.export_page.open && self.ready() {
+            self.cursor = (x,y);
+            if !self.show_ui {return;}
+            if y < HEADER_H {
+                if let Some(control) = self.mode_selector().controls().into_iter().find(|c| contains(c.r,x,y)) { self.activate(control.action); }
+            } else if let Some(action) = self.export_page.click(self.vp,x,y) { self.export_action(action); }
+            return;
+        }
         if self.show_ui && self.ready() && self.processors.open && contains(self.footer_export(), x, y) {
             self.export();
             return;
@@ -2086,6 +2110,7 @@ impl App {
     }
 
     pub fn scroll(&mut self, dx: f32, dy: f32) {
+        if self.export_page.open { return; }
         if self.show_ui && self.processors.scroll(dy, self.cursor, self.vp) { return; }
         self.stroke_last = None;
         if !self.ready() { return; }
@@ -2232,7 +2257,7 @@ impl App {
     }
 
     pub fn tick(&mut self, dt: f32, vp: (f32, f32), _scale: f32) -> FrameDesc {
-        if self.videos.is_empty(){self.processors.close();}
+        if self.videos.is_empty(){self.processors.close();self.export_page.open=false;self.export_page.cancel();}
         if self.vp != vp {
             self.stroke_last = None;
             self.vp = vp;
@@ -2550,7 +2575,19 @@ impl App {
         self.processors.draw(&mut items, vp, n, self.view(), self.show_ui);
         if self.processors.open && self.show_ui { self.draw_footer_end(&mut items, vp); }
 
-        let animating = self.processors.animating()
+        if self.ready() { self.export_page.reset_source(&self.videos[self.active].info); }
+        self.export_page.poll(&mut uploads, n + 1);
+        if let Some(t) = self.export_page.seek.take().filter(|_| self.export_page.open) { self.seek_all(t,true);self.adopt_seek=false; }
+        if self.export_page.open {
+            items.clear();
+            self.export_page.draw(&mut items,vp,self.active,n+1,&self.videos[self.active].info,self.cursor,self.videos[self.active].shown_pts,self.show_ui);
+            if self.show_ui {
+            items.push(Item::Rect(RectItem::new(RectPx{x:0.,y:0.,w:vp.0,h:HEADER_H},WORKSPACE_PANEL)));
+            self.mode_selector().draw(&mut items,self.cursor,self.cursor_inside);
+            draw_status_chip(&mut items,self.status_chip(),if self.export_page.busy(){0xe6ac69}else{0x9ac8aa},if self.export_page.busy(){"ENCODING"}else{"READY"},WORKSPACE_TEXT);
+            }
+        }
+        let animating = self.export_page.busy() || self.processors.animating()
             || self.playing
             || !self.started
             || self.cut_thumb.play.is_some()
@@ -2708,7 +2745,7 @@ impl App {
         let l = self.workspace();
         let mut out = self.mode_selector().controls();
         out.push(Control { hint: "⌘E", ..Control::new(self.footer_export(), "Export", false, Action::Export) });
-        if self.processors.open {
+        if self.processors.open || self.export_page.open {
             return out;
         }
         if l.rail > 0.0 {
@@ -2843,6 +2880,7 @@ impl App {
 
     fn activate(&mut self, action: Action) {
         self.mouse_up();
+        if matches!(action, Action::Tool(t) if t != 5) { self.export_page.open=false; }
         if matches!(action, Action::Tool(t) if t != 4) {
             self.processors.close();
         }
@@ -2853,6 +2891,14 @@ impl App {
                     self.mask_mode = false;
                     self.leave_mask_mode();
                 }
+            }
+            Action::Tool(5) => {
+                self.export_page.crop = self.crop.map(|c| c.pixels(self.videos[self.active].info.width,self.videos[self.active].info.height));
+                self.set_cut_mode(false);
+                if self.mask_mode { self.mask_mode=false;self.leave_mask_mode(); }
+                self.playing=false;self.show_ui=true;
+                self.export_page.reset_source(&self.videos[self.active].info);
+                self.export_page.enter();
             }
             Action::Tool(3) => self.set_cut_mode(true),
             Action::Tool(4) => {
@@ -2932,7 +2978,8 @@ impl App {
 
     /// Shared by the painted header and the native View menu.
     pub fn workspace_mode(&self) -> usize {
-        if self.processors.open {
+        if self.export_page.open { 5 }
+        else if self.processors.open {
             4
         } else if self.cut_mode {
             3
@@ -2970,7 +3017,7 @@ impl App {
     }
 
     pub fn select_workspace_mode(&mut self, mode: usize) {
-        if self.ready() && mode < 5 && mode != self.workspace_mode() {
+        if self.ready() && mode < 6 && mode != self.workspace_mode() {
             self.activate(Action::Tool(mode));
         }
     }
@@ -3012,17 +3059,17 @@ impl App {
         }
     }
 
-    /// Header tabs (MainNav 382:4686, 2026-10-26): five 110×30 tabs on a
+    /// Header tabs (MainNav 382:4686, 2026-10-26): six 110×30 tabs on a
     /// 5px gap. They shrink together so the row ends 12px short of what
     /// the header carries at its right — the persistent encode indicator.
     fn mode_selector(&self) -> ModeSelector {
         let right = self.status_chip().x;
-        let tab_w = ((right - 12.0 - self.header_left() - 4.0 * TAB_GAP) / 5.0).clamp(40.0, TAB_W);
+        let tab_w = ((right - 12.0 - self.header_left() - 5.0 * TAB_GAP) / 6.0).clamp(40.0, TAB_W);
         ModeSelector {
             rect: RectPx {
                 x: self.header_left(),
                 y: (HEADER_H - TAB_H) / 2.0,
-                w: 5.0 * tab_w + 4.0 * TAB_GAP,
+                w: 6.0 * tab_w + 5.0 * TAB_GAP,
                 h: TAB_H,
             },
             active: self.workspace_mode(),
@@ -3794,11 +3841,11 @@ struct ModeSelector {
 
 impl ModeSelector {
     /// The tabs' workspace modes in header order.
-    pub(crate) const ORDER: [usize; 5] = [0, 3, 4, 2, 1];
+    pub(crate) const ORDER: [usize; 6] = [0, 3, 4, 2, 1, 5];
     /// MainNav (382:4686): five equal tabs on a `TAB_GAP`.
     fn controls(&self) -> Vec<Control> {
-        let w = (self.rect.w - 4.0 * TAB_GAP) / 5.0;
-        ["Sources", "Timeline", "Process", "Crop", "Mask"]
+        let w = (self.rect.w - 5.0 * TAB_GAP) / 6.0;
+        ["Sources", "Timeline", "Process", "Crop", "Mask", "Export"]
         .into_iter()
         .zip(Self::ORDER)
         .enumerate()
@@ -6652,8 +6699,8 @@ mod tests {
     fn native_workspace_selection_matches_header_for_every_transition() {
         let Some(clip) = test_clip() else { return };
         let mut app = mk_app(&clip, 1);
-        for from in 0..5 {
-            for to in 0..5 {
+        for from in 0..6 {
+            for to in 0..6 {
                 app.select_workspace_mode(from);
                 app.select_workspace_mode(to);
                 assert_eq!(app.workspace_mode(), to, "{from} -> {to}");
@@ -6685,7 +6732,7 @@ mod tests {
         app.key(Key::PrevMode);
         assert_eq!(app.workspace_mode(), 3);
         for _ in 0..6 { app.key(Key::NextMode); }
-        assert_eq!(app.workspace_mode(), 1, "Mask is the last tab");
+        assert_eq!(app.workspace_mode(), 5, "Export is the last tab");
     }
 
     #[test]
@@ -6807,10 +6854,10 @@ mod tests {
         let Some(clip) = test_clip() else { return };
         let mut app = mk_app(&clip, 2);
         app.vp = (1280.0, 800.0);
-        // Five 110px tabs on a 5px gap end at 648; the strip past them is bare.
+        // Six 110px tabs on a 5px gap end at 763; the strip past them is bare.
         let tabs = app.header_tabs();
-        assert_eq!((tabs.x, tabs.w, tabs.h), (78.0, 570.0, TAB_H));
-        assert!(app.titlebar_background(700.0, 20.0));
+        assert_eq!((tabs.x, tabs.w, tabs.h), (78.0, 685.0, TAB_H));
+        assert!(app.titlebar_background(800.0, 20.0));
         assert!(!app.titlebar_background(50.0, 20.0));
         assert!(!app.titlebar_background(100.0, 20.0));
         assert!(!app.titlebar_background(600.0, 20.0), "over the fifth tab");
@@ -6819,7 +6866,7 @@ mod tests {
         for mode in [3, 4, 2, 1, 0] {
             app.activate(Action::Tool(mode));
             let controls = app.mode_selector().controls();
-            assert_eq!(controls.len(), 5);
+            assert_eq!(controls.len(), 6);
             assert_eq!(controls.iter().filter(|c| c.selected).count(), 1);
             for (before, after) in original.iter().zip(&controls) {
                 assert_eq!(

@@ -3,6 +3,22 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-11-01 — Minimal Export workspace
+
+Added the sixth header tab and native View menu entry, reachable with `--export`.
+The dark Signal layout follows the approved minimal reference: a large output
+preview, HEVC / ProRes presets, MP4 / MKV container choices, one Export button,
+progress beneath the player, and an Export / Cancel / Reveal output footer.
+File > Export opens this page and starts a job when already on it.
+
+Exports run off the event loop through all enabled processors, retained Timeline
+ranges and the crop carried into Export. Native HEVC / ProRes encoding, AAC audio,
+atomic publication, cancellation and bounded preview delivery are covered by native
+round-trip tests, including processed pixels, audio, cropped cuts and changed frame
+rates. TAB comparison, manual review and follow-render behavior are tested separately.
+ProRes selects MKV; MP4 is unavailable for that preset. Scope and precision limits
+are documented in docs/NATIVE-MEDIA.md.
+
 ## 2026-11-01 — MP4 average rate follows sample timing
 
 MP4/MOV metadata computes average FPS from the sample timing table rather than

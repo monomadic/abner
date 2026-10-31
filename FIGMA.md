@@ -423,3 +423,12 @@ is a 61×27 housing with a 28×21 thumb, 3px inset and 27px horizontal travel.
 cubic ease-out slide reverses from its current position and requests continuous
 redraws only until settled. Click bounds are `card_switch` / `settings_switch`;
 presets share `preset_buttons` between drawing and hit testing.
+
+### Minimal Export workspace (2026-11-01)
+
+`src/export_page.rs` implements the minimal [Signal Export variant 232:4510](https://www.figma.com/design/oDvZ81OLuzewiI2oLcqeVU?node-id=232-4510),
+with the user's attached dark-mode reference taking precedence over the light board.
+It uses native UI text, geometric drawing, a live video texture, and shared `Layout`
+rectangles for drawing and input. The footer is an Export / Cancel / Reveal output
+button bar; Timeline editing actions from the reference's footer are deliberately
+replaced per the user's correction. `--export INPUT` opens this view for capture.
