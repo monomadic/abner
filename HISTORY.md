@@ -3,6 +3,23 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-11-01 — Scrollable chapter list; chapters added out of order
+
+The cut inspector's chapter list only ever showed the page around the playhead, so
+chapters off that page were unreachable. It now scrolls: the wheel moves the page a
+row per 26px of travel (a row of two cards in thumbnail view), a thin bar shows the
+position, and playback only moves the page when the current chapter changes and is
+off it. A click on a row therefore never moves the list under the pointer.
+
+Adding a chapter before an existing one used to title it "Chapter 2" beside flag 1,
+and the status said "Chapter 1 added". Default titles ("Chapter N") are now
+renumbered by position on every add; titles from the file are left alone. `+` puts
+the chapter on the frame on screen rather than the raw clock, so it sits on the frame
+grid. Chapter flags on the timeline are now click targets that seek to the chapter's
+start, like the inspector rows; before, a click there seeked to the pixel under the
+pointer or started a rubber band. Test:
+`chapters_added_out_of_order_click_through_and_the_list_scrolls`.
+
 ## 2026-11-01 — Saved processor presets
 
 Added Save and Delete beside the Process inspector's preset arrows. Save names a

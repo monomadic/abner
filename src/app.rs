@@ -226,6 +226,14 @@ pub struct App {
     cut_gop: bool,
     frame_detail_boot: bool,
     cut_thumbs: bool,
+    /// The chapter list's first visible entry. The wheel moves it; playback
+    /// moves it only when the current chapter changes and is off the page,
+    /// so a scrolled list stays put under the pointer.
+    chapter_first: usize,
+    /// The current chapter `chapter_first` was last kept visible for.
+    chapter_seen: Option<usize>,
+    /// Wheel travel not yet worth a whole row.
+    chapter_wheel: f32,
     cut_posters: bool,
     /// The start-of-clip thumbnails on the picture lane (posters, and the one under the pointer playing).
     cut_thumb: CutThumbs,
@@ -696,6 +704,9 @@ impl App {
             cut_frames: false,
             frame_changes: false, cut_gop: false, frame_detail_boot: false,
             cut_thumbs: false,
+            chapter_first: 0,
+            chapter_seen: None,
+            chapter_wheel: 0.0,
             cut_posters: true,
             cut_thumb: CutThumbs::new(),
             split_preview: None,
@@ -2119,6 +2130,10 @@ impl App {
             self.info_scroll = (self.info_scroll.min(self.info_scroll_max()) - dy).clamp(0.0, self.info_scroll_max());
             return;
         }
+        if self.cut_mode && self.show_ui && self.cut_tab == 0 && contains(self.cut_side().body, self.cursor.0, self.cursor.1) {
+            self.scroll_chapters(dy);
+            return;
+        }
         if self.cut_mode && self.show_ui && self.cut_over_panel() {
             let lane = self.cut_lanes().video;
             if dy.abs() > dx.abs() {
@@ -2283,6 +2298,7 @@ impl App {
             }
             self.frame_detail_boot = false;
         }
+        self.keep_chapter_visible();
         self.tick_cut_thumbs(dt);
         self.update_split_preview();
         if !self.cut_boot.is_empty() { self.boot_cut(); }
@@ -4467,6 +4483,14 @@ impl App {
                 let cut = self.cut.as_mut().unwrap();
                 self.cut_restore = Some((seg.start, seg.end));
                 cut.status.clear();
+            } else if let Some(idx) = self.cut_flag_at(x, y).filter(|_| !self.cut_near_playhead(x, y)) {
+                // A chapter flag is a place, as its inspector row is: go to
+                // its start, not to the pixel under the pointer.
+                self.cut_restore = None;
+                self.cut_picks.clear();
+                let start = self.cut.as_ref().unwrap().chapters[idx].start;
+                let end = if self.wrap.is_finite() { (self.wrap - 0.05).max(0.0) } else { f64::MAX };
+                self.seek_all(start.min(end), true);
             } else if self.cut_near_playhead(x, y) {
                 // Grab the playhead through vacant lanes instead of starting a band.
                 self.cut_restore = None;
@@ -4497,8 +4521,9 @@ impl App {
             if let Some(i) = side.tab.iter().position(|r| contains(*r, x, y)) {
                 self.cut_tab = [0, 2, 3, 1][i];
             } else if self.cut_tab == 0 && contains(side.add_btn, x, y) {
-                // A chapter starts here: the playhead.
-                let t = self.t;
+                // A chapter starts here: on the frame on screen, so it sits on
+                // the frame grid and a seek back to it lands on it.
+                let t = self.chapter_here();
                 if let Some(cut) = self.cut.as_mut() {
                     cut.status = match cut.add_chapter(t) {
                         Some(n) => format!("Chapter {n} added at {}", fmt_hms(t)),
@@ -4827,6 +4852,20 @@ impl App {
         a.2 == b.2 && (a.0 - b.0).abs() < 1e-3 && (a.1 - b.1).abs() < 1e-3
     }
 
+    /// The chapter whose flag is under the pointer on the chapter row: the
+    /// flag hangs right of its start, and a later flag (drawn on top) wins.
+    fn cut_flag_at(&self, x: f32, y: f32) -> Option<usize> {
+        let lanes = self.cut_lanes();
+        let row = lanes.chapters?;
+        let v = lanes.video;
+        let cut = self.cut.as_ref()?;
+        if x < v.x || x >= v.x + v.w || y < row.y || y >= row.y + row.h { return None; }
+        cut.chapters.iter().rposition(|c| {
+            let fx = v.x + ((c.start - cut.t0) * cut.pps) as f32;
+            x >= fx - 2.0 && x < fx + 26.0
+        })
+    }
+
     fn cut_near_playhead(&self, x: f32, y: f32) -> bool {
         let Some(rows) = self.cut_band_rows() else { return false };
         let Some(cut) = &self.cut else { return false };
@@ -4962,30 +5001,105 @@ impl App {
             body: RectPx { x: x0, y: body_top, w, h: (body_bottom - body_top).max(0.0) } }
     }
 
+    /// The chapter list's paging: `(fit, step)` — how many entries the body
+    /// holds and how many one wheel row moves (a row of two cards, or one).
+    fn chapter_page(&self) -> (usize, usize) {
+        let body = self.cut_side().body;
+        if self.cut_thumbs {
+            let rows = ((body.h + 8.0) / (CHAPTER_CARD_H + 8.0)).floor().max(0.0) as usize;
+            (rows * 2, 2)
+        } else {
+            (((body.h + 6.0) / CHAPTER_ROW_PITCH).floor().max(0.0) as usize, 1)
+        }
+    }
+
+    /// The first entry on the page: `chapter_first`, clamped so the page
+    /// is full and starts on a row.
+    fn chapter_first_shown(&self) -> usize {
+        let n = self.cut.as_ref().map_or(0, |c| c.chapters.len());
+        let (fit, step) = self.chapter_page();
+        let last = n.saturating_sub(fit).div_ceil(step) * step;
+        (self.chapter_first.min(last) / step) * step
+    }
+
+    /// The chapter the playhead is in.
+    fn chapter_current(&self) -> Option<usize> {
+        self.cut.as_ref()?.chapters.iter().rposition(|c| c.start <= self.t + 1e-6)
+    }
+
+    /// When the current chapter changes and is off the page, bring it to
+    /// the middle. Otherwise the page stays where the wheel left it.
+    fn keep_chapter_visible(&mut self) {
+        if !self.cut_mode { return; }
+        let current = self.chapter_current();
+        if current == self.chapter_seen { return; }
+        self.chapter_seen = current;
+        let Some(cur) = current else { return };
+        let (fit, _) = self.chapter_page();
+        let first = self.chapter_first_shown();
+        if fit > 0 && (cur < first || cur >= first + fit) {
+            self.chapter_first = cur.saturating_sub(fit / 2);
+        }
+    }
+
+    /// The wheel over the chapter list: a row per 26px of travel (trackpads
+    /// send many small deltas, a mouse wheel few large ones).
+    fn scroll_chapters(&mut self, dy: f32) {
+        self.chapter_wheel -= dy;
+        let (_, step) = self.chapter_page();
+        let first = self.chapter_first_shown();
+        let rows = (self.chapter_wheel / CHAPTER_WHEEL_PX).trunc();
+        if rows == 0.0 { return; }
+        self.chapter_wheel -= rows * CHAPTER_WHEEL_PX;
+        let moved = (rows.abs() as usize) * step;
+        self.chapter_first = if rows > 0.0 { first + moved } else { first.saturating_sub(moved) };
+        self.chapter_first = self.chapter_first_shown();
+    }
+
+    /// Where `+` puts a chapter: the frame on screen (paused, that is the
+    /// playhead; playing, the clock can be a part-frame ahead of it).
+    fn chapter_here(&self) -> f64 {
+        let v = &self.videos[self.active];
+        if v.delivered && (v.shown_pts - self.t).abs() < 1.0 { v.shown_pts } else { self.quantize(self.t) }
+    }
+
     /// The chapter rows (or thumbnail cards) on screen, with their chapter
-    /// index. More chapters than fit: the page follows the playhead.
+    /// index: the page `chapter_first_shown` names.
     fn cut_chapter_rows(&self) -> Vec<(RectPx, usize)> {
         let Some(cut) = &self.cut else { return Vec::new() };
         let side = self.cut_side();
         if self.workspace().side.w <= 0.0 || self.cut_tab != 0 || cut.chapters.is_empty() { return Vec::new(); }
         let body = side.body;
         let n = cut.chapters.len();
-        let current = cut.chapters.iter().rposition(|c| c.start <= self.t + 1e-6).unwrap_or(0);
+        let (fit, _) = self.chapter_page();
+        let first = self.chapter_first_shown();
+        // The scroll bar takes a strip on the right when there is one.
+        let w = body.w - if n > fit { CHAPTER_BAR_GUTTER } else { 0.0 };
         if self.cut_thumbs {
-            let (cw, ch) = ((body.w - 8.0) / 2.0, 104.0);
-            let rows = (((body.h + 8.0) / (ch + 8.0)).floor().max(0.0)) as usize;
-            let fit = rows * 2;
-            let first = (current.saturating_sub(fit / 2).min(n.saturating_sub(fit)) / 2) * 2;
+            let cw = (w - 8.0) / 2.0;
             (first..n.min(first + fit)).enumerate()
-                .map(|(i, idx)| (RectPx { x: body.x + (i % 2) as f32 * (cw + 8.0), y: body.y + (i / 2) as f32 * (ch + 8.0), w: cw, h: ch }, idx))
+                .map(|(i, idx)| (RectPx { x: body.x + (i % 2) as f32 * (cw + 8.0), y: body.y + (i / 2) as f32 * (CHAPTER_CARD_H + 8.0), w: cw, h: CHAPTER_CARD_H }, idx))
                 .collect()
         } else {
-            let fit = (((body.h + 6.0) / 52.0).floor().max(0.0)) as usize;
-            let first = current.saturating_sub(fit / 2).min(n.saturating_sub(fit));
             (first..n.min(first + fit)).enumerate()
-                .map(|(i, idx)| (RectPx { x: body.x, y: body.y + i as f32 * 52.0, w: body.w, h: 46.0 }, idx))
+                .map(|(i, idx)| (RectPx { x: body.x, y: body.y + i as f32 * CHAPTER_ROW_PITCH, w, h: 46.0 }, idx))
                 .collect()
         }
+    }
+
+    /// The chapter list's scroll bar, when it has more than a page:
+    /// `(track, thumb)`.
+    fn chapter_scrollbar(&self) -> Option<(RectPx, RectPx)> {
+        let n = self.cut.as_ref()?.chapters.len();
+        let (fit, _) = self.chapter_page();
+        if self.cut_tab != 0 || fit == 0 || n <= fit || self.workspace().side.w <= 0.0 { return None; }
+        let body = self.cut_side().body;
+        let track = RectPx { x: body.x + body.w - 3.0, y: body.y, w: 3.0, h: body.h };
+        let h = (track.h * fit as f32 / n as f32).max(16.0);
+        let first = self.chapter_first_shown();
+        let span = n.saturating_sub(fit).max(1) as f32;
+        let y = track.y + (track.h - h) * (first.min(n - fit) as f32 / span);
+        Some((track, RectPx { y, h, ..track }))
     }
 
     /// Subtitle and segment lists share their drawing and seek targets.
@@ -5358,6 +5472,10 @@ impl App {
                     inspector_label(items, r.x + 42.0, r.y + 32.0, 10.0, faint, format!("{} · {}", fmt_hms(c.start), fmt_span(end - c.start)), Align::Left, r.w - 42.0 - 28.0);
                     items.push(Item::Rect(RectItem { radius: 3.5, ..RectItem::new(RectPx { x: r.x + r.w - 17.0, y: r.y + r.h / 2.0 - 3.5, w: 7.0, h: 7.0 }, snap_dot) }));
                 }
+            }
+            if let Some((track, thumb)) = self.chapter_scrollbar() {
+                items.push(Item::Rect(RectItem { radius: 1.5, ..RectItem::new(track, mix(CUT_BG, 0xffffff, 0.05)) }));
+                items.push(Item::Rect(RectItem { radius: 1.5, ..RectItem::new(thumb, mix(CUT_BG, 0xffffff, 0.32)) }));
             }
         } else if self.cut_tab >= 2 {
             let (title, count) = if self.cut_tab == 2 { ("Subtitles", cut.cues.len()) } else { ("Segments", cut.segments().len()) };
@@ -5810,8 +5928,7 @@ impl App {
         let over = |r: RectPx| self.cursor_inside && self.cut_drag.is_none() && mx >= v.x && mx < v.x + v.w && my >= r.y && my < r.y + r.h;
         let at = self.cut_time_at(mx);
         let told = if lanes.chapters.is_some_and(over) {
-            cut.chapters.iter().enumerate().find(|(_, c)| { let x = x_of(c.start); mx >= x - 2.0 && mx < x + 26.0 })
-                .map(|(i, c)| format!("{} · {}", i + 1, c.title))
+            self.cut_flag_at(mx, my).map(|i| format!("{} · {}", i + 1, cut.chapters[i].title))
         } else if over(RectPx { y: s.y - 2.0, h: s.h + 4.0, ..s }) {
             cut.cues.iter().find(|c| at >= c.start && at < c.end).map(|c| c.text.clone())
         } else { None };
@@ -6148,6 +6265,12 @@ const CUT_TIMELINE_H: f32 = 198.0;
 const CUT_TIMELINE_COMPACT_H: f32 = 126.0;
 const CUT_FULL_MIN_H: f32 = 640.0;
 const CUT_SIDE_W: f32 = 300.0;
+/// The inspector's chapter list: row pitch, card height, the strip the
+/// scroll bar takes, and the wheel travel worth one row.
+const CHAPTER_ROW_PITCH: f32 = 52.0;
+const CHAPTER_CARD_H: f32 = 104.0;
+const CHAPTER_BAR_GUTTER: f32 = 9.0;
+const CHAPTER_WHEEL_PX: f32 = 26.0;
 /// The icon gutter left of the rows, and the pad right of them.
 const CUT_GUTTER: f32 = 56.0;
 const CUT_PAD: f32 = 16.0;
@@ -7467,6 +7590,106 @@ mod tests {
         assert!(!app.playing, "a dropped clip must not resume playback");
         assert!(tick_until(&mut app, Duration::from_secs(5), |a| a.started));
         assert_eq!(app.t, 0.0);
+    }
+
+    /// A chapter added BEFORE an existing one (+ at 2.3 s, scrub back to
+    /// 1 s, + again) is numbered and titled by position, and both its
+    /// inspector row and its timeline flag take the playhead to its start.
+    /// Many chapters scroll: the wheel moves the page, a click inside it
+    /// does not move it, and playback brings an off-page chapter back.
+    #[test]
+    fn chapters_added_out_of_order_click_through_and_the_list_scrolls() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        assert!(tick_until(&mut app, Duration::from_secs(5), |a| a.started));
+        app.key(Key::Char('t'));
+        assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.cut.as_ref().is_some_and(|c| !c.scanning())));
+        assert!(tick_until(&mut app, Duration::from_secs(5), |a| a.t > 2.3));
+        app.key(Key::Space);
+        for _ in 0..3 { app.tick(0.0, (1280.0, 800.0), 2.0); }
+        let side = app.cut_side();
+        let add = |app: &mut App| { app.mouse_down(side.add_btn.x + 4.0, side.add_btn.y + 4.0); app.mouse_up(); };
+        let page_of = |rows: &[(RectPx, usize)]| rows.iter().map(|(r, i)| (r.y, *i)).collect::<Vec<_>>();
+        let page = |app: &App| page_of(&app.cut_chapter_rows());
+        add(&mut app);
+        let late = app.cut.as_ref().unwrap().chapters[0].start;
+        let grid = late * 30.0;
+        assert!((grid - grid.round()).abs() < 1e-3, "a chapter starts on a frame, not between two: {late}");
+
+        // Scrub back before it and add another.
+        let lane = app.cut_lanes().video;
+        let x = { let c = app.cut.as_ref().unwrap(); lane.x + ((1.0 - c.t0) * c.pps) as f32 };
+        app.begin_cut_scrub(); app.cut_drag_to(x); app.mouse_up();
+        assert!(tick_until(&mut app, Duration::from_secs(5), |a| !a.seek_in_flight()));
+        add(&mut app);
+        let cut = app.cut.as_ref().unwrap();
+        assert_eq!(cut.chapters.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(), ["Chapter 1", "Chapter 2"]);
+        assert_eq!(cut.status, format!("Chapter 1 added at {}", fmt_hms(1.0)));
+
+        // Each row goes to its own chapter and stays lit and in place.
+        for _ in 0..2 {
+            for want in [0, 1, 0] {
+                let rows = app.cut_chapter_rows();
+                let (r, idx) = rows.iter().copied().find(|(_, i)| *i == want).unwrap();
+                app.mouse_down(r.x + 20.0, r.y + 10.0); app.mouse_up();
+                assert!(tick_until(&mut app, Duration::from_secs(5), |a| !a.seek_in_flight() && a.videos.iter().all(|v| !v.pending)));
+                let start = app.cut.as_ref().unwrap().chapters[idx].start;
+                assert!((app.t - start).abs() < 1e-3, "row {idx}: t = {} for a chapter at {start}", app.t);
+                assert_eq!(app.chapter_current(), Some(idx));
+                assert_eq!(page(&app), page_of(&rows), "the list must not move under the pointer");
+            }
+        }
+        // The timeline's flags are click targets too.
+        let flags = app.cut_lanes().chapters.expect("a chapter row");
+        for idx in [1, 0] {
+            let start = app.cut.as_ref().unwrap().chapters[idx].start;
+            let fx = { let c = app.cut.as_ref().unwrap(); lane.x + ((start - c.t0) * c.pps) as f32 };
+            app.mouse_down(fx + 12.0, flags.y + flags.h / 2.0); app.mouse_up();
+            assert!(tick_until(&mut app, Duration::from_secs(5), |a| !a.seek_in_flight() && a.videos.iter().all(|v| !v.pending)));
+            assert!((app.t - start).abs() < 1e-3, "flag {idx}: t = {} for a chapter at {start}", app.t);
+        }
+
+        // Thirty chapters: more than a page.
+        let cut = app.cut.as_mut().unwrap();
+        cut.chapters.clear();
+        // Closer than `+` allows, to fit a short clip: set them directly.
+        cut.chapters = (0..30).map(|i| crate::cut::Chapter { start: i as f64 * 4.0 / 30.0, title: format!("Chapter {}", i + 1) }).collect();
+        let n = app.cut.as_ref().unwrap().chapters.len();
+        assert_eq!(n, 30);
+        app.seek_all(0.0, true);
+        assert!(tick_until(&mut app, Duration::from_secs(5), |a| !a.seek_in_flight()));
+        for thumbs in [false, true] {
+            app.cut_thumbs = thumbs;
+            app.chapter_first = 0;
+            let (fit, step) = app.chapter_page();
+            assert!(fit > 0 && fit < n, "the test window shows part of the list ({fit} of {n})");
+            assert!(app.chapter_scrollbar().is_some());
+            let body = app.cut_side().body;
+            app.cursor = (body.x + 20.0, body.y + 20.0);
+            let scale = app.cut.as_ref().unwrap().pps;
+            app.scroll(0.0, -CHAPTER_WHEEL_PX * 2.0);
+            assert_eq!(app.cut_chapter_rows()[0].1, 2 * step, "two rows down");
+            assert_eq!(app.cut.as_ref().unwrap().pps, scale, "the wheel scrolls the list, not the timeline");
+            app.scroll(0.0, -100000.0);
+            let rows = app.cut_chapter_rows();
+            assert_eq!(rows.last().unwrap().1, n - 1, "scrolled to the end");
+            assert!(rows.iter().all(|(r, _)| r.y + r.h <= body.y + body.h + 0.5), "rows stay inside the body");
+            app.scroll(0.0, 100000.0);
+            assert_eq!(app.cut_chapter_rows()[0].1, 0, "and back to the top");
+        }
+        app.cut_thumbs = false;
+        // Scrolled away, a click on a row keeps the page; playback reaching
+        // a chapter off the page brings it back.
+        app.scroll(0.0, -100000.0);
+        let rows = app.cut_chapter_rows();
+        let (r, idx) = rows[1];
+        app.mouse_down(r.x + 20.0, r.y + 10.0); app.mouse_up();
+        assert!(tick_until(&mut app, Duration::from_secs(5), |a| !a.seek_in_flight() && a.videos.iter().all(|v| !v.pending)));
+        assert_eq!(app.chapter_current(), Some(idx));
+        assert_eq!(page(&app), page_of(&rows));
+        app.seek_all(0.0, true);
+        assert!(tick_until(&mut app, Duration::from_secs(5), |a| !a.seek_in_flight() && a.videos.iter().all(|v| !v.pending)));
+        assert!(app.cut_chapter_rows().iter().any(|(_, i)| *i == 0), "the current chapter came back into view");
     }
 
     /// Tick until a condition holds (real decode runs behind this).

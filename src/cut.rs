@@ -457,15 +457,22 @@ impl Cut {
 
     /// Start a chapter at `t`. Refused within half a second of one that is
     /// already there. Returns its (1-based) number.
+    ///
+    /// The list, the lane flags and the export all number chapters by
+    /// position, so a default title ("Chapter N") is renumbered to match:
+    /// a chapter added before the others must not read "Chapter 2" beside
+    /// flag 1. Titles that aren't the default pattern are left alone.
     pub fn add_chapter(&mut self, t: f64) -> Option<usize> {
         let t = t.clamp(0.0, self.duration);
         if self.chapters.iter().any(|c| (c.start - t).abs() < 0.5) {
             return None;
         }
         let at = self.chapters.partition_point(|c| c.start < t);
-        let mut n = self.chapters.len() + 1;
-        while self.chapters.iter().any(|c| c.title == format!("Chapter {n}")) { n += 1; }
-        self.chapters.insert(at, Chapter { start: t, title: format!("Chapter {n}") });
+        self.chapters.insert(at, Chapter { start: t, title: "Chapter 0".into() });
+        for (i, c) in self.chapters.iter_mut().enumerate() {
+            let default = c.title.strip_prefix("Chapter ").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+            if default { c.title = format!("Chapter {}", i + 1); }
+        }
         self.chapters_edited = true;
         Some(at + 1)
     }
@@ -1651,7 +1658,13 @@ mod tests {
         assert_eq!(c.add_chapter(10.0), Some(1), "inserted in time order");
         assert_eq!(c.add_chapter(10.3), None, "within half a second of one that exists");
         assert!(c.chapters_edited);
-        assert_eq!(c.chapters.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(), ["Chapter 2", "Chapter 1"]);
+        assert_eq!(c.chapters.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(), ["Chapter 1", "Chapter 2"],
+            "default titles follow time order, matching the numbered flags");
+        // A title of the file's own is kept; defaults around it renumber.
+        c.chapters[1].title = "Intro".into();
+        assert_eq!(c.add_chapter(5.0), Some(1));
+        assert_eq!(c.chapters.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(), ["Chapter 1", "Chapter 2", "Intro"]);
+        c.chapters.remove(0);
         // Cut 20–40: the chapter at 30 is inside it and goes; 10 stays put.
         let keeps = [(0.0, 20.0), (40.0, 60.0)];
         c.add_chapter(50.0);
@@ -1659,7 +1672,7 @@ mod tests {
         assert_eq!(out.iter().map(|o| (o.0, o.1)).collect::<Vec<_>>(), [(10.0, 30.0), (30.0, 40.0)]);
         // 50 s in the source is 30 s out (20 s were cut before it).
         let meta = ffmetadata(&out);
-        assert!(meta.starts_with(";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=10000\nEND=30000\ntitle=Chapter 2"));
+        assert!(meta.starts_with(";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=10000\nEND=30000\ntitle=Chapter 1"));
     }
 }
 #[cfg(test)]
