@@ -3,6 +3,17 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-11-01 — Saved processor presets
+
+Added Save and Delete beside the Process inspector's preset arrows. Save names a
+preset inline (Enter or a second Save confirms; Escape cancels); named custom
+presets can be updated and deleted, while built-in presets remain protected.
+Default remains selectable independently of named presets. Custom files are
+pretty-printed, versioned JSON under ~/.config/abner/presets, grouped by processor.
+Atomic writes preserve nested settings and explicit null values. Invalid files are
+skipped individually and logged. Tests use temporary directories and cover
+save/reload/update/delete, built-in protection, file isolation and compact geometry.
+
 ## 2026-11-01 — Contiguous processor timing during export
 
 Fixed the export failure “non-contiguous timing; create a new session at cuts or

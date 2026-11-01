@@ -832,6 +832,9 @@ fn check_sdr(path: &std::path::Path) -> Result<(), String> {
 
 
 pub struct Panel {
+    preset_dir: Option<std::path::PathBuf>,
+    user_presets: BTreeMap<String,std::path::PathBuf>,
+    preset_name: Option<String>,
     /// Shared with the worker (locked for a whole render), so the page can
     /// ask the chain's output rate without waiting on one, and Export can
     /// hand the same registry to its own job.
@@ -901,6 +904,9 @@ pub struct Panel {
 impl Default for Panel {
     fn default() -> Self {
         Self {
+            preset_dir: None,
+            user_presets: BTreeMap::new(),
+            preset_name: None,
             registry: Arc::new(Mutex::new(Registry::default())),
             open: false,
             descriptors: vec![],
@@ -952,14 +958,23 @@ impl Default for Panel {
             editing: None,
             scroll: 0.0,
             dragging: None,
-            preset: 0,
+            preset: usize::MAX,
             text_selected: false,
         }
     }
 }
 impl Panel {
     pub fn new(registry: Registry) -> Self {
-        let descriptors = registry.descriptors();
+        Self::with_presets(registry, crate::processor_presets::directory())
+    }
+    fn with_presets(registry: Registry, preset_dir: Option<std::path::PathBuf>) -> Self {
+        let mut descriptors = registry.descriptors();
+        let mut user_presets=BTreeMap::new();
+        if let Some(root)=&preset_dir {for d in &mut descriptors {
+            let (presets,errors)=crate::processor_presets::load(root,&d.id);
+            for error in errors {log::warn!("Preset skipped: {error}");}
+            for (path,preset) in presets {let id=format!("user:{}",path.display());user_presets.insert(id.clone(),path);d.presets.push(abner_processor_api::Preset{id,name:preset.name,settings:preset.settings});}
+        }}
         let capabilities = descriptors
             .iter()
             .map(|d| registry.get(&d.id).unwrap().capabilities())
@@ -993,6 +1008,8 @@ impl Panel {
         let registry = Arc::new(Mutex::new(registry));
         let worker = (!descriptors.is_empty()).then(|| Worker::new(registry.clone()));
         let mut s = Self::default();
+        s.preset_dir = preset_dir;
+        s.user_presets = user_presets;
         s.registry = registry;
         s.descriptors = descriptors;
         s.saved = saved;
@@ -1011,7 +1028,8 @@ impl Panel {
         }
         self.dragging = None;
         self.selected = index;
-        self.preset = 0;
+        self.preset = usize::MAX;
+        self.preset_name = None;
         self.fields = fields(&self.descriptors[index].settings_schema);
         self.settings = self.saved[index].clone();
         self.scroll = 0.0;
@@ -1053,6 +1071,7 @@ impl Panel {
             self.generation += 1;
             self.busy = false;
             self.editing = None;
+            self.preset_name = None;
             self.dirty = None;
         }
     }
@@ -1076,7 +1095,7 @@ impl Panel {
         Ok(())
     }
     pub fn shortcut(&mut self, c: char) -> bool {
-        if !self.open || self.editing.is_none() {
+        if !self.open || (self.editing.is_none() && self.preset_name.is_none()) {
             return false;
         }
         match c.to_ascii_lowercase() {
@@ -1091,6 +1110,11 @@ impl Panel {
         true
     }
     pub fn text_input(&mut self, text: &str) -> bool {
+        if self.open && let Some(value)=&mut self.preset_name {
+            if self.text_selected {value.clear();self.text_selected=false;}
+            if value.len()+text.len()<=160 {value.push_str(text);}
+            return true;
+        }
         if self.open
             && let Some((_, value)) = &mut self.editing
         {
@@ -1293,6 +1317,17 @@ impl Panel {
         self.select(to);
     }
     pub fn key(&mut self, key: Key) -> bool {
+        if self.open && self.preset_name.is_some() {
+            match key {
+                Key::Escape=>self.preset_name=None,
+                Key::Enter=>self.save_preset(),
+                Key::Backspace=>{let value=self.preset_name.as_mut().unwrap();if self.text_selected{value.clear();self.text_selected=false;}else{value.pop();}},
+                Key::Char(c)=>{self.text_input(&c.to_string());},
+                Key::Space=>{self.text_input(" ");},
+                _=>{}
+            }
+            return true;
+        }
         if self.open && self.editing.is_some() {
             match key {
                 Key::Escape => self.editing = None,
@@ -1493,14 +1528,137 @@ impl Panel {
         RectPx { x: vp.0 - 78.0, y: HEADER_H + 20.0, w: 61.0, h: 27.0 }
     }
     /// Preset controls use the same bounds for drawing and pointer input.
-    fn preset_buttons(vp: (f32, f32)) -> [RectPx; 3] {
-        let x = vp.0 - Self::right(vp) + 16.0;
-        let y = HEADER_H + 100.0;
-        [
-            RectPx { x: x + 49.0, y, w: (Self::right(vp) - 161.0).max(1.0), h: 23.0 },
-            RectPx { x: vp.0 - 86.0, y, w: 30.0, h: 23.0 },
-            RectPx { x: vp.0 - 46.0, y, w: 30.0, h: 23.0 },
-        ]
+    fn preset_buttons(vp: (f32, f32)) -> [RectPx; 5] {
+        let x = vp.0 - Self::right(vp) + 16.;
+        let y = HEADER_H + 100.;
+        let w = Self::right(vp) - 32.;
+        let name = (w - 128.).max(40.);
+        let widths = [name, 18., 18., 34., 42.];
+        let mut at = x;
+        std::array::from_fn(|i| {
+            let r = RectPx {
+                x: at,
+                y,
+                w: widths[i],
+                h: 23.,
+            };
+            at += widths[i] + 4.;
+            r
+        })
+    }
+    fn begin_save_preset(&mut self) {
+        if let Some((i, value)) = &self.editing {
+            match text_value(
+                &self.fields[*i],
+                &self.descriptors[self.selected].settings_schema,
+                value,
+            ) {
+                Ok(Some(value)) => self.settings[&self.fields[*i].key] = value,
+                Ok(None) => {
+                    self.settings
+                        .as_object_mut()
+                        .unwrap()
+                        .remove(&self.fields[*i].key);
+                }
+                Err(e) => {
+                    self.status = e;
+                    return;
+                }
+            }
+            self.changed();
+        }
+        let d = &self.descriptors[self.selected];
+        self.editing = None;
+        self.preset_name = Some(
+            d.presets
+                .get(self.preset)
+                .filter(|p| self.user_presets.contains_key(&p.id))
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| {
+                    let mut n = 1;
+                    loop {
+                        let name = format!("Custom {n}");
+                        if !d.presets.iter().any(|p| p.name == name) {
+                            break name;
+                        }
+                        n += 1;
+                    }
+                }),
+        );
+        self.text_selected = true;
+        self.status = "Name the preset, then press Enter or Save. Escape cancels.".into();
+    }
+    fn save_preset(&mut self) {
+        let Some(name) = self.preset_name.clone() else {
+            self.begin_save_preset();
+            return;
+        };
+        let Some(root) = &self.preset_dir else {
+            self.status = "Config directory unavailable; preset was not saved.".into();
+            return;
+        };
+        let d = &mut self.descriptors[self.selected];
+        match crate::processor_presets::save(root, &d.id, &name, &self.settings) {
+            Ok(path) => {
+                let id = format!("user:{}", path.display());
+                let preset = abner_processor_api::Preset {
+                    id: id.clone(),
+                    name: name.trim().into(),
+                    settings: self.settings.clone(),
+                };
+                self.preset = if let Some(i) = d.presets.iter().position(|p| p.id == id) {
+                    d.presets[i] = preset;
+                    i
+                } else {
+                    d.presets.push(preset);
+                    d.presets.len() - 1
+                };
+                self.user_presets.insert(id, path);
+                self.preset_name = None;
+                self.status = format!("Saved preset {}", name.trim());
+            }
+            Err(e) => self.status = format!("Could not save preset: {e}"),
+        }
+    }
+    fn delete_preset(&mut self) {
+        let d = &mut self.descriptors[self.selected];
+        let Some(p) = d.presets.get(self.preset) else {
+            return;
+        };
+        let Some(path) = self.user_presets.get(&p.id) else {
+            self.status = "Built-in presets cannot be deleted.".into();
+            return;
+        };
+        let Some(root) = &self.preset_dir else {
+            return;
+        };
+        match crate::processor_presets::delete(root, &d.id, path) {
+            Ok(()) => {
+                let p = d.presets.remove(self.preset);
+                self.user_presets.remove(&p.id);
+                self.preset = if d.presets.is_empty() {
+                    usize::MAX
+                } else {
+                    self.preset.min(d.presets.len() - 1)
+                };
+                self.preset_name = None;
+                self.apply_preset();
+                self.status = format!("Deleted preset {}", p.name);
+            }
+            Err(e) => self.status = format!("Could not delete preset: {e}"),
+        }
+    }
+    fn apply_preset(&mut self) {
+        self.settings = defaults(&self.fields);
+        if let Some(p) = self.descriptors[self.selected].presets.get(self.preset)
+            && let Some(map) = p.settings.as_object()
+        {
+            for (k, v) in map {
+                self.settings[k] = v.clone();
+            }
+        }
+        self.preset_name = None;
+        self.changed();
     }
     fn draw_settings(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
         let x = vp.0 - Self::right(vp) + 16.0;
@@ -1517,11 +1675,13 @@ impl Panel {
             &format!("{} · {}", category_label(&self.categories[self.selected]), input_label(self.capabilities[self.selected])), muted, w);
         let switch = Self::settings_switch(vp);
         draw_processor_switch(items, switch, self.enabled[self.selected], self.switch_position(self.selected, Instant::now()));
-        text(items, x, top + 107.0, 9.0, "PRESET", dim, 48.0);
-        let preset = d.presets.get(self.preset).map_or("Default", |p| p.name.as_str());
-        for (r, label) in Self::preset_buttons(vp).into_iter().zip([preset, "‹", "›"]) {
+        text(items, x, top + 88.0, 9.0, "PRESET", dim, w);
+        let name=self.preset_name.as_ref().map(|n|format!("{n}▏"));
+        let preset = name.as_deref().unwrap_or_else(||d.presets.get(self.preset).map_or("Default", |p| p.name.as_str()));
+        let custom=d.presets.get(self.preset).is_some_and(|p|self.user_presets.contains_key(&p.id));
+        for (index,(r, label)) in Self::preset_buttons(vp).into_iter().zip([preset, "‹", "›", "Save", "Delete"]).enumerate() {
             items.push(Item::Rect(RectItem { radius: 6.0, border_w: 1.0, border_color: hex_color(0x303234), ..RectItem::new(r, hex_color(0x0a0a0a)) }));
-            ui_label(items, r.x + r.w / 2.0, r.y + r.h / 2.0, 10.0, muted, label, Align::Center, r.w - 8.0);
+            ui_label(items, r.x + r.w / 2.0, r.y + r.h / 2.0, 10.0, if index==4&&!custom {dim} else if index==0&&name.is_some(){blue}else{muted}, label, Align::Center, r.w - 4.0);
         }
         items.push(Item::Rect(RectItem::new(RectPx { x, y: top + 136.0, w, h: 1.0 }, hex_color(0x303234))));
         let clip = RectPx { x: x - 16.0, y: top + 158.0, w: Self::right(vp), h: (Self::bottom(vp) - top - 158.0).max(1.0) };
@@ -1653,21 +1813,17 @@ impl Panel {
         if let Some(button) = Self::preset_buttons(vp).iter().position(|r| hit(*r, x, y))
             && !self.descriptors.is_empty()
         {
-            let d = &self.descriptors[self.selected];
-            if !d.presets.is_empty() {
-                self.preset = if button == 1 {
-                    (self.preset + d.presets.len() - 1) % d.presets.len()
-                } else { (self.preset + 1) % d.presets.len() };
-                let p = &d.presets[self.preset];
-                self.settings = defaults(&self.fields);
-                if let Some(map) = p.settings.as_object() {
-                    for (k, v) in map { self.settings[k] = v.clone(); }
-                }
-                self.changed();
+            match button {
+                3=>self.save_preset(),
+                4=>self.delete_preset(),
+                0 if self.preset_name.is_some()=>self.text_selected=true,
+                1|2=>{let count=self.descriptors[self.selected].presets.len()+1;let at=if self.preset<count-1{self.preset+1}else{0};let next=if button==1{(at+count-1)%count}else{(at+1)%count};self.preset=if next==0{usize::MAX}else{next-1};self.apply_preset();},
+                _=>{}
             }
             return true;
         }
         if y < Self::bottom(vp) && y >= HEADER_H + 158.0 {
+            self.preset_name=None;
             for i in 0..self.fields.len() {
                 let row = self.row(i, vp);
                 if !hit(row, x, y) {
@@ -1788,7 +1944,7 @@ impl Panel {
             self.changed();
         }
         self.update_rate(info);
-        if self.dirty.is_some() && self.editing.is_none() {
+        if self.dirty.is_some() && self.editing.is_none() && self.preset_name.is_none() {
             self.dirty = None;
             let chain = self.chain();
             if chain.is_empty() && !self.descriptors.is_empty() {
@@ -3271,4 +3427,27 @@ mod tests {
         cancel.cancel();
         assert!(process_chain(&mut sessions, 0, vec![make()], &cancel, DEFAULT_PREVIEW_BYTES).is_err());
     }
+    #[test]
+    fn custom_presets_save_reload_update_delete_and_keep_builtins() {
+        let root=std::env::temp_dir().join(format!("abner-preset-panel-{}",std::process::id()));
+        let _=std::fs::remove_dir_all(&root);
+        let vp=(1280.,900.);
+        let click=|panel:&mut Panel,index:usize|{let r=Panel::preset_buttons(vp)[index];assert!(panel.click(r.x+r.w/2.,r.y+r.h/2.,vp));};
+        let mut panel=Panel::with_presets(registry(),Some(root.clone()));panel.open=true;
+        panel.settings["strength"]=json!(0.75);
+        click(&mut panel,3);assert!(panel.preset_name.is_some());panel.text_input("Soft restoration");panel.key(Key::Enter);
+        assert!(panel.preset_name.is_none());assert_eq!(panel.user_presets.len(),1);
+        let file=panel.user_presets.values().next().unwrap().clone();assert!(file.is_file());
+        let mut reloaded=Panel::with_presets(registry(),Some(root.clone()));reloaded.open=true;
+        assert_eq!(reloaded.settings["strength"],json!(0.5));
+        click(&mut reloaded,2);assert_eq!(reloaded.settings["strength"],json!(0.75));assert!(!reloaded.enabled[0]);
+        reloaded.settings["strength"]=json!(0.9);click(&mut reloaded,3);reloaded.key(Key::Enter);
+        assert_eq!(reloaded.user_presets.len(),1);assert_eq!(crate::processor_presets::load(&root,"example.buffered").0[0].1.settings["strength"],json!(0.9));
+        click(&mut reloaded,4);assert!(!file.exists());assert_eq!(reloaded.settings["strength"],json!(0.5));
+        reloaded.descriptors[0].presets.push(abner_processor_api::Preset{id:"builtin".into(),name:"Built-in".into(),settings:json!({"strength":0.25})});
+        click(&mut reloaded,2);click(&mut reloaded,4);assert_eq!(reloaded.descriptors[0].presets.len(),1);assert!(reloaded.status.contains("Built-in presets cannot"));
+        for vp in [(720.,480.),(1280.,800.),(1440.,900.)]{let rects=Panel::preset_buttons(vp);for pair in rects.windows(2){assert!(pair[0].x+pair[0].w<=pair[1].x);}assert!(rects[4].x+rects[4].w<=vp.0-15.);}
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
 }

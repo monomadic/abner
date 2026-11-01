@@ -20,6 +20,19 @@ The animated splash appears only when launched with no arguments. Video paths
 start playback directly without probing or decoding the splash video. Any arguments
 also make the empty window logo-only, including after closing the last clip.
 
+## Processor presets
+
+On Process, use **Save** beside the preset arrows, enter a name in the preset
+field, then press Enter or Save again. The arrows cycle through Default, built-in
+presets and your saved presets. Saving an existing custom name updates that preset;
+Delete removes the selected custom preset. Built-in presets cannot be deleted.
+
+Presets are individual, pretty-printed JSON files under
+`~/.config/abner/presets/processor-<processor-id>/`. Each records a version, processor
+ID, name and settings, including nested values and automatic/null settings. Files
+can be edited by hand and are loaded when the app starts. Presets affect settings;
+loading one does not turn a bypassed processor on.
+
 ## Export
 
 Open the **Export** tab to write the enabled processor pipeline, or launch with
