@@ -1768,3 +1768,14 @@ purpose, and sb-window's `App` trait is shaped around a tile grid.
   delta / split / checker / blend views, photo-style synced zoom, speed control, fake
   fullscreen, mip-chained video textures, ab_glyph text. Adapted from switchblade's
   media and render stack as of that date.
+
+## 2026-11-01 — Exact trim export repairs only boundary GOPs
+
+Frame-accurate Timeline exports now use selective GOP repair followed by the
+existing packet-copy exporter. Complete GOPs remain unchanged; aligned exports
+copy even in frame mode. Unsupported selective-encoding formats fail explicitly
+instead of falling back to a full transcode. Crop requests always encode all kept
+frames, even if the caller requests copy. Process-chain media export remains
+explicitly unsupported; previews must not be mistaken for processed exports.
+Regression coverage compares coded picture hashes across CFR/VFR and I/P/B
+fixtures, checks automatic working-file cleanup, and verifies crop overrides copy.

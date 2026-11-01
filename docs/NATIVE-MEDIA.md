@@ -69,3 +69,14 @@ synthetic fixtures and obtain independent packet/decode references. The AVI, MXF
 MPEG TS/PS, raw MPEG and Y4M fixtures are also read in child test processes with
 PATH=/nonexistent; native-generated MXF/Y4M tests need no fixture helper at all.
 The optional packaging flag that bundles diagnostic tools remains compatible.
+
+### Exact trims and pixel edits
+
+Without pixel edits, keyframe-aligned exports copy coded packets. Frame-accurate
+trims encode only GOPs intersected by trim boundaries, then copy the kept ranges;
+complete GOPs retain their coded pictures. Selective repair currently requires
+SDR 8-bit H.264 4:2:0 on a zero-based timeline. Unsupported inputs fail explicitly
+rather than silently transcoding the whole clip. Automatic repair files are
+removed after export, including failed exports. Pixel edits such as cropping
+require encoding every kept frame and override a copy request. Process-chain
+media export is not yet supported and is rejected explicitly by the Process page.

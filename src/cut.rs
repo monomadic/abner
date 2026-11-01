@@ -32,7 +32,7 @@ const EPS: f64 = 1e-3;
 pub enum Snap {
     /// In/out land on keyframes: the export is a stream copy.
     Keyframe,
-    /// In/out stay where they were asked: the export re-encodes.
+    /// In/out stay where they were asked: the export re-encodes only intersected GOPs.
     Frame,
 }
 
@@ -953,7 +953,7 @@ impl Cut {
         let (tx, rx) = channel();
         self.export = Some(rx);
         std::thread::spawn(move || {
-            let how = if snap == Snap::Keyframe { "stream copy" } else { "re-encoded" };
+            let how = if snap == Snap::Keyframe { "stream copy" } else { "partial GOPs encoded; remaining video copied" };
             let _ = tx.send(
                 export(&source, &dest, &keeps, snap, &chapters)
                     .map(|()| format!("{name} ({} segments, {how})", keeps.len()))
@@ -1255,8 +1255,8 @@ fn ffmetadata(chapters: &[(f64, f64, String)]) -> String {
     text
 }
 
-/// Native Filmcraft export. Keyframe mode copies coded packets; frame mode encodes
-/// selected pictures as H.264 and audio as AAC. Publish only a completed temporary.
+/// Native Filmcraft export. Keyframe mode copies coded packets; frame mode repairs
+/// boundary GOPs as H.264 and copies audio. Publish only a completed temporary.
 pub fn export(source: &Path, dest: &Path, keeps: &[(f64, f64)], snap: Snap, chapters: &[Chapter]) -> anyhow::Result<()> {
     crate::media_io::export(source, dest, keeps, snap == Snap::Keyframe, &output_chapters(chapters, keeps), None)
 }

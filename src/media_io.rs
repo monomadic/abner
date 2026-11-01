@@ -1218,6 +1218,27 @@ fn encode_ranges(
     Ok(())
 }
 
+/// Locate only the GOPs intersected by an exact trim boundary. Whole GOPs
+/// remain coded packets, including when frame mode was selected unnecessarily.
+fn trim_regions(input: &Input, keeps: &[(f64, f64)]) -> Result<Vec<crate::smart::Region>> {
+    let video = &input.tracks[input.video()?];
+    let duration = video.samples.iter().map(|s| s.pts + s.duration).fold(0., f64::max);
+    let mut keys: Vec<_> = video.samples.iter().filter(|s| s.key).map(|s| s.pts).collect();
+    keys.sort_by(f64::total_cmp);
+    let mut regions = Vec::new();
+    for (i, &start) in keys.iter().enumerate() {
+        let end = keys.get(i + 1).copied().unwrap_or(duration);
+        let mut boundaries: Vec<_> = keeps.iter().flat_map(|&(a, b)| [a, b])
+            .filter(|t| *t > start + 0.0001 && *t < end - 0.0001).collect();
+        boundaries.sort_by(f64::total_cmp);
+        boundaries.dedup_by(|a, b| (*a - *b).abs() < 0.0001);
+        if !boundaries.is_empty() {
+            regions.push(crate::smart::Region { start, encode_start: start, end, boundaries });
+        }
+    }
+    Ok(regions)
+}
+
 pub(crate) fn export(
     path: &Path,
     dest: &Path,
@@ -1240,6 +1261,16 @@ pub(crate) fn export(
     );
     let cancel = AtomicBool::new(false);
     let input = Input::open(path)?;
+    // Pixel edits always encode every kept frame. Exact trims without pixel
+    // edits repair only intersected GOPs, then use the existing lossless muxer.
+    // Unsupported smart-encoding formats fail explicitly; never silently fall
+    // back to a full transcode.
+    let repaired = if !copy && crop.is_none() {
+        let regions = trim_regions(&input, keeps)?;
+        if regions.is_empty() { None } else { Some(Pending(smart(path, &regions, &cancel)?)) }
+    } else { None };
+    let input = if let Some(work) = &repaired { Input::open(&work.0)? } else { input };
+    let copy = crop.is_none();
     let temp = pending(dest)?;
     let mut mux = new_mux(&input, &temp.0, dest)?;
     if copy {
@@ -1874,7 +1905,7 @@ mod tests {
             &source,
             &crop,
             &[(0., 2.)],
-            false,
+            true, // Pixel edits override a stream-copy request.
             &[],
             Some((16, 8, 64, 48)),
         )

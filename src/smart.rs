@@ -98,6 +98,21 @@ mod tests {
         }
         assert_ne!(&a[42..60], &b[42..60]);
         assert_eq!(hashes(&source, true), hashes(&dest, true));
+        // Exact trim export must repair boundary GOPs automatically while
+        // preserving the coded pictures in the complete middle GOP.
+        let trimmed = work.0.join(format!("trimmed-{bf}-{vfr}.mp4"));
+        crate::media_io::export(&source, &trimmed, &[(pts[12], pts[78])], false, &[], None).unwrap();
+        let trimmed_info = probe(&trimmed, &work.0, &cancel).unwrap();
+        assert_eq!(frames(&trimmed_info).len(), 66);
+        let source_packets = packet_hashes(&source);
+        let trimmed_packets = packet_hashes(&trimmed);
+        assert_eq!(&source_packets[30..60], &trimmed_packets[18..48], "complete middle GOP is copied verbatim");
+        assert!(!std::fs::read_dir(&work.0).unwrap().any(|e| {
+            let name = e.unwrap().file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(&format!("source-{bf}-{vfr}.encoded-")) && name.ends_with(".mp4")
+                && work.0.join(name.as_ref()) != dest
+        }), "automatic repair working files are removed");
         cancel.store(true, Ordering::Relaxed);
         assert!(encode(&source, &regions, &cancel).is_err());
         assert!(!std::fs::read_dir(&work.0).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with(".abner-encode")));
