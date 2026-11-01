@@ -32,8 +32,18 @@ const FRAMES: usize = 24;
 const INK: [f32; 4] = [0.8, 0.8, 0.8, 1.0];
 const DIM: [f32; 4] = [0.43, 0.43, 0.43, 1.0];
 const BLUE: [f32; 4] = [0.04, 0.33, 0.7, 1.0];
-/// Compact processor rows: 48px of content plus an 8px gap.
-const CARD_PITCH: f32 = 56.0;
+/// Compact processor rows (Figma rail): 30px rows on a 3px gap, inside a
+/// rounded group box with 10px padding, under the category chips.
+const CARD_PITCH: f32 = 33.0;
+const ROW_H: f32 = 30.0;
+const GROUP_PAD: f32 = 10.0;
+/// Category chips: 18px pills, wrapping on a 24px pitch from the rail's
+/// 13px gutter; mono 10px labels, never narrower than ALL's 62px pill.
+const CHIP_TOP: f32 = 67.0;
+const CHIP_H: f32 = 18.0;
+const CHIP_PITCH: f32 = 24.0;
+const CHIP_PX: f32 = 10.0;
+const CHIP_TRACK: f32 = 0.4;
 /// The page's footer bar: the Timeline's height, since it carries the same
 /// kind of button (Render frame, drawn as the cut footer's Split).
 const FOOTER_H: f32 = CUT_STATUS_H;
@@ -864,6 +874,8 @@ pub struct Panel {
     source: usize,
     source_dims: [u32; 2],
     list_scroll: f32,
+    /// The category chip picked above the list; `None` is ALL.
+    filter: Option<Category>,
     scrubbing: bool,
     filename: String,
     fields: Vec<Field>,
@@ -930,6 +942,7 @@ impl Default for Panel {
             source: 0,
             source_dims: [16, 9],
             list_scroll: 0.0,
+            filter: None,
             scrubbing: false,
             filename: String::new(),
             fields: vec![],
@@ -1298,23 +1311,78 @@ impl Panel {
             .map(|(i, d)| (d.id.clone(), self.saved[i].clone()))
             .collect()
     }
+    /// Move the focused processor one visible row up or down the chain;
+    /// rows a category filter hides keep their order relative to each other.
     fn move_selected(&mut self, delta: isize) {
         if self.descriptors.is_empty() {
             return;
         }
-        let to = self
-            .selected
-            .saturating_add_signed(delta)
-            .min(self.descriptors.len() - 1);
+        let visible = self.visible();
+        let Some(at) = visible.iter().position(|i| *i == self.selected) else { return };
+        let to = visible[at.saturating_add_signed(delta).min(visible.len() - 1)];
+        if to == self.selected {
+            return;
+        }
         self.saved[self.selected] = self.settings.clone();
-        self.descriptors.swap(self.selected, to);
-        self.saved.swap(self.selected, to);
-        self.enabled.swap(self.selected, to);
-        self.switch_slides.swap(self.selected, to);
-        self.supported.swap(self.selected, to);
-        self.capabilities.swap(self.selected, to);
-        self.categories.swap(self.selected, to);
+        fn shift<T>(v: &mut Vec<T>, from: usize, to: usize) {
+            let item = v.remove(from);
+            v.insert(to, item);
+        }
+        let from = self.selected;
+        shift(&mut self.descriptors, from, to);
+        shift(&mut self.saved, from, to);
+        shift(&mut self.enabled, from, to);
+        shift(&mut self.switch_slides, from, to);
+        shift(&mut self.supported, from, to);
+        shift(&mut self.capabilities, from, to);
+        shift(&mut self.categories, from, to);
         self.select(to);
+    }
+    /// Descriptor indices the category filter shows, in chain order.
+    fn visible(&self) -> Vec<usize> {
+        (0..self.descriptors.len())
+            .filter(|i| self.filter.as_ref().is_none_or(|f| self.categories[*i].contains(f)))
+            .collect()
+    }
+    /// Every category some processor declares, in the API's order.
+    fn chip_categories(&self) -> Vec<Category> {
+        let mut all: Vec<Category> = self.categories.iter().flatten().cloned().collect();
+        all.sort();
+        all.dedup();
+        all
+    }
+    /// The chip row (ALL, then each category), wrapped to the rail's width:
+    /// one geometry for drawing and hit testing.
+    fn chips(&self, vp: (f32, f32)) -> Vec<(RectPx, Option<Category>, String)> {
+        if self.descriptors.is_empty() {
+            return Vec::new();
+        }
+        let (x0, x1) = (13.0, Self::left(vp) - 13.0);
+        let (mut x, mut y) = (x0, HEADER_H + CHIP_TOP);
+        std::iter::once(None)
+            .chain(self.chip_categories().into_iter().map(Some))
+            .map(|c| {
+                let label = c.as_ref().map_or("ALL".to_string(), |c| c.label().to_uppercase());
+                let n = label.chars().count() as f32;
+                let w = (n * (CHIP_PX * MONO_ADV + CHIP_TRACK) + 20.0).max(62.0).min(x1 - x0);
+                if x > x0 && x + w > x1 {
+                    x = x0;
+                    y += CHIP_PITCH;
+                }
+                let r = RectPx { x, y, w, h: CHIP_H };
+                x += w + 2.0;
+                (r, c, label)
+            })
+            .collect()
+    }
+    fn set_filter(&mut self, filter: Option<Category>) {
+        self.filter = filter;
+        self.list_scroll = 0.0;
+        if let Some(&first) = self.visible().first()
+            && !self.visible().contains(&self.selected)
+        {
+            self.select(first);
+        }
     }
     pub fn key(&mut self, key: Key) -> bool {
         if self.open && self.preset_name.is_some() {
@@ -1440,8 +1508,12 @@ impl Panel {
     fn left(vp: (f32, f32)) -> f32 {
         rail_full_width(vp.0)
     }
-    fn list_top() -> f32 {
-        HEADER_H + RAIL_HEAD_H + 10.0
+    /// The rounded box the rows sit in starts 14px under the last chip row.
+    fn group_top(&self, vp: (f32, f32)) -> f32 {
+        self.chips(vp).last().map_or(HEADER_H + RAIL_HEAD_H, |(r, ..)| r.y + r.h + 14.0)
+    }
+    fn list_top(&self, vp: (f32, f32)) -> f32 {
+        self.group_top(vp) + GROUP_PAD
     }
     /// The grip strip and the visible part of the focused inspector, as
     /// the Sources rail lays them out: above the Move up / down row, and
@@ -1451,7 +1523,7 @@ impl Panel {
         let bottom = Self::bottom(vp) - RAIL_ACTIONS_H;
         let none = RectPx { x: 0.0, y: bottom, w: l, h: 0.0 };
         let needed = CARD_PITCH + RAIL_FOOTER_H + RAIL_GRIP_H + RAIL_INSPECTOR_H;
-        if self.descriptors.is_empty() || bottom - Self::list_top() < needed {
+        if self.descriptors.is_empty() || bottom - self.list_top(vp) < needed {
             return (none, none);
         }
         let t = self.detail_slide();
@@ -1462,22 +1534,26 @@ impl Panel {
     }
     fn list(&self, vp: (f32, f32)) -> RectPx {
         let (grip, _) = self.detail(vp);
-        let y = Self::list_top();
+        let y = self.list_top(vp);
         let end = if grip.h > 0.0 { grip.y } else { Self::bottom(vp) - RAIL_ACTIONS_H };
-        RectPx { x: 0.0, y, w: Self::left(vp), h: (end - RAIL_FOOTER_H - y).max(CARD_PITCH) }
+        RectPx { x: 0.0, y, w: Self::left(vp), h: (end - RAIL_FOOTER_H - GROUP_PAD - y).max(CARD_PITCH) }
     }
+    /// Processor `i`'s row; a row the filter hides has no area.
     fn card(&self, i: usize, vp: (f32, f32)) -> RectPx {
+        let Some(at) = self.visible().iter().position(|v| *v == i) else {
+            return RectPx { x: 0.0, y: -1e4, w: 0.0, h: 0.0 };
+        };
         RectPx {
-            x: 12.0,
-            y: Self::list_top() + i as f32 * CARD_PITCH - self.list_scroll,
-            w: Self::left(vp) - 24.0,
-            h: CARD_PITCH - 8.0,
+            x: 13.0 + GROUP_PAD,
+            y: self.list_top(vp) + at as f32 * CARD_PITCH - self.list_scroll,
+            w: Self::left(vp) - 2.0 * (13.0 + GROUP_PAD),
+            h: ROW_H,
         }
     }
-    /// Switch geometry is shared by painting and hit testing.
+    /// The row's pill switch: shared by painting and hit testing.
     fn card_switch(&self, i: usize, vp: (f32, f32)) -> RectPx {
         let r = self.card(i, vp);
-        RectPx { x: r.x + r.w - 71.0, y: r.y + (r.h - 27.0) / 2.0, w: 61.0, h: 27.0 }
+        RectPx { x: r.x + r.w - 46.0, y: r.y + (r.h - 18.0) / 2.0, w: 34.0, h: 18.0 }
     }
     fn move_button(vp: (f32, f32), down: bool) -> RectPx {
         let w = (Self::left(vp) - 32.0) / 2.0;
@@ -1729,7 +1805,7 @@ impl Panel {
                 let list = self.list(vp);
                 self.list_scroll = (self.list_scroll - dy).clamp(
                     0.0,
-                    (self.descriptors.len() as f32 * CARD_PITCH - list.h).max(0.0),
+                    (self.visible().len() as f32 * CARD_PITCH - 3.0 - list.h).max(0.0),
                 );
                 return true;
             }
@@ -1772,9 +1848,11 @@ impl Panel {
                 self.move_selected(-1);
             } else if hit(Self::move_button(vp, true), x, y) {
                 self.move_selected(1);
+            } else if let Some((_, c, _)) = self.chips(vp).into_iter().find(|(r, ..)| hit(*r, x, y)) {
+                self.set_filter(c);
             } else if hit(self.list(vp), x, y) {
-                let index = ((y - Self::list_top() + self.list_scroll) / CARD_PITCH) as usize;
-                if index < self.descriptors.len() && hit(self.card(index, vp), x, y) {
+                let row = ((y - self.list_top(vp) + self.list_scroll) / CARD_PITCH) as usize;
+                if let Some(&index) = self.visible().get(row) && hit(self.card(index, vp), x, y) {
                     if hit(self.card_switch(index, vp), x, y) {
                         self.toggle_enabled(index);
                     } else if index != self.selected {
@@ -2068,32 +2146,50 @@ impl Panel {
             items.push(Item::Text(TextItem { regular: true, align: Align::Right, valign: VAlign::Middle, max_width: Some(70.0),
                 ..TextItem::new(l - 14.0, hy, 11.0, if on > 0 { hex_color(CUT_HEADER_BLUE) } else { subtle }, format!("{on} ACTIVE")) }));
         }
+        let chips = self.chips(vp);
+        if let Some((first, ..)) = chips.first() {
+            items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, tracking: 0.5,
+                ..TextItem::new(14.0, first.y - 14.0, 10.0, subtle, "CATEGORY") }));
+        }
+        for (r, c, label) in &chips {
+            let picked = *c == self.filter;
+            let colour = if picked { ink } else if over(*r) { hex_color(0xc8c8c8) } else { secondary };
+            if picked {
+                items.push(Item::Rect(RectItem { radius: CHIP_H / 2.0, border_w: 1.0,
+                    border_color: hex_color(SOURCE_RING), ..RectItem::new(*r, hex_color(0x1a1a1a)) }));
+            }
+            items.push(Item::Text(TextItem { regular: true, align: Align::Center, valign: VAlign::Middle,
+                tracking: CHIP_TRACK, max_width: Some(r.w - 8.0),
+                ..TextItem::new(r.x + r.w / 2.0, r.y + r.h / 2.0, CHIP_PX, colour, label.as_str()) }));
+        }
         let list = self.list(vp);
+        let visible = self.visible();
+        if !visible.is_empty() {
+            // The group box hugs its rows, and stops at the list's end.
+            let top = self.group_top(vp);
+            let rows = visible.len() as f32 * CARD_PITCH - 3.0;
+            let h = (rows.min(list.h) + 2.0 * GROUP_PAD).max(0.0);
+            items.push(Item::Rect(RectItem { radius: 14.0, border_w: 1.0, border_color: hex_color(0x2e2e2e),
+                ..RectItem::new(RectPx { x: 13.0, y: top, w: l - 26.0, h }, hex_color(0x121212)) }));
+        }
         items.push(Item::Clip(Some(list)));
-        for (i, d) in self.descriptors.iter().enumerate() {
+        for &i in &visible {
+            let d = &self.descriptors[i];
             let c = self.card(i, vp);
             if c.y + c.h < list.y || c.y > list.y + list.h {
                 continue;
             }
             let active = i == self.selected;
             let hover = over(c) && over(list);
-            items.push(Item::Rect(RectItem { radius: 10.0, border_w: if active { 2.0 } else { 0.0 },
+            items.push(Item::Rect(RectItem { radius: 8.0, border_w: if active { 2.0 } else { 0.0 },
                 border_color: hex_color(SOURCE_RING),
-                ..RectItem::new(c, hex_color(if hover && !active { 0x0a0a0a } else { 0x050505 })) }));
+                ..RectItem::new(c, hex_color(if hover && !active { 0x0c0c0c } else { 0x030303 })) }));
             let on = self.enabled[i];
             let switch = self.card_switch(i, vp);
-            let tx = c.x + 12.0;
-            let tw = switch.x - tx - 10.0;
-            items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(tw),
-                ..TextItem::new(tx, c.y + 16.0, 12.0, ink, d.name.as_str()) }));
-            let meta = if on && !self.supported[i] {
-                "No frame preview".to_string()
-            } else {
-                category_label(&self.categories[i])
-            };
-            items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(tw),
-                ..TextItem::new(tx, c.y + 33.0, 10.0, secondary, meta) }));
-            draw_processor_switch(items, switch, on, self.switch_position(i, Instant::now()));
+            let tx = c.x + 13.0;
+            items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(switch.x - tx - 10.0),
+                ..TextItem::new(tx, c.y + c.h / 2.0, 12.0, if on || active { ink } else { hex_color(0x8c8c8c) }, d.name.as_str()) }));
+            draw_rail_switch(items, switch, self.switch_position(i, Instant::now()));
         }
         items.push(Item::Clip(None));
         let footer = if self.descriptors.is_empty() { "No processors in this build" } else { "" };
@@ -2127,8 +2223,13 @@ impl Panel {
             // Full layout anchored at the top, clipped while it folds.
             items.push(Item::Clip(Some(inspector)));
             items.push(Item::Rect(RectItem::new(RectPx { h: RAIL_INSPECTOR_H, ..inspector }, hex_color(INSPECTOR_BG))));
-            items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(l - 48.0),
-                ..TextItem::new(x0, y + 28.0, 13.0, hex_color(SOURCE_INK), d.name.as_str()) }));
+            // The chain position as a round badge, the Sources keycap's place.
+            let badge = RectPx { x: x0, y: y + 16.0, w: 24.0, h: 24.0 };
+            items.push(Item::Rect(RectItem { radius: 12.0, ..RectItem::new(badge, hex_color(0xb4b4b8)) }));
+            items.push(Item::Text(TextItem { inspector: 2, align: Align::Center, valign: VAlign::Middle, max_width: Some(22.0),
+                ..TextItem::new(badge.x + 12.0, badge.y + 12.0, 14.0, hex_color(0x161616), (i + 1).to_string()) }));
+            items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(l - 80.0),
+                ..TextItem::new(x0 + 32.0, y + 28.0, 13.0, hex_color(SOURCE_INK), d.name.as_str()) }));
             for ry in [y + 49.0, y + 178.0] {
                 items.push(Item::Rect(RectItem::new(
                     RectPx { x: x0, y: ry, w: x1 - x0, h: 1.0 }, hex_color(0x303234))));
@@ -2378,6 +2479,16 @@ fn draw_processor_switch(items: &mut Vec<Item>, r: RectPx, on: bool, position: f
         ..RectItem::new(thumb, mix(0x535353, CUT_HEADER_BLUE, position)) }));
     items.push(Item::Text(TextItem { header: true, align: Align::Center, valign: VAlign::Middle,
         max_width: Some(28.0), ..TextItem::new(thumb.x + 14.0, thumb.y + 10.5, 12.0, ink, if on { "ON" } else { "OFF" }) }));
+}
+/// The rail's pill switch (Figma rail): a 14px round thumb on a 16px
+/// travel, grey and outlined off, the focus orange on.
+fn draw_rail_switch(items: &mut Vec<Item>, r: RectPx, position: f32) {
+    items.push(Item::Rect(RectItem { radius: r.h / 2.0, border_w: 1.5,
+        border_color: mix(0xdcdcdc, 0xc87a00, position),
+        ..RectItem::new(r, mix(0x34373b, SOURCE_RING, position)) }));
+    let d = r.h - 4.0;
+    let thumb = RectPx { x: r.x + 2.0 + (r.w - d - 4.0) * position, y: r.y + 2.0, w: d, h: d };
+    items.push(Item::Rect(RectItem { radius: d / 2.0, ..RectItem::new(thumb, hex_color(0xf7f7f7)) }));
 }
 fn display_value(v: &Value) -> String {
     if let Some(n) = v.as_f64() {
@@ -2808,6 +2919,51 @@ mod tests {
         p.move_selected(-1);
         assert_eq!(category_label(&p.categories[0]), "Uncategorized");
         assert_eq!(p.enabled, [false, true], "flags travel with their processor");
+    }
+    #[test]
+    fn category_chips_filter_the_rows_and_keep_focus_visible() {
+        struct Tagged(&'static str, Vec<Category>);
+        impl abner_processor_api::Factory for Tagged {
+            fn categories(&self) -> Vec<Category> {
+                self.1.clone()
+            }
+            fn descriptor(&self) -> Descriptor {
+                Descriptor { id: self.0.into(), ..BufferedFactory.descriptor() }
+            }
+            fn create(&self, w: usize, h: usize, s: &Value) -> Result<Box<dyn Session>, String> {
+                BufferedFactory.create(w, h, s)
+            }
+        }
+        let mut r = Registry::default();
+        r.register(Box::new(Tagged("example.a", vec![Category::Denoising]))).unwrap();
+        r.register(Box::new(Tagged("example.b", vec![Category::Interpolation]))).unwrap();
+        r.register(Box::new(Tagged("example.c", vec![Category::Denoising]))).unwrap();
+        let mut p = Panel::new(r);
+        p.enter();
+        let vp = (1280.0, 900.0);
+        let chips = p.chips(vp);
+        let labels: Vec<_> = chips.iter().map(|(_, _, l)| l.as_str()).collect();
+        assert_eq!(labels, ["ALL", "INTERPOLATION", "DENOISING"], "ALL, then the categories present, in API order");
+        p.select(1);
+        // Picking a chip that hides the focused row focuses the first row it shows.
+        let (chip, ..) = chips[2];
+        p.click(chip.x + chip.w / 2.0, chip.y + chip.h / 2.0, vp);
+        assert_eq!(p.filter, Some(Category::Denoising));
+        assert_eq!(p.visible(), [0, 2]);
+        assert_eq!(p.selected, 0);
+        assert_eq!(p.card(1, vp).h, 0.0, "a hidden row has no area");
+        let second = p.card(2, vp);
+        assert_eq!(second.y, p.card(0, vp).y + CARD_PITCH, "visible rows close up");
+        p.click(second.x + 20.0, second.y + 10.0, vp);
+        assert_eq!(p.selected, 2);
+        // Moving steps over the hidden row, which keeps its place.
+        p.move_selected(-1);
+        let ids: Vec<_> = p.descriptors.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(ids, ["example.c", "example.a", "example.b"]);
+        assert_eq!(p.selected, 0);
+        let (all, ..) = p.chips(vp)[0];
+        p.click(all.x + 5.0, all.y + 5.0, vp);
+        assert_eq!(p.visible(), [0, 1, 2]);
     }
     struct BufferedFactory;
     impl abner_processor_api::Factory for BufferedFactory {

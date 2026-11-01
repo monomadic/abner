@@ -432,3 +432,17 @@ It uses native UI text, geometric drawing, a live video texture, and shared `Lay
 rectangles for drawing and input. The footer is an Export / Cancel / Reveal output
 button bar; Timeline editing actions from the reference's footer are deliberately
 replaced per the user's correction. `--export INPUT` opens this view for capture.
+
+### Processors rail (2026-11-01)
+
+The Process page's left rail follows the user's Figma rail capture (280px rail
+at 2×): a `CATEGORY` label over wrapping chips (ALL, then every category a
+processor declares, in the API's order; the picked one is an 18px pill ringed
+`SOURCE_RING`), then one rounded group box (#121212, 1px #2e2e2e, radius 14,
+10px padding) holding 30px rows on a 33px pitch — name only, white when on or
+focused and #8c8c8c otherwise, with a 34×18 pill switch (`draw_rail_switch`,
+orange on, grey outlined off; the settings inspector keeps the 61×27 Switch).
+A chip filters the rows (`Panel::filter` / `visible`); Move up / down step over
+hidden rows. The focused inspector shows the chain position as a 24px round
+badge before the name. `chips`, `card` and `card_switch` are the one geometry
+for drawing and hit testing.
