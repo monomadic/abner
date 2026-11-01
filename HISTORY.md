@@ -1779,3 +1779,15 @@ frames, even if the caller requests copy. Process-chain media export remains
 explicitly unsupported; previews must not be mistaken for processed exports.
 Regression coverage compares coded picture hashes across CFR/VFR and I/P/B
 fixtures, checks automatic working-file cleanup, and verifies crop overrides copy.
+
+## 2026-11-01 — Persistent encode requirement indicator
+
+The loaded workspace header now reports STREAM COPY, PARTIAL RE-ENCODE, or
+FULL RE-ENCODE instead of READY. The focused source's timeline edits determine
+copy versus partial encoding; a crop or enabled stage in the selected processing
+chain requires full encoding. Bypassed stages and other sources' timeline edits
+do not affect the indicator. Keyframe analysis shows CHECKING GOPs until known.
+The same indicator appears on every workspace page, including narrow Timeline
+windows, with tabs reserving room for its text. The inspector badge uses the
+same status instead of inferring full encoding from frame snap. Splash READY
+remains a launch lamp.

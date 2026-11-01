@@ -1251,6 +1251,11 @@ impl Panel {
         }
         .map(|f| f.pts);
     }
+    /// An enabled stage in the current chain requires encoding output pixels.
+    pub fn modifies_video(&self) -> bool {
+        self.enabled.iter().take(self.selected + 1).any(|enabled| *enabled)
+    }
+
     fn chain(&self) -> Vec<(String, Value)> {
         self.descriptors
             .iter()
@@ -3151,7 +3156,11 @@ mod tests {
         // Plugins start bypassed; nothing runs until it is ticked.
         assert_eq!(p.enabled, [false, false]);
         assert!(p.chain().is_empty());
+        assert!(!p.modifies_video());
+        p.enabled[1] = true;
+        assert!(!p.modifies_video(), "stages after the selected output are outside the chain");
         p.enabled = vec![true, true];
+        assert!(p.modifies_video());
         p.enter();
         p.settings["strength"] = json!(0.8);
         p.changed();

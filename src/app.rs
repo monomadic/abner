@@ -3014,12 +3014,9 @@ impl App {
 
     /// Header tabs (MainNav 382:4686, 2026-10-26): five 110×30 tabs on a
     /// 5px gap. They shrink together so the row ends 12px short of what
-    /// the header carries at its right — the READY chip, or cut mode's
-    /// status chip (under `CUT_COLUMNS_MIN_W`, nothing).
+    /// the header carries at its right — the persistent encode indicator.
     fn mode_selector(&self) -> ModeSelector {
-        let right = if self.cut_mode {
-            if self.vp.0 >= CUT_COLUMNS_MIN_W { self.cut_status_chip().x } else { self.vp.0 - 12.0 }
-        } else { self.status_chip().x };
+        let right = self.status_chip().x;
         let tab_w = ((right - 12.0 - self.header_left() - 4.0 * TAB_GAP) / 5.0).clamp(40.0, TAB_W);
         ModeSelector {
             rect: RectPx {
@@ -3032,29 +3029,25 @@ impl App {
         }
     }
 
-    /// The READY chip (Header 382:4716 `Status / READY`): 126×28, ending
-    /// 11px from the right edge, level with the tabs. Input modes only;
-    /// cut mode's status chip (`cut_status_chip`) says what the export
-    /// will do instead.
+    /// Persistent encode requirement for the focused video's current edits.
     fn status_chip(&self) -> RectPx {
-        RectPx { x: self.vp.0 - 11.0 - 126.0, y: (HEADER_H - 28.0) / 2.0, w: 126.0, h: 28.0 }
+        let (text, _) = self.encode_status();
+        let w = 34.0 + text.chars().count() as f32 * (MONO_ADV * 10.0 + 0.5);
+        let inset = if self.cut_mode && self.vp.0 >= CUT_COLUMNS_MIN_W { 55.0 } else { 11.0 };
+        RectPx { x: self.vp.0 - inset - w, y: (HEADER_H - 28.0) / 2.0, w, h: 28.0 }
     }
 
-    /// Cut mode's status chip: same chip, sized to its mono text, 12px
-    /// left of the inspector toggle (Export and Render live in the footer).
-    fn cut_status_chip(&self) -> RectPx {
-        let (text, _) = self.cut_status();
-        let w = 22.0 + text.chars().count() as f32 * (MONO_ADV * 10.0 + 0.5) + 12.0;
-        let right = self.vp.0 - 43.0 - 12.0;
-        RectPx { x: right - w, y: (HEADER_H - 28.0) / 2.0, w, h: 28.0 }
-    }
-
-    fn cut_status(&self) -> (&'static str, u32) {
-        let cut = self.cut.as_ref().unwrap();
-        if cut.encoding() { ("ENCODING SPLIT GOPs…", 0xb68aff) }
-        else if cut.scanning() { ("SCANNING KEYFRAMES…", CUT_INK) }
-        else if cut.copy_ready() { ("READY · STREAM COPY", CUT_LAMP) }
-        else { ("SPLIT GOPs · ENCODING NEEDED", 0xb68aff) }
+    fn encode_status(&self) -> (&'static str, u32) {
+        // Pixel processing takes precedence over temporal edits, even while
+        // viewing another page. Bypassed processors do not affect the result.
+        if self.crop.is_some() || self.processors.modifies_video() {
+            return ("FULL RE-ENCODE", 0xf08566);
+        }
+        if let Some(cut) = self.cut.as_ref().filter(|_| self.active == self.cut_video) {
+            if cut.scanning() { return ("CHECKING GOPs…", CUT_INK); }
+            if !cut.copy_ready() { return ("PARTIAL RE-ENCODE", 0xb68aff); }
+        }
+        ("STREAM COPY", CUT_LAMP)
     }
 
     fn build_hud(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
@@ -3073,7 +3066,8 @@ impl App {
             items.push(Item::Rect(RectItem::new(r, WORKSPACE_RULE)));
         }
         self.mode_selector().draw(items, self.cursor, self.cursor_inside);
-        draw_status_chip(items, self.status_chip(), HEADER_LAMP, "READY", hex_color(0xc8c8c8));
+        let (text, lamp) = self.encode_status();
+        draw_status_chip(items, self.status_chip(), lamp, text, hex_color(0xc8c8c8));
         for control in self.controls() {
             let hovered = contains(control.r, self.cursor.0, self.cursor.1) && self.cursor_inside;
             if matches!(control.action, Action::Tool(_) | Action::ToggleSources | Action::ToggleInspector | Action::ToggleDetail)
@@ -5014,11 +5008,11 @@ impl App {
         if self.vp.0 >= CUT_COLUMNS_MIN_W {
             let toggle = self.inspector_toggle();
             draw_sidebar_toggle(items, toggle, true, self.show_inspector, self.cursor_inside && contains(toggle, self.cursor.0, self.cursor.1));
-            let (text, lamp) = self.cut_status();
-            let chip = self.cut_status_chip();
-            if chip.x >= r.x + r.w + 12.0 {
-                draw_status_chip(items, chip, lamp, text, hex_color(0xc8c8c8));
-            }
+        }
+        let (text, lamp) = self.encode_status();
+        let chip = self.status_chip();
+        if chip.x >= r.x + r.w + 12.0 {
+            draw_status_chip(items, chip, lamp, text, hex_color(0xc8c8c8));
         }
     }
 
@@ -5238,7 +5232,6 @@ impl App {
         let dim = mix(CUT_BG, 0xffffff, 0.5);
         let faint = mix(CUT_BG, 0xffffff, 0.42);
         let ink = hex_color(CUT_INK);
-        let green = hex_color(CUT_GREEN_INK);
         let chip_bg = mix(CUT_BG, 0xffffff, 0.07);
         items.push(Item::Clip(Some(s)));
 
@@ -5414,7 +5407,6 @@ impl App {
         let cy = g.footer_y + 28.0;
         let kept = cut.kept();
         let removed = cut.duration - kept;
-        let frame_mode = cut.snap == Snap::Frame;
         let right_chip = |items: &mut Vec<Item>, right: f32, text: &str, bg: [f32; 4], fg: [f32; 4]| -> f32 {
             let w = text.chars().count() as f32 * 10.0 * MONO_ADV + 14.0;
             items.push(Item::Text(TextItem { header: true, align: Align::Right, valign: VAlign::Middle,
@@ -5424,9 +5416,8 @@ impl App {
         };
         if self.cut_tab != 1 {
             inspector_label(items, x0, cy, 15.0, ink, fmt_hms(kept), Align::Left, 110.0);
-            let (re_text, re_bg, re_fg) = if frame_mode { ("all re-enc", mix(CUT_BG, CUT_CORAL, 0.14), hex_color(CUT_CORAL_INK)) }
-                else { ("0 re-enc", mix(CUT_BG, CUT_GREEN, 0.14), green) };
-            let r = right_chip(items, x1, re_text, re_bg, re_fg);
+            let (re_text, lamp) = self.encode_status();
+            let r = right_chip(items, x1, re_text, mix(CUT_BG, lamp, 0.14), hex_color(lamp));
             if removed > 1e-3 {
                 right_chip(items, r, &format!("−{}", fmt_span(removed)), chip_bg, mix(CUT_BG, 0xffffff, 0.75));
             }
@@ -6150,7 +6141,6 @@ const CUT_AMBER: u32 = 0xe9ac00;
 const CUT_AMBER_INK: u32 = 0x1a1408;
 /// Lossless / snapped.
 const CUT_GREEN: u32 = 0x35c15f;
-const CUT_GREEN_INK: u32 = 0x7fdc98;
 /// Warnings only: long GOPs, what snapping costs, the cut button.
 const CUT_CORAL: u32 = 0xf08566;
 const CUT_CORAL_INK: u32 = 0xf5b3a0;
@@ -6160,8 +6150,6 @@ const CUT_FLAG_PAST: u32 = 0x393a3a;
 const CUT_LAMP: u32 = 0x20c45f;
 /// Header tab ring and selected tint (Figma `header/ink`, 382:4686).
 const HEADER_RING: u32 = 0x0088ff;
-/// The READY chip's lamp (Header 382:4716 `Status / READY`).
-const HEADER_LAMP: u32 = 0x90c9a4;
 /// Header tabs: 110×30 on a 5px gap (MainNav 382:4686).
 const TAB_W: f32 = 110.0;
 const TAB_H: f32 = 30.0;
@@ -7793,6 +7781,40 @@ mod tests {
         assert!((app.t - want).abs() < 1e-9, "the decoder never moves a pointer-owned clock");
         for v in &app.videos {
             assert!((v.shown_pts - want).abs() < 1.0 / 30.0, "every stream shows the requested frame: {} vs {want}", v.shown_pts);
+        }
+    }
+
+    #[test]
+    fn encode_indicator_tracks_edits_across_pages_and_focused_sources() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 2);
+        assert_eq!(app.encode_status().0, "STREAM COPY");
+        let mut cut = crate::cut::Cut::new(&clip, 4.0);
+        cut.set_keys(vec![0.0, 1.0, 2.0, 3.0]);
+        cut.snap = crate::cut::Snap::Frame;
+        cut.set_in(0.5);
+        cut.set_out(1.5);
+        cut.cut_selection();
+        app.cut = Some(cut);
+        app.cut_video = app.active;
+        assert_eq!(app.encode_status().0, "PARTIAL RE-ENCODE");
+        app.crop = Some(Crop { x: 0.0, y: 0.0, w: 160.0, h: 90.0 });
+        assert_eq!(app.encode_status().0, "FULL RE-ENCODE");
+        app.crop = None;
+        app.cut.as_mut().unwrap().undo();
+        assert_eq!(app.encode_status().0, "STREAM COPY");
+        app.cut.as_mut().unwrap().set_in(0.5);
+        app.cut.as_mut().unwrap().set_out(1.5);
+        app.cut.as_mut().unwrap().cut_selection();
+        app.active = 1;
+        assert_eq!(app.encode_status().0, "STREAM COPY", "another source has no timeline edits");
+        for width in [720.0, 900.0, 1280.0] {
+            app.vp.0 = width;
+            for cut_mode in [false, true] {
+                app.cut_mode = cut_mode;
+                let tabs = app.mode_selector().rect;
+                assert!(tabs.x + tabs.w + 12.0 <= app.status_chip().x + 0.01);
+            }
         }
     }
 
