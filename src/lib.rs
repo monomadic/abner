@@ -853,6 +853,8 @@ impl ApplicationHandler for Runner {
                     {
                         Some(Key::Close)
                     }
+                    // ⌘0: the focused video at original size (before the digit arm).
+                    WinitKey::Character(s) if self.mods.super_key() && s == "0" => Some(Key::ActualSize),
                     // ⌘1–9: a recent file on the launch window, the bare
                     // digit (pick a clip) once clips are up.
                     WinitKey::Character(s)

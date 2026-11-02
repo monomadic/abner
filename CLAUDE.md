@@ -142,7 +142,10 @@ from one to the other, keeping its number.
   every video applies it to its own fit rect, so pan/zoom position stays synced across
   streams and side-by-side cells; pinch anchors on the pointer (solve for the content
   point under the cursor, keep it there), `clamp_center` pins the view inside the
-  content, Z resets. **Speed** (`[`/`]`, Backspace) just scales the master clock's dt —
+  content, Z resets. ⌘0 (`Key::ActualSize`, `actual_size`) sets the zoom that shows the
+  focused clip one video pixel per PHYSICAL pixel (`App::scale` is the last tick's
+  backing scale) — below 1 for a clip smaller than its fit; a pinch never goes lower
+  than where it starts, and the footer reads `1:1`. **Speed** (`[`/`]`, Backspace) just scales the master clock's dt —
   decoders need no notion of rate (backpressure absorbs slow, frame-dropping in
   `take_upto` absorbs fast). Framestep = exact seek to
   `t + 0.5/fps` (forward) / `t − 1.5/fps` (back) — half-period offsets so pts rounding

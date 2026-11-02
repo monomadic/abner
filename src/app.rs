@@ -74,6 +74,9 @@ pub enum Key {
     /// (Sources · Timeline · Process · Crop · Mask), stopping at the ends.
     PrevMode,
     NextMode,
+    /// ⌘0: show the focused video at its original size (one video pixel
+    /// per screen pixel).
+    ActualSize,
 }
 
 #[derive(Debug, Clone)]
@@ -288,6 +291,9 @@ pub struct App {
     mode: Mode,
     /// Photo-style zoom: 1.0 = fit; pinch scales around the pointer.
     zoom: f32,
+    /// The window's backing scale factor, from the last `tick`: original
+    /// size is one video pixel per PHYSICAL pixel.
+    scale: f32,
     /// Content point (0..1 of the video) held at the view's center. All
     /// videos share it, so pan/zoom stays position-synced across streams.
     center: (f32, f32),
@@ -752,6 +758,7 @@ impl App {
             started: false,
             mode: cfg.playback.view,
             zoom: 1.0,
+            scale: 1.0,
             center: (0.5, 0.5),
             speed: 1.0,
             seek_step: cfg.playback.seek_step,
@@ -1744,6 +1751,10 @@ impl App {
             self.cycle_workspace_mode(if k == Key::NextMode { 1 } else { -1 });
             return;
         }
+        if k == Key::ActualSize {
+            self.actual_size();
+            return;
+        }
         if self.export_page.open && self.ready() && self.export_page.key(k) { return; }
         if self.export_page.open && matches!(k, Key::Space | Key::Render) { self.start_pipeline_export(); return; }
         if self.processors.key(k) {
@@ -1888,7 +1899,7 @@ impl App {
                 }
             }
             Key::Backspace => self.speed = 1.0,
-            Key::Close | Key::CmdDigit(_) | Key::Undo | Key::Render | Key::SaveProject | Key::KeyLeft | Key::KeyRight | Key::DuplicateSources | Key::SelectSources | Key::OpenFiles | Key::PrevMode | Key::NextMode => {} // handled above
+            Key::Close | Key::ActualSize | Key::CmdDigit(_) | Key::Undo | Key::Render | Key::SaveProject | Key::KeyLeft | Key::KeyRight | Key::DuplicateSources | Key::SelectSources | Key::OpenFiles | Key::PrevMode | Key::NextMode => {} // handled above
             Key::Char('V') => self.mode = self.mode.cycle(-1),
             Key::Char(c @ '1'..='9') => {
                 let idx = c as usize - '1' as usize;
@@ -2273,7 +2284,8 @@ impl App {
         let (cx, cy) = self.cursor;
         let base = self.gesture_base(cx, cy);
         let old = self.zoom;
-        let new = (old * (1.0 + delta)).clamp(1.0, 32.0);
+        // Below fit only if ⌘0 already put it there (a small window).
+        let new = (old * (1.0 + delta)).clamp(old.min(1.0), 32.0);
         if (new - old).abs() < 1e-5 {
             return;
         }
@@ -2287,6 +2299,24 @@ impl App {
         self.zoom = new;
         self.center.0 = u + (bcx - cx) / (base.w * new);
         self.center.1 = v + (bcy - cy) / (base.h * new);
+        self.clamp_center();
+    }
+
+    /// The zoom at which the focused video shows at its original size:
+    /// its native width over its fit width in physical pixels.
+    fn actual_zoom(&self) -> Option<f32> {
+        let v = self.videos.get(self.active)?;
+        let base = self.base_rect(self.active);
+        (base.w > 0.0 && v.info.width > 0).then(|| v.info.width as f32 / (base.w * self.scale.max(0.1)))
+    }
+
+    /// ⌘0: original size in every view that shows a video. The view stays
+    /// centred where it was; a video bigger than the canvas is cropped,
+    /// a smaller one sits letterboxed at its own size.
+    pub fn actual_size(&mut self) {
+        if !self.ready() || self.export_page.open { return; }
+        let Some(zoom) = self.actual_zoom() else { return };
+        self.zoom = zoom.clamp(1.0 / 32.0, 32.0);
         self.clamp_center();
     }
 
@@ -2357,11 +2387,20 @@ impl App {
         (self.zoom, self.center)
     }
 
+    /// The footer's zoom readout: fit, 1:1 (original size), or a factor.
+    fn zoom_label(&self) -> String {
+        if self.actual_zoom().is_some_and(|a| (self.zoom - a).abs() < 1e-3) { "1:1".into() }
+        else if (self.zoom - 1.0).abs() < 1e-3 { "fit".into() }
+        else if self.zoom < 1.0 { format!("{:.2}×", self.zoom) }
+        else { format!("{:.1}×", self.zoom) }
+    }
+
     fn content_rect(&self, idx: usize) -> RectPx {
         Self::zoomed(self.base_rect(idx), self.zoom, self.center)
     }
 
-    pub fn tick(&mut self, dt: f32, vp: (f32, f32), _scale: f32) -> FrameDesc {
+    pub fn tick(&mut self, dt: f32, vp: (f32, f32), scale: f32) -> FrameDesc {
+        self.scale = scale;
         if self.videos.is_empty(){self.processors.close();self.export_page.open=false;self.export_page.cancel();}
         if self.vp != vp {
             self.stroke_last = None;
@@ -3562,7 +3601,7 @@ impl App {
         ui_label(items, 16.0, y + STATUS_H / 2.0, 10.0, if self.mask_mode { MASK_RED } else { ACCENT }, mode, Align::Left, 70.0);
         let status = if let Some(notice) = self.fresh_notice() { notice.to_string() }
             else if !self.mask_status.is_empty() && self.mask_mode { self.mask_status.clone() }
-            else { format!("Clip {} · {}", self.active + 1, if self.zoom <= 1.001 { "fit".into() } else { format!("{:.1}×", self.zoom) }) };
+            else { format!("Clip {} · {}", self.active + 1, self.zoom_label()) };
         let hint = if self.mask_mode { if self.crop.is_some() {
                 format!("a {}   drag move / resize   s save   e export", ASPECTS[self.aspect].0)
             } else { "drag paint   [ ] brush   s save".into() } }
@@ -9181,6 +9220,29 @@ mod tests {
         app.key(Key::Char('z'));
         assert!((app.zoom - 1.0).abs() < 1e-6);
         assert_eq!(app.center, (0.5, 0.5));
+    }
+
+    /// ⌘0 shows the focused video one video pixel per physical pixel, in
+    /// the plain view, the timeline and the Process page alike.
+    #[test]
+    fn cmd_zero_shows_original_size_in_every_video_view() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 2);
+        let native = app.videos[0].info.width as f32;
+        let scale = 2.0;
+        let check = |app: &mut App, what: &str| {
+            let _ = app.tick(0.0, (1280.0, 800.0), scale);
+            app.key(Key::ActualSize);
+            let _ = app.tick(0.0, (1280.0, 800.0), scale);
+            let w = app.content_rect(app.active).w * scale;
+            assert!((w - native).abs() < 0.5, "{what}: {w} physical px for a {native}px video");
+            assert_eq!(app.zoom_label(), "1:1", "{what}");
+            app.key(Key::Char('z'));
+        };
+        check(&mut app, "sources");
+        app.key(Key::Char('t'));
+        assert!(app.cut_mode);
+        check(&mut app, "timeline");
     }
 
     /// `[`/`]` scale how fast the master clock runs; Backspace resets.
