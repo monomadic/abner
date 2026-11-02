@@ -2962,11 +2962,23 @@ impl App {
             self.cut.as_ref().is_some_and(|c| !c.pending_gops().is_empty())
     }
 
+    /// A rail narrower than `SOURCE_OVERLAY_W` lays each card's name and
+    /// metadata over the bottom of its preview instead of under it.
+    fn source_overlay(&self) -> bool {
+        self.workspace().panel < SOURCE_OVERLAY_W
+    }
+
+    /// What a card adds to its preview's height: the text block under it,
+    /// or only the padding when the label sits on the picture.
+    fn source_chrome(&self) -> f32 {
+        if self.source_overlay() { 20.0 } else { 69.0 }
+    }
+
     fn source_thumb_height(&self, index: usize) -> f32 {
         let width = (self.workspace().panel - 32.0).max(1.0);
         let info = &self.videos[index].info;
         (width * info.height.max(1) as f32 / info.width.max(1) as f32)
-            .min((self.workspace().list.h - 69.0).max(1.0))
+            .min((self.workspace().list.h - self.source_chrome()).max(1.0))
     }
 
     fn source_thumb(&self, index: usize) -> RectPx {
@@ -2978,7 +2990,7 @@ impl App {
     }
 
     fn source_pitch(&self, index: usize) -> f32 {
-        self.source_thumb_height(index) + 69.0
+        self.source_thumb_height(index) + self.source_chrome()
     }
 
     fn source_capacity(&self) -> usize {
@@ -3030,7 +3042,8 @@ impl App {
         let r = self.source_row(index);
         RectPx {
             x: r.x + r.w - 39.0,
-            y: r.y + self.source_thumb_height(index) - 19.0,
+            // Overlaid, the label owns the preview's foot: the box moves up.
+            y: if self.source_overlay() { r.y + 11.0 } else { r.y + self.source_thumb_height(index) - 19.0 },
             w: 20.0,
             h: 20.0,
         }
@@ -3609,12 +3622,21 @@ impl App {
             // the deliberate dark rim between ring and picture — with only
             // rounded corners. The full UV rectangle preserves every frame.
             let thumb = self.source_thumb(i);
+            let overlay = self.source_overlay();
             items.push(Item::Clip(Some(intersect(thumb, visible))));
             let quad = thumb;
             items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(quad, WORKSPACE_PANEL) }));
             if v.delivered {
                 items.push(Item::Video { a: i, b: i, r: quad, uv: [0.0, 0.0, 1.0, 1.0],
                     mode: VideoMode::Tex, p0: 6.0, p1: 0.0 });
+            }
+            // Overlaid, a dark strip across the preview's foot carries the
+            // label: clipped flat on top, the preview's rounding below.
+            if overlay {
+                let strip = RectPx { y: thumb.y + thumb.h - SOURCE_LABEL_H, h: SOURCE_LABEL_H, ..thumb };
+                items.push(Item::Clip(Some(intersect(strip, visible))));
+                items.push(Item::Rect(RectItem { radius: 6.0,
+                    ..RectItem::new(RectPx { y: strip.y - 6.0, h: strip.h + 6.0, ..strip }, [0.0, 0.0, 0.0, 0.8]) }));
             }
             items.push(Item::Clip(Some(visible)));
             let badge = RectPx { x: thumb.x + 7.0, y: thumb.y + 7.0, w: 24.0, h: 24.0 };
@@ -3623,7 +3645,8 @@ impl App {
                 ..TextItem::new(badge.x + 12.0, badge.y + 12.0, 15.0, hex_color(0x000000), (i + 1).to_string()) }));
             let shared = self.videos.iter().filter(|other| other.info.path == v.info.path).count();
             if shared > 1 || v.linked_copy {
-                let chip = RectPx { x: thumb.x + 7.0, y: thumb.y + (thumb.h - 30.0).max(7.0), w: (thumb.w - 48.0).min(142.0), h: 23.0 };
+                let foot = if overlay { SOURCE_LABEL_H } else { 0.0 };
+                let chip = RectPx { x: thumb.x + 7.0, y: thumb.y + (thumb.h - foot - 30.0).max(7.0), w: (thumb.w - 48.0).min(142.0), h: 23.0 };
                 items.push(Item::Rect(RectItem { radius: 5.0, ..RectItem::new(chip, hex_color(0x080d14)) }));
                 ui_label(items, chip.x + 6.0, chip.y + 11.5, 10.0, secondary,
                     if shared > 1 { format!("Shared · {shared} items") } else { "Linked copy".into() }, Align::Left, chip.w - 12.0);
@@ -3641,16 +3664,21 @@ impl App {
             }
             // Text block: 7px side padding inside the ring, 6px below the
             // preview; the name and the metadata are 18px lines.
-            let (tx, tw) = (r.x + 11.0, r.w - 22.0);
+            // Overlaid, the same two lines sit inside the strip at 9px in.
+            let (tx, tw) = if overlay { (thumb.x + 9.0, thumb.w - 18.0) } else { (r.x + 11.0, r.w - 22.0) };
+            let base = if overlay { thumb.y + thumb.h - SOURCE_LABEL_H } else { thumb.y + thumb.h };
             let name = format!("{}{}", name_of(&v.info.path), if v.linked_copy { " · copy" } else { "" });
             items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(tw),
-                ..TextItem::new(tx, thumb.y + thumb.h + 15.0, 13.0, ink, name) }));
+                ..TextItem::new(tx, base + 15.0, 13.0, ink, name) }));
             let codec = match v.info.codec.as_str() { "h264" => "H.264".into(), "hevc" => "HEVC".into(), c => c.to_uppercase() };
             let seconds = v.info.duration.max(0.0) as u64;
-            let meta_y = thumb.y + thumb.h + 33.0;
+            let meta_y = base + 33.0;
             let left = format!("{codec} · {}p", v.info.height);
             let right = format!("{}fps · {}:{:02}", v.info.fps, seconds / 60, seconds % 60);
-            if l.panel >= 280.0 {
+            if overlay {
+                items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(tw),
+                    ..TextItem::new(tx, meta_y, 10.0, ink, format!("{left} / {} fps", v.info.fps)) }));
+            } else if l.panel >= 280.0 {
                 items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(tw - 112.0),
                     ..TextItem::new(tx, meta_y, 11.0, secondary, left) }));
                 items.push(Item::Text(TextItem { regular: true, align: Align::Right, valign: VAlign::Middle, max_width: Some(108.0),
@@ -6904,6 +6932,10 @@ pub(crate) const HEADER_H: f32 = CUT_HEADER_H;
 const CONTEXT_H: f32 = 40.0;
 /// Sources sidebar (278:584): 157px cards on a 12px gap, a 100px preview.
 const SOURCE_H: f32 = 169.0;
+/// Below this panel width the source cards put their label on the preview.
+const SOURCE_OVERLAY_W: f32 = 260.0;
+/// The overlaid label's strip: two lines plus padding.
+const SOURCE_LABEL_H: f32 = 46.0;
 
 /// The app's rows the design leaves out: the footer line above the
 /// inspector and the Duplicate / Add files buttons under it.
@@ -7284,7 +7316,8 @@ mod tests {
         assert!(app.videos.iter().all(|v| !v.selected));
         let desc = app.tick(0.0, (720.0, 480.0), 2.0);
         drop(desc);
-        assert_eq!(app.source_first(), 2, "resize keeps the viewed source visible");
+        let first = app.source_first();
+        assert!(first <= 2 && 2 < first + app.source_capacity(), "resize keeps the viewed source visible");
     }
 
     #[test]
