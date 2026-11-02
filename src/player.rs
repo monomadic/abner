@@ -281,6 +281,10 @@ struct Shared {
     /// forward-biased) — newest wins. Seeks the cache can serve never get
     /// here.
     cmd: Mutex<Option<(f64, bool, bool)>>,
+    /// A frame an exact seek may soon ask for (seconds; see `Player::prefetch`). Newest wins.
+    prefetch: Mutex<Option<f64>>,
+    /// Ends a prefetch's hold (`Player::end_prefetch`).
+    unhold: AtomicBool,
     /// Raised with every command so a decode-forward in progress inside FilmCraft gives up.
     cancel: Arc<AtomicBool>,
     /// f64 bits: pts of the frame most recently taken (on screen), or the
@@ -368,6 +372,8 @@ impl Player {
             space: Condvar::new(),
             closed: AtomicBool::new(false),
             cmd: Mutex::new(None),
+            prefetch: Mutex::new(None),
+            unhold: AtomicBool::new(false),
             cancel: Arc::new(AtomicBool::new(false)),
             position: AtomicU64::new(0f64.to_bits()),
             failed: AtomicBool::new(false),
@@ -444,6 +450,39 @@ impl Player {
             self.shared.cancel.store(true, Ordering::Relaxed);
         }
         drop(c);
+        self.shared.space.notify_all();
+    }
+
+    /// Warm the decoder for an exact seek to `target_s` that may follow (the timeline's hover):
+    /// FilmCraft decodes to that frame and keeps the pictures it decoded, nothing is converted
+    /// or shown, and the reader then holds still, so decoding ahead can't evict them. The seek
+    /// then converts one cached picture instead of walking the GOP. A seek, or the position
+    /// moving (playback), lets the reader go again. Ignored while an exact seek is landing, and
+    /// when the frame is already cached.
+    pub fn prefetch(&self, target_s: f64) {
+        let key = us(target_s.max(0.0));
+        let c = self.shared.cache.lock().unwrap();
+        let cached = c
+            .frames
+            .range(key - SAME_FRAME_US..)
+            .next()
+            .is_some_and(|(k, _)| c.covers(*k, key));
+        if cached || c.pending.is_some() || c.landing || self.shared.cmd.lock().unwrap().is_some() {
+            return;
+        }
+        *self.shared.prefetch.lock().unwrap() = Some(target_s.max(0.0));
+        self.shared.unhold.store(false, Ordering::Relaxed);
+        // Abandons a decode-ahead frame (or an older prefetch); never a seek, see above.
+        self.shared.cancel.store(true, Ordering::Relaxed);
+        drop(c);
+        self.shared.space.notify_all();
+    }
+
+    /// Let a reader held by `prefetch` decode ahead again (playback is about to want frames the
+    /// position alone would not ask for).
+    pub fn end_prefetch(&self) {
+        *self.shared.prefetch.lock().unwrap() = None;
+        self.shared.unhold.store(true, Ordering::Relaxed);
         self.shared.space.notify_all();
     }
 
@@ -597,11 +636,19 @@ fn reader(shared: &Arc<Shared>, cfg: &ReaderCfg) -> Result<(), String> {
     let mut at_end = false;
     let mut active_target: Option<i64> = None;
     let mut seen_before_target = false;
+    // A cold exact seek decodes straight to its target (the frames before it are references
+    // FilmCraft keeps as planar pictures) and converts the rewind window only once the target
+    // is in the cache: `(target index, window start)`.
+    let mut backfill: Option<(u64, u64)> = None;
+    // After a prefetch: the position it was made at. The reader parks until a command arrives or
+    // the position moves, so decoding ahead doesn't evict the pictures it warmed.
+    let mut hold: Option<u64> = None;
     loop {
         if shared.closed.load(Ordering::Relaxed) {
             return Ok(());
         }
         if let Some((target, exact, forward)) = shared.cmd.lock().unwrap().take() {
+            hold = None;
             shared.eof.store(false, Ordering::Release);
             let t_idx = to_index(target);
             if exact {
@@ -621,9 +668,12 @@ fn reader(shared: &Arc<Shared>, cfg: &ReaderCfg) -> Result<(), String> {
                 let budget = shared.cache.lock().unwrap().budget;
                 let rewind = (budget / frame_bytes.max(1)).saturating_sub(2).min(30) as u64;
                 let start = keyframe_before(t_idx).max(t_idx.saturating_sub(rewind));
-                seen_before_target = start < t_idx || t_idx == 0;
-                index = start;
+                // Landing on the target's own index verifies it as the exact frame.
+                seen_before_target = false;
+                backfill = (start < t_idx).then_some((t_idx, start));
+                index = t_idx;
             } else {
+                backfill = None;
                 active_target = None;
                 seen_before_target = false;
                 index = match &sync {
@@ -637,6 +687,37 @@ fn reader(shared: &Arc<Shared>, cfg: &ReaderCfg) -> Result<(), String> {
             shared.cache.lock().unwrap().broken = true;
             last_index = None;
             at_end = false;
+            continue;
+        }
+        let warm = shared.prefetch.lock().unwrap().take();
+        if let Some(t) = warm {
+            shared.cancel.store(false, Ordering::Relaxed);
+            // The frame itself is not wanted, only the decoder state and FilmCraft's pictures.
+            // Cancelled = a seek or a newer prefetch: the loop picks that up.
+            let _ = fc::frame_at(&src, to_index(t), frame_s, &shared.cancel);
+            hold = Some(shared.position.load(Ordering::Relaxed));
+            // The frame a parked push gave up on (see `push`) is missing: start a fresh span.
+            shared.cache.lock().unwrap().broken = true;
+            continue;
+        }
+        if let Some(at) = hold {
+            if shared.position.load(Ordering::Relaxed) == at && !shared.unhold.load(Ordering::Relaxed) {
+                let c = shared.cache.lock().unwrap();
+                let _c = shared.space.wait_timeout(c, Duration::from_millis(10)).unwrap().0;
+                continue;
+            }
+            hold = None;
+        }
+        if let Some((target, start)) = backfill
+            && index > target
+        {
+            // The target is cached (and on its way to the screen): now the frames before it,
+            // as a span of their own that merges into the target's when it reaches it.
+            backfill = None;
+            index = start;
+            last_index = None;
+            at_end = false;
+            shared.cache.lock().unwrap().broken = true;
             continue;
         }
         if at_end {
@@ -756,7 +837,7 @@ fn push(
             }
             continue;
         }
-        if shared.cmd.lock().unwrap().is_some() {
+        if shared.cmd.lock().unwrap().is_some() || shared.prefetch.lock().unwrap().is_some() {
             c.broken = true;
             return Flow::Continue;
         }
@@ -987,6 +1068,11 @@ mod tests {
         assert!(landed.iter().all(|&pts| (pts - 3.5).abs() < 1e-6), "inexact landing: {landed:?}");
         eprintln!("cold: players={n} gop_delta={:?} planar_cache_bytes={} pool_before={pool_before:?} pool_after={:?}", filmcraft_codecs::gop::gop_stats() - gop_before, filmcraft_codecs::gop::cached_bytes(), filmcraft_frame::pool::stats());
         eprintln!("hardware: before={hw_before:?} after={:?}", filmcraft_codecs::hw::hw_stats());
+        // The rewind window is converted after the landing: wait for it before timing a hit.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while players.iter().any(|p| p.frame_at(83.0 / 24.0).is_none()) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(2));
+        }
         let cached = Instant::now();
         for p in &players {
             p.seek(3.42, true);
@@ -1144,10 +1230,55 @@ mod tests {
         );
         let (pts, _) = p.take_next().unwrap();
         assert!((3.48..=3.54).contains(&pts), "landed {pts}");
+        // The rewind window is converted AFTER the target lands; give it a moment.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while p.frame_at(3.4).is_none() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
         p.seek(3.4, true);
         let (back, _) = p.take_next().expect("nearby pre-target frame is cached");
         assert!((3.38..=3.44).contains(&back), "backward landed {back}");
         assert!(p.cached_bytes() <= frame * 12);
+        assert!(!p.failed());
+    }
+
+    /// A prefetch warms the decoder without showing anything: the exact seek
+    /// that follows lands on its frame, and a reader held after it plays on
+    /// once released.
+    #[test]
+    fn prefetch_then_seek_lands_exact_and_playback_resumes() {
+        let Some(clip) = test_clip("prefetch.mp4", 4) else {
+            return;
+        };
+        let frame = 320 * 180 * 4;
+        let p = Player::spawn(&clip, 320, 180, false, None, frame * 40).unwrap();
+        p.seek(0.5, true);
+        assert!(wait_buffered(&p, 1, Duration::from_secs(5)), "first seek did not land");
+        let (start, _) = p.take_next().unwrap();
+        p.prefetch(3.0);
+        thread::sleep(Duration::from_millis(200));
+        assert!(p.frame_at(3.0).is_none(), "a prefetch converts nothing");
+        assert!((p.position() - start).abs() < 1e-6, "a prefetch never moves the position");
+        p.seek(3.0, true);
+        assert!(wait_buffered(&p, 1, Duration::from_secs(5)), "seek after prefetch did not land");
+        let (pts, _) = p.take_next().unwrap();
+        assert!((pts - 3.0).abs() < 0.02, "landed {pts}");
+        // Held again by a second prefetch, released for playback: frames keep coming.
+        p.prefetch(1.0);
+        thread::sleep(Duration::from_millis(100));
+        p.end_prefetch();
+        let mut t = pts;
+        let mut got = 0;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while got < 10 && Instant::now() < deadline {
+            t += 1.0 / 30.0;
+            while p.take_upto(t).is_none() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(2));
+            }
+            got += 1;
+        }
+        assert_eq!(got, 10);
+        assert!(Instant::now() < deadline, "playback stalled after a prefetch");
         assert!(!p.failed());
     }
 

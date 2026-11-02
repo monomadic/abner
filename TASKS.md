@@ -30,6 +30,15 @@ Effort estimates come from the 2026-09-04 comparison against switchblade.
    Callback copy is the leading measured cost; pool allocation/lock and GOP insertion
    time are small. No decoder policy or budget change; investigation stays open.
 
+22. **Cheaper reference decoding in FilmCraft.** A cold seek still decodes and copies
+   every picture from the keyframe to the target (see HISTORY 2026-11-02 for figures).
+   Two upstream-shaped wins: don't copy/deinterleave VideoToolbox output for pictures
+   that are only references (the profile's biggest measured cost), and skip
+   non-reference samples before the target — `GopCache::frame_late` already skips
+   disposable samples before `late_before`; check whether `FrameRequest` can pass the
+   target as `late_before` from Abner (the rewind window would then need its own decode
+   after landing).
+
 21. **Process page: render a range, and export.** A frame render fills one source
    frame's outputs, so seeing retimed motion play means rendering frame by frame;
    a "render span" (the segment, or N frames from the playhead) bounded by

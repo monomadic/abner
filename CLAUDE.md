@@ -78,10 +78,12 @@ from one to the other, keeping its number.
   the position; the reader keeps decoding ahead while there is budget (nearby
   frames stay resident, and the next span gets warm), and `seek` serves a target whose
   span is resident on the CALLER's thread without touching the decoder. On a cold
-  jump within a long GOP, the reader decodes distant pre-target frames for codec
-  references without converting them to RGBA; a budget-sized rewind window before
-  the target is cached, and the first frame at/after the target is verified by the
-  decoder. The cache IS the queue (`take_upto`/`take_next` read it;
+  jump within a long GOP, the reader asks FilmCraft for the target itself (the frames before it are decoded
+  as codec references, never converted), and only once the target is cached converts
+  a budget-sized rewind window before it from FilmCraft's GOP cache (`backfill`), a
+  span that merges into the target's. `Player::prefetch` warms FilmCraft for a seek
+  that may follow (nothing converted or shown) and holds the reader still until a
+  command, the position moving, or `end_prefetch`. The cache IS the queue (`take_upto`/`take_next` read it;
   `buffered()` counts deliverable
   frames; `buffered() > 0` after `seek()` means it landed). `Cache::runs` tracks
   contiguous spans so "first cached frame ≥ t" is trusted only when nothing
@@ -154,6 +156,12 @@ from one to the other, keeping its number.
   EXACT with `adopt_seek = false` (the clock stays where the pointer put it); the
   player's frame cache is what makes them instant inside the resident span.
   Seek-bar targets are `quantize`d to the frame grid and dropped when equal to `t`.
+  **The timeline seeks one stream** (2026-11-02): in cut mode only the active clip is
+  drawn, so `dispatch_seek` marks the others `stale` (not seeked, not drained) and
+  `tick` re-seeks a stale clip to `t` once it is on screen again. A timeline press
+  that moves under `CUT_SCRUB_SLOP` (3 px) is still a click, not a second queued cold
+  seek. Resting on the timeline for `PREFETCH_DWELL` while paused prefetches the
+  hovered frame (`prefetch_hover`).
   **Keys**: `1`–`9` pick a clip directly (`select`), `V`/Shift-V cycle the view.
   ⌃⇧[ / ⌃⇧] (`Key::PrevMode`/`NextMode`, matched in lib.rs on both the bracket
   and its shifted brace) walk the header tabs in `ModeSelector::ORDER` without

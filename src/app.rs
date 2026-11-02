@@ -137,6 +137,11 @@ pub enum CropCursor {
 
 /// How long a seek may stay "in flight" before the app stops waiting on
 /// it (see `Video::seek_sent`).
+/// A timeline press that wobbles less than this (px) is still a click: it
+/// keeps the press's target instead of queueing a second cold seek behind it.
+const CUT_SCRUB_SLOP: f32 = 3.0;
+/// How long the pointer rests on the timeline before its frame is prefetched.
+const PREFETCH_DWELL: std::time::Duration = std::time::Duration::from_millis(60);
 const SEEK_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
 
 pub struct Video {
@@ -156,6 +161,10 @@ pub struct Video {
     /// scrub sends a seek per pointer event, each one abandoning the
     /// previous GOP decode, and nothing ever reaches the screen.
     pub seeking: bool,
+    /// Off screen while the timeline shows another clip: seeks skip it and
+    /// nothing drains it, so a timeline click decodes one stream, not every
+    /// loaded one. `tick` re-seeks it to the clock once it is shown again.
+    pub stale: bool,
     /// When the seek in flight was sent. A seek past a stream's last frame
     /// never delivers (the reader discards to EOF and parks), so in-flight
     /// expires after `SEEK_SETTLE` rather than wedging every later seek.
@@ -217,6 +226,14 @@ pub struct App {
     cut_tab: usize,
     /// Only discrete seeks/framesteps adopt a decoded timestamp; pointer seeks stay pinned.
     adopt_seek: bool,
+    /// Where a timeline scrub was pressed, while the pointer is still within
+    /// `CUT_SCRUB_SLOP` of it (`NEG_INFINITY` once it has left). None = the
+    /// next `cut_drag_to` is the press itself.
+    cut_scrub_press: Option<f32>,
+    /// The timeline hover target and since when it has stayed put.
+    cut_hover_at: Option<(f64, std::time::Instant)>,
+    /// The frame the shown clip's decoder was last warmed for (`prefetch_hover`).
+    cut_prefetch: Option<f64>,
     /// The seek that arrived while one was in flight: `(target, exact)`,
     /// newest wins, dispatched by `tick` once every player has landed.
     queued_seek: Option<(f64, bool)>,
@@ -699,6 +716,9 @@ impl App {
             cut_drag: None,
             cut_tab: 0,
             adopt_seek: false,
+            cut_scrub_press: None,
+            cut_hover_at: None,
+            cut_prefetch: None,
             queued_seek: None,
             info_scroll: 0.0,
             cut_frames: false,
@@ -1384,7 +1404,7 @@ impl App {
                 return;
             };
             copies.push((i, Video { selected: true, linked_copy: true, info, player,
-                shown_pts: 0.0, delivered: false, pending: false, seeking: false, seek_sent: std::time::Instant::now(), last_frame: None }));
+                shown_pts: 0.0, delivered: false, pending: false, seeking: false, stale: false, seek_sent: std::time::Instant::now(), last_frame: None }));
         }
         for v in &mut self.videos { v.selected = false; }
         let focus = destination.unwrap_or(indices[0] + 1);
@@ -1574,15 +1594,59 @@ impl App {
         }
     }
 
+    /// The timeline's hover is where the next click goes: once the pointer
+    /// rests there (`PREFETCH_DWELL`) with the playhead paused, the shown
+    /// clip's decoder walks to that frame ahead of the click, so a cold
+    /// seek finds its GOP already decoded. Playback or leaving the
+    /// timeline lets the decoder read ahead again.
+    fn prefetch_hover(&mut self) {
+        let idle = !self.playing && self.queued_seek.is_none() && !self.seek_in_flight();
+        let Some(h) = self.cut_hover_playhead().filter(|_| idle) else {
+            self.cut_hover_at = None;
+            if (self.playing || !self.cut_mode) && self.cut_prefetch.take().is_some() {
+                for v in &self.videos {
+                    v.player.end_prefetch();
+                }
+            }
+            return;
+        };
+        let now = std::time::Instant::now();
+        match self.cut_hover_at {
+            Some((at, since)) if at == h => {
+                let elsewhere = (h - self.t).abs() > 0.5 / self.fps.max(1.0);
+                if now - since >= PREFETCH_DWELL && self.cut_prefetch != Some(h) && elsewhere {
+                    if let Some(v) = self.videos.get(self.active) {
+                        v.player.prefetch(h);
+                    }
+                    self.cut_prefetch = Some(h);
+                }
+            }
+            _ => self.cut_hover_at = Some((h, now)),
+        }
+    }
+
     fn seek_in_flight(&self) -> bool {
-        self.videos.iter().any(|v| v.seeking && !v.player.failed() && v.seek_sent.elapsed() < SEEK_SETTLE)
+        self.videos.iter().any(|v| v.seeking && !v.stale && !v.player.failed() && v.seek_sent.elapsed() < SEEK_SETTLE)
+    }
+
+    /// Whether clip `i` is drawn at all: the timeline shows only its own.
+    fn on_screen(&self, i: usize) -> bool {
+        !self.cut_mode || i == self.active
     }
 
     fn dispatch_seek(&mut self, target: f64, exact: bool) {
         self.queued_seek = None;
         let paused = !self.playing;
         let now = std::time::Instant::now();
-        for v in &mut self.videos {
+        let shown: Vec<bool> = (0..self.videos.len()).map(|i| self.on_screen(i)).collect();
+        for (v, shown) in self.videos.iter_mut().zip(shown) {
+            if !shown {
+                v.stale = true;
+                v.seeking = false;
+                v.pending = false;
+                continue;
+            }
+            v.stale = false;
             v.player.seek(target, exact);
             v.seeking = true;
             v.seek_sent = now;
@@ -2068,6 +2132,7 @@ impl App {
         self.scrub_resume = self.playing;
         self.playing = false;
         self.cut_drag = Some(CutDrag::Scrub);
+        self.cut_scrub_press = None;
     }
 
     pub fn mouse_up(&mut self) {
@@ -2077,6 +2142,7 @@ impl App {
             if self.cut_band_rect().is_none() && !add {
                 // A plain click on the vacant lanes: the playhead goes there.
                 self.cut_drag = Some(CutDrag::Scrub);
+                self.cut_scrub_press = None;
                 self.cut_drag_to(x0);
             }
             self.cut_band_base.clear();
@@ -2380,7 +2446,21 @@ impl App {
         let capture = self.mask_mode;
         let superseded_seek = self.queued_seek.is_some();
         let mut adopt = None;
+        let shown: Vec<bool> = (0..self.videos.len()).map(|i| self.on_screen(i)).collect();
         for (i, v) in self.videos.iter_mut().enumerate() {
+            if !shown[i] {
+                v.stale = true;
+                continue;
+            }
+            if v.stale {
+                // Back on screen: catch up with the clock it sat out.
+                v.stale = false;
+                v.player.seek(t, true);
+                v.seeking = true;
+                v.seek_sent = std::time::Instant::now();
+                v.pending = !self.playing;
+                continue;
+            }
             let was_pending = v.pending;
             // A newer pointer target is waiting for this seek to settle.
             // Its intermediate frame must never reach the screen.
@@ -2433,8 +2513,10 @@ impl App {
         if let Some((target, exact)) = self.queued_seek && !self.seek_in_flight() {
             self.dispatch_seek(target, exact);
         }
+        self.prefetch_hover();
         if !self.started {
-            self.started = self.videos.iter().all(|v| v.delivered || v.player.failed());
+            self.started = self.videos.iter().enumerate()
+                .all(|(i, v)| !self.on_screen(i) || v.delivered || v.player.failed());
         }
         let step = dt / RAIL_SLIDE_S;
         let toward = |cur: f32, shown: bool| {
@@ -4953,6 +5035,11 @@ impl App {
         let end = (cut.duration.min(self.wrap) - 0.05).max(0.0);
         match self.cut_drag {
             Some(CutDrag::Scrub) => {
+                match self.cut_scrub_press {
+                    Some(x0) if (x - x0).abs() < CUT_SCRUB_SLOP => return,
+                    Some(_) => self.cut_scrub_press = Some(f32::NEG_INFINITY),
+                    None => self.cut_scrub_press = Some(x),
+                }
                 let target = scrub_target;
                 if (target - self.t).abs() > 1e-9 { self.seek_all(target, true); }
                 self.adopt_seek = false;
@@ -7558,7 +7645,7 @@ mod tests {
             crate::config::Config::default().frame_cache_bytes(),
         )
         .expect("spawn");
-        Video { selected: false, linked_copy: false, info, player, shown_pts: 0.0, delivered: false, pending: false, seeking: false, seek_sent: std::time::Instant::now(), last_frame: None }
+        Video { selected: false, linked_copy: false, info, player, shown_pts: 0.0, delivered: false, pending: false, seeking: false, stale: false, seek_sent: std::time::Instant::now(), last_frame: None }
     }
 
     /// A playing app: most tests drive the clock, so they opt out of the
@@ -8052,6 +8139,93 @@ mod tests {
         for v in &app.videos {
             assert!((v.shown_pts - want).abs() < 1.0 / 30.0, "every stream shows the requested frame: {} vs {want}", v.shown_pts);
         }
+    }
+
+    /// The timeline shows one clip, so a timeline seek decodes one stream;
+    /// the others catch up with the clock when they are shown again.
+    #[test]
+    fn timeline_seeks_only_the_shown_clip() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 2);
+        let vp = (1280.0, 720.0);
+        app.playing = false;
+        app.set_cut_mode(true);
+        assert!(app.cut_mode);
+        app.tick(0.016, vp, 1.0);
+        app.seek_all(2.0, true);
+        assert!(app.videos[0].seeking, "the shown clip seeks");
+        assert!(app.videos[1].stale && !app.videos[1].seeking, "the hidden clip does not");
+        let settle = |app: &mut App| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while (app.queued_seek.is_some() || app.seek_in_flight()
+                || app.videos.iter().enumerate().any(|(i, v)| app.on_screen(i) && v.stale))
+                && std::time::Instant::now() < deadline
+            {
+                app.tick(0.016, vp, 1.0);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        settle(&mut app);
+        assert!((app.videos[0].shown_pts - 2.0).abs() < 1.0 / 30.0);
+        app.set_cut_mode(false);
+        settle(&mut app);
+        app.tick(0.016, vp, 1.0);
+        for v in &app.videos {
+            assert!(!v.stale);
+            assert!((v.shown_pts - app.t).abs() < 1.0 / 30.0, "stream shows {:.3}, clock {:.3}", v.shown_pts, app.t);
+        }
+    }
+
+    /// A timeline click that wobbles a pixel is one seek, not a second
+    /// cold seek queued behind the first; a real drag still scrubs.
+    #[test]
+    fn timeline_click_jitter_sends_one_seek() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        let vp = (1280.0, 720.0);
+        app.playing = false;
+        app.set_cut_mode(true);
+        app.tick(0.016, vp, 1.0);
+        let lane = app.cut_lanes().video;
+        let x = lane.x + lane.w * 0.6;
+        app.begin_cut_scrub();
+        app.cut_drag_to(x);
+        let pressed = app.t;
+        assert!(app.videos[0].seeking, "the press seeks at once");
+        app.cut_drag_to(x + 2.0);
+        app.cut_drag_to(x - 1.5);
+        assert_eq!(app.t, pressed, "jitter keeps the press's target");
+        assert!(app.queued_seek.is_none(), "jitter queues nothing");
+        app.cut_drag_to(x + 40.0);
+        assert!(app.t > pressed, "a drag past the slop scrubs");
+        let dragged = app.t;
+        app.cut_drag_to(x + 41.0);
+        assert!(app.t > dragged, "and keeps scrubbing without a dead zone");
+        app.mouse_up();
+    }
+
+    /// Resting on the timeline prefetches the frame a click there would
+    /// seek to; playback lets the decoder go again.
+    #[test]
+    fn timeline_hover_prefetches_after_a_rest() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        let vp = (1280.0, 720.0);
+        app.playing = false;
+        app.show_ui = true;
+        app.set_cut_mode(true);
+        app.tick(0.016, vp, 1.0);
+        let lane = app.cut_lanes().video;
+        app.cursor_moved(lane.x + lane.w * 0.7, lane.y + lane.h / 2.0);
+        let want = app.cut_hover_playhead().expect("the lane previews a seek");
+        app.tick(0.016, vp, 1.0);
+        assert!(app.cut_prefetch.is_none(), "no prefetch before the pointer rests");
+        std::thread::sleep(PREFETCH_DWELL + std::time::Duration::from_millis(10));
+        app.tick(0.016, vp, 1.0);
+        assert_eq!(app.cut_prefetch, Some(want));
+        app.playing = true;
+        app.tick(0.016, vp, 1.0);
+        assert!(app.cut_prefetch.is_none(), "playback ends the prefetch");
     }
 
     #[test]

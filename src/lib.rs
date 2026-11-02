@@ -357,7 +357,7 @@ fn load_video(path: &Path, cache_bytes: usize) -> anyhow::Result<Video> {
         cache_bytes,
     )
     .ok_or_else(|| anyhow::anyhow!("failed to start decoder for {}", path.display()))?;
-    Ok(Video { selected: false, linked_copy: false, info, player, shown_pts: 0.0, delivered: false, pending: false, seeking: false, seek_sent: std::time::Instant::now(), last_frame: None })
+    Ok(Video { selected: false, linked_copy: false, info, player, shown_pts: 0.0, delivered: false, pending: false, seeking: false, stale: false, seek_sent: std::time::Instant::now(), last_frame: None })
 }
 
 /// The launch window's floor video: `Contents/Resources/background.mp4`

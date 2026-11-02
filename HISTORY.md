@@ -3,6 +3,36 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-11-02 — Faster cold seeks on the timeline
+
+A cold exact seek costs one decode per frame from the previous keyframe to the target,
+about 4 ms a frame at 4K on an M4 Pro: a 4K clip with a 10 s GOP, clicked 240 frames
+past its keyframe, took ~1040 ms (1.4–1.5 s with three clips loaded). The 285–470 ms
+figures in CLAUDE.md were 1080p with 3–4 s GOPs. Four changes, measured with
+`benchmark_three_4k_players` parameterized for size, GOP, target and budget (release,
+VideoToolbox, one player, default 1 GB cache):
+
+- **Target first, rewind window after.** The reader asks FilmCraft for the target
+  itself and converts the up-to-30-frame window before it only once the target is
+  cached (the pictures are still in FilmCraft's GOP cache). 4K, 96-frame GOP:
+  525 → 400 ms; 250-frame GOP: 1040 → 900 ms.
+- **The timeline seeks only its own clip.** Other clips go `stale` (no seeks, no
+  draining) and are re-seeked to the clock in `tick` once shown again. Saves the
+  multi-stream penalty (~400–500 ms at 4K with three clips).
+- **A click that wobbles under 3 px is one seek** (`CUT_SCRUB_SLOP`). Before, any
+  move during the press queued a second cold seek behind the first and hid the
+  first one's frame, doubling the wait.
+- **Hover prefetch.** Resting on the timeline for 60 ms while paused calls
+  `Player::prefetch`: FilmCraft decodes to the hovered frame (nothing converted or
+  shown) and the reader holds still so decode-ahead can't evict those pictures. A
+  click after the warm-up lands in ~15 ms instead of ~910; an earlier click picks
+  up where the prefetch got to. Playback or leaving the timeline releases the hold
+  (`end_prefetch`), as does any seek.
+
+Tests: `timeline_seeks_only_the_shown_clip`, `timeline_click_jitter_sends_one_seek`,
+`timeline_hover_prefetches_after_a_rest`,
+`prefetch_then_seek_lands_exact_and_playback_resumes`.
+
 ## 2026-11-01 — Scrollable chapter list; chapters added out of order
 
 The cut inspector's chapter list only ever showed the page around the playhead, so
