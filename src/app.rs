@@ -1645,6 +1645,23 @@ impl App {
         }
     }
 
+    /// Tell each player where playback seeks away on its own — the loop wrap,
+    /// and in the timeline the removed ranges `tick` jumps over — so its reader
+    /// stops decoding at the jump and warms the landing (`Player::set_jumps`).
+    /// The numbers are `tick`'s own: a wrap at `wrap - 0.05`, a skip from a
+    /// cut's start (less `Cut::skip`'s epsilon) to its end, or to 0 past `end`.
+    fn sync_jumps(&self) {
+        let end = if self.wrap.is_finite() { self.wrap - 0.05 } else { f64::MAX };
+        let wrap: Vec<(f64, f64)> = if self.wrap.is_finite() { vec![(end, 0.0)] } else { Vec::new() };
+        for (i, v) in self.videos.iter().enumerate() {
+            let mut jumps = wrap.clone();
+            if self.cut_mode && i == self.active && let Some(cut) = &self.cut {
+                jumps.extend(cut.cuts().iter().map(|&(a, b)| (a - 1e-3, if b >= end { 0.0 } else { b })));
+            }
+            v.player.set_jumps(jumps);
+        }
+    }
+
     fn seek_in_flight(&self) -> bool {
         self.videos.iter().any(|v| v.seeking && !v.stale && !v.player.failed() && v.seek_sent.elapsed() < SEEK_SETTLE)
     }
@@ -2577,6 +2594,7 @@ impl App {
             self.dispatch_seek(target, exact);
         }
         self.prefetch_hover();
+        self.sync_jumps();
         if !self.started {
             self.started = self.videos.iter().enumerate()
                 .all(|(i, v)| !self.on_screen(i) || v.delivered || v.player.failed());
@@ -4890,9 +4908,13 @@ impl App {
             } else { continue };
             self.cut_thumb.uploads.push(ThumbUpload { slot, buf: rgba });
         }
+        // Attention owns the decoder (switchblade's preview-lane rule): a thumbnail decode
+        // started while the shown clip is landing a seek competes with it for VideoToolbox
+        // and memory bandwidth, so new jobs wait until the seek has landed.
+        let seeking = self.queued_seek.is_some() || self.seek_in_flight();
         for &(key, at) in &wants {
             let cb = &self.cut_thumb;
-            if cb.pending.len() >= 2 { break; }
+            if seeking || cb.pending.len() >= 2 { break; }
             let room = cb.cells.len() + cb.pending.len() < recent::ATLAS || cb.cells.iter().any(|c| !wanted(c.key));
             if cb.slot_of(key).is_some() || cb.pending.contains(&key) || cb.failed.contains(&key) || !room { continue; }
             self.cut_thumb.pending.push(key);

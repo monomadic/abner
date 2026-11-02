@@ -12,6 +12,27 @@ tall thumbnails also fit the available list height. Text stays at its normal siz
 Scrolling, selection, checkboxes and Option-drag use the same card geometry.
 The chosen width lasts for the session and survives collapsing the sidebar.
 
+## 2026-11-02 — Playback jumps are warmed; background decodes yield to seeks
+
+Two of switchblade's seek habits, adapted:
+
+- **Warm where playback jumps.** Switchblade decodes frame 0 a few frames before a
+  loop wrap. Abner's playback also jumps over every removed range in the timeline,
+  and a frame-snapped resume point is mid-GOP: a cold seek in the middle of playback.
+  `Player::set_jumps` (fed by `App::sync_jumps`) tells the reader where those seeks go:
+  decode-ahead stops at the jump instead of converting frames inside the cut, and the
+  reader warms the landing in FilmCraft's cache while playback uses up the frames
+  before it. 4K, 250-frame GOP, a cut from 3.0 to 10.0 s played into in real time:
+  the seek past it lands in ~6 ms instead of ~780.
+- **`extend` only within a rewind window.** An exact seek forward in the same GOP used
+  to decode-and-convert every frame on the way (the libav reader's rule); with FilmCraft,
+  asking for the target continues the running decoder without converting anything. Same
+  scenario without jumps known: ~780 → ~500 ms.
+- **Thumbnails yield.** Timeline thumbnail jobs (two at a time, each its own source and
+  VideoToolbox session) no longer start while a seek is landing.
+
+Test: `decode_ahead_stops_at_jumps_and_lands_past_them`.
+
 ## 2026-11-02 — Faster cold seeks on the timeline
 
 A cold exact seek costs one decode per frame from the previous keyframe to the target,

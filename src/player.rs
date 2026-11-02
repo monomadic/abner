@@ -285,6 +285,11 @@ struct Shared {
     prefetch: Mutex<Option<f64>>,
     /// Ends a prefetch's hold (`Player::end_prefetch`).
     unhold: AtomicBool,
+    /// Where playback leaves the timeline and where it resumes (seconds): the app's own
+    /// seeks at a loop wrap or over a cut range (`Player::set_jumps`). Bumped `jumps_gen`
+    /// tells the reader they changed.
+    jumps: Mutex<Vec<(f64, f64)>>,
+    jumps_gen: AtomicU64,
     /// Raised with every command so a decode-forward in progress inside FilmCraft gives up.
     cancel: Arc<AtomicBool>,
     /// f64 bits: pts of the frame most recently taken (on screen), or the
@@ -374,6 +379,8 @@ impl Player {
             cmd: Mutex::new(None),
             prefetch: Mutex::new(None),
             unhold: AtomicBool::new(false),
+            jumps: Mutex::new(Vec::new()),
+            jumps_gen: AtomicU64::new(0),
             cancel: Arc::new(AtomicBool::new(false)),
             position: AtomicU64::new(0f64.to_bits()),
             failed: AtomicBool::new(false),
@@ -476,6 +483,22 @@ impl Player {
         self.shared.cancel.store(true, Ordering::Relaxed);
         drop(c);
         self.shared.space.notify_all();
+    }
+
+    /// Tell the reader where playback will seek away on its own: each `(from, to)` is a seek
+    /// the app makes when the clock reaches `from` (a cut range's end, or the loop's start
+    /// when `to < from`). Decoding ahead stops at `from` instead of converting frames that are
+    /// never shown, and the reader warms `to` in FilmCraft's cache while playback uses up the
+    /// frames before it, so the seek lands without a GOP walk. An exact seek to a `to` also
+    /// skips the rewind window: the frames before it are the ones being jumped over.
+    pub fn set_jumps(&self, jumps: Vec<(f64, f64)>) {
+        let mut j = self.shared.jumps.lock().unwrap();
+        if *j != jumps {
+            *j = jumps;
+            self.shared.jumps_gen.fetch_add(1, Ordering::Relaxed);
+            drop(j);
+            self.shared.space.notify_all();
+        }
     }
 
     /// Let a reader held by `prefetch` decode ahead again (playback is about to want frames the
@@ -643,34 +666,44 @@ fn reader(shared: &Arc<Shared>, cfg: &ReaderCfg) -> Result<(), String> {
     // After a prefetch: the position it was made at. The reader parks until a command arrives or
     // the position moves, so decoding ahead doesn't evict the pictures it warmed.
     let mut hold: Option<u64> = None;
+    // Parked at a playback jump (`set_jumps`): the jump generation it was decided under, so
+    // new jumps re-evaluate it.
+    let mut at_jump: Option<u64> = None;
     loop {
         if shared.closed.load(Ordering::Relaxed) {
             return Ok(());
         }
         if let Some((target, exact, forward)) = shared.cmd.lock().unwrap().take() {
             hold = None;
+            at_jump = None;
             shared.eof.store(false, Ordering::Release);
             let t_idx = to_index(target);
             if exact {
                 active_target = Some(key_of(t_idx));
-                // Already decoding towards it inside the same GOP: carry on (the old reader's
-                // `extend`), nothing before the target is lost.
-                let extend = !at_end
-                    && last_index
-                        .is_some_and(|l| t_idx > l && keyframe_before(t_idx) == keyframe_before(l));
-                if extend {
-                    seen_before_target = true;
-                    continue;
-                }
                 // A rewind window of frames before the target, bounded by the budget (as
                 // `rewind_us` was): the keyframe decode is paid once, the frames nearest the
                 // target are what a scrub back wants.
                 let budget = shared.cache.lock().unwrap().budget;
                 let rewind = (budget / frame_bytes.max(1)).saturating_sub(2).min(30) as u64;
+                // Playback resuming past a jump never shows what lies before it.
+                let resuming = shared.jumps.lock().unwrap().iter().any(|&(_, to)| to_index(to) == t_idx);
+                // Already decoding towards it, within a window's reach in the same GOP: carry
+                // on (the old reader's `extend`), nothing before the target is lost. Farther
+                // than that, asking for the target is cheaper: FilmCraft continues its running
+                // decoder without converting the frames in between.
+                let extend = !at_end
+                    && !resuming
+                    && last_index.is_some_and(|l| {
+                        t_idx > l && t_idx - l <= rewind.max(1) && keyframe_before(t_idx) == keyframe_before(l)
+                    });
+                if extend {
+                    seen_before_target = true;
+                    continue;
+                }
                 let start = keyframe_before(t_idx).max(t_idx.saturating_sub(rewind));
                 // Landing on the target's own index verifies it as the exact frame.
                 seen_before_target = false;
-                backfill = (start < t_idx).then_some((t_idx, start));
+                backfill = (start < t_idx && !resuming).then_some((t_idx, start));
                 index = t_idx;
             } else {
                 backfill = None;
@@ -718,6 +751,31 @@ fn reader(shared: &Arc<Shared>, cfg: &ReaderCfg) -> Result<(), String> {
             last_index = None;
             at_end = false;
             shared.cache.lock().unwrap().broken = true;
+            continue;
+        }
+        let generation = shared.jumps_gen.load(Ordering::Relaxed);
+        if at_jump.is_some_and(|g| g == generation) {
+            let c = shared.cache.lock().unwrap();
+            let _c = shared.space.wait_timeout(c, Duration::from_millis(10)).unwrap().0;
+            continue;
+        }
+        at_jump = None;
+        // Decoding ahead is about to cross a jump the app will seek over: stop here and warm
+        // where playback resumes. A seek that LANDED inside a jump's span decodes on normally.
+        // Not while heading for an exact target: that seek asked for these frames.
+        let heading = active_target.is_some_and(|t| key_of(index) <= t + SAME_FRAME_US);
+        let crossing = last_index.filter(|_| !heading).and_then(|l| {
+            let (before, here) = (key_of(l), key_of(index));
+            shared.jumps.lock().unwrap().iter().copied().find(|&(from, to)| {
+                // `to < from` is the loop: everything from `from` on is jumped over.
+                let wrap = to < from;
+                before < us(from) && here >= us(from) && (wrap || here < us(to))
+            })
+        });
+        if let Some((_, to)) = crossing {
+            shared.cancel.store(false, Ordering::Relaxed);
+            let _ = fc::frame_at(&src, to_index(to), frame_s, &shared.cancel);
+            at_jump = Some(generation);
             continue;
         }
         if at_end {
@@ -1279,6 +1337,48 @@ mod tests {
         }
         assert_eq!(got, 10);
         assert!(Instant::now() < deadline, "playback stalled after a prefetch");
+        assert!(!p.failed());
+    }
+
+    /// Decoding ahead stops where playback will jump: frames inside a cut are never
+    /// converted, the landing past it is exact, and the loop's wrap behaves the same.
+    #[test]
+    fn decode_ahead_stops_at_jumps_and_lands_past_them() {
+        let Some(clip) = test_clip("jumps.mp4", 4) else {
+            return;
+        };
+        let frame = 320 * 180 * 4;
+        let p = Player::spawn(&clip, 320, 180, false, None, frame * 200).unwrap();
+        p.set_jumps(vec![(1.0, 2.5), (3.5, 0.0)]);
+        p.seek(0.5, true);
+        assert!(wait_buffered(&p, 1, Duration::from_secs(5)), "first seek did not land");
+        p.take_next().unwrap();
+        // Room for 200 frames: without the jump the reader would run through the cut.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while p.frame_at(29.0 / 30.0).is_none() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(p.frame_at(29.0 / 30.0).is_some(), "decoded up to the cut");
+        thread::sleep(Duration::from_millis(200));
+        assert!(p.frame_at(1.5).is_none() && p.frame_at(30.0 / 30.0).is_none(), "nothing inside the cut");
+        p.seek(2.5, true);
+        assert!(wait_buffered(&p, 1, Duration::from_secs(5)), "landing past the cut");
+        let (pts, _) = p.take_next().unwrap();
+        assert!((pts - 2.5).abs() < 0.02, "landed {pts}");
+        // On to the wrap: nothing at or past 3.5 is decoded ahead; the seek to 0 lands.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while p.frame_at(104.0 / 30.0).is_none() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        thread::sleep(Duration::from_millis(200));
+        assert!(p.frame_at(105.0 / 30.0).is_none(), "nothing past the wrap");
+        p.seek(0.0, true);
+        assert!(wait_buffered(&p, 1, Duration::from_secs(5)), "wrap landing");
+        assert!(p.take_next().unwrap().0 < 0.02);
+        // A seek INTO a jumped span still decodes there (a scrub inside a cut).
+        p.seek(1.5, true);
+        assert!(wait_buffered(&p, 1, Duration::from_secs(5)), "seek inside the cut");
+        assert!((p.take_next().unwrap().0 - 1.5).abs() < 0.02);
         assert!(!p.failed());
     }
 

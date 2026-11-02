@@ -83,7 +83,13 @@ from one to the other, keeping its number.
   a budget-sized rewind window before it from FilmCraft's GOP cache (`backfill`), a
   span that merges into the target's. `Player::prefetch` warms FilmCraft for a seek
   that may follow (nothing converted or shown) and holds the reader still until a
-  command, the position moving, or `end_prefetch`. The cache IS the queue (`take_upto`/`take_next` read it;
+  command, the position moving, or `end_prefetch`. `Player::set_jumps` names the seeks
+  playback makes on its own (the loop wrap, the timeline's removed ranges): decode-ahead
+  stops at a jump instead of converting frames nobody sees, the reader warms the landing
+  in FilmCraft's cache while playback uses up what is cached, and a seek to a landing skips
+  the rewind window. An exact seek forward in the same GOP only `extend`s (decodes and
+  converts the frames on the way) within a rewind window's reach; farther, it asks for the
+  target, which FilmCraft serves by continuing its running decoder. The cache IS the queue (`take_upto`/`take_next` read it;
   `buffered()` counts deliverable
   frames; `buffered() > 0` after `seek()` means it landed). `Cache::runs` tracks
   contiguous spans so "first cached frame ≥ t" is trusted only when nothing
@@ -164,7 +170,9 @@ from one to the other, keeping its number.
   `tick` re-seeks a stale clip to `t` once it is on screen again. A timeline press
   that moves under `CUT_SCRUB_SLOP` (3 px) is still a click, not a second queued cold
   seek. Resting on the timeline for `PREFETCH_DWELL` while paused prefetches the
-  hovered frame (`prefetch_hover`).
+  hovered frame (`prefetch_hover`). `sync_jumps` hands every player the loop wrap and
+  the timeline's cut ranges each tick, and timeline thumbnail jobs don't start while a
+  seek is landing (switchblade's "attention owns the decoder").
   **Keys**: `1`–`9` pick a clip directly (`select`), `V`/Shift-V cycle the view.
   ⌃⇧[ / ⌃⇧] (`Key::PrevMode`/`NextMode`, matched in lib.rs on both the bracket
   and its shifted brace) walk the header tabs in `ModeSelector::ORDER` without
