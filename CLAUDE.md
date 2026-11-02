@@ -213,7 +213,10 @@ from one to the other, keeping its number.
   `SOURCE_COMPACT_W` (180) the label, heading title, inspector and Duplicate go, the toggle
   moves to the panel's left and the other clips get a big centred keycap; under
   `SOURCE_KEYCAP_W` (140) the focused preview washes out under a big slot number.
-  `--sources-width <px>` sets the width for captures. The header's **sidebar toggle** (`draw_sidebar_toggle`,
+  `--sources-width <px>` sets the width for captures. Dragged past halfway between
+  `RAIL_MIN_W` and the mini strip, the rail folds into the mini strip (`show_sources`
+  off; back out in the same drag reopens it; released shut, the drag's starting width is
+  restored for the next open), and a click on the mini strip's FOCUSED keycap reopens it. The header's **sidebar toggle** (`draw_sidebar_toggle`,
   Figma 278:573, `Action::ToggleSources`, `--no-sources` for captures) hides the rail
   in EVERY mode, the timeline included (there the rail, canvas and cut inspector share
   the top and the transport + lanes run full width, as 12:2 draws it; a click on a card

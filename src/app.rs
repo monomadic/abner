@@ -188,7 +188,9 @@ pub struct App {
     active: usize,
     source_scroll: usize,
     source_width: Option<f32>,
-    source_resize: Option<f32>,
+    /// An edge drag: the pointer's offset from the panel's edge, and the
+    /// width it started at (restored if the drag ends collapsed).
+    source_resize: Option<(f32, f32)>,
     source_copy_drag: Option<(usize, f32, f32, bool)>,
     source_status: String,
     masks: Vec<Option<Mask>>,
@@ -2075,8 +2077,13 @@ impl App {
     }
 
     pub fn cursor_moved(&mut self, x: f32, y: f32) {
-        if let Some(offset) = self.source_resize {
-            self.source_width = Some((x + offset).clamp(RAIL_MIN_W, (self.vp.0 * 0.45).clamp(180.0, 480.0)));
+        if let Some((offset, _)) = self.source_resize {
+            // Past the narrowest panel, halfway to the mini strip, the rail
+            // collapses into it; dragging back out in the same gesture
+            // reopens it.
+            let want = x + offset;
+            self.show_sources = want >= (RAIL_MIN_W + RAIL_MINI_W) / 2.0;
+            self.source_width = Some(want.clamp(RAIL_MIN_W, (self.vp.0 * 0.45).clamp(180.0, 480.0)));
             self.cursor = (x, y);
             self.cursor_inside = true;
             return;
@@ -2171,7 +2178,8 @@ impl App {
 
     pub fn mouse_down(&mut self, x: f32, y: f32) {
         if self.source_resize_hit(x, y) {
-            self.source_resize = Some(self.workspace().panel - x);
+            let panel = self.workspace().panel;
+            self.source_resize = Some((panel - x, panel));
             return;
         }
         if self.export_page.open && self.ready() {
@@ -2215,7 +2223,10 @@ impl App {
                 let first = self.source_first();
                 for idx in first..(first + self.source_capacity()).min(self.videos.len()) {
                     if contains(self.source_row(idx), x, y) {
-                        if self.batch_ui() && contains(self.source_checkbox(idx), x, y) {
+                        if self.workspace().mini && idx == self.active {
+                            // The mini strip's focused keycap reopens the rail.
+                            self.show_sources = true;
+                        } else if self.batch_ui() && contains(self.source_checkbox(idx), x, y) {
                             self.videos[idx].selected ^= true;
                         } else { self.select(idx); }
                         break;
@@ -2275,7 +2286,10 @@ impl App {
     }
 
     pub fn mouse_up(&mut self) {
-        self.source_resize = None;
+        // Dragged shut: the toggle reopens the rail at the width it had.
+        if let Some((_, from)) = self.source_resize.take() {
+            if !self.show_sources { self.source_width = Some(from); }
+        }
         if self.processors.release(){return;}
         self.source_copy_drag = None;
         if let Some(CutDrag::Band { x0, add, .. }) = self.cut_drag {
@@ -7068,9 +7082,38 @@ mod tests {
             assert!(thumb.h + 69.0 <= app.workspace().list.h + 0.001);
         }
         app.mouse_down(200.0, HEADER_H + 20.0);
-        app.cursor_moved(-100.0, HEADER_H + 20.0);
+        app.cursor_moved(90.0, HEADER_H + 20.0);
         app.mouse_up();
         assert_eq!(app.workspace().rail, RAIL_MIN_W);
+    }
+
+    #[test]
+    fn dragging_past_the_narrowest_rail_collapses_it_and_the_focused_keycap_reopens_it() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 3);
+        let vp = (1280.0, 1200.0);
+        app.tick(0.0, vp, 2.0);
+        app.mouse_down(280.0, HEADER_H + 20.0);
+        app.cursor_moved(40.0, HEADER_H + 20.0);
+        assert!(!app.show_sources, "past the snap point the rail folds");
+        app.cursor_moved(150.0, HEADER_H + 20.0);
+        assert!(app.show_sources, "dragging back out reopens it");
+        app.cursor_moved(-50.0, HEADER_H + 20.0);
+        app.mouse_up();
+        app.tick(RAIL_SLIDE_S * 2.0, vp, 2.0);
+        assert!(app.workspace().mini);
+        // A different keycap just selects; the focused one reopens the rail
+        // at the width the drag started from.
+        let other = app.mini_row(1);
+        app.mouse_down(other.x + 4.0, other.y + 4.0);
+        app.mouse_up();
+        assert_eq!((app.active, app.show_sources), (1, false));
+        let focused = app.mini_row(1);
+        app.mouse_down(focused.x + 4.0, focused.y + 4.0);
+        app.mouse_up();
+        assert!(app.show_sources);
+        app.tick(RAIL_SLIDE_S * 2.0, vp, 2.0);
+        assert_eq!(app.workspace().rail, 280.0);
     }
 
     #[test]
