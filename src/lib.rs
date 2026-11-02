@@ -49,7 +49,7 @@ use text::TextCtx;
 const USAGE: &str = "\
 abner — video comparison and editing workspace
 
-usage: abner [--config <file.toml>] [--no-video-splash] [--duplicate] [--no-sources] [--no-inspector] [--no-detail] [--mask] [--crop [x,y,w,h]] [--cut [in,out]] [--view <overlay|sbs|delta|split|checker|blend>] [<video-a> [<video-b> [more...]]]
+usage: abner [--config <file.toml>] [--no-video-splash] [--duplicate] [--no-sources] [--sources-width <px>] [--no-inspector] [--no-detail] [--mask] [--crop [x,y,w,h]] [--cut [in,out]] [--view <overlay|sbs|delta|split|checker|blend>] [<video-a> [<video-b> [more...]]]
 
 Run with no arguments (or launched from the .app bundle) to open the
 launch window, then drag clips onto it: one drop fills slot 1 and plays
@@ -139,6 +139,7 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
     let mut processor_settings = serde_json::json!({});
     // The Sources sidebar hidden, as the header toggle leaves it: for captures.
     let mut no_sources = false;
+    let mut sources_width: Option<f32> = None;
     let mut no_inspector = false;
     let mut no_detail = false;
     let mut cut: Option<Vec<f64>> = None;
@@ -192,6 +193,8 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
             timeline_frames = true;
         } else if a == "--duplicate" {
             duplicate = true;
+        } else if a == "--sources-width" {
+            sources_width = Some(it.next().ok_or_else(|| anyhow::anyhow!("--sources-width needs a width"))?.parse()?);
         } else if a == "--no-sources" {
             no_sources = true;
         } else if a == "--no-inspector" {
@@ -311,6 +314,7 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
     // their own tool, and two or more files stay in Sources.
     runner.app.set_cut_default(true);
     if no_sources { runner.app.set_sources_visible(false); }
+    if let Some(w) = sources_width { runner.app.set_sources_width(w); }
     if no_inspector { runner.app.set_inspector_visible(false); }
     if no_detail { runner.app.set_detail_visible(false); }
     if mask_mode { runner.app.key(Key::Char('m')); }

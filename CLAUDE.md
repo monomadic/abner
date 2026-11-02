@@ -208,7 +208,12 @@ from one to the other, keeping its number.
   orange ring (`SOURCE_RING`) on the focused clip and a navy surface on the rest, then
   the 216px focused inspector. Under `SOURCE_OVERLAY_W` (260px panel) a card drops its text
   block and lays name + `codec · height / fps` on a dark strip over the preview's foot
-  (`source_overlay`, `SOURCE_LABEL_H`); the checkbox moves to the top-right corner. The header's **sidebar toggle** (`draw_sidebar_toggle`,
+  (`source_overlay`, `SOURCE_LABEL_H`); the checkbox moves to the top-right corner. The
+  edge drags down to `RAIL_MIN_W` (110) through two more stages (`SourceStage`): under
+  `SOURCE_COMPACT_W` (180) the label, heading title, inspector and Duplicate go, the toggle
+  moves to the panel's left and the other clips get a big centred keycap; under
+  `SOURCE_KEYCAP_W` (140) the focused preview washes out under a big slot number.
+  `--sources-width <px>` sets the width for captures. The header's **sidebar toggle** (`draw_sidebar_toggle`,
   Figma 278:573, `Action::ToggleSources`, `--no-sources` for captures) hides the rail
   in EVERY mode, the timeline included (there the rail, canvas and cut inspector share
   the top and the transport + lanes run full width, as 12:2 draws it; a click on a card

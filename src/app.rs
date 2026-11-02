@@ -2076,7 +2076,7 @@ impl App {
 
     pub fn cursor_moved(&mut self, x: f32, y: f32) {
         if let Some(offset) = self.source_resize {
-            self.source_width = Some((x + offset).clamp(180.0, (self.vp.0 * 0.45).clamp(180.0, 480.0)));
+            self.source_width = Some((x + offset).clamp(RAIL_MIN_W, (self.vp.0 * 0.45).clamp(180.0, 480.0)));
             self.cursor = (x, y);
             self.cursor_inside = true;
             return;
@@ -2968,6 +2968,17 @@ impl App {
         self.workspace().panel < SOURCE_OVERLAY_W
     }
 
+    /// How far the cards have collapsed: `Label` under the preview, `Overlay`
+    /// on it, `Thumb` the preview and keycap alone, `Keycap` the active
+    /// preview washed out under its slot number.
+    fn source_stage(&self) -> SourceStage {
+        let panel = self.workspace().panel;
+        if panel >= SOURCE_OVERLAY_W { SourceStage::Label }
+        else if panel >= SOURCE_COMPACT_W { SourceStage::Overlay }
+        else if panel >= SOURCE_KEYCAP_W { SourceStage::Thumb }
+        else { SourceStage::Keycap }
+    }
+
     /// What a card adds to its preview's height: the text block under it,
     /// or only the padding when the label sits on the picture.
     fn source_chrome(&self) -> f32 {
@@ -3086,11 +3097,14 @@ impl App {
             return out;
         }
         if l.panel > 0.0 && !self.mask_mode {
-            let w = (l.panel - 32.0) / 2.0;
-            for (x, label, action) in [
+            // A compact panel keeps one full-width Add button.
+            let compact = l.panel < SOURCE_COMPACT_W;
+            let w = if compact { l.panel - 24.0 } else { (l.panel - 32.0) / 2.0 };
+            let row: &[(f32, &str, Action)] = if compact { &[(l.list.x + 12.0, "+ Add", Action::OpenFiles)] } else { &[
                 (l.list.x + 12.0, "Duplicate", Action::Duplicate),
                 (l.list.x + 20.0 + w, "+ Add files", Action::OpenFiles),
-            ] {
+            ] };
+            for &(x, label, action) in row {
                 out.push(Control::new(
                     RectPx {
                         x,
@@ -3332,6 +3346,12 @@ impl App {
         self.rail_slide = if shown { 1.0 } else { 0.0 };
     }
 
+    /// `--sources-width`: the rail's panel as a drag of its edge leaves it
+    /// (`Workspace::new` clamps it).
+    pub fn set_sources_width(&mut self, w: f32) {
+        self.source_width = Some(w);
+    }
+
     /// `--no-inspector`: the timeline's inspector hidden, as its toggle leaves it.
     pub fn set_inspector_visible(&mut self, shown: bool) {
         self.show_inspector = shown;
@@ -3373,9 +3393,12 @@ impl App {
 
     /// The sidebar toggle rides the right end of the rail's heading strip,
     /// so it slides with the panel and lands at the top of the mini strip.
+    /// On a compact panel the title goes and the toggle takes its place at
+    /// the panel's left (never left of where the mini strip has it).
     fn sidebar_toggle(&self) -> RectPx {
+        let l = self.workspace();
         RectPx {
-            x: self.workspace().rail - 38.0,
+            x: if l.panel > 0.0 && l.panel < SOURCE_COMPACT_W { (l.list.x + 14.0).max(6.0) } else { l.rail - 38.0 },
             y: HEADER_H + (RAIL_HEAD_H - 28.0) / 2.0,
             w: 32.0,
             h: 28.0,
@@ -3567,7 +3590,7 @@ impl App {
         // Heading strip: "Sources N" anchored on the panel (it slides out
         // with the cards) and the toggle on the rail's right end.
         items.push(Item::Clip(Some(RectPx { x: 0.0, y: HEADER_H, w: l.rail, h: RAIL_HEAD_H })));
-        if l.panel > 0.0 {
+        if l.panel >= SOURCE_COMPACT_W {
             let (hx, hy) = (l.list.x + 14.0, HEADER_H + RAIL_HEAD_H / 2.0);
             items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(l.panel - 110.0),
                 ..TextItem::new(hx, hy, 13.0, ink, "Sources") }));
@@ -3622,7 +3645,9 @@ impl App {
             // the deliberate dark rim between ring and picture — with only
             // rounded corners. The full UV rectangle preserves every frame.
             let thumb = self.source_thumb(i);
-            let overlay = self.source_overlay();
+            let stage = self.source_stage();
+            let overlay = stage == SourceStage::Overlay;
+            let compact = stage >= SourceStage::Thumb;
             items.push(Item::Clip(Some(intersect(thumb, visible))));
             let quad = thumb;
             items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(quad, WORKSPACE_PANEL) }));
@@ -3638,13 +3663,29 @@ impl App {
                 items.push(Item::Rect(RectItem { radius: 6.0,
                     ..RectItem::new(RectPx { y: strip.y - 6.0, h: strip.h + 6.0, ..strip }, [0.0, 0.0, 0.0, 0.8]) }));
             }
+            // At the narrowest the focused preview is washed out under its
+            // slot number, which is all the card has room to say.
+            if active && stage == SourceStage::Keycap {
+                items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(quad, [1.0, 1.0, 1.0, 0.55]) }));
+                items.push(Item::Text(TextItem { header: true, align: Align::Center, valign: VAlign::Middle, max_width: Some(thumb.w),
+                    ..TextItem::new(thumb.x + thumb.w / 2.0, thumb.y + thumb.h / 2.0, 30.0, hex_color(0x000000), (i + 1).to_string()) }));
+            }
             items.push(Item::Clip(Some(visible)));
-            let badge = RectPx { x: thumb.x + 7.0, y: thumb.y + 7.0, w: 24.0, h: 24.0 };
-            items.push(Item::Rect(RectItem { radius: 12.0, ..RectItem::new(badge, SOURCE_KEYCAP) }));
-            items.push(Item::Text(TextItem { header: true, align: Align::Center, valign: VAlign::Middle, max_width: Some(22.0),
-                ..TextItem::new(badge.x + 12.0, badge.y + 12.0, 15.0, hex_color(0x000000), (i + 1).to_string()) }));
+            if compact && !active {
+                // Collapsed, the other clips carry a big centred keycap.
+                let cap = RectPx { x: thumb.x + (thumb.w - 40.0) / 2.0, y: thumb.y + (thumb.h - 30.0) / 2.0, w: 40.0, h: 30.0 };
+                items.push(Item::Shadow { r: cap, inner: false, blur: 8.0, alpha: 0.35 });
+                items.push(Item::Rect(RectItem { radius: 7.0, ..RectItem::new(cap, hex_color(0xffffff)) }));
+                items.push(Item::Text(TextItem { header: true, align: Align::Center, valign: VAlign::Middle, max_width: Some(cap.w - 4.0),
+                    ..TextItem::new(cap.x + cap.w / 2.0, cap.y + cap.h / 2.0, 16.0, hex_color(0xb4b4b4), (i + 1).to_string()) }));
+            } else if !(active && stage == SourceStage::Keycap) {
+                let badge = RectPx { x: thumb.x + 7.0, y: thumb.y + 7.0, w: 24.0, h: 24.0 };
+                items.push(Item::Rect(RectItem { radius: 12.0, ..RectItem::new(badge, SOURCE_KEYCAP) }));
+                items.push(Item::Text(TextItem { header: true, align: Align::Center, valign: VAlign::Middle, max_width: Some(22.0),
+                    ..TextItem::new(badge.x + 12.0, badge.y + 12.0, 15.0, hex_color(0x000000), (i + 1).to_string()) }));
+            }
             let shared = self.videos.iter().filter(|other| other.info.path == v.info.path).count();
-            if shared > 1 || v.linked_copy {
+            if !compact && (shared > 1 || v.linked_copy) {
                 let foot = if overlay { SOURCE_LABEL_H } else { 0.0 };
                 let chip = RectPx { x: thumb.x + 7.0, y: thumb.y + (thumb.h - foot - 30.0).max(7.0), w: (thumb.w - 48.0).min(142.0), h: 23.0 };
                 items.push(Item::Rect(RectItem { radius: 5.0, ..RectItem::new(chip, hex_color(0x080d14)) }));
@@ -3662,6 +3703,10 @@ impl App {
                     }
                 }
             }
+            if v.player.failed() {
+                ui_label(items, thumb.x + 8.0, thumb.y + 52.0, 11.0, ERR, "DECODE FAILED", Align::Left, thumb.w - 16.0);
+            }
+            if compact { continue; }
             // Text block: 7px side padding inside the ring, 6px below the
             // preview; the name and the metadata are 18px lines.
             // Overlaid, the same two lines sit inside the strip at 9px in.
@@ -3686,9 +3731,6 @@ impl App {
             } else {
                 items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(tw),
                     ..TextItem::new(tx, meta_y, 10.0, secondary, format!("{left} · {right}")) }));
-            }
-            if v.player.failed() {
-                ui_label(items, thumb.x + 8.0, thumb.y + 52.0, 11.0, ERR, "DECODE FAILED", Align::Left, thumb.w - 16.0);
             }
         }
         items.push(Item::Clip(None));
@@ -6711,7 +6753,7 @@ impl Workspace {
         // `rail` is what the layout gives the panel this frame; `panel` is
         // the panel's own width, and its rects start at `rail - panel` so
         // a half-open rail is the right-hand part of a whole one.
-        let full = source_width.unwrap_or_else(|| rail_full_width(w)).clamp(180.0, (w * 0.45).clamp(180.0, 480.0));
+        let full = source_width.unwrap_or_else(|| rail_full_width(w)).clamp(RAIL_MIN_W, (w * 0.45).clamp(180.0, 480.0));
         // Cut mode under CUT_COLUMNS_MIN_W drops its right column; the
         // rail collapses to the mini strip at the same width, so the two
         // columns go together and the lanes keep their room.
@@ -6779,7 +6821,7 @@ impl Workspace {
     fn detail(ox: f32, panel: f32, h: f32, list_y: f32, bottom: f32, detail_slide: f32) -> (RectPx, RectPx) {
         let none = RectPx { x: ox, y: bottom, w: panel, h: 0.0 };
         let needed = SOURCE_H + RAIL_FOOTER_H + RAIL_GRIP_H + RAIL_INSPECTOR_H;
-        if panel <= 0.0 || h < 800.0 || bottom - list_y < needed { return (none, none); }
+        if panel < SOURCE_COMPACT_W || h < 800.0 || bottom - list_y < needed { return (none, none); }
         let ease = |t: f32| { let t = t.clamp(0.0, 1.0); t * t * (3.0 - 2.0 * t) };
         let shown = (RAIL_INSPECTOR_H * ease(detail_slide)).round();
         let inspector = RectPx { x: ox, y: bottom - shown, w: panel, h: shown };
@@ -6934,6 +6976,16 @@ const CONTEXT_H: f32 = 40.0;
 const SOURCE_H: f32 = 169.0;
 /// Below this panel width the source cards put their label on the preview.
 const SOURCE_OVERLAY_W: f32 = 260.0;
+/// Below this the cards drop the label: preview and keycap only, the
+/// heading drops its title, and the inspector and Duplicate go.
+const SOURCE_COMPACT_W: f32 = 180.0;
+/// Below this the focused preview washes out under a big slot number.
+const SOURCE_KEYCAP_W: f32 = 140.0;
+/// The narrowest the rail's panel can be dragged.
+const RAIL_MIN_W: f32 = 110.0;
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum SourceStage { Label, Overlay, Thumb, Keycap }
 /// The overlaid label's strip: two lines plus padding.
 const SOURCE_LABEL_H: f32 = 46.0;
 
@@ -7015,7 +7067,7 @@ mod tests {
         app.mouse_down(200.0, HEADER_H + 20.0);
         app.cursor_moved(-100.0, HEADER_H + 20.0);
         app.mouse_up();
-        assert_eq!(app.workspace().rail, 180.0);
+        assert_eq!(app.workspace().rail, RAIL_MIN_W);
     }
 
     #[test]
