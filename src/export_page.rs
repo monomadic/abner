@@ -41,6 +41,7 @@ struct Job {
     source: PathBuf,
 }
 pub(crate) struct Page {
+    pub(crate) inputs:crate::spatial::JobInputs,
     pub open: bool,
     pub crop: Option<(u32, u32, u32, u32)>,
     pub prores: bool,
@@ -65,6 +66,7 @@ pub(crate) struct Page {
 impl Default for Page {
     fn default() -> Self {
         Self {
+            inputs:Default::default(),
             open: false,
             crop: None,
             prores: false,
@@ -241,6 +243,7 @@ impl Page {
         let (tx, done) = mpsc::sync_channel(1);
         let shared = latest.clone();
         let stop = cancel.clone();
+        let inputs = self.inputs.clone();
         let prores = self.prores;
         let crop = self.crop;
         let active = Arc::new(Mutex::new(Vec::new()));
@@ -251,7 +254,8 @@ impl Page {
                 let registry = registry
                     .lock()
                     .map_err(|_| "Processor registry unavailable".to_string())?;
-                crate::media_io::pipeline_export(
+                crate::media_io::pipeline_export_with_inputs(
+                    &inputs,
                     &info,
                     &dest,
                     &keeps,

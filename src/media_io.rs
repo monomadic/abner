@@ -2327,7 +2327,16 @@ mod tests {
 }
 
 /// Export the enabled processor chain. Output is published only after mux finalization.
+#[cfg(test)]
 pub(crate) fn pipeline_export(
+    info:&crate::probe::VideoInfo,dest:&Path,keeps:&[(f64,f64)],registry:&abner_processor_api::Registry,
+    chain:&[(String,serde_json::Value)],prores:bool,crop:Option<(u32,u32,u32,u32)>,
+    cancel:&abner_processor_api::Cancellation,active:&Mutex<Vec<abner_processor_api::Cancellation>>,
+    emit:impl FnMut(crate::export_page::Rendered)->Result<(),String>,
+)->Result<()> {pipeline_export_with_inputs(&Default::default(),info,dest,keeps,registry,chain,prores,crop,cancel,active,emit)}
+
+pub(crate) fn pipeline_export_with_inputs(
+    inputs:&crate::spatial::JobInputs,
     info: &crate::probe::VideoInfo,
     dest: &Path,
     keeps: &[(f64, f64)],
@@ -2340,6 +2349,8 @@ pub(crate) fn pipeline_export(
     mut emit: impl FnMut(crate::export_page::Rendered) -> Result<(), String>,
 ) -> Result<()> {
     use abner_processor_api::{Frame, InputRequirement, Role};
+    inputs.validate_geometry(info.width,info.height).map_err(anyhow::Error::msg)?;
+    ensure!(crop.is_none() || inputs.crops.is_empty(), "Use either the timeline crop or an export crop");
     validate_ranges(keeps)?;
     ensure!(
         !dest.exists(),
@@ -2395,7 +2406,8 @@ pub(crate) fn pipeline_export(
         active.lock().unwrap().clear();
         let mut dims = [cw as usize, ch as usize];
         let mut sessions = Vec::new();
-        for (id, settings) in chain {
+        for (stage,(id, settings)) in chain.iter().enumerate() {
+            ensure!(stage==0 || inputs.bindings.get(id).is_none_or(|b|b.is_empty()), "Spatial inputs currently require the first enabled processor");
             let f = registry.get(id).map_err(anyhow::Error::msg)?;
             ensure!(
                 matches!(f.capabilities().role, Role::Processor)
@@ -2403,8 +2415,7 @@ pub(crate) fn pipeline_export(
                 "{} requires whole-clip execution",
                 f.descriptor().name
             );
-            let session = f
-                .create(dims[0], dims[1], settings)
+            let session = abner_processor_api::create_bound(f,dims[0],dims[1],settings,inputs.bindings.get(id).cloned().unwrap_or_default())
                 .map_err(anyhow::Error::msg)?;
             active.lock().unwrap().push(session.cancellation());
             dims = session.output_dimensions();
@@ -2570,7 +2581,7 @@ pub(crate) fn pipeline_export(
                         })
                 })
                 .collect();
-            let f = Frame {
+            let mut f = Frame {
                 width: cw as usize,
                 height: ch as usize,
                 pixels,
@@ -2578,6 +2589,7 @@ pub(crate) fn pipeline_export(
                 duration,
                 time_base: [1, 1_000_000],
             };
+            crate::spatial::apply_crop(&mut f,&inputs.crops);
             accept(
                 crate::processor_gui::process_chain(
                     &mut sessions,

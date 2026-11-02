@@ -148,6 +148,8 @@ const PREFETCH_DWELL: std::time::Duration = std::time::Duration::from_millis(60)
 const SEEK_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
 
 pub struct Video {
+    pub input_crop: Option<Crop>,
+    pub spatial_id: usize,
     /// Batch scope is independent of the source currently shown in the viewer.
     pub selected: bool,
     /// An independent item referring to existing media; never a filesystem copy.
@@ -179,6 +181,7 @@ pub struct Video {
 }
 
 pub struct App {
+    editor: Option<crate::spatial::Editor>,
     processors: crate::processor_gui::Panel,
     export_page: crate::export_page::Page,
     pub videos: Vec<Video>,
@@ -700,6 +703,7 @@ impl App {
         let fps = Self::fps_of(&videos);
         let wrap = Self::wrap_of(&videos);
         Self {
+            editor: None,
             processors: crate::processor_gui::Panel::default(),
             export_page: crate::export_page::Page::default(),
             masks: (0..videos.len()).map(|_| None).collect(),
@@ -795,6 +799,77 @@ impl App {
             recent: RecentRow::default(),
             cmds: Vec::new(),
         }
+    }
+
+    fn begin_editor(&mut self, crop:bool, plugin:Option<(String,String)>) {
+        if !self.ready() {return}
+        if self.editor.is_some() { self.finish_editor(false); }
+        self.processors.input_owner(self.videos[self.active].spatial_id);
+        let return_mode=self.workspace_mode();
+        let owner=if let Some((id,key))=plugin { crate::spatial::Owner::Plugin{id,key} }
+            else if self.cut_mode {
+                let segment=self.cut.as_ref().and_then(|c| c.segments().into_iter().find(|s|!s.cut &&
+                    if self.cut_picks.len()==1 { let p=self.cut_picks[0]; (s.start-p.0).abs()<1e-6 && (s.end-p.1).abs()<1e-6 }
+                    else { self.cut_picks.is_empty() && self.t>=s.start&&self.t<s.end }));
+                let Some(s)=segment else {self.notify("Select one kept clip to crop".into());return};
+                crate::spatial::Owner::Timeline{start:s.start,end:s.end}
+            } else {crate::spatial::Owner::Source};
+        let original_mask=self.masks[self.active].clone();
+        let mut saved_crop=self.videos[self.active].input_crop;
+        match &owner {
+            crate::spatial::Owner::Timeline{start,end}=> {saved_crop=self.cut.as_ref().and_then(|c|c.crop_at((start+end)/2.));}
+            crate::spatial::Owner::Plugin{id,key}=> {
+                let b=self.processors.binding(id,key);
+                saved_crop=b.as_ref().and_then(|b|b.crop).map(|[x,y,w,h]|Crop{x:x as f32,y:y as f32,w:w as f32,h:h as f32});
+                let v=&self.videos[self.active];let mut m=Mask::new(v.info.width,v.info.height);
+                if let Some(pixels)=b.and_then(|b|b.mask) {m.pixels=pixels;}
+                self.masks[self.active]=Some(m);
+            }
+            _=>{}
+        }
+        self.editor=Some(crate::spatial::Editor{owner,source:self.active,return_mode,original_mask});
+        self.processors.close();self.export_page.open=false;self.cut_mode=false;
+        self.mask_mode=true;self.playing=false;self.show_ui=true;self.ensure_mask();
+        self.crop=if crop {Some(saved_crop.unwrap_or_else(||self.full_crop()))}else{None};
+        self.zoom=1.;self.center=(0.5,0.5);self.seek_all(self.t,true);
+    }
+    fn finish_editor(&mut self, apply:bool) {
+        let Some(e)=self.editor.take() else{return};
+        let draft=self.masks[e.source].take();
+        self.masks[e.source]=e.original_mask;
+        if apply {match e.owner {
+            crate::spatial::Owner::Source=>{
+                if let Some(c)=self.crop {self.videos[e.source].input_crop=if c==Crop::full(self.videos[e.source].info.width,self.videos[e.source].info.height){None}else{Some(c)};if !matches!(self.mode,Mode::Overlay|Mode::SideBySide){self.mode=Mode::Overlay;}}
+                else {self.masks[e.source]=draft;}
+            }
+            crate::spatial::Owner::Timeline{start,end}=>{if let (Some(c),Some(t))=(self.crop,self.cut.as_mut()){t.set_crop(start,end,c);}}
+            crate::spatial::Owner::Plugin{id,key}=>{
+                let v=&self.videos[e.source];
+                let mut b=self.processors.binding(&id,&key).unwrap_or_default();
+                b.dimensions=[v.info.width as usize,v.info.height as usize];b.revision+=1;
+                if let Some(c)=self.crop {let (x,y,w,h)=c.pixels(v.info.width,v.info.height);b.crop=Some([x as usize,y as usize,w as usize,h as usize]);}
+                else {b.mask=draft.map(|m|m.pixels);}
+                self.processors.set_binding(id,key,b);
+            }
+        }}
+        self.mask_mode=false;self.leave_mask_mode();self.active=e.source;
+        self.seek_all(self.t,true);
+        self.activate(Action::Tool(e.return_mode));
+    }
+    fn applied_crop(&self,idx:usize)->Option<Crop> {
+        if self.mask_mode || self.processors.open {return None}
+        if self.cut_mode && idx==self.cut_video {self.cut.as_ref().and_then(|c|c.crop_at(self.t))}
+        else {self.videos[idx].input_crop}
+    }
+    fn image_uv(&self,idx:usize)->[f32;4] {
+        let v=&self.videos[idx];self.applied_crop(idx).map_or([0.,0.,1.,1.],|c|[c.x/v.info.width as f32,c.y/v.info.height as f32,(c.x+c.w)/v.info.width as f32,(c.y+c.h)/v.info.height as f32])
+    }
+    fn image_dims(&self,idx:usize)->(u32,u32) {
+        self.applied_crop(idx).map_or((self.videos[idx].info.width,self.videos[idx].info.height),|c|(c.w.round() as u32,c.h.round() as u32))
+    }
+    fn crop_schedule(&self)->Vec<crate::spatial::ClipCrop> {
+        if let Some(c)=self.cut.as_ref().filter(|_|self.cut_video==self.active) {c.crops().to_vec()}
+        else {self.videos[self.active].input_crop.map(|crop|crate::spatial::ClipCrop{start:0.,end:self.videos[self.active].info.duration,crop}).into_iter().collect()}
     }
 
     fn ensure_mask(&mut self) {
@@ -1364,6 +1439,7 @@ impl App {
     /// unsynced against them — the one thing this product must never
     /// show. Frame-lock is re-established by construction, as at startup.
     pub fn add_videos(&mut self, mut videos: Vec<Video>, replace: bool) {
+        self.finish_editor(false);
         self.source_copy_drag = None;
         if videos.is_empty() {
             return;
@@ -1415,6 +1491,7 @@ impl App {
     }
 
     fn duplicate_source_indices(&mut self, indices: &[usize], destination: Option<usize>) {
+        self.finish_editor(false);
         let mut copies = Vec::new();
         for &i in indices {
             let info = self.videos[i].info.clone();
@@ -1423,15 +1500,15 @@ impl App {
                 self.source_status = "Could not duplicate source: decoder unavailable".into();
                 return;
             };
-            copies.push((i, Video { selected: true, linked_copy: true, info, player,
+            copies.push((i, self.masks[i].clone(), Video { spatial_id: crate::spatial::next_source_id(), input_crop: self.videos[i].input_crop, selected: true, linked_copy: true, info, player,
                 shown_pts: 0.0, delivered: false, pending: false, seeking: false, stale: false, seek_sent: std::time::Instant::now(), last_frame: None }));
         }
         for v in &mut self.videos { v.selected = false; }
         let focus = destination.unwrap_or(indices[0] + 1);
-        for (i, v) in copies.into_iter().rev() {
+        for (i, mask, v) in copies.into_iter().rev() {
             let at = destination.unwrap_or(i + 1);
             self.videos.insert(at, v);
-            self.masks.insert(at, None);
+            self.masks.insert(at, mask);
         }
         self.cut = None;
         self.cut_restore = None;
@@ -1458,6 +1535,7 @@ impl App {
     }
 
     fn close_sources(&mut self, selected: bool) {
+        self.finish_editor(false);
         if self.videos.is_empty() {
             return;
         }
@@ -1533,8 +1611,10 @@ impl App {
     fn start_pipeline_export(&mut self) {
         if !self.ready() { return; }
         let info = self.videos[self.active].info.clone();
+        self.export_page.inputs = self.processors.job_inputs();
+        self.export_page.inputs.crops = self.crop_schedule();
         let keeps = self.cut.as_ref().filter(|_| self.active == self.cut_video)
-            .map(|c| c.segments().into_iter().map(|s| (s.start,s.end)).collect())
+            .map(|c| c.segments().into_iter().filter(|s|!s.cut).map(|s| (s.start,s.end)).collect())
             .unwrap_or_else(|| vec![(0.,info.duration)]);
         let (registry, chain) = self.processors.export_setup();
         self.export_page.start(info, keeps, registry, chain);
@@ -1738,6 +1818,7 @@ impl App {
         Ok(())
     }
     fn apply_processor_transport(&mut self) {
+        if let Some((id,key,crop))=self.processors.editor_request.take() {self.begin_editor(crop,Some((id,key)));return}
         if std::mem::take(&mut self.processors.toggle_play) {
             self.playing = !self.playing;
         }
@@ -1764,6 +1845,12 @@ impl App {
     }
 
     pub fn key(&mut self, mut k: Key) {
+        if self.editor.is_some() {
+            if k==Key::Escape {self.finish_editor(false);return}
+            if k==Key::Enter {self.finish_editor(true);return}
+        }
+        if self.ready() && matches!(k,Key::Char('m'|'M')) {if self.editor.is_some(){self.finish_editor(false)}else{self.begin_editor(false,None)}return}
+        if self.ready() && !self.mask_mode && matches!(k,Key::Char('c'|'C')) {self.begin_editor(true,None);return}
         if matches!(k, Key::PrevMode | Key::NextMode) {
             self.cycle_workspace_mode(if k == Key::NextMode { 1 } else { -1 });
             return;
@@ -1961,6 +2048,7 @@ impl App {
 
     /// Show clip `idx` (`keys.next_source`'s flip, or its number key directly).
     fn select(&mut self, idx: usize) {
+        if self.editor.is_some() {return}
         let reopen_cut = self.cut_mode && self.active != idx;
         self.active = idx;
         if reopen_cut { self.cut_mode = false; self.set_cut_mode(true); }
@@ -2384,12 +2472,11 @@ impl App {
     }
 
     fn base_rect(&self, idx: usize) -> RectPx {
-        let dims = (self.videos[idx].info.width, self.videos[idx].info.height);
+        let dims = (self.videos[idx].info.width,self.videos[idx].info.height);
         let cell = self.video_cell(idx);
-        if (self.processors.open || self.cut_mode) && self.show_ui {
-            return Canvas { r: cell }.fit(dims);
-        }
-        Self::fit_rect(dims, inset_rect(cell, if self.show_ui { 24.0 } else { 0.0 }))
+        let frame=if (self.processors.open || self.cut_mode) && self.show_ui {Canvas { r: cell }.fit(dims)}
+            else {Self::fit_rect(dims, inset_rect(cell, if self.show_ui { 24.0 } else { 0.0 }))};
+        if self.applied_crop(idx).is_some(){Self::fit_rect(self.image_dims(idx),frame)}else{frame}
     }
 
     /// The picture surface pointer gestures act on: the processors
@@ -2524,6 +2611,7 @@ impl App {
         let t = self.t;
         let active = self.active;
         let capture = self.mask_mode;
+        let editor_crops=if self.editor.as_ref().is_some_and(|e|matches!(e.owner,crate::spatial::Owner::Plugin{..})) {self.crop_schedule()}else{Vec::new()};
         let superseded_seek = self.queued_seek.is_some();
         let mut adopt = None;
         let shown: Vec<bool> = (0..self.videos.len()).map(|i| self.on_screen(i)).collect();
@@ -2558,7 +2646,8 @@ impl App {
             if got.is_some() || v.player.failed() || v.player.buffered() > 0 {
                 v.seeking = false;
             }
-            if let Some((pts, buf)) = got {
+            if let Some((pts, mut buf)) = got {
+                if i==active && !editor_crops.is_empty() {buf=crate::spatial::crop_rgba(&buf,v.player.w,v.player.h,pts,&editor_crops);}
                 if was_pending && self.adopt_seek && i == active && !self.playing {
                     adopt = Some(pts);
                 }
@@ -2649,7 +2738,7 @@ impl App {
                 a,
                 b: a,
                 r: self.content_rect(a),
-                uv: full_uv,
+                uv: self.image_uv(a),
                 mode: VideoMode::Tex,
                 p0: 0.0,
                 p1: 0.0,
@@ -2658,15 +2747,12 @@ impl App {
                 for i in 0..n {
                     let cell = self.video_cell(i);
                     items.push(Item::Clip(Some(cell)));
-                    let dims = (self.videos[i].info.width, self.videos[i].info.height);
-                    // Every cell shares the zoom/center, so panning one
-                    // pans them all to the same content position.
-                    let base = Self::fit_rect(dims, inset_rect(cell, if self.show_ui { 24.0 } else { 0.0 }));
+                    let base = self.base_rect(i);
                     items.push(Item::Video {
                         a: i,
                         b: i,
                         r: Self::zoomed(base, self.zoom, self.center),
-                        uv: full_uv,
+                        uv: self.image_uv(i),
                         mode: VideoMode::Tex,
                         p0: 0.0,
                         p1: 0.0,
@@ -2736,6 +2822,8 @@ impl App {
                 })
             });
         let preview_end = segment.map(|s| s.end);
+        self.processors.input_owner(self.videos[self.active].spatial_id);
+        self.processors.set_crops(self.crop_schedule());
         self.processors.source(
             self.active,
             [
@@ -2972,6 +3060,7 @@ impl App {
             ));
         }
         if self.cut_mode {
+            out.push(Control::new(RectPx{x:self.workspace().canvas.x+12.,y:HEADER_H+6.,w:92.,h:27.},"Crop clip",false,Action::LaunchEditor(true)));
             if self.vp.0 >= CUT_COLUMNS_MIN_W {
                 out.push(Control::new(
                     self.inspector_toggle(),
@@ -3018,6 +3107,9 @@ impl App {
         let mut x = l.rail + 12.0;
         let y = HEADER_H + 6.0;
         if !self.mask_mode {
+            for (label,tool) in [("Crop",2),("Mask",1)] {
+                out.push(Control::new(RectPx{x,y,w:58.,h:27.},label,false,Action::LaunchEditor(tool==2)));x+=62.;
+            }
             for (mode, label, w) in [
                 (Mode::Overlay, "Single", 62.0),
                 (Mode::SideBySide, "Side by side", 102.0),
@@ -3026,6 +3118,7 @@ impl App {
                 (Mode::Checker, "Checker", 74.0),
                 (Mode::Blend, "Blend", 64.0),
             ] {
+                if x+w>self.vp.0-12. {break}
                 out.push(Control::new(
                     RectPx { x, y, w, h: 27.0 },
                     label,
@@ -3058,6 +3151,7 @@ impl App {
                 ("Save still + mask", 138.0, Action::Save),
                 ("Export ProRes", 122.0, Action::Export),
             ] {
+                if self.editor.is_some() && x+w>self.vp.0-260. {break}
                 out.push(Control::new(
                     RectPx { x, y, w, h: 27.0 },
                     label,
@@ -3073,6 +3167,7 @@ impl App {
                 ("+", 28.0, Action::Brush(true)),
                 ("Save mask", 100.0, Action::Save),
             ] {
+                if self.editor.is_some() && x+w>self.vp.0-260. {break}
                 out.push(Control::new(
                     RectPx { x, y, w, h: 27.0 },
                     label,
@@ -3082,11 +3177,26 @@ impl App {
                 x += w + 8.0;
             }
         }
+        if self.editor.is_some() {
+            let x=self.vp.0-176.;
+            out.push(Control::new(RectPx{x:x-76.,y,w:68.,h:27.},"Reset",false,Action::ResetEdit));
+            out.push(Control::new(RectPx{x,y,w:76.,h:27.},"Cancel",false,Action::CancelEdit));
+            out.push(Control::new(RectPx{x:x+84.,y,w:76.,h:27.},"Apply",false,Action::ApplyEdit));
+        }
         out
     }
 
     fn activate(&mut self, action: Action) {
         self.mouse_up();
+        match action {
+            Action::LaunchEditor(crop)=>{self.begin_editor(crop,None);return}
+            Action::ResetEdit=>{if self.crop.is_some(){self.crop=Some(self.full_crop())}else{let v=&self.videos[self.active];self.masks[self.active]=Some(Mask::new(v.info.width,v.info.height));}return}
+            Action::ApplyEdit=>{self.finish_editor(true);return}
+            Action::CancelEdit=>{self.finish_editor(false);return}
+            Action::Tool(1|2)=>{if self.workspace_mode()!=if matches!(action,Action::Tool(2)){2}else{1}{self.begin_editor(matches!(action,Action::Tool(2)),None);}return}
+            _=>{}
+        }
+        if self.editor.is_some() && matches!(action,Action::Tool(_)) {self.finish_editor(false);}
         if matches!(action, Action::Tool(t) if t != 5) { self.export_page.open=false; }
         if matches!(action, Action::Tool(t) if t != 4) {
             self.processors.close();
@@ -3100,7 +3210,7 @@ impl App {
                 }
             }
             Action::Tool(5) => {
-                self.export_page.crop = self.crop.map(|c| c.pixels(self.videos[self.active].info.width,self.videos[self.active].info.height));
+                self.export_page.crop = None;
                 self.set_cut_mode(false);
                 if self.mask_mode { self.mask_mode=false;self.leave_mask_mode(); }
                 self.playing=false;self.show_ui=true;
@@ -3127,6 +3237,7 @@ impl App {
                     self.toggle_crop();
                 }
             }
+            Action::LaunchEditor(_) | Action::ResetEdit | Action::ApplyEdit | Action::CancelEdit => unreachable!(),
             Action::Duplicate => self.duplicate_sources(),
             Action::OpenFiles => self.cmds.push(Cmd::OpenFiles),
             Action::ClearSources => {
@@ -3137,7 +3248,10 @@ impl App {
             Action::ToggleSources => self.show_sources = !self.show_sources,
             Action::ToggleInspector => self.show_inspector = !self.show_inspector,
             Action::ToggleDetail => self.show_detail = !self.show_detail,
-            Action::View(mode) => self.mode = mode,
+            Action::View(mode) => {
+                if self.videos.iter().any(|v|v.input_crop.is_some()) && !matches!(mode,Mode::Overlay|Mode::SideBySide) {self.notify("Use Single or Side by side for cropped sources".into());}
+                else {self.mode=mode;}
+            },
             Action::Brush(up) => self.resize_brush(if up { 1.25 } else { 0.8 }),
             Action::Save => self.save_mask(),
             Action::Export => self.export(),
@@ -3232,7 +3346,7 @@ impl App {
     /// One tab left or right along the header (⌃⇧[ / ⌃⇧]), in the order
     /// the header draws them; the ends don't wrap.
     pub fn cycle_workspace_mode(&mut self, dir: i32) {
-        let order = ModeSelector::ORDER;
+        let order:Vec<_> = ModeSelector::ORDER.into_iter().filter(|m|!matches!(m,1|2)||*m==self.workspace_mode()).collect();
         let Some(at) = order.iter().position(|m| *m == self.workspace_mode()) else { return };
         let next = (at as i32 + dir).clamp(0, order.len() as i32 - 1) as usize;
         self.select_workspace_mode(order[next]);
@@ -3270,13 +3384,14 @@ impl App {
     /// 5px gap. They shrink together so the row ends 12px short of what
     /// the header carries at its right — the persistent encode indicator.
     fn mode_selector(&self) -> ModeSelector {
+        let count=if self.editor.is_some(){5.}else{4.};
         let right = self.status_chip().x;
         let tab_w = ((right - 12.0 - self.header_left() - 5.0 * TAB_GAP) / 6.0).clamp(40.0, TAB_W);
         ModeSelector {
             rect: RectPx {
                 x: self.header_left(),
                 y: (HEADER_H - TAB_H) / 2.0,
-                w: 6.0 * tab_w + 5.0 * TAB_GAP,
+                w: count * tab_w + (count-1.) * TAB_GAP,
                 h: TAB_H,
             },
             active: self.workspace_mode(),
@@ -3343,11 +3458,12 @@ impl App {
                 11.0, color, &control.label, Align::Center, control.r.w - 8.0);
         }
         if self.mask_mode {
+            let context=self.editor.as_ref().map(|e|match &e.owner {crate::spatial::Owner::Source=>"Source",crate::spatial::Owner::Timeline{..}=>"Clip",crate::spatial::Owner::Plugin{..}=>"Input"}).unwrap_or("Source");
             let label = if let Some(c) = self.crop {
                 let m = self.masks[self.active].as_ref().unwrap();
                 let (_, _, w, h) = c.pixels(m.width, m.height);
-                format!("Crop {w} × {h}")
-            } else { format!("Brush {:.0} px", self.brush_diameter) };
+                format!("{context} · {w} × {h}")
+            } else { format!("{context} · {:.0} px", self.brush_diameter) };
             ui_label(items, l.rail + 20.0, HEADER_H + CONTEXT_H / 2.0, 11.0, WORKSPACE_TEXT, label, Align::Left, 126.0);
         } else if vp.0 - l.rail > 760.0 {
             let parameter = match self.mode {
@@ -4047,13 +4163,15 @@ struct ModeSelector {
 
 impl ModeSelector {
     /// The tabs' workspace modes in header order.
-    pub(crate) const ORDER: [usize; 6] = [0, 3, 4, 2, 1, 5];
+    pub(crate) const ORDER: [usize; 6] = [0, 3, 4, 5, 2, 1];
     /// MainNav (382:4686): five equal tabs on a `TAB_GAP`.
     fn controls(&self) -> Vec<Control> {
-        let w = (self.rect.w - 5.0 * TAB_GAP) / 6.0;
-        ["Sources", "Timeline", "Process", "Crop", "Mask", "Export"]
+        let count=if matches!(self.active,1|2){5}else{4};
+        let w = (self.rect.w - (count-1) as f32 * TAB_GAP) / count as f32;
+        ["Sources", "Timeline", "Process", "Export", "Crop", "Mask"]
         .into_iter()
         .zip(Self::ORDER)
+        .filter(|(_,mode)| !matches!(mode,1|2) || *mode==self.active)
         .enumerate()
         .map(|(index, (label, mode))| {
             Control::new(
@@ -4130,7 +4248,7 @@ struct CutSide {
 impl App {
     /// Mask and cut both show the focused clip alone, whatever the view.
     fn single(&self) -> bool {
-        self.mask_mode || self.cut_mode
+        (self.videos.iter().any(|v|v.input_crop.is_some()) && self.mode!=Mode::SideBySide) || self.mask_mode || self.cut_mode
     }
 
     /// `--cut [in,out[,in,out…]]`: open on the timeline, for targeted
@@ -4158,6 +4276,7 @@ impl App {
     }
 
     fn set_cut_mode(&mut self, on: bool) {
+        if self.editor.is_some() {self.finish_editor(false);}
         self.cut_restore = None;
         if on == self.cut_mode || !self.ready() {
             return;
@@ -4177,6 +4296,7 @@ impl App {
             if self.cut_video != self.active || self.cut.as_ref().is_none_or(|c| c.path != info.path) {
                 self.cut_video = self.active;
                 self.cut = Some(Cut::open(&info.path, info.duration));
+                self.cut.as_mut().unwrap().inherit_crop(self.videos[self.active].input_crop);
             }
             self.zoom = 1.0;
             self.center = (0.5, 0.5);
@@ -4240,6 +4360,7 @@ impl App {
     }
 
     fn cut_action(&mut self, action: CutAction) {
+        if action==CutAction::Export && self.cut.as_ref().is_some_and(|c|!c.crops().is_empty()) {self.activate(Action::Tool(5));return}
         if matches!(action, CutAction::In | CutAction::Out | CutAction::Undo | CutAction::ToggleSplit) {
             self.cut_restore = None;
         }
@@ -5402,6 +5523,10 @@ impl App {
         // ---- Figma timeline header ----
         let controls = self.controls();
         self.build_cut_header(items);
+        for control in controls.iter().filter(|c|matches!(c.action,Action::LaunchEditor(_))) {
+            items.push(Item::Rect(RectItem{radius:6.,..RectItem::new(control.r,CONTROL_BG)}));
+            ui_label(items,control.r.x+control.r.w/2.,control.r.y+control.r.h/2.,11.,WORKSPACE_TEXT,&control.label,Align::Center,control.r.w-8.);
+        }
 
         // ---- scrub toolbar: play, the clock, the edit tools, the zoom ----
         let bar = l.transport;
@@ -6636,7 +6761,7 @@ impl Workspace {
 }
 
 #[derive(Clone, Copy)]
-enum Action { Duplicate, OpenFiles, ClearSources, ToggleSources, ToggleInspector, ToggleDetail, Tool(usize), View(Mode), Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
+enum Action { LaunchEditor(bool), ResetEdit, ApplyEdit, CancelEdit, Duplicate, OpenFiles, ClearSources, ToggleSources, ToggleInspector, ToggleDetail, Tool(usize), View(Mode), Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
 #[derive(Clone, Copy, PartialEq)]
 enum CutAction { TogglePosters, FrameChanges(bool), TimeDisplay(bool), In, Out, Split, ToggleSplit, Join, Apply, DeletePicked, Undo, Export, SaveProject, EncodeAll, Encode(f64), Snap(Snap), Play, Zoom(bool), Step(i32), Keyframe(i32), Chapter(i32) }
 /// `hint` is the key cap a cut-mode button carries ("" for none).
@@ -7075,6 +7200,25 @@ mod tests {
     }
 
     #[test]
+    fn temporary_editor_apply_cancel_and_ownership() {
+        let Some(clip)=test_clip() else{return};let mut app=mk_app(&clip,2);
+        assert_eq!(app.mode_selector().controls().len(),4);
+        app.begin_editor(true,None);let crop=Crop{x:20.,y:10.,w:100.,h:100.};app.crop=Some(crop);
+        app.finish_editor(false);assert!(app.videos[0].input_crop.is_none());
+        app.begin_editor(true,None);app.crop=Some(crop);app.finish_editor(true);
+        assert_eq!(app.videos[0].input_crop,Some(crop));assert!(app.videos[1].input_crop.is_none());
+        app.set_cut_mode(true);assert_eq!(app.cut.as_ref().unwrap().crop_at(0.),Some(crop));
+        app.activate(Action::Tool(0));app.begin_editor(true,None);app.crop=Some(Crop::full(320,180));app.finish_editor(true);
+        assert!(app.videos[0].input_crop.is_none());assert_eq!(app.cut.as_ref().unwrap().crop_at(0.),Some(crop));
+        app.begin_editor(false,None);app.masks[0].as_mut().unwrap().paint((10.,10.),(10.,10.),3.);app.finish_editor(true);
+        let saved=app.masks[0].as_ref().unwrap().pixels.clone();
+        app.begin_editor(false,None);app.masks[0].as_mut().unwrap().paint((80.,80.),(80.,80.),3.);
+        app.select(1);assert_eq!(app.active,0);app.finish_editor(false);
+        assert_eq!(*app.masks[0].as_ref().unwrap().pixels,*saved);
+        assert_eq!(app.mode_selector().controls().len(),4);
+    }
+
+    #[test]
     fn workspace_controls_select_tools_and_never_paint_the_shell() {
         let Some(clip) = test_clip() else { return };
         let mut app = mk_app(&clip, 3);
@@ -7086,7 +7230,7 @@ mod tests {
         };
         click(&mut app, |a| matches!(a, Action::View(Mode::Blend)));
         assert_eq!(app.mode, Mode::Blend);
-        click(&mut app, |a| matches!(a, Action::Tool(2)));
+        click(&mut app, |a| matches!(a, Action::LaunchEditor(true)));
         assert!(app.mask_mode && app.crop.is_some() && !app.playing);
         let crop = app.crop;
         // A zoomed crop can extend underneath the shell, but the shell owns input.
@@ -7095,17 +7239,18 @@ mod tests {
         app.cursor_moved(130.0, app.workspace().inspector.y + 40.0);
         app.mouse_up();
         assert_eq!(app.crop, crop);
-        click(&mut app, |a| matches!(a, Action::Tool(1)));
+        click(&mut app, |a| matches!(a, Action::CancelEdit));
+        click(&mut app, |a| matches!(a, Action::LaunchEditor(false)));
         assert!(app.mask_mode && app.crop.is_none());
         let r = app.source_row(1);
         app.mouse_down(r.x + 60.0, r.y + 25.0);
         app.mouse_up();
-        assert_eq!(app.active, 1);
-        assert_eq!(app.masks[1].as_ref().unwrap().revision, 0);
+        assert_eq!(app.active, 0, "an editor keeps its owning source");
+        assert!(app.masks[1].is_none());
         app.mouse_down(300.0, HEADER_H + 20.0);
         app.cursor_moved(350.0, HEADER_H + 20.0);
         app.mouse_up();
-        assert_eq!(app.masks[1].as_ref().unwrap().revision, 0);
+        assert_eq!(app.masks[0].as_ref().unwrap().revision, 0);
         let brush = app.brush_diameter;
         click(&mut app, |a| matches!(a, Action::Brush(true)));
         assert!(app.brush_diameter > brush);
@@ -7196,17 +7341,17 @@ mod tests {
         app.vp = (1280.0, 800.0);
         // Six 110px tabs on a 5px gap end at 763; the strip past them is bare.
         let tabs = app.header_tabs();
-        assert_eq!((tabs.x, tabs.w, tabs.h), (78.0, 685.0, TAB_H));
+        assert_eq!((tabs.x, tabs.w, tabs.h), (78.0, 455.0, TAB_H));
         assert!(app.titlebar_background(800.0, 20.0));
         assert!(!app.titlebar_background(50.0, 20.0));
         assert!(!app.titlebar_background(100.0, 20.0));
-        assert!(!app.titlebar_background(600.0, 20.0), "over the fifth tab");
+        assert!(app.titlebar_background(600.0, 20.0), "no permanent editor tab");
         assert!(!app.titlebar_background(700.0, HEADER_H));
         let original = app.mode_selector().controls();
         for mode in [3, 4, 2, 1, 0] {
             app.activate(Action::Tool(mode));
             let controls = app.mode_selector().controls();
-            assert_eq!(controls.len(), 6);
+            assert_eq!(controls.len(), if matches!(mode,1|2){5}else{4});
             assert_eq!(controls.iter().filter(|c| c.selected).count(), 1);
             for (before, after) in original.iter().zip(&controls) {
                 assert_eq!(
@@ -7524,7 +7669,9 @@ mod tests {
         assert!(app.brush_diameter > 8.0);
         app.key(Key::Char('-'));
         assert!((app.brush_diameter - 8.0).abs() < 0.01);
-        app.key(Key::Tab);
+        app.key(Key::Enter);
+        app.select(1);
+        app.key(Key::Char('m'));
         assert!(app.masks[1].as_ref().unwrap().pixels.iter().all(|p| *p == 0));
         pointer_down(&mut app, 160.0, 90.0);
         app.cursor_left();
@@ -7538,10 +7685,10 @@ mod tests {
         let output = mask::output_path(&output_video);
         assert!(output.exists());
         std::fs::remove_file(output).unwrap();
-        app.key(Key::Char('m'));
+        app.key(Key::Enter);
         assert_eq!(app.mode, Mode::SideBySide);
+        app.select(0);
         app.key(Key::Char('m'));
-        app.key(Key::Tab);
         assert_eq!(app.masks[0].as_ref().unwrap().revision, revision);
         app.add_videos(vec![mk_video(&clip)], false);
         assert!(app.masks[0].is_some());
@@ -7764,7 +7911,7 @@ mod tests {
             crate::config::Config::default().frame_cache_bytes(),
         )
         .expect("spawn");
-        Video { selected: false, linked_copy: false, info, player, shown_pts: 0.0, delivered: false, pending: false, seeking: false, stale: false, seek_sent: std::time::Instant::now(), last_frame: None }
+        Video { spatial_id: crate::spatial::next_source_id(), input_crop: None, selected: false, linked_copy: false, info, player, shown_pts: 0.0, delivered: false, pending: false, seeking: false, stale: false, seek_sent: std::time::Instant::now(), last_frame: None }
     }
 
     /// A playing app: most tests drive the clock, so they opt out of the

@@ -42,6 +42,8 @@ struct Edit {
     cuts: Vec<(f64, f64)>,
     /// Extra boundaries inside kept material (`S`).
     splits: Vec<f64>,
+    #[serde(default)]
+    crops: Vec<crate::spatial::ClipCrop>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -80,6 +82,10 @@ fn validate_project(project: &CutProject, duration: f64) -> anyhow::Result<()> {
         anyhow::ensure!(start.is_finite() && end.is_finite() && start >= previous_end &&
             end > start + EPS && end <= duration + EPS, "invalid saved cut range");
         previous_end = end;
+    }
+    for c in &project.edit.crops {
+        anyhow::ensure!(c.start.is_finite() && c.end.is_finite() && c.start>=0. && c.end>c.start && c.end<=duration+EPS
+            && [c.crop.x,c.crop.y,c.crop.w,c.crop.h].iter().all(|v|v.is_finite()) && c.crop.x>=0. && c.crop.y>=0. && c.crop.w>=1. && c.crop.h>=1., "invalid saved crop");
     }
     let mut previous_split = 0.0;
     for &at in &project.edit.splits {
@@ -602,6 +608,8 @@ impl Cut {
     /// adjacent, and there is nothing to join.
     pub fn joinable(&self, ranges: &[(f64, f64)]) -> Option<Vec<f64>> {
         if ranges.len() < 2 { return None; }
+        let crop=self.crop_at((ranges[0].0+ranges[0].1)/2.);
+        if ranges.iter().any(|(a,b)|self.crop_at((a+b)/2.)!=crop) {return None;}
         let keeps: Vec<Segment> = self.segments().into_iter().filter(|s| !s.cut).collect();
         let mut picked: Vec<usize> = ranges.iter().map(|(a, b)| {
             keeps.iter().position(|s| (s.start - a).abs() < EPS && (s.end - b).abs() < EPS)
@@ -656,6 +664,11 @@ impl Cut {
         let lo = if i == 0 { 0.0 } else { bounds[i - 1] };
         let hi = bounds.get(i + 1).copied().unwrap_or(self.duration);
         let to = self.snap_near(to.clamp(lo, hi)).clamp(lo, hi);
+        for c in &mut self.edit.crops {
+            if (c.start-edge).abs()<EPS && edge>EPS {c.start=to;}
+            if (c.end-edge).abs()<EPS && edge<self.duration-EPS {c.end=to;}
+        }
+        self.edit.crops.retain(|c|c.end>c.start+EPS);
         if let Some(c) = self.edit.cuts.iter_mut().find(|c| (c.1 - edge).abs() < EPS) {
             // The far edge of the cut on the left: this one may also pull
             // back INTO the cut, down to its start.
@@ -710,6 +723,32 @@ impl Cut {
         !self.undo.is_empty()
     }
 
+    pub(crate) fn crops(&self) -> &[crate::spatial::ClipCrop] { &self.edit.crops }
+    pub(crate) fn crop_at(&self, t:f64) -> Option<crate::mask::Crop> {
+        self.edit.crops.iter().rev().find(|c|t>=c.start&&t<c.end).map(|c|c.crop)
+    }
+    pub(crate) fn set_crop(&mut self,start:f64,end:f64,crop:crate::mask::Crop) {
+        self.undo.push(self.edit.clone());
+        let mut crops=Vec::new();
+        for c in self.edit.crops.drain(..) {
+            if c.end<=start || c.start>=end {crops.push(c);continue}
+            if c.start<start {crops.push(crate::spatial::ClipCrop{end:start,..c.clone()});}
+            if c.end>end {crops.push(crate::spatial::ClipCrop{start:end,..c});}
+        }
+        crops.push(crate::spatial::ClipCrop{start,end,crop});
+        crops.sort_by(|a,b|a.start.total_cmp(&b.start));
+        let mut merged:Vec<crate::spatial::ClipCrop>=Vec::new();
+        for c in crops {
+            if let Some(last)=merged.last_mut() && (last.end-c.start).abs()<EPS && last.crop==c.crop {last.end=c.end;}
+            else {merged.push(c);}
+        }
+        self.edit.crops=merged;
+    }
+    pub(crate) fn inherit_crop(&mut self,crop:Option<crate::mask::Crop>) {
+        if self.edit.crops.is_empty() { if let Some(crop)=crop {
+            self.edit.crops.push(crate::spatial::ClipCrop{start:0.,end:self.duration,crop});
+        }}
+    }
     pub fn cuts(&self) -> &[(f64, f64)] {
         &self.edit.cuts
     }
@@ -726,6 +765,7 @@ impl Cut {
             b.push(c.1);
         }
         b.extend(&self.edit.splits);
+        for c in &self.edit.crops { b.extend([c.start,c.end]); }
         b.sort_by(f64::total_cmp);
         b.dedup_by(|a, b| (*a - *b).abs() < EPS);
         b
@@ -945,6 +985,7 @@ impl Cut {
 
     /// Write the kept ranges beside the source (`clip.cut.mp4`).
     pub fn start_export(&mut self) {
+        if !self.edit.crops.is_empty() {self.status="Cropped clips require the Export workspace".into();return}
         if self.export.is_some() || self.encoding() || self.scanning() {
             return;
         }
@@ -1688,5 +1729,24 @@ mod native_wave_tests {
         mux.write_sample(a,WriteSample{data:&data,duration:700,composition_offset:0,is_sync:true}).unwrap();mux.finish().unwrap();
         let(tx,rx)=channel();read_wave(&path,&Arc::new(AtomicBool::new(false)),&tx);drop(tx);let peaks:Vec<_>=rx.iter().flatten().collect();assert_eq!(peaks,vec![64,128,0]);
         let(tx,rx)=channel();read_wave(Path::new("missing"),&Arc::new(AtomicBool::new(true)),&tx);drop(tx);assert!(rx.iter().next().is_none());std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)] mod spatial_tests {
+    use super::*;
+    #[test] fn crops_inherit_split_trim_undo_and_round_trip() {
+        let mut cut=Cut::new(Path::new("test.mp4"),10.);
+        let full=crate::mask::Crop{x:0.,y:0.,w:320.,h:180.};
+        let crop=crate::mask::Crop{x:40.,y:20.,w:120.,h:100.};
+        cut.inherit_crop(Some(full));cut.split(5.);cut.set_crop(5.,10.,crop);
+        assert_eq!(cut.crop_at(2.),Some(full));assert_eq!(cut.crop_at(7.),Some(crop));
+        assert!(cut.joinable(&[(0.,5.),(5.,10.)]).is_none());
+        let saved=serde_json::to_string(&cut.edit).unwrap();
+        let edit:Edit=serde_json::from_str(&saved).unwrap();assert_eq!(edit,cut.edit);
+        cut.begin_trim();cut.move_edge(5.,6.);
+        assert_eq!(cut.crop_at(5.5),Some(full));assert_eq!(cut.crop_at(6.5),Some(crop));
+        assert!(cut.undo());assert_eq!(cut.crop_at(5.5),Some(crop));
+        assert!(cut.undo());assert_eq!(cut.crop_at(7.),Some(full));
+        let legacy:Edit=serde_json::from_str(r#"{"cuts":[],"splits":[]}"#).unwrap();assert!(legacy.crops.is_empty());
     }
 }

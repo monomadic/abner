@@ -81,6 +81,7 @@ enum Kind {
     Enum(Vec<Choice>),
     Bool,
     Text,
+    Spatial { key:String, crop:bool },
     Unsupported,
 }
 #[derive(Clone, Debug)]
@@ -260,6 +261,7 @@ fn text_value(field: &Field, schema: &Value, text: &str) -> Result<Option<Value>
 }
 
 struct Request {
+    inputs: crate::spatial::JobInputs,
     generation: u64,
     chain: Vec<(String, Value)>,
     target: Option<f64>,
@@ -541,10 +543,12 @@ fn render(
     // HDR conversion or a full-precision export.
     check_sdr(&r.info.path)?;
     let [w, h] = [r.info.width, r.info.height];
+    r.inputs.validate_geometry(w,h)?;
     let mut sessions = Vec::new();
     let mut dims = [w as usize, h as usize];
     for (index, (id, settings)) in r.chain.iter().enumerate() {
         let factory = registry.get(id)?;
+        if index>0 && r.inputs.bindings.get(id).is_some_and(|b|!b.is_empty()) {return Err("Spatial inputs currently require the first enabled processor; move this processor first".into());}
         let caps = factory.capabilities();
         if !matches!(caps.role, Role::Processor)
             || matches!(caps.input, InputRequirement::WholeClip)
@@ -579,7 +583,7 @@ fn render(
             }
         });
         report(Progress { phase: "Preparing processor".into(), completed: 0, total: None });
-        let mut session = factory.create(dims[0], dims[1], settings)?;
+        let mut session = abner_processor_api::create_bound(factory,dims[0],dims[1],settings,r.inputs.bindings.get(id).cloned().unwrap_or_default())?;
         if let Some(target) = r.target {
             session.set_preview_target((target * 1e6).round() as i64, [1, 1_000_000]);
         }
@@ -772,18 +776,13 @@ fn render(
             return Err("Processor buffered too many frames for preview".into());
         }
         originals.insert(pts, (rgba, source_pts));
+        let mut input = Frame {width:w as usize,height:h as usize,pixels,pts,duration,time_base:[1,1_000_000]};
+        crate::spatial::apply_crop(&mut input,&r.inputs.crops);
         let delivered = emit(
             process_chain(
                 &mut sessions,
                 0,
-                vec![Frame {
-                    width: w as usize,
-                    height: h as usize,
-                    pixels,
-                    pts,
-                    duration,
-                    time_base: [1, 1_000_000],
-                }],
+                vec![input],
                 &r.cancel,
                 r.budget,
             )?,
@@ -842,6 +841,11 @@ fn check_sdr(path: &std::path::Path) -> Result<(), String> {
 
 
 pub struct Panel {
+    declarations: BTreeMap<String,Vec<abner_processor_api::SpatialInputDescriptor>>,
+    inputs: crate::spatial::JobInputs,
+    input_owner:usize,
+    source_bindings: BTreeMap<usize,abner_processor_api::ChainBindings>,
+    pub editor_request: Option<(String,String,bool)>,
     preset_dir: Option<std::path::PathBuf>,
     user_presets: BTreeMap<String,std::path::PathBuf>,
     preset_name: Option<String>,
@@ -916,6 +920,7 @@ pub struct Panel {
 impl Default for Panel {
     fn default() -> Self {
         Self {
+            input_owner:usize::MAX, declarations: BTreeMap::new(), inputs: Default::default(), source_bindings: BTreeMap::new(), editor_request: None,
             preset_dir: None,
             user_presets: BTreeMap::new(),
             preset_name: None,
@@ -1018,11 +1023,13 @@ impl Panel {
             .collect();
         // Plugins start bypassed: running one is always the user's choice.
         let enabled = vec![false; descriptors.len()];
+        let declarations=descriptors.iter().map(|d|(d.id.clone(),registry.get(&d.id).unwrap().spatial_inputs())).collect();
         let registry = Arc::new(Mutex::new(registry));
         let worker = (!descriptors.is_empty()).then(|| Worker::new(registry.clone()));
         let mut s = Self::default();
         s.preset_dir = preset_dir;
         s.user_presets = user_presets;
+        s.declarations = declarations;
         s.registry = registry;
         s.descriptors = descriptors;
         s.saved = saved;
@@ -1044,6 +1051,17 @@ impl Panel {
         self.preset = usize::MAX;
         self.preset_name = None;
         self.fields = fields(&self.descriptors[index].settings_schema);
+        if let Some(inputs)=self.declarations.get(&self.descriptors[index].id) {
+            use abner_processor_api::SpatialInputKind as K;
+            for d in inputs {
+                let tools: &[bool]=match d.kind {K::Image|K::Region=>&[true],K::Mask=>&[false],K::MaskedImage=>&[true,false]};
+                for &crop in tools {
+                    self.fields.push(Field { key:format!("__spatial_{}_{}",d.key,crop), title:format!("{} · {}",d.title,if crop {"Crop"} else {"Mask"}),
+                        kind:Kind::Spatial{key:d.key.clone(),crop},default:None,required:false,
+                        description:Some(if d.kind==K::Region {"Processing region; keeps the complete input image"} else {"Edit this input without changing other inputs"}.into()) });
+                }
+            }
+        }
         self.settings = self.saved[index].clone();
         self.scroll = 0.0;
         self.editing = None;
@@ -1211,7 +1229,22 @@ impl Panel {
     pub fn enter(&mut self) {
         self.open = true;
     }
+    pub(crate) fn input_owner(&mut self,id:usize) {
+        if self.input_owner!=id {
+            self.source_bindings.insert(self.input_owner,std::mem::take(&mut self.inputs.bindings));
+            self.inputs.bindings=self.source_bindings.remove(&id).unwrap_or_default();self.input_owner=id;self.changed();
+        }
+    }
+    pub(crate) fn job_inputs(&self)->crate::spatial::JobInputs {self.inputs.clone()}
+    pub(crate) fn set_crops(&mut self,crops:Vec<crate::spatial::ClipCrop>) {
+        if self.inputs.crops!=crops {self.inputs.crops=crops;self.changed();}
+    }
+    pub(crate) fn binding(&self,id:&str,key:&str)->Option<abner_processor_api::SpatialBinding> {self.inputs.bindings.get(id)?.get(key).cloned()}
+    pub(crate) fn set_binding(&mut self,id:String,key:String,b:abner_processor_api::SpatialBinding) {
+        self.inputs.bindings.entry(id).or_default().insert(key,b);self.changed();
+    }
     pub fn source(&mut self, slot: usize, dims: [u32; 2], playing: bool) {
+
         self.source = slot;
         self.source_dims = dims;
         self.playback = playing;
@@ -1768,7 +1801,10 @@ impl Panel {
             text(items, row.x, row.y, 11.0, &f.title, ink, row.w);
             let value = &self.settings[&f.key];
             let editing = self.editing.as_ref().filter(|(n, _)| *n == i);
-            let shown = editing.map_or_else(|| if value.is_null() { "Automatic".into() } else { f.shown(value) }, |(_, s)| format!("{s}▏"));
+            let shown = if let Kind::Spatial{key,crop}=&f.kind {
+                let configured=self.binding(&self.descriptors[self.selected].id,key).is_some_and(|b| if *crop {b.crop.is_some()}else{b.mask.is_some()});
+                if configured {"Edit…".into()} else {"Choose…".into()}
+            } else { editing.map_or_else(|| if value.is_null() { "Automatic".into() } else { f.shown(value) }, |(_, s)| format!("{s}▏")) };
             if let Kind::Number { min, max, .. } = f.kind {
                 text(items, row.x, row.y + 15.0, 9.0, f.description.as_deref().unwrap_or(""), muted, row.w);
                 let amount = ((value.as_f64().unwrap_or(min) - min) / (max - min)).clamp(0.0, 1.0) as f32;
@@ -1947,6 +1983,10 @@ impl Panel {
                         ));
                         return true;
                     }
+                    Kind::Spatial{key,crop} => {
+                        if self.enabled.iter().take(self.selected).any(|e|*e) {self.status="Move this processor first to edit its spatial inputs".into();return true;}
+                        self.editor_request=Some((self.descriptors[self.selected].id.clone(),key.clone(),*crop));return true;
+                    }
                     Kind::Unsupported => {
                         self.status =
                             "This input type is not supported by the preview editor".into();
@@ -2043,6 +2083,7 @@ impl Panel {
                 self.progress = None;
                 self.busy_since = Instant::now();
                 worker.submit(Request {
+                    inputs:self.inputs.clone(),
                     generation: self.generation,
                     chain,
                     // The source frame under the playhead: a retimed chain
@@ -3100,6 +3141,7 @@ mod tests {
         assert!(status.success());
         let info = crate::probe::probe(&path).unwrap();
         let r = Request {
+            inputs:Default::default(),
             generation: 7,
             chain: vec![("example.buffered".into(), json!({}))],
             target: None,
@@ -3125,6 +3167,7 @@ mod tests {
         assert!(frames.windows(2).all(|f| f[1].pts > f[0].pts));
         // A budget too small for one native pair refuses, naming the config key.
         let starved = Request {
+            inputs:Default::default(),
             generation: 8,
             chain: r.chain.clone(),
             target: None,
@@ -3137,6 +3180,7 @@ mod tests {
         let err = render(&registry(), &starved, &tx, None, None).unwrap_err();
         assert!(err.contains("preview_cache_mb"), "{err}");
         let limited = Request {
+            inputs:Default::default(),
             generation: 9,
             chain: r.chain.clone(),
             target: None,
@@ -3158,6 +3202,7 @@ mod tests {
         );
         // Two buffering stages must flush in order and publish ONLY the requested frame.
         let single = Request {
+            inputs:Default::default(),
             generation: 12,
             chain: vec![
                 ("example.buffered".into(), json!({})),
@@ -3204,6 +3249,7 @@ mod tests {
         let mut guarded = Registry::default();
         guarded.register(Box::new(GuardFactory(calls.clone()))).unwrap();
         let first = Request {
+            inputs:Default::default(),
             generation: 12, chain: r.chain.clone(), target: Some(0.0),
             info: info.clone(), start: 0.0, end: None, cancel: Cancellation::default(), budget: r.budget,
         };
@@ -3416,6 +3462,7 @@ mod tests {
         let chain = vec![("example.double".to_string(), json!({}))];
         assert_eq!(chain_rate(&reg, &chain, info.fps).unwrap(), [48, 1]);
         let request = |generation, target| Request {
+            inputs:Default::default(),
             generation,
             chain: chain.clone(),
             target,

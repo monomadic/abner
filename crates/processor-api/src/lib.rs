@@ -1,5 +1,7 @@
 //! Experimental streaming CPU frame contract. No implementation dependencies.
 use serde::Serialize;
+mod spatial;
+pub use spatial::*;
 use std::collections::BTreeMap;
 use std::sync::{
     Arc,
@@ -166,6 +168,11 @@ pub trait Session {
     /// Implementations may retain this callback to report progress during work.
     fn set_progress_reporter(&mut self, _reporter: ProgressReporter) {}
     fn process(&mut self, input: Frame) -> Result<Vec<Frame>>;
+    /// Named spatial inputs accompany the unmodified primary frame. Opt in explicitly.
+    fn process_with_inputs(&mut self, input: Frame, inputs: Vec<SpatialInput>) -> Result<Vec<Frame>> {
+        if !inputs.is_empty() { return Err("Session does not accept spatial inputs".into()); }
+        self.process(input)
+    }
     fn finish(&mut self) -> Result<Vec<Frame>>;
     fn output_dimensions(&self) -> [usize; 2];
     fn cancellation(&self) -> Cancellation;
@@ -174,6 +181,8 @@ pub trait Session {
 }
 /// Factories can move to a preview worker; sessions stay on their creating thread.
 pub trait Factory: Send {
+    /// Optional controls shown by the host, independently of numeric settings.
+    fn spatial_inputs(&self) -> Vec<SpatialInputDescriptor> { Vec::new() }
     /// Declarations describe the plugin, not a guarantee of host execution support.
     fn capabilities(&self) -> Capabilities {
         Capabilities::default()

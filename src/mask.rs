@@ -16,6 +16,10 @@ pub struct Mask {
     pub pixels: Arc<Vec<u8>>,
 }
 
+impl Clone for Mask {
+    fn clone(&self)->Self {Self{id:NEXT_ID.fetch_add(1,Ordering::Relaxed),revision:self.revision,width:self.width,height:self.height,pixels:self.pixels.clone()}}
+}
+
 impl Mask {
     pub fn new(width: u32, height: u32) -> Self {
         Self {
@@ -61,7 +65,7 @@ impl Mask {
 /// The crop marquee, in image pixels — the same grid the mask uses, so a
 /// crop cuts the mask and the video frame to identical rectangles. App owns
 /// the dragging (screen space); this owns the geometry and the pixels.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Crop {
     pub x: f32,
     pub y: f32,
