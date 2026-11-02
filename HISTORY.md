@@ -3,6 +3,15 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-11-02 — Resizable Sources sidebar
+
+Drag the expanded Sources sidebar's right edge to resize it (180–480 logical
+pixels, limited to 45% of the window). The cursor indicates the resize target.
+Cards follow the width and each source's aspect ratio, showing the entire frame;
+tall thumbnails also fit the available list height. Text stays at its normal size.
+Scrolling, selection, checkboxes and Option-drag use the same card geometry.
+The chosen width lasts for the session and survives collapsing the sidebar.
+
 ## 2026-11-02 — Faster cold seeks on the timeline
 
 A cold exact seek costs one decode per frame from the previous keyframe to the target,

@@ -181,6 +181,8 @@ pub struct App {
     pub videos: Vec<Video>,
     active: usize,
     source_scroll: usize,
+    source_width: Option<f32>,
+    source_resize: Option<f32>,
     source_copy_drag: Option<(usize, f32, f32, bool)>,
     source_status: String,
     masks: Vec<Option<Mask>>,
@@ -741,6 +743,8 @@ impl App {
             videos,
             active: 0,
             source_scroll: 0,
+            source_width: None,
+            source_resize: None,
             source_copy_drag: None,
             source_status: String::new(),
             t: 0.0,
@@ -915,9 +919,18 @@ impl App {
         self.crop_drag = Some((hit, (point.0 - hx, point.1 - hy)));
     }
 
-    /// The cursor the marquee wants, or None when the pointer is not on the
-    /// canvas with the marquee up (the shell keeps the default arrow).
+    /// Shared edge hit area for starting a resize and showing its cursor.
+    fn source_resize_hit(&self, x: f32, y: f32) -> bool {
+        let l = self.workspace();
+        self.ready() && self.show_ui && !self.processors.open && !self.export_page.open
+            && self.show_sources && self.rail_slide >= 0.999 && !l.mini
+            && (x - l.rail).abs() <= 5.0 && y >= HEADER_H && y < l.transport.y
+    }
+
     pub fn crop_cursor(&self) -> Option<CropCursor> {
+        if self.source_resize.is_some() || (self.cursor_inside && self.source_resize_hit(self.cursor.0, self.cursor.1)) {
+            return Some(CropCursor::EwResize);
+        }
         if !self.ready() {
             return (self.cursor_inside && self.recent.hover.is_some()).then_some(CropCursor::Pointer);
         }
@@ -1937,15 +1950,21 @@ impl App {
     }
 
     fn reveal_source(&mut self) {
-        let capacity = self.source_capacity();
         if self.active < self.source_first() {
             self.source_scroll = self.active;
-        } else if self.active >= self.source_first() + capacity {
-            self.source_scroll = self.active + 1 - capacity;
+        }
+        while self.active >= self.source_first() + self.source_capacity() {
+            self.source_scroll += 1;
         }
     }
 
     pub fn cursor_moved(&mut self, x: f32, y: f32) {
+        if let Some(offset) = self.source_resize {
+            self.source_width = Some((x + offset).clamp(180.0, (self.vp.0 * 0.45).clamp(180.0, 480.0)));
+            self.cursor = (x, y);
+            self.cursor_inside = true;
+            return;
+        }
         if self.export_page.open { self.cursor=(x,y);self.cursor_inside=true;return; }
         if self.show_ui && self.processors.pointer(x, y, self.vp) {
             self.cursor = (x, y);
@@ -2035,6 +2054,10 @@ impl App {
     }
 
     pub fn mouse_down(&mut self, x: f32, y: f32) {
+        if self.source_resize_hit(x, y) {
+            self.source_resize = Some(self.workspace().panel - x);
+            return;
+        }
         if self.export_page.open && self.ready() {
             self.cursor = (x,y);
             if !self.show_ui {return;}
@@ -2136,6 +2159,7 @@ impl App {
     }
 
     pub fn mouse_up(&mut self) {
+        self.source_resize = None;
         if self.processors.release(){return;}
         self.source_copy_drag = None;
         if let Some(CutDrag::Band { x0, add, .. }) = self.cut_drag {
@@ -2215,7 +2239,7 @@ impl App {
         }
         if self.show_ui && contains(self.workspace().list, self.cursor.0, self.cursor.1) {
             let first = self.source_first();
-            self.source_scroll = if dy < 0.0 { (first + 1).min(self.videos.len().saturating_sub(self.source_capacity())) }
+            self.source_scroll = if dy < 0.0 { (first + 1).min(self.videos.len().saturating_sub(1)) }
                 else if dy > 0.0 { first.saturating_sub(1) } else { first };
             return;
         }
@@ -2715,7 +2739,7 @@ impl App {
         let lift = if self.show_ui && self.cut_mode {
             self.frame_detail_extra() + if self.cut_encode_rail() { 26.0 } else { 0.0 }
         } else { 0.0 };
-        Workspace::new(self.vp, self.show_ui, self.cut_mode, lift, self.rail_slide, self.side_slide, self.detail_slide)
+        Workspace::new(self.vp, self.show_ui, self.cut_mode, lift, self.rail_slide, self.side_slide, self.detail_slide, self.source_width)
     }
 
     fn cut_frame_cells(&self) -> bool {
@@ -2793,9 +2817,37 @@ impl App {
             self.cut.as_ref().is_some_and(|c| !c.pending_gops().is_empty())
     }
 
+    fn source_thumb_height(&self, index: usize) -> f32 {
+        let width = (self.workspace().panel - 32.0).max(1.0);
+        let info = &self.videos[index].info;
+        (width * info.height.max(1) as f32 / info.width.max(1) as f32)
+            .min((self.workspace().list.h - 69.0).max(1.0))
+    }
+
+    fn source_thumb(&self, index: usize) -> RectPx {
+        let r = self.source_row(index);
+        let info = &self.videos[index].info;
+        let h = self.source_thumb_height(index);
+        let w = h * info.width.max(1) as f32 / info.height.max(1) as f32;
+        RectPx { x: r.x + (r.w - w) / 2.0, y: r.y + 4.0, w, h }
+    }
+
+    fn source_pitch(&self, index: usize) -> f32 {
+        self.source_thumb_height(index) + 69.0
+    }
+
     fn source_capacity(&self) -> usize {
         let l = self.workspace();
-        (l.list.h / if l.mini { RAIL_MINI_PITCH } else { SOURCE_H }).floor().max(1.0) as usize
+        if l.mini { return (l.list.h / RAIL_MINI_PITCH).floor().max(1.0) as usize; }
+        let first = self.source_scroll.min(self.videos.len().saturating_sub(1));
+        let mut height = 0.0;
+        let mut count = 0;
+        for i in first..self.videos.len() {
+            if count > 0 && height + self.source_pitch(i) > l.list.h { break; }
+            height += self.source_pitch(i);
+            count += 1;
+        }
+        count.max(1)
     }
 
     /// The collapsed rail's keycap for the `k`th visible clip.
@@ -2805,14 +2857,14 @@ impl App {
     }
 
     fn source_first(&self) -> usize {
-        self.source_scroll.min(self.videos.len().saturating_sub(self.source_capacity()))
+        self.source_scroll.min(self.videos.len().saturating_sub(1))
     }
 
     fn source_row(&self, index: usize) -> RectPx {
         let l = self.workspace();
         if l.mini { return self.mini_row(index - self.source_first()); }
-        RectPx { x: l.list.x + 12.0, y: l.list.y + (index - self.source_first()) as f32 * SOURCE_H,
-            w: l.panel - 24.0, h: SOURCE_H - 12.0 }
+        RectPx { x: l.list.x + 12.0, y: l.list.y + (self.source_first()..index).map(|i| self.source_pitch(i)).sum::<f32>(),
+            w: l.panel - 24.0, h: self.source_pitch(index) - 12.0 }
     }
 
     fn source_drop_index(&self, y: f32) -> usize {
@@ -2833,7 +2885,7 @@ impl App {
         let r = self.source_row(index);
         RectPx {
             x: r.x + r.w - 39.0,
-            y: r.y + 81.0,
+            y: r.y + self.source_thumb_height(index) - 19.0,
             w: 20.0,
             h: 20.0,
         }
@@ -3315,7 +3367,7 @@ impl App {
     }
 
     /// Sources sidebar (Abner — Timeline Edit, 278:584): a stack of
-    /// preview cards — cover-fitted live media under a white keycap, then
+    /// preview cards — full-frame live media under a white keycap, then
     /// the filename and a two-column metadata line — ringed orange on the
     /// focused clip and on a navy surface otherwise. The hover checkbox,
     /// the shared/linked chip and the footer line are the app's batch
@@ -3382,14 +3434,13 @@ impl App {
                 ..RectItem::new(r, if active { WORKSPACE_PANEL } else { hex_color(0x000000) }) }));
             // The preview sits inside the ring AND the card's 2px padding —
             // the deliberate dark rim between ring and picture — with only
-            // its top corners rounded: the quad runs 6px past the clip so
-            // the bottom radius never shows.
-            let thumb = RectPx { x: r.x + 4.0, y: r.y + 4.0, w: r.w - 8.0, h: SOURCE_THUMB_H };
+            // rounded corners. The full UV rectangle preserves every frame.
+            let thumb = self.source_thumb(i);
             items.push(Item::Clip(Some(intersect(thumb, visible))));
-            let quad = RectPx { h: thumb.h + 6.0, ..thumb };
+            let quad = thumb;
             items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(quad, WORKSPACE_PANEL) }));
             if v.delivered {
-                items.push(Item::Video { a: i, b: i, r: quad, uv: cover_uv(&v.info, quad),
+                items.push(Item::Video { a: i, b: i, r: quad, uv: [0.0, 0.0, 1.0, 1.0],
                     mode: VideoMode::Tex, p0: 6.0, p1: 0.0 });
             }
             items.push(Item::Clip(Some(visible)));
@@ -3399,7 +3450,7 @@ impl App {
                 ..TextItem::new(badge.x + 12.0, badge.y + 12.0, 15.0, hex_color(0x000000), (i + 1).to_string()) }));
             let shared = self.videos.iter().filter(|other| other.info.path == v.info.path).count();
             if shared > 1 || v.linked_copy {
-                let chip = RectPx { x: thumb.x + 7.0, y: thumb.y + 70.0, w: (thumb.w - 48.0).min(142.0), h: 23.0 };
+                let chip = RectPx { x: thumb.x + 7.0, y: thumb.y + (thumb.h - 30.0).max(7.0), w: (thumb.w - 48.0).min(142.0), h: 23.0 };
                 items.push(Item::Rect(RectItem { radius: 5.0, ..RectItem::new(chip, hex_color(0x080d14)) }));
                 ui_label(items, chip.x + 6.0, chip.y + 11.5, 10.0, secondary,
                     if shared > 1 { format!("Shared · {shared} items") } else { "Linked copy".into() }, Align::Left, chip.w - 12.0);
@@ -3417,7 +3468,7 @@ impl App {
             }
             // Text block: 7px side padding inside the ring, 6px below the
             // preview; the name and the metadata are 18px lines.
-            let (tx, tw) = (thumb.x + 7.0, thumb.w - 14.0);
+            let (tx, tw) = (r.x + 11.0, r.w - 22.0);
             let name = format!("{}{}", name_of(&v.info.path), if v.linked_copy { " · copy" } else { "" });
             items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(tw),
                 ..TextItem::new(tx, thumb.y + thumb.h + 15.0, 13.0, ink, name) }));
@@ -6440,13 +6491,13 @@ struct Workspace {
 impl Workspace {
     /// `lift` is how far cut mode's lanes grow upward past their base
     /// height (frame detail, the encode rail); everything above moves with it.
-    fn new(vp: (f32, f32), visible: bool, cut: bool, lift: f32, slide: f32, side_slide: f32, detail_slide: f32) -> Self {
+    fn new(vp: (f32, f32), visible: bool, cut: bool, lift: f32, slide: f32, side_slide: f32, detail_slide: f32, source_width: Option<f32>) -> Self {
         let (w, h) = vp;
         let none = RectPx { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
         // `rail` is what the layout gives the panel this frame; `panel` is
         // the panel's own width, and its rects start at `rail - panel` so
         // a half-open rail is the right-hand part of a whole one.
-        let full = rail_full_width(w);
+        let full = source_width.unwrap_or_else(|| rail_full_width(w)).clamp(180.0, (w * 0.45).clamp(180.0, 480.0));
         // Cut mode under CUT_COLUMNS_MIN_W drops its right column; the
         // rail collapses to the mini strip at the same width, so the two
         // columns go together and the lanes keep their room.
@@ -6637,16 +6688,6 @@ pub(crate) fn draw_rail_grip(items: &mut Vec<Item>, grip: RectPx, panel: f32, ho
 pub(crate) fn hex_color(rgb: u32) -> [f32; 4] {
     [((rgb >> 16) & 255) as f32 / 255.0, ((rgb >> 8) & 255) as f32 / 255.0, (rgb & 255) as f32 / 255.0, 1.0]
 }
-/// The texture window that fills `r` edge to edge at the clip's own
-/// proportions (CSS `object-fit: cover`), as the renderer's uv CORNERS
-/// `[u0, v0, u1, v1]` — not an origin and size: handing it a size put v1
-/// below v0 on tall clips and drew them upside down.
-fn cover_uv(info: &crate::probe::VideoInfo, r: RectPx) -> [f32; 4] {
-    let aspect = info.width.max(1) as f32 / info.height.max(1) as f32;
-    let (uw, uh) = if aspect > r.w / r.h.max(1.0) { (r.w / r.h.max(1.0) / aspect, 1.0) } else { (1.0, aspect * r.h / r.w.max(1.0)) };
-    let (u0, v0) = ((1.0 - uw) / 2.0, (1.0 - uh) / 2.0);
-    [u0, v0, u0 + uw, v0 + uh]
-}
 fn intersect(a: RectPx, b: RectPx) -> RectPx {
     let (x0, y0) = (a.x.max(b.x), a.y.max(b.y));
     let (x1, y1) = ((a.x + a.w).min(b.x + b.w), (a.y + a.h).min(b.y + b.h));
@@ -6677,7 +6718,7 @@ pub(crate) const HEADER_H: f32 = CUT_HEADER_H;
 const CONTEXT_H: f32 = 40.0;
 /// Sources sidebar (278:584): 157px cards on a 12px gap, a 100px preview.
 const SOURCE_H: f32 = 169.0;
-const SOURCE_THUMB_H: f32 = 100.0;
+
 /// The app's rows the design leaves out: the footer line above the
 /// inspector and the Duplicate / Add files buttons under it.
 pub(crate) const RAIL_FOOTER_H: f32 = 36.0;
@@ -6732,6 +6773,33 @@ const CONTROL_BG: [f32; 4] = [26.0 / 255.0, 26.0 / 255.0, 26.0 / 255.0, 1.0];
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn source_edge_drag_resizes_cards_without_selecting_or_seeking() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 3);
+        app.tick(0.0, (1280.0, 1200.0), 2.0);
+        let before = app.source_row(0);
+        let t = app.t;
+        app.mouse_down(280.0, HEADER_H + 20.0);
+        app.cursor_moved(200.0, HEADER_H + 20.0);
+        app.mouse_up();
+        assert_eq!(app.workspace().rail, 200.0);
+        let after = app.source_row(0);
+        assert!(after.w < before.w && after.h < before.h);
+        assert_eq!((app.active, app.t), (0, t));
+        for (w, h) in [(1920, 1080), (1080, 1920), (1920, 800)] {
+            app.videos[0].info.width = w;
+            app.videos[0].info.height = h;
+            let thumb = app.source_thumb(0);
+            assert!((thumb.w / thumb.h - w as f32 / h as f32).abs() < 1e-5);
+            assert!(thumb.h + 69.0 <= app.workspace().list.h + 0.001);
+        }
+        app.mouse_down(200.0, HEADER_H + 20.0);
+        app.cursor_moved(-100.0, HEADER_H + 20.0);
+        app.mouse_up();
+        assert_eq!(app.workspace().rail, 180.0);
+    }
+
     #[test]
     fn recent_tile_lift_eases_toward_the_hovered_slot_and_settles() {
         let mut row = super::RecentRow::default();
@@ -6949,6 +7017,7 @@ mod tests {
     fn workspace_controls_select_tools_and_never_paint_the_shell() {
         let Some(clip) = test_clip() else { return };
         let mut app = mk_app(&clip, 3);
+        app.vp = (1280.0, 1200.0);
         let click = |app: &mut App, action: fn(Action) -> bool| {
             let r = app.controls().into_iter().find(|c| action(c.action)).unwrap().r;
             app.mouse_down(r.x + r.w / 2.0, r.y + r.h / 2.0);
@@ -6989,7 +7058,7 @@ mod tests {
     fn source_checkboxes_do_not_change_view_and_clear_keeps_focus() {
         let Some(clip) = test_clip() else { return };
         let mut app = mk_app(&clip, 3);
-        app.vp = (1280.0, 800.0);
+        app.vp = (1280.0, 1200.0);
         let r = app.source_checkbox(1);
         app.mouse_down(r.x + 10.0, r.y + 10.0);
         assert_eq!(app.active, 0);
@@ -7288,22 +7357,11 @@ mod tests {
         assert_eq!(app.workspace().side.x, before.side.x);
         app.set_cut_mode(false);
         let card = app.source_row(0);
-        assert_eq!((card.y, card.h), (HEADER_H + RAIL_HEAD_H + 10.0, 157.0));
-        // The preview is a cover crop in uv CORNERS: never mirrored, never
-        // stretched, centred on the picture.
-        let wide = crate::probe::VideoInfo { width: 2880, height: 720, ..app.videos[0].info.clone() };
-        let tall = crate::probe::VideoInfo { width: 720, height: 1280, ..app.videos[0].info.clone() };
-        let r = RectPx { x: 0.0, y: 0.0, w: 252.0, h: 106.0 };
-        for info in [&wide, &tall] {
-            let [u0, v0, u1, v1] = cover_uv(info, r);
-            assert!(u1 > u0 && v1 > v0, "{:?}", (u0, v0, u1, v1));
-            assert!((u0 + u1 - 1.0).abs() < 1e-6 && (v0 + v1 - 1.0).abs() < 1e-6);
-            let shown = (u1 - u0) * info.width as f32 / ((v1 - v0) * info.height as f32);
-            assert!((shown - r.w / r.h).abs() < 1e-3, "crop keeps the box's proportion: {shown}");
-        }
-        assert_eq!(cover_uv(&wide, r)[1], 0.0, "a wide clip gives up width, not height");
-        assert_eq!(cover_uv(&tall, r)[0], 0.0, "a tall clip gives up height, not width");
-        assert_eq!(app.source_row(1).y - card.y, SOURCE_H);
+        assert_eq!((card.y, card.h), (HEADER_H + RAIL_HEAD_H + 10.0, app.source_pitch(0) - 12.0));
+        let thumb_h = app.source_thumb_height(0);
+        let info = &app.videos[0].info;
+        assert!(((card.w - 8.0) / thumb_h - info.width as f32 / info.height as f32).abs() < 1e-5);
+        assert_eq!(app.source_row(1).y - card.y, app.source_pitch(0));
     }
 
     #[test]
@@ -8980,11 +9038,11 @@ mod tests {
         for destination in [0, 1, 3] {
             let mut app = mk_app(&clip, 3);
             app.playing = false;
-            app.tick(0.0, (1280.0, 1000.0), 2.0);
+            app.tick(0.0, (1280.0, 1400.0), 2.0);
             let from = app.source_row(1);
             let x = from.x + from.w / 2.0;
             let y = if destination == 3 {
-                app.source_row(2).y + SOURCE_H + 10.0
+                app.source_row(2).y + app.source_pitch(2) + 10.0
             } else { app.source_row(destination).y + 10.0 };
             assert!(contains(app.workspace().list, x, y));
             app.mouse_down_with_alt(x, from.y + 40.0, true);
