@@ -8,7 +8,7 @@ use crate::{
         SOURCE_SUBTLE, SOURCE_SURFACE, WORKSPACE_DIM, WORKSPACE_MUTED,
         WORKSPACE_PANEL, WORKSPACE_RULE, WORKSPACE_TEXT, draw_cut_footer_button,
         draw_icon, draw_rail_grip, footer_export_rect, hex_color, mix, rail_full_width,
-        status_build_width, ui_label,
+        status_build_width, ui_label, fmt_time, TRACK, FRAME_INK,
     },
     player::{Player, Rgba},
     probe::VideoInfo,
@@ -29,7 +29,6 @@ use std::{
 /// `processors.preview_cache_mb`'s default, for a `Panel` nobody configured.
 pub const DEFAULT_PREVIEW_BYTES: usize = 1024 * 1024 * 1024;
 const FRAMES: usize = 24;
-const INK: [f32; 4] = [0.8, 0.8, 0.8, 1.0];
 const DIM: [f32; 4] = [0.43, 0.43, 0.43, 1.0];
 const BLUE: [f32; 4] = [0.04, 0.33, 0.7, 1.0];
 /// Compact processor rows (Figma rail): 30px rows on a 3px gap, inside a
@@ -2419,14 +2418,11 @@ impl Panel {
         self.draw_progress(items, vp);
         self.draw_transport(items, vp);
         let t = Self::timeline(vp);
-        items.push(Item::Rect(RectItem::new(
-            RectPx {
-                y: t.y + 12.0,
-                h: 4.0,
-                ..t
-            },
-            hex_color(0x0a0a0a),
-        )));
+        let track = RectPx { y: t.y + 12.0, h: 4.0, ..t };
+        items.push(Item::Rect(RectItem { radius: 2.0, ..RectItem::new(track, TRACK) }));
+        let fraction = (self.time / self.duration.max(0.001)).clamp(0.0, 1.0) as f32;
+        items.push(Item::Rect(RectItem { radius: 2.0,
+            ..RectItem::new(RectPx { w: track.w * fraction, ..track }, ACCENT) }));
         let at = |pts: f64| t.x + t.w * (pts / self.duration.max(0.001)).clamp(0.0, 1.0) as f32;
         for f in &self.frames {
             let x = at(f.pts);
@@ -2460,31 +2456,14 @@ impl Panel {
                 [amber[0], amber[1], amber[2], pulse],
             )));
         }
-        let x = t.x + t.w * (self.time / self.duration.max(0.001)).clamp(0.0, 1.0) as f32;
-        items.push(Item::Rect(RectItem::new(
-            RectPx {
-                x,
-                y: t.y + 1.0,
-                w: 2.0,
-                h: 26.0,
-            },
-            INK,
-        )));
-        text(
-            items,
-            t.x,
-            t.y + 32.0,
-            11.0,
-            &format!(
-                "{:.3}s / {:.3}s · {} rendered frames{}",
-                self.time,
-                self.duration,
-                self.frames.len(),
-                if self.retimed { format!(" · stepping at {} fps", fps_label(self.rate)) } else { String::new() }
-            ),
-            hex_color(0xa4a7ad),
-            t.w,
-        );
+        let x = at(self.time);
+        items.push(Item::Rect(RectItem { radius: 6.0,
+            ..RectItem::new(RectPx { x: x - 6.0, y: track.y - 4.0, w: 12.0, h: 12.0 }, ACCENT) }));
+        ui_label(items, t.x, t.y + 37.0, 11.0, WORKSPACE_TEXT,
+            format!("{} / {}", fmt_time(self.time), fmt_time(self.duration)), Align::Left, t.w * 0.55);
+        ui_label(items, t.x + t.w, t.y + 37.0, 10.0, WORKSPACE_DIM,
+            format!("frame {} · {} rendered", (self.time * self.rate).round() as i64, self.frames.len()),
+            Align::Right, t.w * 0.45);
         self.draw_footer(items, vp);
         self.draw_settings(items, vp);
     }
@@ -2661,7 +2640,11 @@ impl Panel {
             // Bare glyphs, as the reference draws them: no box, the hover
             // lifts the ink to white and names the control beneath.
             let hover = hit(b, self.cursor.0, self.cursor.1);
-            let ink = hex_color(if hover { 0xffffff } else { 0xc6c6c6 });
+            let ink = if i == 2 { FRAME_INK } else if hover { hex_color(0xffffff) } else { WORKSPACE_DIM };
+            if i == 2 {
+                let circle = RectPx { x: b.x + (b.w - 32.0) / 2.0, y: b.y - 1.0, w: 32.0, h: 32.0 };
+                items.push(Item::Rect(RectItem { radius: 16.0, ..RectItem::new(circle, ACCENT) }));
+            }
             let (cx, cy) = (b.x + b.w / 2.0, b.y + b.h / 2.0);
             match i {
                 0 => draw_icon(items, Icon::KeyBack, cx, cy, ink),

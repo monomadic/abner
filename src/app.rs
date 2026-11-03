@@ -9660,9 +9660,9 @@ const PLAYHEAD_GRAB: f32 = 8.0;
 /// Frame background / ink on the accent (#050506). Opaque: the window
 /// no longer lets the desktop through.
 const FRAME_BG: [f32; 4] = [0.0196, 0.0196, 0.0235, 1.0];
-const FRAME_INK: [f32; 4] = [0.0196, 0.0196, 0.0235, 1.0];
+pub(crate) const FRAME_INK: [f32; 4] = [0.0196, 0.0196, 0.0235, 1.0];
 const ERR: [f32; 4] = [1.0, 0.35, 0.3, 1.0];
-const TRACK: [f32; 4] = [1.0, 1.0, 1.0, 0.14];
+pub(crate) const TRACK: [f32; 4] = [1.0, 1.0, 1.0, 0.14];
 const MASK_RED: [f32; 4] = [0.906, 0.106, 0.141, 1.0];
 
 // Launch window — the design system's `Splash` surface.
@@ -9867,7 +9867,7 @@ fn name_of(path: &std::path::Path) -> String {
     path.file_name().unwrap_or_default().to_string_lossy().into_owned()
 }
 
-fn fmt_time(t: f64) -> String {
+pub(crate) fn fmt_time(t: f64) -> String {
     let t = t.max(0.0);
     let m = (t / 60.0) as u64;
     format!("{m:02}:{:06.3}", t - m as f64 * 60.0)

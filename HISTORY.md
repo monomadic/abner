@@ -3,6 +3,13 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-11-03 — Process transport styling
+
+Process uses the regular transport's rounded track, blue played portion, round
+playhead, blue Play/Pause button, and formatted time readout. Rendered-frame marks
+and the amber in-progress frame indicator remain on the seek bar; the output frame
+number and rendered count appear below it. Existing navigation and scrubbing stay intact.
+
 ## 2026-11-02 — Resizable Sources sidebar
 
 Drag the expanded Sources sidebar's right edge to resize it (180–480 logical
