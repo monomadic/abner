@@ -609,8 +609,124 @@ fn box_bytes(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
     out.extend(data);
     out
 }
-fn add_mp4_chapters(path: &Path, chapters: &[(f64, f64, String)]) -> Result<()> {
-    use std::io::{Seek, SeekFrom, Write};
+/// Top-level boxes of an in-memory box payload: (kind, header + body).
+fn child_boxes(data: &[u8]) -> Result<Vec<([u8; 4], &[u8])>> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < data.len() {
+        ensure!(data.len() - at >= 8, "truncated MP4 box");
+        let mut size = u32::from_be_bytes(data[at..at + 4].try_into()?) as usize;
+        if size == 1 {
+            ensure!(data.len() - at >= 16, "truncated MP4 box");
+            size = u64::from_be_bytes(data[at + 8..at + 16].try_into()?) as usize;
+        } else if size == 0 {
+            size = data.len() - at;
+        }
+        ensure!(size >= 8 && at + size <= data.len(), "malformed MP4 box");
+        out.push((data[at + 4..at + 8].try_into()?, &data[at..at + size]));
+        at += size;
+    }
+    Ok(out)
+}
+fn full_box(kind: &[u8; 4], version: u8, flags: u32, data: &[u8]) -> Vec<u8> {
+    let mut body = ((version as u32) << 24 | flags).to_be_bytes().to_vec();
+    body.extend(data);
+    box_bytes(kind, &body)
+}
+/// The QuickTime chapter track Apple's players read (a disabled `text`
+/// track the video and audio tracks name through `tref/chap`), one sample a
+/// chapter, at movie timescale `movie_ts`. Samples live in their own `mdat`
+/// at `offset`, which the caller writes. Returns (trak, mdat).
+fn chapter_trak(chapters: &[(f64, f64, String)], id: u32, movie_ts: u32, offset: u64) -> Result<(Vec<u8>, Vec<u8>)> {
+    let ms = |t: f64| (t.max(0.) * 1000.).round() as u64;
+    let mut samples = Vec::new();
+    let mut sizes = Vec::new();
+    let mut durations: Vec<u32> = Vec::new();
+    for (a, b, title) in chapters {
+        ensure!(title.len() <= 65535, "chapter title too long");
+        let d = ms(*b).saturating_sub(ms(*a));
+        ensure!(d > 0, "zero-length chapter");
+        let mut sample = (title.len() as u16).to_be_bytes().to_vec();
+        sample.extend(title.as_bytes());
+        // QuickTime text defaults to Mac Roman; `encd` 0x100 says UTF-8.
+        sample.extend(box_bytes(b"encd", &0x100u32.to_be_bytes()));
+        sizes.push(sample.len() as u32);
+        durations.push(u32::try_from(d)?);
+        samples.extend(sample);
+    }
+    let lead = ms(chapters[0].0);
+    let media: u64 = durations.iter().map(|&d| d as u64).sum();
+    let movie = |ms: u64| ms * movie_ts as u64 / 1000;
+    let duration = movie(lead + media);
+    let mut tkhd = vec![0; 8];
+    tkhd.extend(id.to_be_bytes());
+    tkhd.extend([0; 4]);
+    tkhd.extend(u32::try_from(duration)?.to_be_bytes());
+    tkhd.extend([0; 16]); // reserved, layer, group, volume, reserved
+    for v in [0x10000u32, 0, 0, 0, 0x10000, 0, 0, 0, 0x4000_0000] {
+        tkhd.extend(v.to_be_bytes());
+    }
+    tkhd.extend([0; 8]); // width, height
+    let mut trak = full_box(b"tkhd", 0, 2, &tkhd); // in movie, not enabled
+    if lead > 0 {
+        // An empty edit holds the first chapter at its own start.
+        let mut elst = 2u32.to_be_bytes().to_vec();
+        elst.extend(u32::try_from(movie(lead))?.to_be_bytes());
+        elst.extend((-1i32).to_be_bytes());
+        elst.extend(0x10000u32.to_be_bytes());
+        elst.extend(u32::try_from(movie(media))?.to_be_bytes());
+        elst.extend(0u32.to_be_bytes());
+        elst.extend(0x10000u32.to_be_bytes());
+        trak.extend(box_bytes(b"edts", &full_box(b"elst", 0, 0, &elst)));
+    }
+    let mut mdhd = vec![0; 8];
+    mdhd.extend(1000u32.to_be_bytes());
+    mdhd.extend(u32::try_from(media)?.to_be_bytes());
+    mdhd.extend([0x55, 0xc4, 0, 0]); // und
+    let mut hdlr = b"mhlrtext".to_vec();
+    hdlr.extend([0; 12]);
+    hdlr.extend(b"\x08Chapters");
+    let mut gmin = 0x40u16.to_be_bytes().to_vec();
+    gmin.extend([0x80, 0, 0x80, 0, 0x80, 0, 0, 0, 0, 0]);
+    let mut text = Vec::new();
+    for v in [0x10000u32, 0, 0, 0, 0x10000, 0, 0, 0, 0x4000_0000] {
+        text.extend(v.to_be_bytes());
+    }
+    let gmhd = box_bytes(b"gmhd", &[full_box(b"gmin", 0, 0, &gmin), box_bytes(b"text", &text)].concat());
+    let dref = full_box(b"dref", 0, 0, &[1u32.to_be_bytes().to_vec(), full_box(b"url ", 0, 1, &[])].concat());
+    // QuickTime TextSampleEntry: reserved, data ref 1, then display flags,
+    // justification, colours, box, font: all zero/default.
+    let mut entry = vec![0, 0, 0, 0, 0, 0, 0, 1];
+    entry.extend([0; 43]);
+    entry.push(0); // empty font name
+    let stsd = full_box(b"stsd", 0, 0, &[1u32.to_be_bytes().to_vec(), box_bytes(b"text", &entry)].concat());
+    let mut stts = (durations.len() as u32).to_be_bytes().to_vec();
+    for d in &durations {
+        stts.extend(1u32.to_be_bytes());
+        stts.extend(d.to_be_bytes());
+    }
+    let stsc = [1u32, 1, durations.len() as u32, 1].iter().flat_map(|v| v.to_be_bytes()).collect::<Vec<_>>();
+    let mut stsz = [0u32, sizes.len() as u32].iter().flat_map(|v| v.to_be_bytes()).collect::<Vec<_>>();
+    stsz.extend(sizes.iter().flat_map(|v| v.to_be_bytes()));
+    let data = offset + 8;
+    let co = match u32::try_from(data) {
+        Ok(o) => full_box(b"stco", 0, 0, &[1u32.to_be_bytes(), o.to_be_bytes()].concat()),
+        Err(_) => full_box(b"co64", 0, 0, &[1u32.to_be_bytes().to_vec(), data.to_be_bytes().to_vec()].concat()),
+    };
+    let stbl = box_bytes(b"stbl", &[stsd, full_box(b"stts", 0, 0, &stts), full_box(b"stsc", 0, 0, &stsc),
+        full_box(b"stsz", 0, 0, &stsz), co].concat());
+    let minf = box_bytes(b"minf", &[gmhd, box_bytes(b"dinf", &dref), stbl].concat());
+    let mdia = box_bytes(b"mdia", &[full_box(b"mdhd", 0, 0, &mdhd), full_box(b"hdlr", 0, 0, &hdlr), minf].concat());
+    trak.extend(mdia);
+    ensure!(samples.len() + 8 <= u32::MAX as usize, "chapter samples too large");
+    Ok((box_bytes(b"trak", &trak), box_bytes(b"mdat", &samples)))
+}
+/// Chapters for an MP4/MOV the muxer just finished (`moov` last in the
+/// file): a Nero `chpl` list, which VLC/mpv read, and, with `qt_track`, the
+/// QuickTime chapter track Apple's players read. `moov` is rebuilt in place
+/// with the chapter samples in an `mdat` ahead of it; nothing before it moves.
+fn add_mp4_chapters(path: &Path, chapters: &[(f64, f64, String)], qt_track: bool) -> Result<()> {
+    use std::io::{Read, Seek, SeekFrom, Write};
     if chapters.is_empty() {
         return Ok(());
     }
@@ -627,20 +743,80 @@ fn add_mp4_chapters(path: &Path, chapters: &[(f64, f64, String)]) -> Result<()> 
         payload.push(title.len() as u8);
         payload.extend(title.as_bytes());
     }
-    let bytes = box_bytes(b"udta", &box_bytes(b"chpl", &payload));
+    let chpl = box_bytes(b"chpl", &payload);
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(path)?;
     let end = file.seek(SeekFrom::End(0))?;
-    let size = end - f.moov_offset + bytes.len() as u64;
-    ensure!(
-        size < u32::MAX as u64,
-        "chapter metadata exceeds MP4 box size"
-    );
-    file.write_all(&bytes)?;
+    let mut moov = vec![0; usize::try_from(end - f.moov_offset)?];
     file.seek(SeekFrom::Start(f.moov_offset))?;
-    file.write_all(&(size as u32).to_be_bytes())?;
+    file.read_exact(&mut moov)?;
+    let boxes = child_boxes(&moov)?;
+    ensure!(boxes.len() == 1 && &boxes[0].0 == b"moov", "moov must end the file");
+    let children = child_boxes(&boxes[0].1[8..])?;
+    let mvhd = children.iter().find(|(k, _)| k == b"mvhd").context("missing mvhd")?.1;
+    let movie_ts = u32::from_be_bytes(mvhd[if mvhd[8] == 1 { 28..32 } else { 20..24 }].try_into()?);
+    let id = u32::from_be_bytes(mvhd[mvhd.len() - 4..].try_into()?).max(f.tracks.iter().map(|t| t.id + 1).max().unwrap_or(1));
+    let referring: Vec<u32> = f.tracks.iter()
+        .filter(|t| matches!(t.kind, mp4::TrackKind::Video | mp4::TrackKind::Audio))
+        .map(|t| t.id).collect();
+    let (trak, mdat) = if qt_track {
+        let (trak, mdat) = chapter_trak(chapters, id, movie_ts, f.moov_offset)?;
+        (Some(trak), mdat)
+    } else { (None, Vec::new()) };
+    let mut body = Vec::new();
+    let mut udta = false;
+    for (kind, b) in &children {
+        match kind {
+            b"mvhd" if trak.is_some() => {
+                let mut b = b.to_vec();
+                let n = b.len();
+                b[n - 4..].copy_from_slice(&(id + 1).to_be_bytes());
+                body.extend(b);
+            }
+            b"trak" if trak.is_some() => {
+                let parts = child_boxes(&b[8..])?;
+                let tkhd = parts.iter().find(|(k, _)| k == b"tkhd").context("missing tkhd")?.1;
+                let p = if tkhd[8] == 1 { 28 } else { 20 };
+                let tid = u32::from_be_bytes(tkhd[p..p + 4].try_into()?);
+                if !referring.contains(&tid) {
+                    body.extend(*b);
+                    continue;
+                }
+                let chap = box_bytes(b"chap", &id.to_be_bytes());
+                let mut inner = Vec::new();
+                let mut has_tref = false;
+                for (k, part) in &parts {
+                    if k == b"tref" {
+                        has_tref = true;
+                        inner.extend(box_bytes(b"tref", &[&part[8..], &chap[..]].concat()));
+                    } else {
+                        inner.extend(*part);
+                    }
+                    if k == b"tkhd" && !parts.iter().any(|(k, _)| k == b"tref") {
+                        inner.extend(box_bytes(b"tref", &chap));
+                        has_tref = true;
+                    }
+                }
+                ensure!(has_tref, "chapter reference not placed");
+                body.extend(box_bytes(b"trak", &inner));
+            }
+            b"udta" if !udta => {
+                udta = true;
+                body.extend(box_bytes(b"udta", &[&b[8..], &chpl[..]].concat()));
+            }
+            _ => body.extend(*b),
+        }
+    }
+    if let Some(trak) = trak { body.extend(trak); }
+    if !udta { body.extend(box_bytes(b"udta", &chpl)); }
+    ensure!(body.len() + 8 < u32::MAX as usize, "chapter metadata exceeds MP4 box size");
+    file.seek(SeekFrom::Start(f.moov_offset))?;
+    file.write_all(&mdat)?;
+    file.write_all(&box_bytes(b"moov", &body))?;
+    let len = file.stream_position()?;
+    file.set_len(len)?;
     Ok(())
 }
 fn write_packet<W: std::io::Write + std::io::Seek>(
@@ -1297,10 +1473,12 @@ pub(crate) fn export_with_cancel(
     if copy {
         carry_transform(&input, &temp.0)?;
     }
-    add_mp4_chapters(&temp.0, chapters)?;
-    if dest
+    let mkv = dest
         .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("mkv") || e.eq_ignore_ascii_case("webm"))
+        .is_some_and(|e| e.eq_ignore_ascii_case("mkv") || e.eq_ignore_ascii_case("webm"));
+    // The Matroska remux writes its own Chapters and copies every track.
+    add_mp4_chapters(&temp.0, chapters, !mkv)?;
+    if mkv
     {
         remux_mkv(&temp.0, dest, chapters)?;
     } else {
@@ -1755,7 +1933,7 @@ pub(crate) fn smart(
             )
         })
         .collect();
-    add_mp4_chapters(&temp.0, &chapters)?;
+    add_mp4_chapters(&temp.0, &chapters, false)?;
     let result = Input::open(&temp.0)?;
     let out = &result.tracks[result.video()?];
     let mut rendered: Vec<_> = out.samples.iter().map(|s| s.pts).collect();
@@ -1915,6 +2093,14 @@ mod tests {
         );
         let meta = crate::media_metadata::timeline(&encoded).unwrap().unwrap();
         assert_eq!(meta.chapters, vec![(0., "Kept ✓".into())]);
+        // Apple reads a `tref/chap` text track, not the Nero list.
+        let src = crate::fc::reader(&encoded).unwrap();
+        let f = mp4::open(&src).unwrap();
+        let chap = f.tracks.iter().flat_map(|t| &t.references)
+            .find(|(k, _)| k.0 == *b"chap").map(|(_, ids)| ids[0]).expect("chapter reference");
+        let track = f.tracks.iter().find(|t| t.id == chap).unwrap();
+        assert_eq!(track.entries[0].format.0, *b"text");
+        assert_eq!(track.samples.len(), 1);
         let crop = dir.0.join("crop.mov");
         export(
             &source,
@@ -2662,11 +2848,11 @@ pub(crate) fn pipeline_export_with_inputs(
     })?;
     cancel.check().map_err(anyhow::Error::msg)?;
     mux.finish()?;
-    add_mp4_chapters(&temp.0, chapters)?;
-    if dest
+    let mkv = dest
         .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("mkv"))
-    {
+        .is_some_and(|e| e.eq_ignore_ascii_case("mkv"));
+    add_mp4_chapters(&temp.0, chapters, !mkv)?;
+    if mkv {
         let remuxed = pending(dest)?;
         remux_mkv(&temp.0, &remuxed.0, chapters)?;
         cancel.check().map_err(anyhow::Error::msg)?;
