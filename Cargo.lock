@@ -30,6 +30,7 @@ dependencies = [
  "bytemuck",
  "cc",
  "env_logger",
+ "fastmkv",
  "filmcraft-aac",
  "filmcraft-av1",
  "filmcraft-avi",
@@ -685,6 +686,11 @@ name = "extended"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af9673d8203fcb076b19dfd17e38b3d4ae9f44959416ea532ce72415a6020365"
+
+[[package]]
+name = "fastmkv"
+version = "0.1.0"
+source = "git+https://github.com/monomadic/fastmkv?rev=dbcd85c93e14ad5f4ff679473e5f5efb065f44fc#dbcd85c93e14ad5f4ff679473e5f5efb065f44fc"
 
 [[package]]
 name = "fax"

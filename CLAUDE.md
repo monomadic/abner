@@ -444,8 +444,11 @@ the "VIDEO QUALITY TESTING TOOLKIT" line that used to be a second text run.
   Native export, text subtitle extraction and decoded-frame inspection live in `src/media_io.rs`;
   see `docs/NATIVE-MEDIA.md` for supported containers/codecs and preservation limits.
   Timeline packet/chapter/stream metadata is native too; AVI/MXF/MPEG/Y4M/APV adapters
-  live in `src/media_packets.rs`. There is no production FFmpeg/FFprobe process. The only other non-obvious dependency is
-  `png`, for the wordmark texture.
+  live in `src/media_packets.rs`. There is no production FFmpeg/FFprobe process. The other non-obvious dependencies are
+  `png`, for the wordmark texture, and `fastmkv` (git-pinned, the user's own crate), which
+  writes Matroska exports' tags and display rotation after the mux and reads Matroska
+  sources' tags. Exports read subtitles and tags once from the ORIGINAL source
+  (`subtitle_tracks`, `source_meta`) whatever the video goes through.
 - **`./packaging/build-app.sh [--open|--install]` builds `Abner.app`** — switchblade's
   recipe: release build, `assets/app-icon.png` → `AppIcon.icns`, `Info.plist.in` with
   version + a NUMERIC build stamp (`CFBundleVersion` = UTC `YYYYMMDD.HHMMSS`; the git

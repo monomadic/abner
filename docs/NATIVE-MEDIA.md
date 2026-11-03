@@ -11,6 +11,7 @@ Abner pins Filmcraft to `3be5ba26da4578cc973eb8f0ab070df1bda9a1f6`.
 | Crop export | Upright display pixels → ProRes 422 Proxy + PCM 16-bit at 48 kHz, retaining source picture durations |
 | Selective GOP render | 8-bit H.264 4:2:0; untouched coded slices and auxiliary streams copied, edited intervals independently encoded |
 | Subtitle lane | First subtitle track: MP4 tx3g/text/wvtt; Matroska SubRip, ASS/SSA, WebVTT; plain text, Unicode and timings |
+| Subtitle export | Every text track, cut to the kept ranges (a cue a cut crosses is shortened), on every export path; see below |
 | Frame inspection | Actual decoder output timestamps; H.264/HEVC/VP9 picture types, intra-only codec types; independent container key flags |
 
 Frame cut export retains the previous CFR behavior. Crop and selective rendering
@@ -22,17 +23,31 @@ Encoder CRF values and pixel scaling are not an x264/FFmpeg quality-parity promi
 Rendering currently uses the same SDR Rec.709/untagged color boundary as previews;
 stream copies preserve coded color without converting it.
 
-Native output containers are MP4/M4V, MOV and MKV for mapped codecs. The current
-Matroska muxer cannot carry an MP4 display transform: rotated copies require MP4/MOV.
+Native output containers are MP4/M4V, MOV and MKV for mapped codecs. A quarter-turn
+MP4 display matrix becomes the Matroska video track's projection roll (written by
+fastmkv after the mux); any other transform has no Matroska equivalent and fails.
 WebM output requires WebM-compatible codecs; H.264/AAC output must use MP4/MOV/MKV.
 Unsupported container/codec mappings fail without launching a helper or publishing
 an incomplete output. Multi-description MP4 tracks currently fail explicitly.
 Bitmap subtitles are not converted into text. Picture types without a parser remain
 `?`; a partial I/P-copy decision requires complete, decoded, known I/P metadata.
 
-Source text metadata and MP4 sample-entry descriptions are carried when copying;
-chapter titles use native Nero MP4 chapter boxes or Matroska Chapters. Chapter titles
-in MP4 are limited to 255 UTF-8 bytes and 255 entries. These are not archival remux
+Subtitles are read once from the original source, whatever the video goes through.
+MP4/MOV text tracks pass to MP4/MOV verbatim (gaps re-filled with empty samples);
+Matroska SubRip/ASS/WebVTT pass to Matroska verbatim, codec private included. Across
+containers the text is converted: Matroska → `tx3g` and MP4 → SubRip, as plain text,
+so styling (italics, ASS positioning) is lost. WebM output drops subtitle tracks with
+a log line. Bitmap subtitles are not exported.
+
+Global tags are carried on every export path: within a container every tag passes as
+it was (the encoder tag excepted); across containers the common ones (title, artist,
+comment, description, date, album, genre, composer, copyright, location) are mapped.
+MP4 outputs get an iTunes `meta/ilst`, which Apple reads; MOV keeps QuickTime `udta`
+atoms; Matroska gets `Info\Title` from the muxer and `Tags` through fastmkv.
+
+Chapter titles use Nero MP4 chapter boxes plus a QuickTime chapter track (what Apple
+reads) in MP4/MOV, or Matroska Chapters. Chapter titles in MP4 are limited to 255
+UTF-8 bytes and 255 entries. These are not archival remux
 preservation guarantees: arbitrary attachments, unknown boxes, packet side data,
 container-specific track metadata and multiple edit-list programs are not promised.
 
@@ -93,8 +108,9 @@ conversion. The header indicator accounts for all enabled stages and saved crops
 HEVC uses macOS VideoToolbox at 35 Mb/s; ProRes
 uses native ProRes 422 Standard. HEVC supports MP4 and MKV; choosing ProRes selects
 MKV and disables MP4. In processed exports, audio is encoded to AAC-LC at 48 kHz / 192 kb/s with the kept
-ranges' timing. This path does not carry subtitles, chapters, attachments or arbitrary
-source metadata. Unprocessed exports retain the existing packet-copy preservation limits.
+ranges' timing. Subtitles, chapters and global tags are carried as described above;
+attachments and other source metadata are not. Unprocessed exports retain the existing
+packet-copy preservation limits.
 
 The pixel-processing path is explicitly SDR and constant-rate: native RGBA8
 decode is expanded to the processor API's RGB16, then encoded from RGBA8 output.

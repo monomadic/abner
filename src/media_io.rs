@@ -293,6 +293,123 @@ fn plain(text: &str, ass: bool) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
+/// Global tags as each container names them: MP4 `ilst` atom, QuickTime
+/// `mdta` key, Matroska tag. Only these cross between containers; within one
+/// container every tag passes as it was.
+const TAG_MAP: &[(&str, &str, &str)] = &[
+    ("©nam", "com.apple.quicktime.title", "TITLE"),
+    ("©ART", "com.apple.quicktime.artist", "ARTIST"),
+    ("©cmt", "com.apple.quicktime.comment", "COMMENT"),
+    ("desc", "com.apple.quicktime.description", "DESCRIPTION"),
+    ("©day", "com.apple.quicktime.creationdate", "DATE_RECORDED"),
+    ("©alb", "com.apple.quicktime.album", "ALBUM"),
+    ("©gen", "com.apple.quicktime.genre", "GENRE"),
+    ("©wrt", "com.apple.quicktime.composer", "COMPOSER"),
+    ("cprt", "com.apple.quicktime.copyright", "COPYRIGHT"),
+    ("©xyz", "com.apple.quicktime.location.ISO6709", "RECORDING_LOCATION"),
+];
+/// The source's global metadata, ready for either output container. The
+/// encoder tag is not carried: this export is not the source's encoder.
+#[derive(Default)]
+pub(crate) struct SourceMeta {
+    mp4: Vec<(String, String)>,
+    mkv: Vec<(String, String)>,
+    title: Option<String>,
+}
+fn source_meta(input: &Input, path: &Path) -> SourceMeta {
+    match &input.container {
+        Container::Mp4(f) => {
+            let mp4: Vec<_> = f.metadata.entries.iter().filter(|(k, _)| k != "©too").cloned().collect();
+            let mut mkv: Vec<(String, String)> = Vec::new();
+            for (k, v) in &mp4 {
+                if let Some((_, _, name)) = TAG_MAP.iter().find(|(a, b, _)| a == k || b == k) {
+                    if !mkv.iter().any(|(n, _)| n == name) { mkv.push((name.to_string(), v.clone())); }
+                }
+            }
+            SourceMeta { title: f.metadata.title().map(str::to_owned), mp4, mkv }
+        }
+        Container::Mkv(_) => {
+            let file = match fastmkv::open(path) {
+                Ok(f) => f,
+                Err(e) => { log::warn!("{}: Matroska tags not read: {e}", path.display()); return SourceMeta::default() }
+            };
+            let mkv: Vec<(String, String)> = file.global()
+                .filter(|(n, _)| *n != "ENCODER")
+                .map(|(n, v)| (n.to_owned(), v.to_owned())).collect();
+            let title = file.title().or_else(|| mkv.iter().find(|(n, _)| n == "TITLE").map(|(_, v)| v.clone()));
+            let mut mp4: Vec<(String, String)> = mkv.iter().filter_map(|(n, v)| {
+                TAG_MAP.iter().find(|(_, _, m)| m == n).map(|(a, _, _)| (a.to_string(), v.clone()))
+            }).collect();
+            if let Some(t) = &title {
+                if !mp4.iter().any(|(k, _)| k == "©nam") { mp4.push(("©nam".into(), t.clone())); }
+            }
+            SourceMeta { mp4, mkv, title }
+        }
+    }
+}
+/// Tags and display rotation onto a finished Matroska file, through
+/// fastmkv so the clusters stay as the muxer wrote them. A rotation that
+/// cannot be written fails the export (the picture would show unrotated);
+/// a tag that cannot is logged. Returns a replacement file when the
+/// headers had to be re-seated to make room.
+fn finish_mkv(path: &Path, dest: &Path, meta: &SourceMeta, rotation: Option<(u64, f64)>) -> Result<Option<Pending>> {
+    if meta.mkv.is_empty() && rotation.is_none() {
+        return Ok(None);
+    }
+    let mut file = fastmkv::open(path)?;
+    for (name, value) in &meta.mkv {
+        if let Err(e) = file.set(name, value) {
+            log::warn!("Matroska tag {name} not written: {e}");
+        }
+    }
+    if let Some((track, degrees)) = rotation {
+        file.set_rotation(track, Some(degrees))?;
+    }
+    match file.plan() {
+        Ok(plan) => { plan.apply()?; Ok(None) }
+        Err(e) if e.kind() == Some(fastmkv::Kind::NeedsReseat) => {
+            let seated = pending(dest)?;
+            std::fs::remove_file(&seated.0)?;
+            file.reseat(&seated.0, fastmkv::Padding::default())?;
+            Ok(Some(seated))
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+/// A subtitle packet's text and whether it is ASS markup; `None` for a
+/// format with no text reading (bitmap subtitles, unknown entries).
+fn cue_text(input: &Input, ti: usize, bytes: &[u8]) -> Result<Option<(String, bool)>> {
+    Ok(Some(match &input.container {
+        Container::Mkv(f) => {
+            use filmcraft_matroska::Codec;
+            match &f.tracks[ti].codec {
+                Codec::SubRip => (String::from_utf8_lossy(bytes).into_owned(), false),
+                Codec::WebVtt => {
+                    let text = String::from_utf8_lossy(bytes);
+                    (text.splitn(3, '\n').nth(2).unwrap_or(&text).to_owned(), false)
+                }
+                Codec::Ass { .. } => (
+                    String::from_utf8_lossy(bytes).splitn(9, ',').nth(8).unwrap_or("").to_owned(),
+                    true,
+                ),
+                _ => return Ok(None),
+            }
+        }
+        Container::Mp4(_) => {
+            let format = input.tracks[ti].entry.as_ref().map(|e| e.format.0).unwrap_or([0; 4]);
+            match &format {
+                b"tx3g" | b"text" => {
+                    let Some(n) = bytes.get(..2) else { return Ok(Some((String::new(), false))) };
+                    let n = u16::from_be_bytes([n[0], n[1]]) as usize;
+                    let text = bytes.get(2..2 + n).context("truncated subtitle sample")?;
+                    (decode_text(text), false)
+                }
+                b"wvtt" => (vtt_payload(bytes)?, false),
+                _ => return Ok(None),
+            }
+        }
+    }))
+}
 pub(crate) fn cues(path: &Path) -> Result<Vec<Cue>> {
     let input = Input::open(path)?;
     let Some(ti) = input.tracks.iter().position(|t| t.kind == Kind::Subtitle) else {
@@ -302,43 +419,7 @@ pub(crate) fn cues(path: &Path) -> Result<Vec<Cue>> {
     let mut out = Vec::new();
     for (i, s) in t.samples.iter().enumerate() {
         let bytes = input.data(ti, i)?;
-        let (text, ass) = match &input.container {
-            Container::Mkv(f) => {
-                use filmcraft_matroska::Codec;
-                match &f.tracks[ti].codec {
-                    Codec::SubRip => (String::from_utf8_lossy(&bytes).into_owned(), false),
-                    Codec::WebVtt => {
-                        let text = String::from_utf8_lossy(&bytes);
-                        (
-                            text.splitn(3, '\n').nth(2).unwrap_or(&text).to_owned(),
-                            false,
-                        )
-                    }
-                    Codec::Ass { .. } => (
-                        String::from_utf8_lossy(&bytes)
-                            .splitn(9, ',')
-                            .nth(8)
-                            .unwrap_or("")
-                            .to_owned(),
-                        true,
-                    ),
-                    _ => continue,
-                }
-            }
-            Container::Mp4(_) => {
-                let format = t.entry.as_ref().map(|e| e.format.0).unwrap_or([0; 4]);
-                match &format {
-                    b"tx3g" | b"text" => {
-                        let Some(n) = bytes.get(..2) else { continue };
-                        let n = u16::from_be_bytes([n[0], n[1]]) as usize;
-                        let text = bytes.get(2..2 + n).context("truncated subtitle sample")?;
-                        (decode_text(text), false)
-                    }
-                    b"wvtt" => (vtt_payload(&bytes)?, false),
-                    _ => continue,
-                }
-            }
-        };
+        let Some((text, ass)) = cue_text(&input, ti, &bytes)? else { continue };
         let text = plain(&text, ass);
         if !text.is_empty() && s.duration > 0. {
             out.push(Cue {
@@ -350,6 +431,156 @@ pub(crate) fn cues(path: &Path) -> Result<Vec<Cue>> {
     }
     out.sort_by(|a, b| a.start.total_cmp(&b.start));
     Ok(out)
+}
+
+/// Where a subtitle track came from, which decides what each output
+/// container can take from it verbatim.
+enum SubSource {
+    /// An MP4/MOV track: its sample entry (`tx3g`, `text`, `wvtt`).
+    Mp4(SampleEntry),
+    /// A Matroska text track: codec id and private data (the ASS header).
+    Mkv { codec_id: String, private: Vec<u8> },
+}
+/// One subtitle cue in OUTPUT time: the source packet and its plain text.
+struct SubCue {
+    start: f64,
+    end: f64,
+    data: Vec<u8>,
+    text: String,
+}
+/// A source subtitle track cut to the kept ranges: the one model every
+/// export path writes from, so subtitles are read once, from the original
+/// file, whatever intermediate the video went through.
+pub(crate) struct SubTrack {
+    language: String,
+    source: SubSource,
+    cues: Vec<SubCue>,
+}
+/// Every text subtitle track of `input`, clipped to `keeps` (source time)
+/// and laid on the output timeline. A cue a cut crosses is shortened; one
+/// spanning two kept ranges appears in both. Empty filler samples (MP4's
+/// way of marking gaps) are dropped here and re-made by the MP4 writer.
+fn subtitle_tracks(input: &Input, keeps: &[(f64, f64)]) -> Result<Vec<SubTrack>> {
+    let mut out = Vec::new();
+    for (ti, t) in input.tracks.iter().enumerate().filter(|(_, t)| t.kind == Kind::Subtitle) {
+        let source = match &input.container {
+            Container::Mp4(_) => match &t.entry {
+                Some(e) if matches!(&e.format.0, b"tx3g" | b"text" | b"wvtt") => SubSource::Mp4(e.clone()),
+                _ => { log::warn!("subtitle track {ti}: no text mapping, not exported"); continue }
+            },
+            Container::Mkv(f) => {
+                use filmcraft_matroska::Codec;
+                let track = &f.tracks[ti];
+                if !matches!(track.codec, Codec::SubRip | Codec::WebVtt | Codec::Ass { .. }) {
+                    log::warn!("subtitle track {ti} ({}): not a text format, not exported", track.codec_id);
+                    continue;
+                }
+                SubSource::Mkv { codec_id: track.codec_id.clone(), private: track.codec_private.clone() }
+            }
+        };
+        let mut cues = Vec::new();
+        for (i, s) in t.samples.iter().enumerate() {
+            let (start, end) = (s.pts, s.pts + s.duration);
+            if end <= start || !keeps.iter().any(|&(a, b)| end > a && start < b) {
+                continue;
+            }
+            let data = input.data(ti, i)?;
+            let Some((text, ass)) = cue_text(input, ti, &data)? else { continue };
+            let text = plain(&text, ass);
+            if text.is_empty() {
+                continue;
+            }
+            let mut before = 0.;
+            for &(a, b) in keeps {
+                let (from, to) = (start.max(a), end.min(b));
+                if to - from > 0.001 {
+                    cues.push(SubCue { start: before + from - a, end: before + to - a, data: data.clone(), text: text.clone() });
+                }
+                before += b - a;
+            }
+        }
+        if cues.is_empty() {
+            continue;
+        }
+        cues.sort_by(|a, b| a.start.total_cmp(&b.start));
+        out.push(SubTrack { language: t.language.clone(), source, cues });
+    }
+    Ok(out)
+}
+/// A `tx3g` sample entry with the usual defaults (centred, bottom, white on
+/// clear, one "Serif" font), for text that arrives from Matroska.
+fn tx3g_entry() -> SampleEntry {
+    let mut raw = vec![0, 0, 0, 0, 0, 0, 0, 1]; // reserved, data reference 1
+    raw.extend([0, 0, 0, 0, 1, 0xff, 0, 0, 0, 0]); // flags, justification, background
+    raw.extend([0; 8]); // default text box
+    raw.extend([0, 0, 0, 0, 0, 1, 0, 0x12, 0xff, 0xff, 0xff, 0xff]); // style record
+    raw.extend(box_bytes(b"ftab", &[0, 1, 0, 1, 5, b'S', b'e', b'r', b'i', b'f']));
+    SampleEntry {
+        format: mp4::FourCc(*b"tx3g"),
+        data_reference_index: 1,
+        codec: CodecConfig::Unknown { fourcc: mp4::FourCc(*b"tx3g"), raw },
+        video: None,
+        audio: None,
+        bitrate: None,
+    }
+}
+fn tx3g_sample(text: &str) -> Vec<u8> {
+    let text = &text.as_bytes()[..text.len().min(65535)];
+    let mut out = (text.len() as u16).to_be_bytes().to_vec();
+    out.extend(text);
+    out
+}
+/// Subtitle tracks into an MP4/MOV being muxed. MP4 text tracks have no
+/// gaps, so silences become empty samples, and overlapping cues (ASS
+/// allows them) are trimmed to start where the previous one ends.
+fn write_subs_mp4(mux: &mut mp4::Mp4Writer<std::fs::File>, subs: &[SubTrack]) -> Result<()> {
+    for sub in subs {
+        let (entry, verbatim) = match &sub.source {
+            SubSource::Mp4(e) => (e.clone(), true),
+            SubSource::Mkv { .. } => (tx3g_entry(), false),
+        };
+        let empty = if entry.format.0 == *b"wvtt" { box_bytes(b"vtte", &[]) } else { vec![0, 0] };
+        let mut config = cfg(entry, &sub.language);
+        config.timescale = 1000;
+        let target = mux.add_track(config)?;
+        let ms = |t: f64| (t.max(0.) * 1000.).round() as u64;
+        let mut write = |data: &[u8], d: u64| -> Result<()> {
+            mux.write_sample(target, mp4::WriteSample {
+                data, duration: u32::try_from(d)?, composition_offset: 0, is_sync: true })?;
+            Ok(())
+        };
+        let mut cursor = 0;
+        for cue in &sub.cues {
+            let (s, e) = (ms(cue.start).max(cursor), ms(cue.end));
+            if e <= s {
+                continue;
+            }
+            if s > cursor {
+                write(&empty, s - cursor)?;
+            }
+            if verbatim { write(&cue.data, e - s)?; } else { write(&tx3g_sample(&cue.text), e - s)?; }
+            cursor = e;
+        }
+    }
+    Ok(())
+}
+/// The Matroska track spec and block payload for a subtitle track:
+/// Matroska text passes through as it was; MP4 text becomes SubRip.
+fn mkv_sub(sub: &SubTrack) -> filmcraft_matroska::TrackSpec {
+    let (id, private) = match &sub.source {
+        SubSource::Mkv { codec_id, private } => (codec_id.clone(), private.clone()),
+        SubSource::Mp4(_) => ("S_TEXT/UTF8".into(), Vec::new()),
+    };
+    let mut spec = filmcraft_matroska::TrackSpec::new(filmcraft_matroska::TrackKind::Subtitle, id);
+    spec.codec_private = private;
+    spec.language = Some(sub.language.clone());
+    spec
+}
+fn mkv_sub_data<'a>(sub: &SubTrack, cue: &'a SubCue) -> &'a [u8] {
+    match sub.source {
+        SubSource::Mkv { .. } => &cue.data,
+        SubSource::Mp4(_) => cue.text.as_bytes(),
+    }
 }
 fn decode_text(b: &[u8]) -> String {
     if b.starts_with(&[0xfe, 0xff]) || b.starts_with(&[0xff, 0xfe]) {
@@ -726,8 +957,36 @@ fn chapter_trak(chapters: &[(f64, f64, String)], id: u32, movie_ts: u32, offset:
 /// QuickTime chapter track Apple's players read. `moov` is rebuilt in place
 /// with the chapter samples in an `mdat` ahead of it; nothing before it moves.
 fn add_mp4_chapters(path: &Path, chapters: &[(f64, f64, String)], qt_track: bool) -> Result<()> {
+    finish_mp4(path, chapters, qt_track, &[])
+}
+/// iTunes-style `meta/ilst` for an MP4's tags: what Apple reads in an MP4
+/// (the QuickTime-style `udta` atoms the muxer writes count only in a MOV).
+/// QuickTime `mdta` keys are mapped to their atom; other keys are left out.
+fn ilst(meta: &[(String, String)]) -> Vec<u8> {
+    let mut items = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    for (k, v) in meta {
+        let atom = TAG_MAP.iter().find(|(a, b, _)| a == k || b == k).map(|(a, _, _)| *a)
+            .or_else(|| (k.chars().count() == 4).then_some(k.as_str()));
+        let Some(atom) = atom else { continue };
+        let code: Vec<u8> = atom.chars().map(|c| c as u32 as u8).collect();
+        if code.len() != 4 || seen.iter().any(|s| s == atom) { continue }
+        seen.push(atom.into());
+        let mut data = vec![0, 0, 0, 1, 0, 0, 0, 0]; // UTF-8, default locale
+        data.extend(v.as_bytes());
+        items.extend(box_bytes(&code.try_into().unwrap(), &box_bytes(b"data", &data)));
+    }
+    if items.is_empty() { return Vec::new() }
+    let mut hdlr = vec![0; 4];
+    hdlr.extend(b"mdirappl");
+    hdlr.extend([0; 9]);
+    full_box(b"meta", 0, 0, &[full_box(b"hdlr", 0, 0, &hdlr), box_bytes(b"ilst", &items)].concat())
+}
+/// Chapters and iTunes tags for an MP4/MOV the muxer just finished.
+fn finish_mp4(path: &Path, chapters: &[(f64, f64, String)], qt_track: bool, tags: &[(String, String)]) -> Result<()> {
     use std::io::{Read, Seek, SeekFrom, Write};
-    if chapters.is_empty() {
+    let meta_box = ilst(tags);
+    if chapters.is_empty() && meta_box.is_empty() {
         return Ok(());
     }
     ensure!(
@@ -743,7 +1002,7 @@ fn add_mp4_chapters(path: &Path, chapters: &[(f64, f64, String)], qt_track: bool
         payload.push(title.len() as u8);
         payload.extend(title.as_bytes());
     }
-    let chpl = box_bytes(b"chpl", &payload);
+    let mut chpl = if chapters.is_empty() { Vec::new() } else { box_bytes(b"chpl", &payload) };
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -761,7 +1020,7 @@ fn add_mp4_chapters(path: &Path, chapters: &[(f64, f64, String)], qt_track: bool
     let referring: Vec<u32> = f.tracks.iter()
         .filter(|t| matches!(t.kind, mp4::TrackKind::Video | mp4::TrackKind::Audio))
         .map(|t| t.id).collect();
-    let (trak, mdat) = if qt_track {
+    let (trak, mdat) = if qt_track && !chapters.is_empty() {
         let (trak, mdat) = chapter_trak(chapters, id, movie_ts, f.moov_offset)?;
         (Some(trak), mdat)
     } else { (None, Vec::new()) };
@@ -804,13 +1063,24 @@ fn add_mp4_chapters(path: &Path, chapters: &[(f64, f64, String)], qt_track: bool
             }
             b"udta" if !udta => {
                 udta = true;
-                body.extend(box_bytes(b"udta", &[&b[8..], &chpl[..]].concat()));
+                let kids = child_boxes(&b[8..])?;
+                let has_meta = kids.iter().any(|(k, _)| k == b"meta");
+                let mut kept = Vec::new();
+                for (k, kid) in &kids {
+                    // The `ilst` now holds these; a QuickTime-style twin
+                    // would read as a second value.
+                    let twin = !has_meta && !meta_box.is_empty()
+                        && TAG_MAP.iter().any(|(a, _, _)| a.chars().map(|c| c as u32 as u8).eq(k.iter().copied()));
+                    if !twin { kept.extend(*kid); }
+                }
+                if !has_meta { chpl.extend(&meta_box); }
+                body.extend(box_bytes(b"udta", &[&kept[..], &chpl[..]].concat()));
             }
             _ => body.extend(*b),
         }
     }
     if let Some(trak) = trak { body.extend(trak); }
-    if !udta { body.extend(box_bytes(b"udta", &chpl)); }
+    if !udta { chpl.extend(&meta_box); body.extend(box_bytes(b"udta", &chpl)); }
     ensure!(body.len() + 8 < u32::MAX as usize, "chapter metadata exceeds MP4 box size");
     file.seek(SeekFrom::Start(f.moov_offset))?;
     file.write_all(&mdat)?;
@@ -945,7 +1215,7 @@ fn text_handlers(path: &Path) -> Result<()> {
     }
     Ok(())
 }
-fn new_mux(input: &Input, path: &Path, dest: &Path) -> Result<mp4::Mp4Writer<std::fs::File>> {
+fn new_mux(meta: &SourceMeta, path: &Path, dest: &Path) -> Result<mp4::Mp4Writer<std::fs::File>> {
     let brand = if dest
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("mov"))
@@ -955,9 +1225,7 @@ fn new_mux(input: &Input, path: &Path, dest: &Path) -> Result<mp4::Mp4Writer<std
         mp4::Brand::Mp4
     };
     let mut options = mp4::WriterOptions::new(brand);
-    if let Container::Mp4(f) = &input.container {
-        options.metadata = f.metadata.entries.clone();
-    }
+    options.metadata = meta.mp4.clone();
     Ok(mp4::Mp4Writer::new(
         std::fs::OpenOptions::new()
             .read(true)
@@ -1451,6 +1719,13 @@ pub(crate) fn export_with_cancel(
         "unsupported output container"
     );
     let input = Input::open(path)?;
+    let mkv = dest
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("mkv") || e.eq_ignore_ascii_case("webm"));
+    // Subtitles and tags come from the ORIGINAL file, whatever the video
+    // goes through on the way.
+    let subs = subtitle_tracks(&input, keeps)?;
+    let meta = source_meta(&input, path);
     // Pixel edits always encode every kept frame. Exact trims without pixel
     // edits repair only intersected GOPs, then use the existing lossless muxer.
     // Unsupported smart-encoding formats fail explicitly; never silently fall
@@ -1462,25 +1737,29 @@ pub(crate) fn export_with_cancel(
     let input = if let Some(work) = &repaired { Input::open(&work.0)? } else { input };
     let copy = crop.is_none();
     let temp = pending(dest)?;
-    let mut mux = new_mux(&input, &temp.0, dest)?;
+    let mut mux = new_mux(&meta, &temp.0, dest)?;
     if copy {
         copy_ranges(&input, &mut mux, keeps, cancel, false)?;
     } else {
         encode_ranges(&input, path, &mut mux, keeps, crop, cancel)?;
+    }
+    // The Matroska remux writes subtitles, Chapters and tags itself.
+    if !mkv {
+        write_subs_mp4(&mut mux, &subs)?;
     }
     ensure!(!cancel.load(std::sync::atomic::Ordering::Relaxed), "Export cancelled");
     mux.finish()?;
     if copy {
         carry_transform(&input, &temp.0)?;
     }
-    let mkv = dest
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("mkv") || e.eq_ignore_ascii_case("webm"));
-    // The Matroska remux writes its own Chapters and copies every track.
-    add_mp4_chapters(&temp.0, chapters, !mkv)?;
+    if !mkv {
+        text_handlers(&temp.0)?;
+    }
+    let tags: &[(String, String)] = if mp4_brand(dest) { &meta.mp4 } else { &[] };
+    finish_mp4(&temp.0, chapters, !mkv, tags)?;
     if mkv
     {
-        remux_mkv(&temp.0, dest, chapters)?;
+        remux_mkv(&temp.0, dest, chapters, &meta, &subs)?;
     } else {
         std::fs::rename(&temp.0, dest)?;
     }
@@ -1497,16 +1776,25 @@ fn uint(id: u32, v: u64) -> Vec<u8> {
     let n = (8 - v.leading_zeros() as usize / 8).max(1);
     ebml(id, &v.to_be_bytes()[8 - n..])
 }
-fn remux_mkv(path: &Path, dest: &Path, chapters: &[(f64, f64, String)]) -> Result<()> {
+fn remux_mkv(
+    path: &Path,
+    dest: &Path,
+    chapters: &[(f64, f64, String)],
+    meta: &SourceMeta,
+    subs: &[SubTrack],
+) -> Result<()> {
     let input = Input::open(path)?;
+    // A quarter-turn display matrix becomes the video track's projection
+    // roll; anything else (a flip, a shear) has no Matroska equivalent.
+    let mut rotation = None;
     if let Container::Mp4(f) = &input.container {
-        ensure!(
-            f.tracks
-                .iter()
-                .filter(|t| t.kind == mp4::TrackKind::Video)
-                .all(|t| t.display_rotation() == Some(0)),
-            "Native Matroska muxing cannot yet preserve a display transform; choose MOV or MP4"
-        );
+        for (ti, t) in f.tracks.iter().enumerate().filter(|(_, t)| t.kind == mp4::TrackKind::Video) {
+            match t.display_rotation() {
+                Some(0) => {}
+                Some(q) => rotation = Some((ti as u64 + 1, ROLL[q as usize])),
+                None => anyhow::bail!("This display transform has no Matroska equivalent; choose MOV or MP4"),
+            }
+        }
     }
     let mut tracks = Vec::new();
     let mut delays = Vec::new();
@@ -1555,6 +1843,13 @@ fn remux_mkv(path: &Path, dest: &Path, chapters: &[(f64, f64, String)]) -> Resul
             .map(|a| (a.sample_rate, a.channels as u64, Some(a.sample_size as u64)));
         tracks.push(spec);
     }
+    let webm = dest.extension().is_some_and(|e| e.eq_ignore_ascii_case("webm"));
+    // WebM names its text tracks differently; Matroska takes them all.
+    let subs: &[SubTrack] = if webm && !subs.is_empty() {
+        log::warn!("WebM output: {} subtitle track(s) not exported; choose MKV to keep them", subs.len());
+        &[]
+    } else { subs };
+    tracks.extend(subs.iter().map(mkv_sub));
     // WebM cannot carry H.264/AAC or ProRes; never publish a falsely labelled file.
     ensure!(
         !dest
@@ -1580,17 +1875,31 @@ fn remux_mkv(path: &Path, dest: &Path, chapters: &[(f64, f64, String)]) -> Resul
         tracks,
         filmcraft_matroska::MuxOptions {
             timestamp_scale: 1000,
+            title: meta.title.clone(),
             ..Default::default()
         },
     )?;
+    let n = input.tracks.len();
     let mut order = Vec::new();
     for (ti, t) in input.tracks.iter().enumerate() {
         for (i, s) in t.samples.iter().enumerate() {
             order.push((s.dts, ti, i));
         }
     }
+    for (si, sub) in subs.iter().enumerate() {
+        for (i, c) in sub.cues.iter().enumerate() {
+            order.push((c.start, n + si, i));
+        }
+    }
     order.sort_by(|a, b| a.0.total_cmp(&b.0));
     for (_, ti, i) in order {
+        if ti >= n {
+            let sub = &subs[ti - n];
+            let c = &sub.cues[i];
+            mux.write_frame(ti, (c.start * 1e9).round() as i64, true, mkv_sub_data(sub, c),
+                Some(((c.end - c.start) * 1e9).round() as u64))?;
+            continue;
+        }
         let s = &input.tracks[ti].samples[i];
         mux.write_frame(
             ti,
@@ -1630,9 +1939,18 @@ fn remux_mkv(path: &Path, dest: &Path, chapters: &[(f64, f64, String)]) -> Resul
         file.write_all(&size)?;
     }
     drop(file);
-    std::fs::rename(&temp.0, dest)?;
+    match finish_mkv(&temp.0, dest, meta, rotation)? {
+        Some(seated) => std::fs::rename(&seated.0, dest)?,
+        None => std::fs::rename(&temp.0, dest)?,
+    }
     Ok(())
 }
+/// An MP4 (not MOV, not Matroska) output: the one that needs `ilst`.
+fn mp4_brand(dest: &Path) -> bool {
+    dest.extension().is_some_and(|e| e.eq_ignore_ascii_case("mp4") || e.eq_ignore_ascii_case("m4v"))
+}
+/// Matroska projection roll for each MP4 quarter turn (`display_rotation`).
+const ROLL: [f64; 4] = [0., -90., 180., 90.];
 
 /// Copy untouched coded pictures; validate before publishing.
 pub(crate) fn smart(
@@ -1724,7 +2042,7 @@ pub(crate) fn smart(
         .map_or(stem.as_ref(), |(s, _)| s);
     let dest = path.with_file_name(format!("{stem}.encoded-{stamp}.mp4"));
     let temp = pending(&dest)?;
-    let mut mux = new_mux(&input, &temp.0, &dest)?;
+    let mut mux = new_mux(&source_meta(&input, path), &temp.0, &dest)?;
     let scale = match &input.container {
         Container::Mp4(f) => f.tracks[vi].timescale,
         _ => SCALE,
@@ -2035,6 +2353,59 @@ mod tests {
             .unwrap();
         }
         mux.finish().unwrap();
+    }
+    #[test]
+    fn subtitles_tags_and_rotation_cross_containers() {
+        let dir = Dir::new("subs");
+        let ffmpeg = |args: &[&str]| assert!(std::process::Command::new("ffmpeg").args(["-y", "-v", "error"]).args(args)
+            .current_dir(&dir.0).status().unwrap().success());
+        std::fs::write(dir.0.join("subs.srt"), "1\n00:00:00,500 --> 00:00:01,800\nFirst <i>line</i>\n\n\
+            2\n00:00:02,200 --> 00:00:03,500\nAcross the cut\n\n3\n00:00:04,000 --> 00:00:05,000\nThird ✓\n").unwrap();
+        ffmpeg(&["-f", "lavfi", "-i", "testsrc2=size=160x90:rate=30", "-f", "lavfi", "-i", "sine", "-i", "subs.srt",
+            "-t", "6", "-g", "30", "-map", "0", "-map", "1", "-map", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-c:s", "mov_text", "-metadata", "title=Source title", "-metadata", "artist=Someone",
+            "-metadata:s:s:0", "language=fra", "-shortest", "src.mp4"]);
+        ffmpeg(&["-i", "src.mp4", "-map", "0", "-c:v", "copy", "-c:a", "copy", "-c:s", "ass",
+            "-metadata", "title=MKV title", "-metadata", "CUSTOM_KEY=kept", "src.mkv"]);
+        ffmpeg(&["-display_rotation", "90", "-i", "src.mp4", "-map", "0:v", "-map", "0:a", "-c", "copy", "rot.mov"]);
+        let keeps = [(0., 2.), (3., 5.)];
+        // The middle cue straddles the cut: only its kept half survives.
+        let expected = [(0.5, 1.8, "First line"), (2.0, 2.5, "Across the cut"), (3.0, 4.0, "Third ✓")];
+        for (src, out) in [("src.mp4", "a.mp4"), ("src.mp4", "a.mkv"), ("src.mkv", "b.mov"), ("src.mkv", "b.mkv")] {
+            let out = dir.0.join(out);
+            export(&dir.0.join(src), &out, &keeps, true, &[], None).unwrap();
+            let got = cues(&out).unwrap();
+            assert_eq!(got.len(), 3, "{}", out.display());
+            for (c, (a, b, text)) in got.iter().zip(expected) {
+                assert!((c.start - a).abs() < 0.01 && (c.end - b).abs() < 0.01, "{}: {c:?}", out.display());
+                assert_eq!(c.text, text, "{}", out.display());
+            }
+            let input = Input::open(&out).unwrap();
+            let sub = input.tracks.iter().find(|t| t.kind == Kind::Subtitle).unwrap();
+            assert!(sub.language.starts_with("fr"), "{}", sub.language);
+        }
+        // MP4: iTunes `ilst` (what Apple reads), no duplicate QuickTime atom.
+        let src = crate::fc::reader(&dir.0.join("a.mp4")).unwrap();
+        let f = mp4::open(&src).unwrap();
+        assert_eq!(f.metadata.title(), Some("Source title"));
+        assert_eq!(f.metadata.entries.iter().filter(|(k, _)| k == "©ART").count(), 1);
+        let len = filmcraft_media::ByteReader::len(&src);
+        let moov = crate::media_metadata::atoms(&src, 0, len).unwrap().into_iter().find(|b| b.0 == *b"moov").unwrap();
+        let udta = crate::media_metadata::atoms(&src, moov.1, moov.2).unwrap().into_iter().find(|b| b.0 == *b"udta").unwrap();
+        assert!(crate::media_metadata::atoms(&src, udta.1, udta.2).unwrap().iter().any(|b| b.0 == *b"meta"));
+        // MP4 → Matroska maps the tags; Matroska → Matroska keeps every tag and the ASS codec.
+        let a = fastmkv::read(dir.0.join("a.mkv")).unwrap();
+        assert_eq!((a.title.as_deref(), a.get("ARTIST")), (Some("Source title"), Some("Someone")));
+        let b = fastmkv::read(dir.0.join("b.mkv")).unwrap();
+        assert_eq!((b.title.as_deref(), b.get("CUSTOM_KEY")), (Some("MKV title"), Some("kept")));
+        assert!(b.tracks.iter().any(|t| t.codec_id == "S_TEXT/ASS"));
+        let src = crate::fc::reader(&dir.0.join("b.mov")).unwrap();
+        assert_eq!(mp4::open(&src).unwrap().metadata.title(), Some("MKV title"));
+        // A quarter-turn display matrix becomes the Matroska projection roll.
+        let rotated = dir.0.join("r.mkv");
+        export(&dir.0.join("rot.mov"), &rotated, &keeps, true, &[], None).unwrap();
+        let r = fastmkv::read(&rotated).unwrap();
+        assert_eq!(r.video().unwrap().video.unwrap().rotation, Some(90.));
     }
     #[test]
     fn native_export_crop_inspection_and_failure_cleanup_need_no_helpers() {
@@ -2583,20 +2954,28 @@ pub(crate) fn pipeline_export_with_inputs(
         .map_err(anyhow::Error::msg)?
         .check_sdr()
         .map_err(anyhow::Error::msg)?;
+    // Subtitles and tags from the source, when it is a container the
+    // packet reader knows; other sources export without them.
+    let (subs, meta) = match Input::open(&info.path) {
+        Ok(original) => (subtitle_tracks(&original, keeps)?, source_meta(&original, &info.path)),
+        Err(e) => {
+            log::warn!("{}: subtitles and tags not carried: {e}", info.path.display());
+            (Vec::new(), SourceMeta::default())
+        }
+    };
     let temp = pending(dest)?;
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .truncate(true)
         .open(&temp.0)?;
-    let mut mux = mp4::Mp4Writer::new(
-        file,
-        mp4::WriterOptions::new(if prores {
-            mp4::Brand::Mov
-        } else {
-            mp4::Brand::Mp4
-        }),
-    )?;
+    let mut options = mp4::WriterOptions::new(if prores {
+        mp4::Brand::Mov
+    } else {
+        mp4::Brand::Mp4
+    });
+    options.metadata = meta.mp4.clone();
+    let mut mux = mp4::Mp4Writer::new(file, options)?;
     ensure!(
         info.fps.is_finite() && info.fps > 0. && info.fps <= 1000.,
         "Export requires a valid constant frame rate"
@@ -2847,14 +3226,21 @@ pub(crate) fn pipeline_export_with_inputs(
         cancel.check().map_err(anyhow::Error::msg)
     })?;
     cancel.check().map_err(anyhow::Error::msg)?;
-    mux.finish()?;
     let mkv = dest
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("mkv"));
-    add_mp4_chapters(&temp.0, chapters, !mkv)?;
+    if !mkv {
+        write_subs_mp4(&mut mux, &subs)?;
+    }
+    mux.finish()?;
+    if !mkv {
+        text_handlers(&temp.0)?;
+    }
+    let tags: &[(String, String)] = if mp4_brand(dest) { &meta.mp4 } else { &[] };
+    finish_mp4(&temp.0, chapters, !mkv, tags)?;
     if mkv {
         let remuxed = pending(dest)?;
-        remux_mkv(&temp.0, &remuxed.0, chapters)?;
+        remux_mkv(&temp.0, &remuxed.0, chapters, &meta, &subs)?;
         cancel.check().map_err(anyhow::Error::msg)?;
         std::fs::hard_link(&remuxed.0, dest)?;
     } else {

@@ -1084,6 +1084,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("abner-pipeline-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let input = dir.join("input.mp4");
+        let srt = dir.join("input.srt");
+        std::fs::write(&srt, "1\n00:00:00,100 --> 00:00:00,500\nRendered cue\n").unwrap();
         let status = std::process::Command::new("ffmpeg")
             .args([
                 "-y",
@@ -1097,6 +1099,20 @@ mod tests {
                 "lavfi",
                 "-i",
                 "sine=frequency=440:duration=0.5",
+                "-i",
+            ])
+            .arg(&srt)
+            .args([
+                "-map",
+                "0",
+                "-map",
+                "1",
+                "-map",
+                "2",
+                "-c:s",
+                "mov_text",
+                "-metadata",
+                "title=Pipeline title",
                 "-c:v",
                 "libx264",
                 "-pix_fmt",
@@ -1143,6 +1159,14 @@ mod tests {
             // Rendered exports carry chapters like the copy path does.
             let chapters = crate::media_metadata::timeline(&dest).unwrap().unwrap().chapters;
             assert_eq!(chapters, vec![(0., "One".into()), (0.25, "Two".into())], "{ext}");
+            // ...and the source's subtitles and title.
+            let cues = crate::media_io::cues(&dest).unwrap();
+            assert_eq!(cues.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(), ["Rendered cue"], "{ext}");
+            let title = if ext == "mkv" { fastmkv::read(&dest).unwrap().title } else {
+                let src = crate::fc::reader(&dest).unwrap();
+                filmcraft_isobmff::open(&src).unwrap().metadata.title().map(str::to_owned)
+            };
+            assert_eq!(title.as_deref(), Some("Pipeline title"), "{ext}");
             let output = crate::probe::probe(&dest).unwrap();
             assert!(
                 output.codec.to_lowercase().contains(codec),
