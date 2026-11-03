@@ -1864,6 +1864,7 @@ impl App {
         if self.editor.is_some() {
             if k==Key::Escape {self.finish_editor(false);return}
             if k==Key::Enter {self.finish_editor(true);return}
+            if matches!(k,Key::Char('c'|'C')) && self.editor.as_ref().is_some_and(|e|!matches!(e.owner,crate::spatial::Owner::Source)) {return}
         }
         if self.ready() && matches!(k,Key::Char('m'|'M')) {if self.editor.is_some(){self.finish_editor(false)}else{self.begin_editor(false,None)}return}
         if self.ready() && !self.mask_mode && matches!(k,Key::Char('c'|'C')) {self.begin_editor(true,None);return}
@@ -7352,6 +7353,7 @@ mod tests {
         app.finish_editor(false);assert!(app.videos[0].input_crop.is_none());
         app.begin_editor(true,None);app.crop=Some(crop);app.finish_editor(true);
         assert_eq!(app.videos[0].input_crop,Some(crop));assert!(app.videos[1].input_crop.is_none());
+        assert_eq!(app.encode_status().0,"FULL RE-ENCODE");
         app.set_cut_mode(true);assert_eq!(app.cut.as_ref().unwrap().crop_at(0.),Some(crop));
         app.activate(Action::Tool(0));app.begin_editor(true,None);app.crop=Some(Crop::full(320,180));app.finish_editor(true);
         assert!(app.videos[0].input_crop.is_none());assert_eq!(app.cut.as_ref().unwrap().crop_at(0.),Some(crop));

@@ -14,6 +14,13 @@ Effort estimates come from the 2026-09-04 comparison against switchblade.
 
 ## Next
 
+23. **Spatial input persistence and intermediate stages.** The first implementation
+   is in [SPATIAL-INPUTS.md](docs/SPATIAL-INPUTS.md). Persist source crops and plugin
+   image/mask bindings with a complete project, add mask import, and provide a
+   stage-input preview before allowing spatial bindings after an enabled upstream
+   processor. Current bindings are static and session-local; timeline crops are
+   already saved with the edit.
+
 20. **Three-stream cold seek on FilmCraft.** `benchmark_three_4k_players` (cold exact
    seek to 3.5 s in a 4 s 4K H.264 GOP): one player lands in 690 ms against the libav
    player's 824, three players in 947 against 861 (interleaved medians, 2026-10-21). The

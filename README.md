@@ -115,7 +115,7 @@ frame's true pts is adopted back into the clock, so stepping can't accumulate dr
 | | **blend** — dissolve between A and B (`-`/`=` adjusts mix) |
 | pinch | photo-style zoom on the pointer — every video pans/zooms to the same spot |
 | drag / scroll | pan while zoomed (synced across videos) |
-| `M` | toggle mask painting on the focused video (pauses on entry) |
+| `M` | open a temporary mask editor on the focused source (pauses on entry) |
 | `+` / `-` | enlarge / shrink the brush in mask mode (`=` also enlarges) |
 | `S` | save the focused mask in mask mode |
 | `Z` | reset zoom |
@@ -138,9 +138,11 @@ Press **M** with a comparison loaded. The focused video fills the canvas with a
 50% red overlay. Click or drag to paint with the circular brush: painted pixels
 become 50% blue, replacing red rather than stacking another tint. **+ / -** changes
 brush diameter (shown in source-image pixels); pinch to zoom and scroll to pan.
-The brush outline follows the same transform as the image. **Enter** (or a clip's number key) switches the
-focused video and its separate mask. **M** or **Esc** hides the layer and restores
-the comparison view; masks persist in memory, and playback stays paused until Space.
+The brush outline follows the same transform as the image. **Apply** or **Enter**
+saves the draft to its caller; **Cancel**, **M**, or **Esc** discards it. The temporary
+tab closes and returns to Sources, Timeline, or Process. The editor stays attached
+to its original source until closed. Applied source masks persist in memory, and
+playback stays paused until Space.
 
 **S** saves beside the focused video: `example.mov` becomes `example.mask.png`.
 The PNG is 8-bit grayscale at the displayed video's native resolution (including
@@ -355,3 +357,30 @@ Timeline’s existing export still exports its source edits, without processing.
 
 `--processor ID --processor-settings JSON` opens Process focused on a registered
 processor.
+
+## Reusable Crop and Mask inputs
+
+Sources has **Crop** and **Mask** controls. Timeline has **Crop clip**, targeting
+one selected kept clip, or the kept clip under the playhead. Process settings show
+Crop/Mask controls only for inputs the processor declares. Each opens a temporary
+tab with Reset, Cancel, and Apply. Choosing another workspace cancels the draft.
+
+A source crop is copied into a newly opened timeline. Later source edits do not
+change that timeline. Clip crops are included in timeline saves and undo; split
+clips inherit their crop, while joining differently cropped clips is disabled.
+Source/timeline crops fit into a fixed source-sized output canvas with black bars
+where needed, preserving one output size across clips. Export applies them before
+the processor chain. Cropped source comparisons support Single and Side by side.
+
+Processors can receive independent image, masked-image, mask, and processing-region
+inputs alongside the complete primary image. A masked image carries its pixels
+and coverage separately. An image crop returns reduced dimensions; a region
+returns coordinates without discarding image pixels. See
+[the spatial input contract](docs/SPATIAL-INPUTS.md) and the runnable
+[generic example](examples/spatial-inputs.rs).
+
+Current scope: static rectangles and masks; spatial inputs belong to the first
+enabled processor. Source crops, source masks, and plugin bindings last for the
+current application session. Only timeline crops are saved to the timeline file;
+PNG mask export remains available. Spatial bindings are not included in numeric
+processor presets.

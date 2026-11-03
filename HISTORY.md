@@ -18,6 +18,15 @@ playhead, blue Play/Pause button, and formatted time readout. Rendered-frame mar
 and the amber in-progress frame indicator remain on the seek bar; the output frame
 number and rendered count appear below it. Existing navigation and scrubbing stay intact.
 
+## 2026-11-03 — Reusable spatial input editors
+
+Crop and Mask open as temporary tabs with Apply/Cancel and keep their caller's
+ownership. Sources own preprocessing crops; Timeline snapshots them and saves
+per-clip overrides with undo; declared processor inputs receive independent image,
+masked-image, mask, and region values. Preview and export use immutable bindings
+and the same crop transformation. See [SPATIAL-INPUTS.md](docs/SPATIAL-INPUTS.md)
+for the API, generic example, validation, and current limits.
+
 ## 2026-11-02 — Resizable Sources sidebar
 
 Drag the expanded Sources sidebar's right edge to resize it (180–480 logical

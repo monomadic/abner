@@ -89,7 +89,7 @@ keys:
   V            next view (Shift-V previous): overlay  side-by-side  delta  split  checker  blend
   - =          adjust delta gain / blend / checker size
   pinch        zoom on the pointer, photo-style (drag or scroll to pan; synced)
-  M            toggle mask painting (pauses; Enter changes focused video)
+  M            open mask editor (pauses; Enter applies, Esc cancels)
   [ ]          change brush size in mask mode
   C            open crop: drag to move, corners to resize
                (--crop opens there; --crop x,y,w,h sets it in image pixels)
