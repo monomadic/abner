@@ -3030,7 +3030,10 @@ impl App {
     fn source_thumb_height(&self, index: usize) -> f32 {
         let width = (self.workspace().panel - 32.0).max(1.0);
         let info = &self.videos[index].info;
+        // A portrait clip stops at a square card: `source_thumb` centres
+        // the narrower preview, so it doesn't fill the rail on its own.
         (width * info.height.max(1) as f32 / info.width.max(1) as f32)
+            .min(width)
             .min((self.workspace().list.h - self.source_chrome()).max(1.0))
     }
 
@@ -7106,6 +7109,7 @@ mod tests {
             app.videos[0].info.height = h;
             let thumb = app.source_thumb(0);
             assert!((thumb.w / thumb.h - w as f32 / h as f32).abs() < 1e-5);
+            assert!(thumb.h <= app.workspace().panel - 32.0 + 0.001, "a portrait preview stops at square");
             assert!(thumb.h + 69.0 <= app.workspace().list.h + 0.001);
         }
         app.mouse_down(200.0, HEADER_H + 20.0);
