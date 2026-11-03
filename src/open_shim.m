@@ -126,7 +126,9 @@ void ab_reveal_in_finder(const char *path) {
     [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:@[url]];
 }
 
-typedef void (*AbOpenCallback)(const char *path);
+// `from_os` is 1 for a Finder Open With / double-click (replaces the set),
+// 0 for the in-app picker (adds sources).
+typedef void (*AbOpenCallback)(const char *path, int from_os);
 
 static AbOpenCallback ab_open_cb = NULL;
 
@@ -141,7 +143,7 @@ static void ab_application_open_urls(id self, SEL _cmd, NSApplication *applicati
         }
         const char *path = url.fileSystemRepresentation;
         if (path != NULL && ab_open_cb != NULL) {
-            ab_open_cb(path);
+            ab_open_cb(path, 1);
         }
     }
 }
@@ -165,7 +167,7 @@ int ab_install_open_handler(AbOpenCallback cb) {
     return class_addMethod(cls, sel, (IMP)ab_application_open_urls, "v@:@@") ? 1 : 0;
 }
 
-// A non-modal picker feeds the same batch queue as Open With. Playback and
+// A non-modal picker feeds the same batch queue as Open With, tagged as an add. Playback and
 // redraws continue while it is open. Cancellation makes no model changes.
 void ab_choose_files(void) {
     static NSOpenPanel *panel = nil;
@@ -178,7 +180,7 @@ void ab_choose_files(void) {
     [panel beginWithCompletionHandler:^(NSModalResponse response) {
         if (response == NSModalResponseOK) {
             for (NSURL *url in panel.URLs) {
-                if (url.isFileURL && ab_open_cb != NULL) ab_open_cb(url.fileSystemRepresentation);
+                if (url.isFileURL && ab_open_cb != NULL) ab_open_cb(url.fileSystemRepresentation, 0);
             }
         }
         panel = nil;

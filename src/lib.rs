@@ -55,7 +55,8 @@ Run with no arguments (or launched from the .app bundle) to open the
 launch window, then drag clips onto it: one drop fills slot 1 and plays
 on its own, two fill 1 and 2, more add 3, 4… Dropping onto a running
 clip or comparison ADDS streams; hold Cmd while dropping to replace the
-whole set. A single path on the command line loads slot 1 the same way.
+whole set (a drop on the sources panel always adds). Opening a file from
+Finder (Open With / double-click) replaces the whole set. A single path on the command line loads slot 1 the same way.
 Any arguments skip the animated splash; video paths play directly.
 Use --no-video-splash alone for just the centered logo and drag clips onto it.
 
@@ -520,6 +521,29 @@ impl Runner {
         self.title = title_for(&self.app.videos);
         if let Some(w) = &self.window {
             w.set_title(&self.title);
+        }
+    }
+
+    /// Where the pointer is in the window, in logical px from the top left,
+    /// read from AppKit: winit reports no cursor position during a file drag
+    /// from another app.
+    fn drop_point(&self) -> Option<(f32, f32)> {
+        #[cfg(target_os = "macos")]
+        {
+            use objc2_app_kit::NSView;
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            let w = self.window.as_ref()?;
+            let handle = w.window_handle().ok()?;
+            let RawWindowHandle::AppKit(h) = handle.as_raw() else { return None };
+            let view: &NSView = unsafe { h.ns_view.cast::<NSView>().as_ref() };
+            let window = view.window()?;
+            let p = view.convertPoint_fromView(unsafe { window.mouseLocationOutsideOfEventStream() }, None);
+            let y = if view.isFlipped() { p.y } else { view.bounds().size.height - p.y };
+            Some((p.x as f32, y as f32))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            None
         }
     }
 
@@ -1039,18 +1063,29 @@ impl ApplicationHandler for Runner {
         // reported the key going down. (switchblade, `FilesDropped`.)
         if !self.dropped.is_empty() {
             let paths = std::mem::take(&mut self.dropped);
-            self.files_dropped(paths, os_primary_modifier_down());
+            // A drop on the sources rail always adds a source; elsewhere ⌘
+            // replaces the set.
+            let onto_sources = self
+                .drop_point()
+                .is_some_and(|(x, y)| self.app.over_sources(x, y));
+            self.files_dropped(paths, !onto_sources && os_primary_modifier_down());
             self.animating = true;
             if let Some(w) = &self.window {
                 w.request_redraw();
             }
         }
-        // Files opened through the OS (Open With / double-click) ride the
-        // same path, always as an ADD: a ⌘ held while picking a menu item
-        // must not wipe the set.
+        // Files opened through Finder (Open With / double-click) REPLACE the
+        // open set: opening a file means "show me this". The in-app "Add
+        // sources" picker shares the queue but always adds. Neither reads ⌘.
         let opened = open::drain();
-        if !opened.is_empty() {
-            self.files_dropped(opened, false);
+        let any = !opened.replace.is_empty() || !opened.add.is_empty();
+        if !opened.replace.is_empty() {
+            self.files_dropped(opened.replace, true);
+        }
+        if !opened.add.is_empty() {
+            self.files_dropped(opened.add, false);
+        }
+        if any {
             self.animating = true;
             if let Some(w) = &self.window {
                 w.request_redraw();

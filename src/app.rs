@@ -1585,6 +1585,17 @@ impl App {
         self.drag_hover = on;
     }
 
+    /// The point (logical px) lies on the sources rail, where a file drop
+    /// adds a source instead of following the ⌘-replace rule.
+    pub fn over_sources(&self, x: f32, y: f32) -> bool {
+        if !self.ready() || !self.show_ui {
+            return false;
+        }
+        let ws = self.workspace();
+        let bottom = if self.cut_mode { ws.transport.y } else { self.vp.1 - STATUS_H };
+        ws.rail > 0.0 && x >= 0.0 && x < ws.rail && y >= HEADER_H && y < bottom
+    }
+
     /// A pick from the native File / Frame menu (`open::MenuAction`).
     pub fn menu(&mut self, action: crate::open::MenuAction) {
         use crate::open::MenuAction as M;

@@ -463,8 +463,12 @@ the "VIDEO QUALITY TESTING TOOLKIT" line that used to be a second text run.
   compiled by `build.rs`): LaunchServices delivers opened files as an Apple Event, never
   argv, and winit 0.30 panics if its `NSApplicationDelegate` is replaced, so the shim
   grafts `application:openURLs:` onto winit's delegate class before the run loop starts.
-  Opened paths drain in `about_to_wait` into `files_dropped(paths, false)` — always an
-  add, never the ⌘-replace. **The native menus** (File · View · Frame) are the same
+  Opened paths drain in `about_to_wait` (`open::Opened`): a Finder Open With /
+  double-click REPLACES the open set (`files_dropped(paths, true)`), while the in-app
+  "Add sources" picker, which shares the queue, always adds; neither reads ⌘. A window
+  drop onto the sources rail (`App::over_sources`, pointer read from AppKit by
+  `Runner::drop_point` — winit gives no cursor during an inbound drag) always adds;
+  elsewhere ⌘ replaces. **The native menus** (File · View · Frame) are the same
   shim: `ab_sync_menus` builds them once and re-derives every item's enabled/checked
   state from `App` on each `about_to_wait` (never from clicks); a pick queues an
   `open::MenuAction` (File) or a view request, applied on the loop. Frame > Copy Frame

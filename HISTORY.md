@@ -3,6 +3,15 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-11-03 — Finder opens replace, rail drops add
+
+Opening a file from Finder (Open With / double-click) while Abner is running now
+replaces every open clip with the opened one(s) instead of appending. The in-app
+"Add sources" picker shares the open queue but stays an add, so the shim tags each
+path with its origin. A file dropped onto the sources rail always adds a source,
+⌘ or not; drops elsewhere keep add / ⌘-replace. winit reports no cursor position
+during an inbound drag, so the drop point is read from AppKit.
+
 ## 2026-11-03 — Lossless export option
 
 Export offers Lossless copy alongside HEVC and ProRes. It copies compressed media

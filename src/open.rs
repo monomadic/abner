@@ -51,10 +51,10 @@ mod imp {
     use std::sync::{Mutex, OnceLock};
     use std::sync::atomic::{AtomicI32, Ordering};
 
-    use super::MenuAction;
+    use super::{MenuAction, Opened};
     use crate::player::Notify;
 
-    static OPENED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    static OPENED: Mutex<Opened> = Mutex::new(Opened { replace: Vec::new(), add: Vec::new() });
     static NOTIFY: OnceLock<Notify> = OnceLock::new();
     static VIEW_REQUEST: AtomicI32 = AtomicI32::new(-1);
     static MENU_REQUESTS: Mutex<Vec<MenuAction>> = Mutex::new(Vec::new());
@@ -64,7 +64,7 @@ mod imp {
         fn ab_sync_menus(mode: i32, has_clips: bool, can_export: bool, view_cb: extern "C" fn(i32), menu_cb: extern "C" fn(i32));
         fn ab_copy_png(bytes: *const u8, len: usize);
         fn ab_reveal_in_finder(path: *const c_char);
-        fn ab_install_open_handler(cb: extern "C" fn(*const c_char)) -> std::ffi::c_int;
+        fn ab_install_open_handler(cb: extern "C" fn(*const c_char, std::ffi::c_int)) -> std::ffi::c_int;
     }
 
     extern "C" fn on_view(mode: i32) {
@@ -106,14 +106,15 @@ mod imp {
         unsafe { ab_reveal_in_finder(c.as_ptr()); }
     }
 
-    extern "C" fn on_open(path: *const c_char) {
+    extern "C" fn on_open(path: *const c_char, from_os: std::ffi::c_int) {
         if path.is_null() {
             return;
         }
         let bytes = unsafe { CStr::from_ptr(path) }.to_bytes();
         let path = PathBuf::from(OsStr::from_bytes(bytes));
-        log::debug!("open-with: {}", path.display());
-        OPENED.lock().unwrap().push(path);
+        log::debug!("open-with: {} ({})", path.display(), if from_os != 0 { "finder" } else { "picker" });
+        let mut opened = OPENED.lock().unwrap();
+        if from_os != 0 { opened.replace.push(path) } else { opened.add.push(path) }
         if let Some(n) = NOTIFY.get() {
             n();
         }
@@ -142,8 +143,8 @@ mod imp {
     }
     pub fn choose_files() { unsafe { ab_choose_files(); } }
 
-    /// Take every path the OS has asked us to open since the last drain.
-    pub fn drain() -> Vec<PathBuf> {
+    /// Take every path opened since the last drain.
+    pub fn drain() -> Opened {
         std::mem::take(&mut *OPENED.lock().unwrap())
     }
 }
@@ -172,9 +173,18 @@ mod imp {
 
     pub fn install(_notify: crate::player::Notify) {}
 
-    pub fn drain() -> Vec<PathBuf> {
-        Vec::new()
+    pub fn drain() -> super::Opened {
+        super::Opened::default()
     }
+}
+
+/// Paths opened since the last `drain`, by where they came from.
+#[derive(Default)]
+pub struct Opened {
+    /// Finder Open With / double-click: these REPLACE the open set.
+    pub replace: Vec<std::path::PathBuf>,
+    /// The in-app "Add sources" picker: these add.
+    pub add: Vec<std::path::PathBuf>,
 }
 
 pub use imp::{paste_text, choose_files, copy_png, drain, install, reveal, sync_menus, take_menu_requests, take_view_request};
