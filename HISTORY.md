@@ -1908,3 +1908,16 @@ The same indicator appears on every workspace page, including narrow Timeline
 windows, with tabs reserving room for its text. The inspector badge uses the
 same status instead of inferring full encoding from frame snap. Splash READY
 remains a launch lamp.
+
+## 2026-11-03 — Keep Export workspace routing consistent with the encode indicator
+
+The newer Export workspace now preserves coded packets when no pixel processing
+is requested, using the existing selective-GOP repair for exact trims. Unprocessed
+sources avoid the SDR pixel pipeline; cropped/processed video and explicit ProRes
+conversion still encode the complete kept video. Generator and whole-clip export
+capabilities have distinct rejection messages. The header includes saved crop edits,
+export crop/codec choices, and every enabled processor, even beyond the selected
+preview output. Export no longer overwrites the header with READY/ENCODING.
+The default preset is labelled Auto / HEVC to expose its behavior.
+Regression coverage checks exact copied video packets in MP4/MKV, untouched middle
+GOPs through pipeline export for CFR/VFR and B-frames, and indicator state.

@@ -2356,10 +2356,6 @@ pub(crate) fn pipeline_export_with_inputs(
         !dest.exists(),
         "Output already exists; choose another filename"
     );
-    crate::media_metadata::read(&info.path)
-        .map_err(anyhow::Error::msg)?
-        .check_sdr()
-        .map_err(anyhow::Error::msg)?;
     let mkv = dest
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("mkv"));
@@ -2370,6 +2366,24 @@ pub(crate) fn pipeline_export_with_inputs(
         "Choose MP4 or MKV for pipeline export"
     );
     ensure!(!prores || mkv, "ProRes requires MKV");
+    cancel.check().map_err(anyhow::Error::msg)?;
+    if chain.is_empty() && crop.is_none() && inputs.crops.is_empty() && !prores {
+        // Keep the packet path available through the Export workspace. Repair
+        // only boundary GOPs, and never pass untouched HDR through the SDR host.
+        // Publish after checking cancellation; RAII removes unpublished work.
+        let reservation = pending(dest)?;
+        let work_path = reservation.0.with_extension(if mkv { "mkv" } else { "mp4" });
+        ensure!(!work_path.exists(), "Export working file already exists");
+        let work = Pending(work_path);
+        export(&info.path, &work.0, keeps, false, &[], None)?;
+        cancel.check().map_err(anyhow::Error::msg)?;
+        std::fs::rename(&work.0, dest)?;
+        return Ok(());
+    }
+    crate::media_metadata::read(&info.path)
+        .map_err(anyhow::Error::msg)?
+        .check_sdr()
+        .map_err(anyhow::Error::msg)?;
     let temp = pending(dest)?;
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -2409,12 +2423,10 @@ pub(crate) fn pipeline_export_with_inputs(
         for (stage,(id, settings)) in chain.iter().enumerate() {
             ensure!(stage==0 || inputs.bindings.get(id).is_none_or(|b|b.is_empty()), "Spatial inputs currently require the first enabled processor");
             let f = registry.get(id).map_err(anyhow::Error::msg)?;
-            ensure!(
-                matches!(f.capabilities().role, Role::Processor)
-                    && !matches!(f.capabilities().input, InputRequirement::WholeClip),
-                "{} requires whole-clip execution",
-                f.descriptor().name
-            );
+            ensure!(matches!(f.capabilities().role, Role::Processor),
+                "{}: generator/post-processor execution is not supported by export", f.descriptor().name);
+            ensure!(!matches!(f.capabilities().input, InputRequirement::WholeClip),
+                "{}: whole-clip execution is not supported by export", f.descriptor().name);
             let session = abner_processor_api::create_bound(f,dims[0],dims[1],settings,inputs.bindings.get(id).cloned().unwrap_or_default())
                 .map_err(anyhow::Error::msg)?;
             active.lock().unwrap().push(session.cancellation());

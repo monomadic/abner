@@ -1322,9 +1322,9 @@ impl Panel {
         }
         .map(|f| f.pts);
     }
-    /// An enabled stage in the current chain requires encoding output pixels.
+    /// Export includes every enabled stage, regardless of preview selection.
     pub fn modifies_video(&self) -> bool {
-        self.enabled.iter().take(self.selected + 1).any(|enabled| *enabled)
+        self.enabled.iter().any(|enabled| *enabled)
     }
 
     /// Export runs every enabled stage in its displayed order, not just the
@@ -3525,7 +3525,7 @@ mod tests {
         assert!(p.chain().is_empty());
         assert!(!p.modifies_video());
         p.enabled[1] = true;
-        assert!(!p.modifies_video(), "stages after the selected output are outside the chain");
+        assert!(p.modifies_video(), "export includes enabled stages after the preview selection");
         p.enabled = vec![true, true];
         assert!(p.modifies_video());
         p.enter();

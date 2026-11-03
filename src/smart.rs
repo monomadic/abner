@@ -101,7 +101,13 @@ mod tests {
         // Exact trim export must repair boundary GOPs automatically while
         // preserving the coded pictures in the complete middle GOP.
         let trimmed = work.0.join(format!("trimmed-{bf}-{vfr}.mp4"));
-        crate::media_io::export(&source, &trimmed, &[(pts[12], pts[78])], false, &[], None).unwrap();
+        let source_info = crate::probe::probe(&source).unwrap();
+        crate::media_io::pipeline_export(
+            &source_info, &trimmed, &[(pts[12], pts[78])],
+            &abner_processor_api::Registry::default(), &[], false, None,
+            &abner_processor_api::Cancellation::default(), &std::sync::Mutex::default(),
+            |_| panic!("partial-GOP export must use selective repair, not the pixel pipeline"),
+        ).unwrap();
         let trimmed_info = probe(&trimmed, &work.0, &cancel).unwrap();
         assert_eq!(frames(&trimmed_info).len(), 66);
         let source_packets = packet_hashes(&source);

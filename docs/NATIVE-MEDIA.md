@@ -80,19 +80,23 @@ rather than silently transcoding the whole clip. Automatic repair files are
 removed after export, including failed exports. Pixel edits such as cropping
 require encoding every kept frame and override a copy request. Process-chain
 media export is not part of this copy/repair path: it belongs to the Export
-workspace below, which always encodes.
+workspace below, which uses the same copy/repair path when no processing is requested.
 
 ## Minimal Export workspace
 
 The Export tab (`--export INPUT`) writes the focused source through **all enabled
 processors in their displayed order**, including the current Timeline kept ranges and
-an active crop carried into Export. HEVC uses macOS VideoToolbox at 35 Mb/s; ProRes
+saved crop edits carried into Export. Auto / HEVC preserves coded packets without
+pixel processing, repairing only GOPs crossed by exact trims. With processors or
+crops enabled it encodes the complete kept video. ProRes explicitly requests full
+conversion. The header indicator accounts for all enabled stages and saved crops.
+HEVC uses macOS VideoToolbox at 35 Mb/s; ProRes
 uses native ProRes 422 Standard. HEVC supports MP4 and MKV; choosing ProRes selects
-MKV and disables MP4. Audio is encoded to AAC-LC at 48 kHz / 192 kb/s with the kept
+MKV and disables MP4. In processed exports, audio is encoded to AAC-LC at 48 kHz / 192 kb/s with the kept
 ranges' timing. This path does not carry subtitles, chapters, attachments or arbitrary
-source metadata. Existing Timeline packet-copy and selective-GOP paths remain separate.
+source metadata. Unprocessed exports retain the existing packet-copy preservation limits.
 
-This first pipeline export path is explicitly SDR and constant-rate: native RGBA8
+The pixel-processing path is explicitly SDR and constant-rate: native RGBA8
 decode is expanded to the processor API's RGB16, then encoded from RGBA8 output.
 It is not a high-bit-depth/HDR mastering path. Streaming frame-count/rate changes are
 supported when output timestamps are contiguous and output durations are constant;
@@ -105,3 +109,6 @@ not an archive of the full output. The latest-frame mailbox drops obsolete displ
 updates without dropping any encoded frames. Export, Cancel and Reveal output are the
 only footer actions. Output is staged beside its destination, removed on error/cancel,
 and published without replacing an existing file. The save dialog chooses the filename.
+Packet-copy jobs check cancellation before work and before publishing; cancellation
+can wait for the native copy/repair operation to finish. They do not populate the
+rendered-frame review cache.

@@ -2851,7 +2851,8 @@ impl App {
             if self.show_ui {
             items.push(Item::Rect(RectItem::new(RectPx{x:0.,y:0.,w:vp.0,h:HEADER_H},WORKSPACE_PANEL)));
             self.mode_selector().draw(&mut items,self.cursor,self.cursor_inside);
-            draw_status_chip(&mut items,self.status_chip(),if self.export_page.busy(){0xe6ac69}else{0x9ac8aa},if self.export_page.busy(){"ENCODING"}else{"READY"},WORKSPACE_TEXT);
+            let (text, lamp) = self.encode_status();
+            draw_status_chip(&mut items, self.status_chip(), lamp, text, WORKSPACE_TEXT);
             }
         }
         let animating = self.export_page.busy() || self.processors.animating()
@@ -3445,7 +3446,9 @@ impl App {
     fn encode_status(&self) -> (&'static str, u32) {
         // Pixel processing takes precedence over temporal edits, even while
         // viewing another page. Bypassed processors do not affect the result.
-        if self.crop.is_some() || self.processors.modifies_video() {
+        if self.crop.is_some() || self.processors.modifies_video()
+            || self.export_page.crop.is_some() || self.export_page.prores
+            || (self.ready() && !self.crop_schedule().is_empty()) {
             return ("FULL RE-ENCODE", 0xf08566);
         }
         if let Some(cut) = self.cut.as_ref().filter(|_| self.active == self.cut_video) {
@@ -8603,6 +8606,17 @@ mod tests {
         app.cut.as_mut().unwrap().cut_selection();
         app.active = 1;
         assert_eq!(app.encode_status().0, "STREAM COPY", "another source has no timeline edits");
+        app.videos[1].input_crop = Some(Crop { x: 0., y: 0., w: 160., h: 90. });
+        assert_eq!(app.encode_status().0, "FULL RE-ENCODE", "saved source crop survives leaving its editor");
+        app.videos[1].input_crop = None;
+        app.export_page.prores = true;
+        assert_eq!(app.encode_status().0, "FULL RE-ENCODE", "explicit codec conversion encodes pixels");
+        app.export_page.prores = false;
+        app.export_page.open = true;
+        let frame = app.tick(0.0, (1280.0, 800.0), 1.0);
+        assert!(frame.items.iter().any(|item| matches!(item, Item::Text(t) if t.text == "STREAM COPY")));
+        assert!(!frame.items.iter().any(|item| matches!(item, Item::Text(t) if t.text == "READY")));
+        app.export_page.open = false;
         for width in [720.0, 900.0, 1280.0] {
             app.vp.0 = width;
             for cut_mode in [false, true] {

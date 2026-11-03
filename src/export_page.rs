@@ -403,7 +403,7 @@ impl Page {
         vec![
             (
                 r(x, 140., half),
-                "HEVC",
+                "Auto / HEVC",
                 !self.prores,
                 Action::Preset(false),
             ),
@@ -888,6 +888,22 @@ mod tests {
             }))
         }
     }
+    struct Unsupported(bool);
+    impl Factory for Unsupported {
+        fn descriptor(&self) -> Descriptor {
+            let mut d = Red.descriptor();
+            d.id = "test.unsupported".into();
+            d
+        }
+        fn capabilities(&self) -> abner_processor_api::Capabilities {
+            use abner_processor_api::{Capabilities, InputRequirement, Role};
+            if self.0 { Capabilities { role: Role::Generator, input: InputRequirement::IndependentFrame } }
+            else { Capabilities { role: Role::Processor, input: InputRequirement::WholeClip } }
+        }
+        fn create(&self, _: usize, _: usize, _: &serde_json::Value) -> Result<Box<dyn Session>, String> {
+            panic!("unsupported export capability must be rejected before creating a session")
+        }
+    }
     impl Session for RedSession {
         fn process(&mut self, mut f: Frame) -> Result<Vec<Frame>, String> {
             if self
@@ -1079,6 +1095,24 @@ mod tests {
             );
             let _ = std::fs::remove_file(dest);
         }
+        // The default export preserves coded packets without processing,
+        // including a container change, rather than silently encoding HEVC.
+        let original = crate::media_io::Input::open(&input).unwrap();
+        let vi = original.video().unwrap();
+        for ext in ["mp4", "mkv"] {
+            let dest = dir.join(format!("copied.{ext}"));
+            crate::media_io::pipeline_export(
+                &info, &dest, &[(0., 0.5)], &registry, &[], false, None,
+                &Cancellation::default(), &Mutex::default(), |_| panic!("packet copy must not render pixels"),
+            ).unwrap();
+            let copied = crate::media_io::Input::open(&dest).unwrap();
+            let cv = copied.video().unwrap();
+            assert_eq!(copied.tracks[cv].samples.len(), original.tracks[vi].samples.len());
+            for i in 0..original.tracks[vi].samples.len() {
+                assert_eq!(original.data(vi, i).unwrap(), copied.data(cv, i).unwrap());
+            }
+            std::fs::remove_file(dest).unwrap();
+        }
         for double in [false, true] {
             let dest = dir.join(if double { "double.mp4" } else { "cropped.mkv" });
             let keeps = if double {
@@ -1111,6 +1145,18 @@ mod tests {
                 if double { 24 } else { 9 }
             );
             std::fs::remove_file(dest).unwrap();
+        }
+        for (generator, message) in [(true, "generator"), (false, "whole-clip")] {
+            let mut unsupported = Registry::default();
+            unsupported.register(Box::new(Unsupported(generator))).unwrap();
+            let dest = dir.join("unsupported.mp4");
+            let error = crate::media_io::pipeline_export(
+                &info, &dest, &[(0., 0.5)], &unsupported,
+                &[("test.unsupported".into(), serde_json::json!({}))], false, None,
+                &Cancellation::default(), &Mutex::default(), |_| Ok(()),
+            ).unwrap_err();
+            assert!(error.to_string().contains(message), "{error}");
+            assert!(!dest.exists());
         }
         let cancelled = Cancellation::default();
         cancelled.cancel();
