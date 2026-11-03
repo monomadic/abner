@@ -3,11 +3,9 @@
 //! LaunchServices hands an opened document to the app as an Apple Event
 //! on the main thread — never as argv — so the paths arrive through the
 //! `open_shim.m` application delegate mid-run-loop. They buffer here and
-//! `Runner::about_to_wait` drains them, flushing the whole batch through
-//! `files_dropped(paths, false)`: the drag-in path already does exactly
-//! what Open With should (survivors fill the next free slots). Always an
-//! ADD, never the ⌘-replace — a ⌘ held while picking a menu item must not
-//! wipe the set. The notify hook covers the running-app case: an open
+//! `Runner::about_to_wait` drains them (`Opened`), flushing each batch
+//! through `files_dropped`: a Finder open REPLACES the open set, while the
+//! in-app "Add sources" picker, which shares this queue, adds. The notify hook covers the running-app case: an open
 //! landing while the loop sleeps on the idle tick still redraws promptly.
 //!
 //! The native File / View / Frame menus live here too (`open_shim.m` builds

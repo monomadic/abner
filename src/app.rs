@@ -1586,7 +1586,7 @@ impl App {
     }
 
     /// The point (logical px) lies on the sources rail, where a file drop
-    /// adds a source instead of following the ⌘-replace rule.
+    /// adds a source instead of replacing the open set.
     pub fn over_sources(&self, x: f32, y: f32) -> bool {
         if !self.ready() || !self.show_ui {
             return false;

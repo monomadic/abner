@@ -54,9 +54,8 @@ from one to the other, keeping its number.
   here. **Drops** are switchblade's `FilesDropped` path: winit sends one `DroppedFile`
   per file with no end-of-batch marker, so `window_event` accumulates into `dropped`
   and `about_to_wait` flushes the whole gesture at once (without the batch, a pair
-  dropped together would land as two one-file loads). ⌘ (replace, not add) is read
-  from the HARDWARE modifier state — a drag from Finder never focuses this window, so
-  no `ModifiersChanged` ever reported the key. `Runner::files_dropped` probes and
+  dropped together would land as two one-file loads). A drop on the sources rail adds;
+  anywhere else it replaces the set. `Runner::files_dropped` probes and
   spawns right there on the loop, which `probe`'s deadline makes safe, and logs-and-
   skips anything that fails: a drop is a guess by definition. **`set_app_icon()` returns early when the executable sits under
   `Contents/MacOS`**: inside a bundle that call OVERRIDES `AppIcon.icns` at launch, and
@@ -467,8 +466,8 @@ the "VIDEO QUALITY TESTING TOOLKIT" line that used to be a second text run.
   double-click REPLACES the open set (`files_dropped(paths, true)`), while the in-app
   "Add sources" picker, which shares the queue, always adds; neither reads ⌘. A window
   drop onto the sources rail (`App::over_sources`, pointer read from AppKit by
-  `Runner::drop_point` — winit gives no cursor during an inbound drag) always adds;
-  elsewhere ⌘ replaces. **The native menus** (File · View · Frame) are the same
+  `Runner::drop_point` — winit gives no cursor during an inbound drag) adds;
+  anywhere else it replaces the set, like a Finder open. No modifier is read. **The native menus** (File · View · Frame) are the same
   shim: `ab_sync_menus` builds them once and re-derives every item's enabled/checked
   state from `App` on each `about_to_wait` (never from clicks); a pick queues an
   `open::MenuAction` (File) or a view request, applied on the loop. Frame > Copy Frame

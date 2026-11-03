@@ -8,8 +8,9 @@ existed there before it landed; earlier entries predate the task list.
 Opening a file from Finder (Open With / double-click) while Abner is running now
 replaces every open clip with the opened one(s) instead of appending. The in-app
 "Add sources" picker shares the open queue but stays an add, so the shim tags each
-path with its origin. A file dropped onto the sources rail always adds a source,
-⌘ or not; drops elsewhere keep add / ⌘-replace. winit reports no cursor position
+path with its origin. A file dropped onto the sources rail adds a source; dropped
+anywhere else it replaces the set, like a Finder open (the old ⌘-to-replace
+modifier is gone). winit reports no cursor position
 during an inbound drag, so the drop point is read from AppKit.
 
 ## 2026-11-03 — Lossless export option

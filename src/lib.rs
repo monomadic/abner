@@ -54,9 +54,9 @@ usage: abner [--config <file.toml>] [--no-video-splash] [--duplicate] [--no-sour
 Run with no arguments (or launched from the .app bundle) to open the
 launch window, then drag clips onto it: one drop fills slot 1 and plays
 on its own, two fill 1 and 2, more add 3, 4… Dropping onto a running
-clip or comparison ADDS streams; hold Cmd while dropping to replace the
-whole set (a drop on the sources panel always adds). Opening a file from
-Finder (Open With / double-click) replaces the whole set. A single path on the command line loads slot 1 the same way.
+clip or comparison REPLACES the whole set; drop onto the sources panel to
+add streams instead. Opening a file from Finder (Open With / double-click)
+replaces the whole set too. A single path on the command line loads slot 1 the same way.
 Any arguments skip the animated splash; video paths play directly.
 Use --no-video-splash alone for just the centered logo and drag clips onto it.
 
@@ -732,23 +732,6 @@ fn set_titlebar_glass(w: &Window) {
     }
 }
 
-/// Whether the platform's primary modifier (⌘ on macOS) is held RIGHT
-/// NOW, read from the hardware state. Only needed where the event stream
-/// can't answer: a drag from another app delivers `DroppedFile` without
-/// this window ever seeing a `ModifiersChanged`. (switchblade.)
-fn os_primary_modifier_down() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        use objc2_app_kit::{NSEvent, NSEventModifierFlags};
-        unsafe { NSEvent::modifierFlags_class() }
-            .contains(NSEventModifierFlags::NSEventModifierFlagCommand)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        false
-    }
-}
-
 #[cfg(target_os = "macos")]
 fn set_window_shadow(w: &Window, on: bool) {
     use objc2_app_kit::NSView;
@@ -1057,18 +1040,15 @@ impl ApplicationHandler for Runner {
         // files dropped together land as an A/B pair. Slot order is the
         // order the platform delivers (for a Finder multi-select, the
         // order they appear in that window) — drop them one at a time to
-        // choose. ⌘ (replace instead
-        // of add) is read from the HARDWARE modifier state — a drag from
-        // Finder never focuses this window, so no `ModifiersChanged` ever
-        // reported the key going down. (switchblade, `FilesDropped`.)
+        // choose. (switchblade, `FilesDropped`.)
         if !self.dropped.is_empty() {
             let paths = std::mem::take(&mut self.dropped);
-            // A drop on the sources rail always adds a source; elsewhere ⌘
-            // replaces the set.
+            // A drop on the sources rail adds a source; anywhere else it
+            // replaces the set, like a Finder open.
             let onto_sources = self
                 .drop_point()
                 .is_some_and(|(x, y)| self.app.over_sources(x, y));
-            self.files_dropped(paths, !onto_sources && os_primary_modifier_down());
+            self.files_dropped(paths, !onto_sources);
             self.animating = true;
             if let Some(w) = &self.window {
                 w.request_redraw();
