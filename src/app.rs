@@ -2248,7 +2248,7 @@ impl App {
             if contains(self.workspace().list, x, y) {
                 let first = self.source_first();
                 for idx in first..(first + self.source_capacity()).min(self.videos.len()) {
-                    if contains(self.source_row(idx), x, y) {
+                    if contains(self.source_card(idx), x, y) {
                         if self.workspace().mini && idx == self.active {
                             // The mini strip's focused keycap reopens the rail.
                             self.show_sources = true;
@@ -3030,10 +3030,11 @@ impl App {
     fn source_thumb_height(&self, index: usize) -> f32 {
         let width = (self.workspace().panel - 32.0).max(1.0);
         let info = &self.videos[index].info;
-        // A portrait clip stops at a square card: `source_thumb` centres
-        // the narrower preview, so it doesn't fill the rail on its own.
+        // A portrait clip stops at a 4:3 card's height: `source_thumb`
+        // centres the narrower preview and `source_card` hugs it, so it
+        // doesn't fill the rail on its own.
         (width * info.height.max(1) as f32 / info.width.max(1) as f32)
-            .min(width)
+            .min(width * PORTRAIT_THUMB_MAX)
             .min((self.workspace().list.h - self.source_chrome()).max(1.0))
     }
 
@@ -3080,6 +3081,16 @@ impl App {
             w: l.panel - 24.0, h: self.source_pitch(index) - 12.0 }
     }
 
+    /// The card as drawn: the row's height, but only as wide as its
+    /// preview plus the 4px rim, so a narrow (portrait) preview is ringed
+    /// itself rather than sitting between dark bars.
+    fn source_card(&self, index: usize) -> RectPx {
+        let r = self.source_row(index);
+        if self.workspace().mini { return r; }
+        let t = self.source_thumb(index);
+        RectPx { x: t.x - 4.0, w: t.w + 8.0, ..r }
+    }
+
     fn source_drop_index(&self, y: f32) -> usize {
         let first = self.source_first();
         (first..self.videos.len()).find(|&i| {
@@ -3095,7 +3106,7 @@ impl App {
     }
 
     fn source_checkbox(&self, index: usize) -> RectPx {
-        let r = self.source_row(index);
+        let r = self.source_card(index);
         RectPx {
             x: r.x + r.w - 39.0,
             // Overlaid, the label owns the preview's foot: the box moves up.
@@ -3682,7 +3693,7 @@ impl App {
         items.push(Item::Clip(Some(visible)));
         for i in first..(first + self.source_capacity()).min(self.videos.len()) {
             let v = &self.videos[i];
-            let r = self.source_row(i);
+            let r = self.source_card(i);
             let active = i == self.active;
             let hover = self.cursor_inside && contains(r, self.cursor.0, self.cursor.1);
             items.push(Item::Rect(RectItem { radius: 10.0, border_w: 2.0,
@@ -3770,7 +3781,7 @@ impl App {
             if overlay {
                 items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(tw),
                     ..TextItem::new(tx, meta_y, 10.0, ink, format!("{left} / {} fps", v.info.fps)) }));
-            } else if l.panel >= 280.0 {
+            } else if r.w >= 256.0 {
                 items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(tw - 112.0),
                     ..TextItem::new(tx, meta_y, 11.0, secondary, left) }));
                 items.push(Item::Text(TextItem { regular: true, align: Align::Right, valign: VAlign::Middle, max_width: Some(108.0),
@@ -7021,6 +7032,9 @@ pub(crate) const HEADER_H: f32 = CUT_HEADER_H;
 const CONTEXT_H: f32 = 40.0;
 /// Sources sidebar (278:584): 157px cards on a 12px gap, a 100px preview.
 const SOURCE_H: f32 = 169.0;
+/// A portrait preview's height stops at this fraction of the card's width
+/// (a 4:3 landscape card's height).
+const PORTRAIT_THUMB_MAX: f32 = 0.75;
 /// Below this panel width the source cards put their label on the preview.
 const SOURCE_OVERLAY_W: f32 = 260.0;
 /// Below this the cards drop the label: preview and keycap only, the
@@ -7109,7 +7123,9 @@ mod tests {
             app.videos[0].info.height = h;
             let thumb = app.source_thumb(0);
             assert!((thumb.w / thumb.h - w as f32 / h as f32).abs() < 1e-5);
-            assert!(thumb.h <= app.workspace().panel - 32.0 + 0.001, "a portrait preview stops at square");
+            assert!(thumb.h <= (app.workspace().panel - 32.0) * PORTRAIT_THUMB_MAX + 0.001, "a portrait preview stops at 4:3");
+            let card = app.source_card(0);
+            assert_eq!((card.x, card.w), (thumb.x - 4.0, thumb.w + 8.0), "the ring hugs the preview");
             assert!(thumb.h + 69.0 <= app.workspace().list.h + 0.001);
         }
         app.mouse_down(200.0, HEADER_H + 20.0);
