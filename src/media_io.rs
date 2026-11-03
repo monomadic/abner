@@ -1250,6 +1250,18 @@ pub(crate) fn export(
     chapters: &[(f64, f64, String)],
     crop: Option<(u32, u32, u32, u32)>,
 ) -> Result<()> {
+    export_with_cancel(path, dest, keeps, copy, chapters, crop, &AtomicBool::new(false))
+}
+
+pub(crate) fn export_with_cancel(
+    path: &Path,
+    dest: &Path,
+    keeps: &[(f64, f64)],
+    copy: bool,
+    chapters: &[(f64, f64, String)],
+    crop: Option<(u32, u32, u32, u32)>,
+    cancel: &AtomicBool,
+) -> Result<()> {
     validate_ranges(keeps)?;
     ensure!(
         path != dest && (!dest.exists() || path.canonicalize()? != dest.canonicalize()?),
@@ -1262,7 +1274,6 @@ pub(crate) fn export(
                 .any(|v| e.eq_ignore_ascii_case(v))),
         "unsupported output container"
     );
-    let cancel = AtomicBool::new(false);
     let input = Input::open(path)?;
     // Pixel edits always encode every kept frame. Exact trims without pixel
     // edits repair only intersected GOPs, then use the existing lossless muxer.
@@ -1270,17 +1281,18 @@ pub(crate) fn export(
     // back to a full transcode.
     let repaired = if !copy && crop.is_none() {
         let regions = trim_regions(&input, keeps)?;
-        if regions.is_empty() { None } else { Some(Pending(smart(path, &regions, &cancel)?)) }
+        if regions.is_empty() { None } else { Some(Pending(smart(path, &regions, cancel)?)) }
     } else { None };
     let input = if let Some(work) = &repaired { Input::open(&work.0)? } else { input };
     let copy = crop.is_none();
     let temp = pending(dest)?;
     let mut mux = new_mux(&input, &temp.0, dest)?;
     if copy {
-        copy_ranges(&input, &mut mux, keeps, &cancel, false)?;
+        copy_ranges(&input, &mut mux, keeps, cancel, false)?;
     } else {
-        encode_ranges(&input, path, &mut mux, keeps, crop, &cancel)?;
+        encode_ranges(&input, path, &mut mux, keeps, crop, cancel)?;
     }
+    ensure!(!cancel.load(std::sync::atomic::Ordering::Relaxed), "Export cancelled");
     mux.finish()?;
     if copy {
         carry_transform(&input, &temp.0)?;

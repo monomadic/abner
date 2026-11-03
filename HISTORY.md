@@ -3,6 +3,14 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-11-03 — Lossless export option
+
+Export offers Lossless copy alongside HEVC and ProRes. It copies compressed media
+without rendering and is disabled, with a reason, for enabled processors, crops,
+and timeline boundaries that are not ready for keyframe copying. Eligibility is
+refreshed when edits change and checked again before export; the media writer
+also validates every copy boundary. Copy jobs support cancellation.
+
 ## 2026-11-03 — Process transport styling
 
 Process uses the regular transport's rounded track, blue played portion, round

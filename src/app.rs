@@ -1610,8 +1610,22 @@ impl App {
         else { self.select_workspace_mode(5); }
     }
 
+    fn update_export_copy_availability(&mut self) {
+        let (_, chain) = self.processors.export_setup();
+        let reason = if !chain.is_empty() {
+            Some("Enabled processors require rendering")
+        } else if self.export_page.crop.is_some() || !self.crop_schedule().is_empty() {
+            Some("Crop edits require rendering")
+        } else if self.cut.as_ref().filter(|_| self.active == self.cut_video)
+            .is_some_and(|c| !c.copy_ready()) {
+            Some("Cut boundaries must be keyframes")
+        } else { None };
+        self.export_page.set_copy_unavailable(reason);
+    }
+
     fn start_pipeline_export(&mut self) {
         if !self.ready() { return; }
+        self.update_export_copy_availability();
         let info = self.videos[self.active].info.clone();
         self.export_page.inputs = self.processors.job_inputs();
         self.export_page.inputs.crops = self.crop_schedule();
@@ -2860,6 +2874,7 @@ impl App {
         self.export_page.poll(&mut uploads, n + 1);
         if let Some(t) = self.export_page.seek.take().filter(|_| self.export_page.open) { self.seek_all(t,true);self.adopt_seek=false; }
         if self.export_page.open {
+            self.update_export_copy_availability();
             items.clear();
             self.export_page.draw(&mut items,vp,self.active,n+1,&self.videos[self.active].info,self.cursor,self.videos[self.active].shown_pts,self.show_ui);
             if self.show_ui {
@@ -7832,6 +7847,23 @@ mod tests {
     /// the player's cache (nothing is kept app-side outside mask mode), the
     /// worker hands back a decodable RGB PNG at the clip's native size, and
     /// the menu is dead without a clip.
+    #[test]
+    fn lossless_export_is_disabled_for_applied_crops() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        app.update_export_copy_availability();
+        assert!(app.export_page.copy_unavailable.is_none());
+        app.export_page.apply(crate::export_page::Action::Lossless);
+        assert!(app.export_page.lossless);
+        app.videos[0].input_crop = Some(Crop { x: 0., y: 0., w: 64., h: 64. });
+        app.update_export_copy_availability();
+        assert_eq!(app.export_page.copy_unavailable, Some("Crop edits require rendering"));
+        assert!(!app.export_page.lossless);
+        app.videos[0].input_crop = None;
+        app.update_export_copy_availability();
+        assert!(app.export_page.copy_unavailable.is_none());
+    }
+
     #[test]
     fn copy_frame_encodes_the_shown_frame_as_rgb_png() {
         let Some(clip) = test_clip() else { return };

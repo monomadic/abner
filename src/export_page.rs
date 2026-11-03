@@ -25,6 +25,7 @@ pub(crate) struct Rendered {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Action {
     Preset(bool),
+    Lossless,
     Container(bool),
     Export,
     Cancel,
@@ -39,12 +40,15 @@ struct Job {
     cancel: Cancellation,
     active: Arc<Mutex<Vec<Cancellation>>>,
     source: PathBuf,
+    copy_cancel: Arc<std::sync::atomic::AtomicBool>,
 }
 pub(crate) struct Page {
     pub(crate) inputs:crate::spatial::JobInputs,
     pub open: bool,
     pub crop: Option<(u32, u32, u32, u32)>,
     pub prores: bool,
+    pub lossless: bool,
+    pub copy_unavailable: Option<&'static str>,
     pub mkv: bool,
     pub following: bool,
     pub original: bool,
@@ -70,6 +74,8 @@ impl Default for Page {
             open: false,
             crop: None,
             prores: false,
+            lossless: false,
+            copy_unavailable: None,
             mkv: false,
             following: true,
             original: false,
@@ -173,12 +179,17 @@ fn hit(r: RectPx, x: f32, y: f32) -> bool {
     x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h
 }
 impl Page {
+    pub fn set_copy_unavailable(&mut self, reason: Option<&'static str>) {
+        self.copy_unavailable = reason;
+        if reason.is_some() { self.lossless = false; }
+    }
     pub fn busy(&self) -> bool {
         self.job.is_some()
     }
     pub fn cancel(&mut self) {
         if let Some(j) = &self.job {
             j.cancel.cancel();
+            j.copy_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             for c in j.active.lock().unwrap().iter() {
                 c.cancel();
             }
@@ -210,8 +221,13 @@ impl Page {
         if self.busy() {
             return;
         }
+        if self.lossless && (self.copy_unavailable.is_some() || !chain.is_empty()
+            || self.crop.is_some() || !self.inputs.crops.is_empty()) {
+            self.status = "Lossless copy is unavailable: these edits require rendering.".into();
+            return;
+        }
         // ProRes in MP4 is not interoperable. MKV is the supported ProRes container here.
-        if self.prores && !self.mkv {
+        if !self.lossless && self.prores && !self.mkv {
             self.status = "ProRes requires MKV. Select MKV to export.".into();
             return;
         }
@@ -237,7 +253,7 @@ impl Page {
         self.duration = keeps.iter().map(|(a, b)| b - a).sum();
         self.started = Instant::now();
         self.elapsed = 0.;
-        self.status = "Preparing pipeline…".into();
+        self.status = if self.lossless { "Copying compressed media…" } else { "Preparing pipeline…" }.into();
         let cancel = Cancellation::default();
         let latest = Arc::new(Mutex::new(None));
         let (tx, done) = mpsc::sync_channel(1);
@@ -245,12 +261,21 @@ impl Page {
         let stop = cancel.clone();
         let inputs = self.inputs.clone();
         let prores = self.prores;
+        let lossless = self.lossless;
         let crop = self.crop;
         let active = Arc::new(Mutex::new(Vec::new()));
         let worker_active = active.clone();
         let source = info.path.clone();
+        let copy_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_copy_cancel = copy_cancel.clone();
         std::thread::spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if lossless {
+                    stop.check().map_err(|e| e.to_string())?;
+                    crate::media_io::export_with_cancel(&info.path, &dest, &keeps, true, &[], None, &worker_copy_cancel)
+                        .map_err(|e| e.to_string())?;
+                    return Ok(dest);
+                }
                 let registry = registry
                     .lock()
                     .map_err(|_| "Processor registry unavailable".to_string())?;
@@ -283,6 +308,7 @@ impl Page {
             cancel,
             active,
             source,
+            copy_cancel,
         });
     }
     pub fn poll(&mut self, uploads: &mut Vec<Upload>, slot: usize) {
@@ -404,23 +430,24 @@ impl Page {
             (
                 r(x, 140., half),
                 "Auto / HEVC",
-                !self.prores,
+                !self.prores && !self.lossless,
                 Action::Preset(false),
             ),
             (
                 r(x + half + 8., 140., half),
                 "ProRes",
-                self.prores,
+                self.prores && !self.lossless,
                 Action::Preset(true),
             ),
-            (r(x, 224., half), "MP4", !self.mkv, Action::Container(false)),
+            (r(x, 184., w), "Lossless copy", self.lossless, Action::Lossless),
+            (r(x, 264., half), "MP4", !self.mkv, Action::Container(false)),
             (
-                r(x + half + 8., 224., half),
+                r(x + half + 8., 264., half),
                 "MKV",
                 self.mkv,
                 Action::Container(true),
             ),
-            (r(x, 276., w), "Export", false, Action::Export),
+            (r(x, 316., w), "Export", false, Action::Export),
             (
                 r(
                     l.context.x + l.context.w * 0.28,
@@ -488,13 +515,18 @@ impl Page {
     pub fn apply(&mut self, a: Action) -> Option<PathBuf> {
         match a {
             Action::Preset(p) if !self.busy() => {
+                self.lossless = false;
                 self.prores = p;
                 if p {
                     self.mkv = true;
                 }
             }
+            Action::Lossless if !self.busy() && self.copy_unavailable.is_none() => {
+                self.lossless = true;
+                self.prores = false;
+            }
             Action::Container(m) if !self.busy() => {
-                if !m && self.prores {
+                if !m && self.prores && !self.lossless {
                     self.status = "ProRes requires MKV.".into();
                 } else {
                     self.mkv = m;
@@ -778,7 +810,7 @@ impl Page {
             Align::Left,
             l.progress.w,
         );
-        for (y, t) in [(84., "EXPORT"), (116., "PRESET"), (200., "CONTAINER")] {
+        for (y, t) in [(84., "EXPORT"), (116., "PRESET"), (244., "CONTAINER")] {
             ui_label(
                 items,
                 l.sidebar.x + 16.,
@@ -790,6 +822,10 @@ impl Page {
                 l.sidebar.w - 32.,
             );
         }
+        if let Some(reason) = self.copy_unavailable {
+            ui_label(items, l.sidebar.x + 16., 368., 10., dim, reason,
+                Align::Left, l.sidebar.w - 32.);
+        }
         items.push(Item::Rect(RectItem::new(l.footer, hex_color(0x0b0c0c))));
         for (r, t, selected, a) in self.actions(vp) {
             let hovered = hit(r, cursor.0, cursor.1);
@@ -797,7 +833,8 @@ impl Page {
                 Action::Export => self.busy(),
                 Action::Cancel => !self.busy(),
                 Action::Reveal => self.path.is_none(),
-                Action::Container(false) => self.busy() || self.prores,
+                Action::Lossless => self.busy() || self.copy_unavailable.is_some(),
+                Action::Container(false) => self.busy() || (self.prores && !self.lossless),
                 Action::Preset(_) | Action::Container(true) => self.busy(),
                 _ => false,
             };
@@ -950,6 +987,26 @@ mod tests {
         }
     }
     #[test]
+    fn lossless_selection_tracks_edit_eligibility() {
+        let mut page = Page::default();
+        page.apply(Action::Lossless);
+        assert!(page.lossless);
+        page.set_copy_unavailable(Some("Crop edits require rendering"));
+        assert!(!page.lossless);
+        page.apply(Action::Lossless);
+        assert!(!page.lossless);
+        page.set_copy_unavailable(None);
+        page.apply(Action::Lossless);
+        assert!(page.lossless);
+        page.apply(Action::Preset(true));
+        assert!(!page.lossless);
+        assert!(page.prores);
+        page.apply(Action::Lossless);
+        page.apply(Action::Container(false));
+        assert!(!page.mkv, "the render preset must not restrict stream copy");
+    }
+
+    #[test]
     fn manual_review_stays_put_while_latest_progress_advances() {
         let mut p = Page::default();
         p.open = true;
@@ -970,6 +1027,7 @@ mod tests {
             cancel: Cancellation::default(),
             active: Arc::default(),
             source: PathBuf::from("source"),
+            copy_cancel: Arc::default(),
         });
         let mut uploads = vec![];
         p.poll(&mut uploads, 3);
