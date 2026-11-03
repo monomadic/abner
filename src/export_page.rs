@@ -44,6 +44,9 @@ struct Job {
 }
 pub(crate) struct Page {
     pub(crate) inputs:crate::spatial::JobInputs,
+    /// Chapters in SOURCE time for the next job: the cut's list when the
+    /// timeline owns this clip, `None` to carry the source file's own.
+    pub(crate) chapters: Option<Vec<crate::cut::Chapter>>,
     pub open: bool,
     pub crop: Option<(u32, u32, u32, u32)>,
     pub prores: bool,
@@ -71,6 +74,7 @@ impl Default for Page {
     fn default() -> Self {
         Self {
             inputs:Default::default(),
+            chapters: None,
             open: false,
             crop: None,
             prores: false,
@@ -260,6 +264,7 @@ impl Page {
         let shared = latest.clone();
         let stop = cancel.clone();
         let inputs = self.inputs.clone();
+        let chapters = self.chapters.clone();
         let prores = self.prores;
         let lossless = self.lossless;
         let crop = self.crop;
@@ -270,9 +275,17 @@ impl Page {
         let worker_copy_cancel = copy_cancel.clone();
         std::thread::spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let chapters = match chapters {
+                    Some(list) => list,
+                    None => crate::media_metadata::timeline(&info.path)?
+                        .map(|t| t.chapters.into_iter()
+                            .map(|(start, title)| crate::cut::Chapter { start, title }).collect())
+                        .unwrap_or_default(),
+                };
+                let chapters = crate::cut::output_chapters(&chapters, &keeps);
                 if lossless {
                     stop.check().map_err(|e| e.to_string())?;
-                    crate::media_io::export_with_cancel(&info.path, &dest, &keeps, true, &[], None, &worker_copy_cancel)
+                    crate::media_io::export_with_cancel(&info.path, &dest, &keeps, true, &chapters, None, &worker_copy_cancel)
                         .map_err(|e| e.to_string())?;
                     return Ok(dest);
                 }
@@ -284,6 +297,7 @@ impl Page {
                     &info,
                     &dest,
                     &keeps,
+                    &chapters,
                     &registry,
                     &chain,
                     prores,
@@ -1106,10 +1120,12 @@ mod tests {
             let dest = dir.join(format!("{}.{}", codec, ext));
             let _ = std::fs::remove_file(&dest);
             let mut previews = 0;
-            crate::media_io::pipeline_export(
+            crate::media_io::pipeline_export_with_inputs(
+                &Default::default(),
                 &info,
                 &dest,
                 &[(0., 0.5)],
+                &[(0., 0.25, "One".into()), (0.25, 0.5, "Two".into())],
                 &registry,
                 &[("test.red".into(), serde_json::json!({}))],
                 prores,
@@ -1124,6 +1140,9 @@ mod tests {
             )
             .unwrap();
             assert_eq!(previews, 12);
+            // Rendered exports carry chapters like the copy path does.
+            let chapters = crate::media_metadata::timeline(&dest).unwrap().unwrap().chapters;
+            assert_eq!(chapters, vec![(0., "One".into()), (0.25, "Two".into())], "{ext}");
             let output = crate::probe::probe(&dest).unwrap();
             assert!(
                 output.codec.to_lowercase().contains(codec),

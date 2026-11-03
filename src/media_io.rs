@@ -2345,13 +2345,14 @@ pub(crate) fn pipeline_export(
     chain:&[(String,serde_json::Value)],prores:bool,crop:Option<(u32,u32,u32,u32)>,
     cancel:&abner_processor_api::Cancellation,active:&Mutex<Vec<abner_processor_api::Cancellation>>,
     emit:impl FnMut(crate::export_page::Rendered)->Result<(),String>,
-)->Result<()> {pipeline_export_with_inputs(&Default::default(),info,dest,keeps,registry,chain,prores,crop,cancel,active,emit)}
+)->Result<()> {pipeline_export_with_inputs(&Default::default(),info,dest,keeps,&[],registry,chain,prores,crop,cancel,active,emit)}
 
 pub(crate) fn pipeline_export_with_inputs(
     inputs:&crate::spatial::JobInputs,
     info: &crate::probe::VideoInfo,
     dest: &Path,
     keeps: &[(f64, f64)],
+    chapters: &[(f64, f64, String)],
     registry: &abner_processor_api::Registry,
     chain: &[(String, serde_json::Value)],
     prores: bool,
@@ -2661,12 +2662,13 @@ pub(crate) fn pipeline_export_with_inputs(
     })?;
     cancel.check().map_err(anyhow::Error::msg)?;
     mux.finish()?;
+    add_mp4_chapters(&temp.0, chapters)?;
     if dest
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("mkv"))
     {
         let remuxed = pending(dest)?;
-        remux_mkv(&temp.0, &remuxed.0, &[])?;
+        remux_mkv(&temp.0, &remuxed.0, chapters)?;
         cancel.check().map_err(anyhow::Error::msg)?;
         std::fs::hard_link(&remuxed.0, dest)?;
     } else {

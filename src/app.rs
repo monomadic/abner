@@ -1643,6 +1643,11 @@ impl App {
         let keeps = self.cut.as_ref().filter(|_| self.active == self.cut_video)
             .map(|c| c.segments().into_iter().filter(|s|!s.cut).map(|s| (s.start,s.end)).collect())
             .unwrap_or_else(|| vec![(0.,info.duration)]);
+        // The timeline's chapters once it has them (edited, or the scan
+        // landed); otherwise the worker reads the source's own.
+        self.export_page.chapters = self.cut.as_ref().filter(|_| self.active == self.cut_video)
+            .filter(|c| c.chapters_edited || !c.scanning())
+            .map(|c| c.chapters.clone());
         let (registry, chain) = self.processors.export_setup();
         self.export_page.start(info, keeps, registry, chain);
     }
