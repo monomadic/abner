@@ -4679,11 +4679,10 @@ impl App {
             (if keyframe { "Snap to keyframes: on" } else { "Snap to keyframes: off" },
                 CutAction::Snap(if keyframe { Snap::Frame } else { Snap::Keyframe }), "K"),
         ] {
-            push(RectPx { x, y: cy - 16.0, w: 32.0, h: 32.0 }, label, matches!(action, CutAction::Snap(_)) && keyframe, action, hint);
-            x += 38.0;
-        }
-        if self.cut_clock_x() - x >= 138.0 {
-            push(RectPx { x, y: cy - 18.0, w: 130.0, h: 36.0 }, "Split", false, CutAction::Split, "S");
+            // The snap control is the keyframe glyph and a switch.
+            let w = if matches!(action, CutAction::Snap(_)) { CUT_SNAP_W } else { 32.0 };
+            push(RectPx { x, y: cy - 16.0, w, h: 32.0 }, label, matches!(action, CutAction::Snap(_)) && keyframe, action, hint);
+            x += w + 6.0;
         }
         push(self.cut_footer_split(), "Split", false, CutAction::Split, "S");
         push(self.cut_footer_join(), "Join", false, CutAction::Join, "J");
@@ -4696,7 +4695,7 @@ impl App {
         }
     }
 
-    /// Edit tools follow playback; the clock follows the three edit buttons.
+    /// Edit tools follow playback; the clock follows the edit buttons and the snap switch.
     fn cut_tools_x(&self) -> f32 {
         self.workspace().transport.x + 254.0
     }
@@ -5735,29 +5734,23 @@ impl App {
                     &control.label, Align::Left, r.w);
             }
             CutAction::Snap(_) => {
+                // The keyframe glyph, then an iOS-style switch: knob left on a
+                // grey track = off, knob right on the keyframe green = on.
                 let on = cut.snap == Snap::Keyframe;
-                if on || hovered {
-                    items.push(Item::Rect(RectItem { radius: 6.0, border_w: if on { 1.0 } else { 0.0 },
-                        border_color: hex_color(FRAME_KEY), ..RectItem::new(r,
-                            hex_color(if on { 0x082b16 } else { 0x17191b })) }));
+                if hovered {
+                    items.push(Item::Rect(RectItem { radius: 7.0, ..RectItem::new(r, mix(CUT_BAR, 0xffffff, 0.07)) }));
                 }
-                draw_icon(items, Icon::SnapKeyframe, cx, cy, hex_color(if on { FRAME_KEY } else { 0xececec }));
+                draw_icon(items, Icon::SnapKeyframe, r.x + 16.0, cy, hex_color(if on { FRAME_KEY } else { 0xececec }));
+                let track = RectPx { x: r.x + r.w - 6.0 - CUT_SWITCH_W, y: cy - CUT_SWITCH_H / 2.0, w: CUT_SWITCH_W, h: CUT_SWITCH_H };
+                items.push(Item::Rect(RectItem { radius: CUT_SWITCH_H / 2.0,
+                    ..RectItem::new(track, if on { hex_color(FRAME_KEY) } else { hex_color(0x3a3a3c) }) }));
+                let d = CUT_SWITCH_H - 4.0;
+                let kx = if on { track.x + track.w - 2.0 - d } else { track.x + 2.0 };
+                items.push(Item::Rect(RectItem { radius: d / 2.0,
+                    ..RectItem::new(RectPx { x: kx, y: track.y + 2.0, w: d, h: d }, hex_color(0xffffff)) }));
             }
-            CutAction::Split => {
-                if r.h <= 26.0 {
-                    draw_cut_footer_button(items, r, &control.label, control.hint, true, hovered, false);
-                    return;
-                }
-                let outline = hex_color(if hovered { 0x555555 } else { 0x303030 });
-                items.push(Item::Rect(RectItem { radius: 8.0, border_w: 1.0, border_color: outline,
-                    ..RectItem::new(r, hex_color(0x050506)) }));
-                let ink = hex_color(if hovered { 0xffffff } else { 0xc8c8c8 });
-                draw_split_icon(items, r.x + 20.0, cy, ink, 0.75);
-                ui_label(items, r.x + 37.0, cy, 14.0, ink, &control.label, Align::Left, r.w - 77.0);
-                let key = RectPx { x: r.x + r.w - 32.0, y: cy - 12.0, w: 25.0, h: 24.0 };
-                items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(key, hex_color(0x1b1b1b)) }));
-                ui_label(items, key.x + key.w / 2.0, cy, 12.0, ink, control.hint, Align::Center, key.w);
-            }
+            // Only the footer carries Split now.
+            CutAction::Split => draw_cut_footer_button(items, r, &control.label, control.hint, true, hovered, false),
             CutAction::SaveProject => draw_cut_footer_button(items, r, &control.label, control.hint, false, hovered, false),
             CutAction::Join => {
                 let dead = self.join_picks().is_none();
@@ -7088,6 +7081,10 @@ const RAIL_GRIP_DOT_FILL: u32 = 0x2a2a2a;
 /// card renders, #444444), and the keycap plate (white @ 0.5 in Figma;
 /// linear blending wants less).
 pub(crate) const SOURCE_RING: u32 = 0xff9d00;
+/// Cut mode's snap control: keyframe glyph + switch.
+const CUT_SNAP_W: f32 = 70.0;
+const CUT_SWITCH_W: f32 = 36.0;
+const CUT_SWITCH_H: f32 = 20.0;
 pub(crate) const SOURCE_EDGE: u32 = 0x444444;
 pub(crate) const SOURCE_EDGE_HOVER: u32 = 0x5c5c5c;
 const SOURCE_KEYCAP: [f32; 4] = [1.0, 1.0, 1.0, 0.3];
@@ -8393,8 +8390,8 @@ mod tests {
         assert!(!app.playing);
 
         assert_eq!(app.controls().iter().filter(|c| matches!(c.action,
-            Action::Cut(CutAction::Split | CutAction::ToggleSplit))).count(), 3,
-            "the two one-shot buttons complement the persistent split tool");
+            Action::Cut(CutAction::Split | CutAction::ToggleSplit))).count(), 2,
+            "the footer's one-shot Split complements the persistent split tool");
         // The toolbar arms the tool; clicking uses its preview and shares undo.
         app.seek_all(1.0, true);
         press(&mut app, CutAction::ToggleSplit);
@@ -8410,13 +8407,11 @@ mod tests {
         app.cut_action(CutAction::Undo);
         assert!(app.cut.as_ref().unwrap().splits().is_empty());
         let splits: Vec<_> = app.controls().into_iter().filter(|c| matches!(c.action, Action::Cut(CutAction::Split))).collect();
-        assert_eq!(splits.len(), 2);
-        let toolbar = splits.iter().find(|c| c.r.y < app.vp.1 - CUT_STATUS_H).unwrap();
+        assert_eq!(splits.len(), 1, "only the footer carries a one-shot Split");
         let footer = splits.iter().find(|c| c.r.y >= app.vp.1 - CUT_STATUS_H).unwrap();
         assert_eq!(footer.label, "Split");
         assert_eq!(footer.hint, "S");
         assert_eq!(footer.r.h, 26.0);
-        assert_eq!(toolbar.r.h, 36.0);
         assert_eq!(footer.r.x, 90.0);
         assert_eq!(footer.r.y - (app.vp.1 - CUT_STATUS_H), 6.0);
         assert_eq!(app.vp.1 - footer.r.y - footer.r.h, 6.0);
@@ -8433,10 +8428,6 @@ mod tests {
         }).collect();
         assert_eq!(footer_text[..11], ["TIMELINE", "Split", "S", "Join", "J", "Save", "⌘S", "Render", "⌘R", "Export", "⌘E"]);
         assert!(footer_text[11].starts_with("build "), "the build stamp closes the footer");
-        app.mouse_down(toolbar.r.x + toolbar.r.w / 2.0, toolbar.r.y + toolbar.r.h / 2.0);
-        app.mouse_up();
-        assert_eq!(app.cut.as_ref().unwrap().splits(), &[1.0]);
-        app.cut_action(CutAction::Undo);
         app.mouse_down(join.x + join.w / 2.0, join.y + join.h / 2.0);
         app.mouse_up();
         app.key(Key::Char('j'));
