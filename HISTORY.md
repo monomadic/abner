@@ -3,6 +3,13 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-11-06 — Honest processor preview feedback
+
+Unknown processor progress now uses a steady activity mark instead of repeatedly
+sweeping across the track. Preview completion reports when no pixels changed,
+counts frames with changed pixels, and retains the processor's final diagnostics
+rather than replacing them with a generic success message.
+
 ## 2026-11-06 — Matroska track tags, names and attachments; chapters indexed
 
 A Matroska → Matroska export now carries track names, the tags aimed at a track

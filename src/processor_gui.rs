@@ -906,6 +906,7 @@ pub struct Panel {
     show_rendered: bool,
     render_elapsed: Duration,
     preview_count: u64,
+    changed_count: u64,
     /// The frame the running render was asked for, and the worker's context
     /// progress (frames decoded, frames to decode): the amber marks.
     pending: Option<f64>,
@@ -971,6 +972,7 @@ impl Default for Panel {
             show_rendered: true,
             render_elapsed: Duration::ZERO,
             preview_count: 0,
+            changed_count: 0,
             pending: None,
             progress: None,
             busy_since: Instant::now(),
@@ -1084,6 +1086,7 @@ impl Panel {
         self.feedback = None;
         self.render_result = None;
         self.preview_count = 0;
+        self.changed_count = 0;
         self.render_elapsed = Duration::ZERO;
         self.dirty = None;
         if let Some(saved) = self.saved.get_mut(self.selected) {
@@ -1272,6 +1275,7 @@ impl Panel {
         self.render_result = None;
         self.show_rendered = true;
         self.preview_count = 0;
+        self.changed_count = 0;
         self.status = "Preparing render…".into();
     }
     fn cancel_preview(&mut self) {
@@ -2123,6 +2127,7 @@ impl Panel {
                 match event {
                     Event::Frame(g, f) if g == self.generation => {
                         self.preview_count += 1;
+                        if f.input != f.output || f.before != f.after { self.changed_count += 1; }
                         self.frames
                             .retain(|old| (old.pts - f.pts).abs() > 0.5 * f.duration);
                         let needed = f.before.len() + f.after.len();
@@ -2156,8 +2161,17 @@ impl Panel {
                         if let Err(e) = result {
                             self.status = e;
                         } else {
-                            self.status =
-                                format!("Render ready · {} saved frames", self.frames.len());
+                            self.status = if self.changed_count == 0 && self.preview_count > 0 {
+                                "Preview complete · no pixels changed. Check processor settings and inputs.".into()
+                            } else {
+                                format!("Render ready · {} frames · {} with changed pixels", self.preview_count, self.changed_count)
+                            };
+                            // The worker's last report can contain diagnostics about
+                            // unresolved output. Preserve it after completion too.
+                            let latest = worker.live.lock().unwrap().take();
+                            if let Some((g, feedback)) = latest && g == self.generation {
+                                self.feedback = Some(feedback);
+                            }
                         }
                     }
                     _ => {}
@@ -2577,7 +2591,8 @@ impl Panel {
                     if f.progress.phase.trim().is_empty() { "Processing" } else { &f.progress.phase })
             })
         } else if self.render_result.is_some() {
-            self.status.clone()
+            self.feedback.as_ref().filter(|f| !f.progress.phase.trim().is_empty())
+                .map_or_else(|| self.status.clone(), |f| format!("{} · {}", self.status, f.progress.phase))
         } else {
             "Render frame to preview the enabled chain".into()
         };
@@ -2625,9 +2640,9 @@ impl Panel {
         let fill = if let Some(fraction) = fraction {
             Some(RectPx { w: track.w * fraction, ..track })
         } else if self.busy {
-            let w = track.w * 0.25;
-            let sweep = 0.5 + 0.5 * (elapsed.as_secs_f32() * 2.5).sin();
-            Some(RectPx { x: track.x + (track.w - w) * sweep, w, ..track })
+            // Unknown work must not look like repeatedly completing work.
+            // Keep a steady activity mark until a measured fraction arrives.
+            Some(RectPx { w: 6.0_f32.min(track.w), ..track })
         } else { None };
         if let Some(fill) = fill && fill.w > 0.0 {
             items.push(Item::Rect(RectItem { radius: 3.0, ..RectItem::new(fill, accent) }));
@@ -3325,6 +3340,21 @@ mod tests {
         assert!(!panel.busy);
         panel.request_preview();
         assert!(panel.feedback.is_none() && panel.render_result.is_none());
+        panel.busy = true;
+        let generation = panel.generation;
+        let mut unchanged = mark(0.0);
+        unchanged.after = unchanged.before.clone();
+        tx.send(Event::Frame(generation, unchanged)).unwrap();
+        tx.send(Event::Done(generation, Ok(()))).unwrap();
+        let mut diagnostic = feedback(1, None);
+        diagnostic.progress.phase = "12 unresolved pixels".into();
+        *live.lock().unwrap() = Some((generation, diagnostic));
+        panel.tick(&info, 0.2, None, &mut uploads, 1);
+        assert_eq!(panel.render_result, Some(true));
+        assert!(panel.status.contains("no pixels changed"));
+        assert_eq!(panel.feedback.as_ref().unwrap().progress.phase, "12 unresolved pixels");
+        panel.request_preview();
+        assert_eq!(panel.changed_count, 0);
         panel.close();
         panel.enter();
         assert_eq!(
