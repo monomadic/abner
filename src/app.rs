@@ -3888,7 +3888,7 @@ impl App {
     /// Right-aligned ahead of the build stamp, but never left of the page's
     /// own footer buttons (`footer_export_rect`).
     fn footer_export(&self) -> RectPx {
-        let left = if self.cut_mode { self.cut_footer_render().x + 116.0 }
+        let left = if self.cut_mode { let r = self.cut_footer_render(); r.x + r.w + 8.0 }
             else if self.processors.open { crate::processor_gui::Panel::segment_button(self.vp).x + 174.0 }
             else { 90.0 };
         footer_export_rect(self.vp, left)
@@ -4675,7 +4675,6 @@ impl App {
         let keyframe = cut.snap == Snap::Keyframe;
         for (label, action, hint) in [
             ("Split tool", CutAction::ToggleSplit, "Esc to leave · S split"),
-            (match (self.cut_picks.len(), self.cut_gop) { (0, _) => if self.cut_restore.is_some() || cut.selection_is_cut() { "Restore selection" } else { "Cut selection" }, (1, true) => "Delete selected GOP", (1, false) => "Delete selected clip", (_, true) => "Delete selected GOPs", (_, false) => "Delete selected clips" }, if !self.cut_picks.is_empty() { CutAction::DeletePicked } else { CutAction::Apply }, if !self.cut_picks.is_empty() { "Backspace" } else { "X" }),
             (if keyframe { "Snap to keyframes: on" } else { "Snap to keyframes: off" },
                 CutAction::Snap(if keyframe { Snap::Frame } else { Snap::Keyframe }), "K"),
         ] {
@@ -4688,6 +4687,7 @@ impl App {
         }
         push(self.cut_footer_split(), "Split", false, CutAction::Split, "S");
         push(self.cut_footer_join(), "Join", false, CutAction::Join, "J");
+        push(self.cut_footer_delete(), "Delete", false, CutAction::DeletePicked, "⌫");
         push(self.cut_footer_save(), "Save", false, CutAction::SaveProject, "⌘S");
         push(self.cut_footer_render(), "Render", false, CutAction::EncodeAll, "⌘R");
         if bar.w >= 900.0 {
@@ -4702,21 +4702,33 @@ impl App {
         self.workspace().transport.x + 254.0
     }
 
+    /// Split · Join · Delete · Save · Render, then Export. Under 900px wide the
+    /// five narrow so Export still fits a minimum-width (720px) window.
     fn cut_footer_split(&self) -> RectPx {
-        RectPx { x: 90.0, y: self.vp.1 - CUT_STATUS_H + 6.0, w: 108.0, h: 26.0 }
+        let w = if self.vp.0 >= 900.0 { FOOTER_BUTTON_W } else { 92.0 };
+        RectPx { x: 90.0, y: self.vp.1 - CUT_STATUS_H + 6.0, w, h: 26.0 }
+    }
+
+    fn cut_footer_next(r: RectPx) -> RectPx {
+        RectPx { x: r.x + r.w + 8.0, ..r }
     }
 
     fn cut_footer_join(&self) -> RectPx {
-        RectPx { x: self.cut_footer_split().x + 116.0, ..self.cut_footer_split() }
+        Self::cut_footer_next(self.cut_footer_split())
+    }
+
+    /// Delete cuts the picked clips, as Backspace does; dead with none picked.
+    fn cut_footer_delete(&self) -> RectPx {
+        Self::cut_footer_next(self.cut_footer_join())
     }
 
     fn cut_footer_save(&self) -> RectPx {
-        RectPx { x: self.cut_footer_join().x + 116.0, ..self.cut_footer_join() }
+        Self::cut_footer_next(self.cut_footer_delete())
     }
 
     /// Render (encode every split GOP) sits after Save; Export follows it.
     fn cut_footer_render(&self) -> RectPx {
-        RectPx { x: self.cut_footer_save().x + 116.0, ..self.cut_footer_save() }
+        Self::cut_footer_next(self.cut_footer_save())
     }
 
     /// The clock is right-aligned beside zoom, or the right edge on narrow windows.
@@ -5700,7 +5712,7 @@ impl App {
             }
         }
         // Icon buttons carry no words, so the hovered one names itself.
-        if let Some(c) = controls.iter().find(|c| matches!(c.action, Action::Cut(a) if !matches!(a, CutAction::Undo | CutAction::Export | CutAction::Split | CutAction::Join | CutAction::SaveProject))
+        if let Some(c) = controls.iter().find(|c| matches!(c.action, Action::Cut(a) if !matches!(a, CutAction::Undo | CutAction::Export | CutAction::Split | CutAction::Join | CutAction::DeletePicked | CutAction::SaveProject))
             && contains(c.r, self.cursor.0, self.cursor.1) && self.cursor_inside) {
             let text = if c.hint.is_empty() { c.label.clone() } else { format!("{}  ·  {}", c.label, c.hint) };
             let right = c.r.x + c.r.w / 2.0 > vp.0 - 140.0;
@@ -5761,6 +5773,10 @@ impl App {
             // Only the footer carries Split now.
             CutAction::Split => draw_cut_footer_button(items, r, &control.label, control.hint, true, hovered, false),
             CutAction::SaveProject => draw_cut_footer_button(items, r, &control.label, control.hint, false, hovered, false),
+            CutAction::DeletePicked => {
+                let dead = self.cut_picks.is_empty();
+                draw_cut_footer_button(items, r, &control.label, control.hint, false, hovered && !dead, dead);
+            }
             CutAction::Join => {
                 let dead = self.join_picks().is_none();
                 draw_cut_footer_button(items, r, &control.label, control.hint, false, hovered && !dead, dead);
@@ -8437,8 +8453,8 @@ mod tests {
         let footer_text: Vec<_> = frame.items.iter().filter_map(|item| match item {
             Item::Text(t) if t.y >= footer_y => Some(t.text.as_str()), _ => None,
         }).collect();
-        assert_eq!(footer_text[..11], ["TIMELINE", "Split", "S", "Join", "J", "Save", "⌘S", "Render", "⌘R", "Export", "⌘E"]);
-        assert!(footer_text[11].starts_with("build "), "the build stamp closes the footer");
+        assert_eq!(footer_text[..13], ["TIMELINE", "Split", "S", "Join", "J", "Delete", "⌫", "Save", "⌘S", "Render", "⌘R", "Export", "⌘E"]);
+        assert!(footer_text[13].starts_with("build "), "the build stamp closes the footer");
         app.mouse_down(join.x + join.w / 2.0, join.y + join.h / 2.0);
         app.mouse_up();
         app.key(Key::Char('j'));
@@ -8534,6 +8550,21 @@ mod tests {
         assert_eq!(app.cut.as_ref().unwrap().cuts(), &[(0.0, 4.0)], "repeat must not restore a deleted piece");
         app.key(Key::Undo);
         assert!(app.cut.as_ref().unwrap().cuts().is_empty());
+        // The footer's Delete is the same, and does nothing with no pick.
+        let delete = app.cut_footer_delete();
+        app.mouse_down(delete.x + delete.w / 2.0, delete.y + delete.h / 2.0);
+        app.mouse_up();
+        assert!(app.cut.as_ref().unwrap().cuts().is_empty(), "Delete with nothing picked");
+        app.mouse_down(v.x + v.w * 0.1, v.y + 10.0);
+        app.mouse_up();
+        app.mouse_down(delete.x + delete.w / 2.0, delete.y + delete.h / 2.0);
+        app.mouse_up();
+        assert_eq!(app.cut.as_ref().unwrap().cuts(), &[(0.0, 4.0)]);
+        assert!(app.cut_picks.is_empty());
+        app.key(Key::Undo);
+        assert!(app.cut.as_ref().unwrap().cuts().is_empty());
+        assert!(!app.controls().iter().any(|c| matches!(c.action, Action::Cut(CutAction::Apply))),
+            "the transport no longer carries Cut / Delete");
 
         // A removed clip selects itself on a click, ready for X to restore it.
         app.seek_all(1.4, true);

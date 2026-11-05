@@ -189,7 +189,7 @@ from one to the other, keeping its number.
   status line. The status line is 38px (`STATUS_H = CUT_STATUS_H`) on every page and
   ends in an **Export** button (`footer_export`, `Action::Export` → `App::export`, the
   File > Export path; dead when `can_export()` is false), drawn like cut mode's
-  Split / Join / Save / Render footer buttons (`draw_cut_footer_button`); the Process
+  Split / Join / Delete / Save / Render footer buttons (`draw_cut_footer_button`); the Process
   page paints it after its own footer (`draw_footer_end`). The rail is 280px (210 below 900px wide), the minimum window is 720×480, and
   the rail's focused inspector exists only when the rail has room for one source
   card + footer + grip + inspector above its end (`Workspace::detail`) — the list
@@ -306,7 +306,7 @@ from one to the other, keeping its number.
   click with nothing picked), a drag from a vacant part of
   the lanes (chapter/caption/keyframe rows, clip-free stretches — the ruler stays a scrub) is a rubber band
   (`CutDrag::Band`; under 4px it is still a click = let go + seek on release),
-  Backspace cuts the set as one undo step (`Cut::merge_last_undo`), and `J` (the footer's Join button, `CutAction::Join`) makes two or more picked clips ONE clip by dropping the splits between them (`Cut::joinable`/`Cut::join`, one undo step; the joined clip stays picked). Join is dead unless the picks are adjacent kept pieces: an unpicked clip or a cut between any two of them refuses it with a status line, and GOP picks are not clips. Icons are rects and triangles (`draw_icon`): there is no path
+  Backspace (or the footer's Delete, dead with nothing picked; the transport no longer carries a cut button) cuts the set as one undo step (`Cut::merge_last_undo`), and `J` (the footer's Join button, `CutAction::Join`) makes two or more picked clips ONE clip by dropping the splits between them (`Cut::joinable`/`Cut::join`, one undo step; the joined clip stays picked). Join is dead unless the picks are adjacent kept pieces: an unpicked clip or a cut between any two of them refuses it with a status line, and GOP picks are not clips. Icons are rects and triangles (`draw_icon`): there is no path
   primitive, and `Item::TriangleDown` exists for the playhead's pin. The design's translucent tokens are baked opaque with `mix()`
   over their known ground — linear blending makes the raw alphas read far too bright.
   Not built yet: clip thumbnails, scene detection, the other three boards.
