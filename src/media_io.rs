@@ -3,7 +3,7 @@ use crate::cut::{Cue, FrameInfo};
 use anyhow::{Context, Result, ensure};
 use filmcraft_isobmff::{self as mp4, CodecConfig, SampleEntry};
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -315,6 +315,73 @@ pub(crate) struct SourceMeta {
     mp4: Vec<(String, String)>,
     mkv: Vec<(String, String)>,
     title: Option<String>,
+    /// A Matroska source's track names, track-targeted tags and attached
+    /// files, for a Matroska output; MP4/MOV have no place for them.
+    tracks: Vec<TrackMeta>,
+    tags: Vec<filmcraft_matroska::Tag>,
+    attachments: Vec<filmcraft_matroska::Attachment>,
+    /// Where the attachments' bytes are: copied at export, never held.
+    path: Option<PathBuf>,
+}
+/// Which output track a source track becomes. Every export path keeps the
+/// first video track and every audio track in source order, so the kind and
+/// the place among its kind say it; subtitle tracks keep their source index
+/// (`SubTrack::track`), since one with no kept cue is dropped.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Slot {
+    Video,
+    Audio(usize),
+    Subtitle(usize),
+}
+struct TrackMeta {
+    slot: Slot,
+    uid: u64,
+    name: Option<String>,
+}
+/// Per-track tags that describe the source's packets rather than its content
+/// (what mkvmerge and ffmpeg compute on mux). A cut makes every one of them
+/// wrong, and the encoder is no more this export's than the global one is.
+fn derived_tag(name: &str, listed: &[String]) -> bool {
+    matches!(name, "BPS" | "DURATION" | "NUMBER_OF_FRAMES" | "NUMBER_OF_BYTES" | "ENCODER")
+        || name.starts_with("_STATISTICS_")
+        || listed.iter().any(|l| l == name)
+}
+/// A Matroska source's track metadata: names, the tags aimed at a track or
+/// an attachment (global ones go through fastmkv), and the attachments.
+/// Tags aimed at an edition or a chapter are not carried: the export writes
+/// its own chapters, under new UIDs.
+fn mkv_track_meta(f: &filmcraft_matroska::MkvFile, meta: &mut SourceMeta) {
+    use filmcraft_matroska::TrackKind as K;
+    let mut audio = 0;
+    let mut video = false;
+    for (ti, t) in f.tracks.iter().enumerate() {
+        let slot = match t.kind {
+            K::Video if !video => { video = true; Slot::Video }
+            K::Audio => { audio += 1; Slot::Audio(audio - 1) }
+            K::Subtitle => Slot::Subtitle(ti),
+            _ => continue,
+        };
+        meta.tracks.push(TrackMeta { slot, uid: t.uid, name: Some(t.name.clone()).filter(|n| !n.is_empty()) });
+    }
+    for tag in &f.tags {
+        let t = &tag.targets;
+        if !t.edition_uids.is_empty() || !t.chapter_uids.is_empty() {
+            log::warn!("Matroska tag aimed at a chapter or edition not carried");
+            continue;
+        }
+        if t.track_uids.is_empty() && t.attachment_uids.is_empty() {
+            continue;
+        }
+        let listed: Vec<String> = tag.simple.iter()
+            .filter(|s| s.name == "_STATISTICS_TAGS")
+            .flat_map(|s| s.string.as_deref().unwrap_or("").split_whitespace().map(str::to_owned))
+            .collect();
+        let simple: Vec<_> = tag.simple.iter().filter(|s| !derived_tag(&s.name, &listed)).cloned().collect();
+        if !simple.is_empty() {
+            meta.tags.push(filmcraft_matroska::Tag { targets: t.clone(), simple });
+        }
+    }
+    meta.attachments = f.attachments.clone();
 }
 fn source_meta(input: &Input, path: &Path) -> SourceMeta {
     match &input.container {
@@ -326,12 +393,16 @@ fn source_meta(input: &Input, path: &Path) -> SourceMeta {
                     if !mkv.iter().any(|(n, _)| n == name) { mkv.push((name.to_string(), v.clone())); }
                 }
             }
-            SourceMeta { title: f.metadata.title().map(str::to_owned), mp4, mkv }
+            SourceMeta { title: f.metadata.title().map(str::to_owned), mp4, mkv, ..Default::default() }
         }
-        Container::Mkv(_) => {
+        Container::Mkv(f) => {
+            // Track metadata comes from the demuxer, so a file fastmkv will
+            // not edit still keeps it.
+            let mut meta = SourceMeta { path: Some(path.to_owned()), ..Default::default() };
+            mkv_track_meta(f, &mut meta);
             let file = match fastmkv::open(path) {
                 Ok(f) => f,
-                Err(e) => { log::warn!("{}: Matroska tags not read: {e}", path.display()); return SourceMeta::default() }
+                Err(e) => { log::warn!("{}: Matroska tags not read: {e}", path.display()); return meta }
             };
             let mkv: Vec<(String, String)> = file.global()
                 .filter(|(n, _)| *n != "ENCODER")
@@ -343,7 +414,7 @@ fn source_meta(input: &Input, path: &Path) -> SourceMeta {
             if let Some(t) = &title {
                 if !mp4.iter().any(|(k, _)| k == "©nam") { mp4.push(("©nam".into(), t.clone())); }
             }
-            SourceMeta { mp4, mkv, title }
+            SourceMeta { mp4, mkv, title, ..meta }
         }
     }
 }
@@ -452,6 +523,8 @@ struct SubCue {
 /// export path writes from, so subtitles are read once, from the original
 /// file, whatever intermediate the video went through.
 pub(crate) struct SubTrack {
+    /// The source track it came from, which names its Matroska metadata.
+    track: usize,
     language: String,
     source: SubSource,
     cues: Vec<SubCue>,
@@ -503,7 +576,7 @@ fn subtitle_tracks(input: &Input, keeps: &[(f64, f64)]) -> Result<Vec<SubTrack>>
             continue;
         }
         cues.sort_by(|a, b| a.start.total_cmp(&b.start));
-        out.push(SubTrack { language: t.language.clone(), source, cues });
+        out.push(SubTrack { track: ti, language: t.language.clone(), source, cues });
     }
     Ok(out)
 }
@@ -1798,8 +1871,13 @@ fn remux_mkv(
     }
     let mut tracks = Vec::new();
     let mut delays = Vec::new();
+    // Which source track each output track is, for its name and tags.
+    let mut slots = Vec::new();
+    let name = |slot: Slot| meta.tracks.iter().find(|t| t.slot == slot).and_then(|t| t.name.clone());
     for t in &input.tracks {
         let e = t.entry.as_ref().context("missing output sample entry")?;
+        let audio = slots.iter().filter(|s| matches!(s, Slot::Audio(_))).count();
+        slots.push(if t.kind == Kind::Video { Slot::Video } else { Slot::Audio(audio) });
         let (id, private) = match &e.codec {
             CodecConfig::Avc(c) => ("V_MPEG4/ISO/AVC", c.to_bytes()),
             CodecConfig::Hevc(c) => ("V_MPEGH/ISO/HEVC", c.to_bytes()),
@@ -1830,6 +1908,7 @@ fn remux_mkv(
         );
         spec.codec_private = private;
         spec.language = Some(t.language.clone());
+        spec.name = name(*slots.last().unwrap());
         let delay = (-t.samples.iter().map(|s| s.pts).fold(0., f64::min)).max(0.);
         spec.codec_delay_ns = (delay * 1e9).round() as u64;
         if matches!(e.codec, CodecConfig::Opus(_)) {
@@ -1849,7 +1928,12 @@ fn remux_mkv(
         log::warn!("WebM output: {} subtitle track(s) not exported; choose MKV to keep them", subs.len());
         &[]
     } else { subs };
-    tracks.extend(subs.iter().map(mkv_sub));
+    for sub in subs {
+        let mut spec = mkv_sub(sub);
+        spec.name = name(Slot::Subtitle(sub.track));
+        tracks.push(spec);
+        slots.push(Slot::Subtitle(sub.track));
+    }
     // WebM cannot carry H.264/AAC or ProRes; never publish a falsely labelled file.
     ensure!(
         !dest
@@ -1910,20 +1994,51 @@ fn remux_mkv(
         )?;
     }
     let mut file = mux.finish()?;
+    use filmcraft_matroska::element_ids as id;
+    let mut parts: Vec<(u32, Vec<u8>)> = Vec::new();
     if !chapters.is_empty() {
-        use std::io::{Read, Seek, SeekFrom, Write};
         let mut atoms = Vec::new();
         for (i, (a, b, title)) in chapters.iter().enumerate() {
-            let mut atom = uint(0x73c4, i as u64 + 1);
-            atom.extend(uint(0x91, (a * 1e9).round() as u64));
-            atom.extend(uint(0x92, (b * 1e9).round() as u64));
-            atom.extend(ebml(0x80, &ebml(0x85, title.as_bytes())));
-            atoms.extend(ebml(0xb6, &atom));
+            let mut atom = uint(id::CHAPTER_UID, i as u64 + 1);
+            atom.extend(uint(id::CHAPTER_TIME_START, (a * 1e9).round() as u64));
+            atom.extend(uint(id::CHAPTER_TIME_END, (b * 1e9).round() as u64));
+            atom.extend(ebml(id::CHAPTER_DISPLAY, &ebml(id::CHAP_STRING, title.as_bytes())));
+            atoms.extend(ebml(id::CHAPTER_ATOM, &atom));
         }
-        let chapter = ebml(0x1043a770, &ebml(0x45b9, &atoms));
-        file.seek(SeekFrom::End(0))?;
-        file.write_all(&chapter)?;
-        // The muxer's Segment size must include the newly appended Chapters element.
+        parts.push((id::CHAPTERS, ebml(id::EDITION_ENTRY, &atoms)));
+    }
+    let attach = !meta.attachments.is_empty() && meta.path.is_some();
+    let attach = if attach && webm {
+        log::warn!("WebM output: {} attachment(s) not exported; choose MKV to keep them", meta.attachments.len());
+        false
+    } else { attach };
+    if !meta.tags.is_empty() {
+        // The output's own track UIDs, which the source's tags are re-aimed at.
+        let reader = crate::fc::reader(&temp.0).map_err(anyhow::Error::msg)?;
+        let out = filmcraft_matroska::open_with(&reader, &filmcraft_matroska::OpenOptions { index: false, verify_crc: false })?;
+        ensure!(out.tracks.len() == slots.len(), "Matroska output tracks do not match the export");
+        let uid = |source: u64| {
+            let slot = meta.tracks.iter().find(|t| t.uid == source)?.slot;
+            slots.iter().position(|s| *s == slot).map(|i| out.tracks[i].uid)
+        };
+        let tags = mkv_tags(&meta.tags, uid, attach);
+        if !tags.is_empty() {
+            parts.push((id::TAGS, tags));
+        }
+    }
+    if !parts.is_empty() || attach {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        let mut index = Vec::new();
+        let at = file.seek(SeekFrom::End(0))?;
+        if attach {
+            index.push((id::ATTACHMENTS, at));
+            write_attachments(&mut file, meta.path.as_deref().unwrap(), &meta.attachments)?;
+        }
+        for (element, body) in &parts {
+            index.push((*element, file.stream_position()?));
+            file.write_all(&ebml(*element, body))?;
+        }
+        // The muxer's Segment size must include what was appended.
         file.seek(SeekFrom::Start(0))?;
         let mut head = [0; 128];
         file.read_exact(&mut head)?;
@@ -1937,12 +2052,151 @@ fn remux_mkv(
         filmcraft_matroska::ebml::write_size(&mut size, end - (p + 8) as u64, 8);
         file.seek(SeekFrom::Start(p as u64))?;
         file.write_all(&size)?;
+        index_appended(&mut file, (p + 8) as u64, &index)?;
     }
     drop(file);
     match finish_mkv(&temp.0, dest, meta, rotation)? {
         Some(seated) => std::fs::rename(&seated.0, dest)?,
         None => std::fs::rename(&temp.0, dest)?,
     }
+    Ok(())
+}
+/// The source's track- and attachment-aimed tags as a `Tags` body, aimed at
+/// the output's UIDs (`uid` maps a source track UID). A target that did not
+/// make it into the output is dropped from the tag, and a tag left aiming at
+/// nothing is dropped whole: it must never widen into a global tag.
+fn mkv_tags(tags: &[filmcraft_matroska::Tag], uid: impl Fn(u64) -> Option<u64>, attach: bool) -> Vec<u8> {
+    use filmcraft_matroska::element_ids as id;
+    fn simple(s: &filmcraft_matroska::SimpleTag) -> Vec<u8> {
+        let mut b = ebml(id::TAG_NAME, s.name.as_bytes());
+        b.extend(ebml(id::TAG_LANGUAGE, s.language.as_bytes()));
+        if !s.default {
+            b.extend(uint(id::TAG_DEFAULT, 0));
+        }
+        if let Some(v) = &s.string {
+            b.extend(ebml(id::TAG_STRING, v.as_bytes()));
+        } else if let Some(v) = &s.binary {
+            b.extend(ebml(id::TAG_BINARY, v));
+        }
+        for c in &s.children {
+            b.extend(simple(c));
+        }
+        ebml(id::SIMPLE_TAG, &b)
+    }
+    let mut out = Vec::new();
+    for tag in tags {
+        let t = &tag.targets;
+        let tracks: Vec<u64> = t.track_uids.iter().filter_map(|&u| uid(u)).collect();
+        let files: &[u64] = if attach { &t.attachment_uids } else { &[] };
+        if (!t.track_uids.is_empty() && tracks.is_empty()) || (tracks.is_empty() && files.is_empty()) {
+            continue;
+        }
+        let mut targets = uint(id::TARGET_TYPE_VALUE, t.type_value);
+        if let Some(n) = &t.type_name {
+            targets.extend(ebml(id::TARGET_TYPE, n.as_bytes()));
+        }
+        for &u in &tracks {
+            targets.extend(uint(id::TAG_TRACK_UID, u));
+        }
+        for &u in files {
+            targets.extend(uint(id::TAG_ATTACHMENT_UID, u));
+        }
+        let mut body = ebml(id::TARGETS, &targets);
+        for s in &tag.simple {
+            body.extend(simple(s));
+        }
+        out.extend(ebml(id::TAG, &body));
+    }
+    out
+}
+/// An `Attachments` element at the file's position, each file's bytes copied
+/// straight from the source (fonts run to megabytes; nothing is held).
+fn write_attachments(file: &mut std::fs::File, source: &Path, list: &[filmcraft_matroska::Attachment]) -> Result<()> {
+    use filmcraft_matroska::{ebml::{write_id, write_size}, element_ids as id};
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let header = |element: u32, size: u64| {
+        let mut b = Vec::new();
+        write_id(&mut b, element);
+        write_size(&mut b, size, 1);
+        b
+    };
+    // Everything but the payload, which comes last so it can stream.
+    let heads: Vec<Vec<u8>> = list
+        .iter()
+        .map(|a| {
+            let mut h = ebml(id::FILE_NAME, a.name.as_bytes());
+            h.extend(ebml(id::FILE_MEDIA_TYPE, a.media_type.as_bytes()));
+            if let Some(d) = &a.description {
+                h.extend(ebml(id::FILE_DESCRIPTION, d.as_bytes()));
+            }
+            h.extend(uint(id::FILE_UID, a.uid));
+            h.extend(header(id::FILE_DATA, a.data_size));
+            let mut b = header(id::ATTACHED_FILE, h.len() as u64 + a.data_size);
+            b.extend(h);
+            b
+        })
+        .collect();
+    let total: u64 = heads.iter().zip(list).map(|(h, a)| h.len() as u64 + a.data_size).sum();
+    file.write_all(&header(id::ATTACHMENTS, total))?;
+    let mut src = std::fs::File::open(source)?;
+    for (h, a) in heads.iter().zip(list) {
+        file.write_all(h)?;
+        src.seek(SeekFrom::Start(a.data_offset))?;
+        let copied = std::io::copy(&mut (&mut src).take(a.data_size), file)?;
+        ensure!(copied == a.data_size, "attachment {} is truncated in the source", a.name);
+    }
+    Ok(())
+}
+/// List appended level-1 elements in the muxer's SeekHead, growing it into
+/// the padding the muxer leaves after it. A reader that meets the clusters
+/// goes by the index from there (ffmpeg, players), so an element appended
+/// after them that the index does not name is not in the file for them.
+fn index_appended(file: &mut std::fs::File, data_start: u64, entries: &[(u32, u64)]) -> Result<()> {
+    use filmcraft_matroska::{ebml::{write_id, write_size}, element_ids as id};
+    use std::io::{Read, Seek, SeekFrom, Write};
+    fn vint(b: &[u8]) -> Option<(usize, usize)> {
+        let first = *b.first()?;
+        let w = first.leading_zeros() as usize + 1;
+        let bytes = b.get(..w.min(9))?;
+        (w <= 8).then(|| (bytes[1..].iter().fold((first & (0xff >> w)) as usize, |v, &x| v << 8 | x as usize), w))
+    }
+    let len = file.seek(SeekFrom::End(0))?;
+    let mut head = vec![0; (len - data_start).min(4096) as usize];
+    file.seek(SeekFrom::Start(data_start))?;
+    file.read_exact(&mut head)?;
+    ensure!(head.starts_with(&[0x11, 0x4d, 0x9b, 0x74]), "the Matroska SeekHead is not first in the Segment");
+    let (size, w) = vint(&head[4..]).context("bad SeekHead size")?;
+    let end = 4 + w + size;
+    ensure!(head.get(end) == Some(&0xec), "no padding after the Matroska SeekHead");
+    let (pad, pw) = vint(&head[end + 1..]).context("bad padding size")?;
+    let region = end + 1 + pw + pad;
+    let mut body = head[4 + w..end].to_vec();
+    for &(element, at) in entries {
+        let mut idb = Vec::new();
+        write_id(&mut idb, element);
+        let mut seek = ebml(id::SEEK_ID, &idb);
+        seek.extend(uint(id::SEEK_POSITION, at - data_start));
+        body.extend(ebml(id::SEEK, &seek));
+    }
+    // The grown index and a Void for the rest of the region, exactly.
+    let out = (1..=8).find_map(|sw| {
+        let mut e = Vec::new();
+        write_id(&mut e, id::SEEK_HEAD);
+        write_size(&mut e, body.len() as u64, sw);
+        e.extend(&body);
+        let rest = region.checked_sub(e.len())?;
+        if rest == 0 {
+            return Some(e);
+        }
+        let vw = (1..=8).find(|&vw| rest > vw && ((rest - 1 - vw) as u64) < (1u64 << (7 * vw)) - 1)?;
+        e.push(0xec);
+        write_size(&mut e, (rest - 1 - vw) as u64, vw);
+        e.resize(region, 0);
+        Some(e)
+    });
+    let out = out.context("no room in the Matroska SeekHead for the appended elements")?;
+    file.seek(SeekFrom::Start(data_start))?;
+    file.write_all(&out)?;
     Ok(())
 }
 /// An MP4 (not MOV, not Matroska) output: the one that needs `ilst`.
@@ -2406,6 +2660,53 @@ mod tests {
         export(&dir.0.join("rot.mov"), &rotated, &keeps, true, &[], None).unwrap();
         let r = fastmkv::read(&rotated).unwrap();
         assert_eq!(r.video().unwrap().video.unwrap().rotation, Some(90.));
+    }
+    #[test]
+    fn matroska_track_tags_attachments_and_chapters_are_indexed() {
+        let dir = Dir::new("mkvmeta");
+        let ffmpeg = |args: &[&str]| assert!(std::process::Command::new("ffmpeg").args(["-y", "-v", "error"]).args(args)
+            .current_dir(&dir.0).status().unwrap().success());
+        let font: Vec<u8> = (0..5000u32).map(|i| (i * 7 % 251) as u8).collect();
+        std::fs::write(dir.0.join("font.ttf"), &font).unwrap();
+        std::fs::write(dir.0.join("subs.srt"), "1\n00:00:00,500 --> 00:00:01,800\nHello\n").unwrap();
+        ffmpeg(&["-f", "lavfi", "-i", "testsrc2=size=160x90:rate=30", "-f", "lavfi", "-i", "sine",
+            "-f", "lavfi", "-i", "sine=frequency=880", "-i", "subs.srt", "-t", "6", "-g", "30",
+            "-map", "0", "-map", "1", "-map", "2", "-map", "3", "-c:v", "libx264", "-bf", "0",
+            "-x264-params", "scenecut=0", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-c:s", "srt", "-attach", "font.ttf", "-metadata:s:t", "mimetype=application/x-truetype-font",
+            "-metadata", "CUSTOM_KEY=kept",
+            "-metadata:s:a:1", "title=Commentary", "-metadata:s:a:1", "MOOD=dry",
+            "-metadata:s:s:0", "title=Signs", "-metadata:s:v:0", "CAMERA=B", "src.mkv"]);
+        let out = dir.0.join("out.mkv");
+        export(&dir.0.join("src.mkv"), &out, &[(0., 2.), (3., 5.)], true, &[(0., 2., "One".into()), (2., 4., "Two".into())], None).unwrap();
+        // Read the way ffmpeg and players do: stop at the clusters, follow the SeekHead.
+        let reader = crate::fc::reader(&out).unwrap();
+        let f = filmcraft_matroska::open_with(&reader, &filmcraft_matroska::OpenOptions { index: false, verify_crc: false }).unwrap();
+        assert_eq!(f.chapters.iter().flat_map(|e| &e.chapters).filter_map(|c| c.title()).collect::<Vec<_>>(), ["One", "Two"]);
+        assert_eq!(f.attachments.len(), 1);
+        let a = &f.attachments[0];
+        assert_eq!((a.name.as_str(), a.media_type.as_str()), ("font.ttf", "application/x-truetype-font"));
+        let bytes = std::fs::read(&out).unwrap();
+        assert_eq!(&bytes[a.data_offset as usize..(a.data_offset + a.data_size) as usize], &font[..]);
+        let names: Vec<_> = f.tracks.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["", "", "Commentary", "Signs"]);
+        let tags_of = |ti: usize| -> Vec<(String, String)> {
+            f.tags.iter().filter(|t| t.targets.track_uids.contains(&f.tracks[ti].uid))
+                .flat_map(|t| &t.simple).map(|s| (s.name.clone(), s.string.clone().unwrap_or_default())).collect()
+        };
+        assert_eq!(tags_of(0), [("CAMERA".to_owned(), "B".to_owned())]);
+        assert!(tags_of(1).is_empty());
+        assert_eq!(tags_of(2), [("MOOD".to_owned(), "dry".to_owned())]);
+        // The source's per-track DURATION is the uncut length: it must not come across.
+        assert!(f.tags.iter().flat_map(|t| &t.simple).all(|s| s.name != "DURATION" && s.name != "ENCODER"));
+        assert_eq!(fastmkv::read(&out).unwrap().get("CUSTOM_KEY"), Some("kept"));
+        // And ffprobe agrees.
+        let probe = std::process::Command::new("ffprobe")
+            .args(["-v", "error", "-show_chapters", "-show_entries", "stream=codec_type:stream_tags", "-of", "compact"])
+            .arg(&out).output().unwrap();
+        let text = String::from_utf8_lossy(&probe.stdout);
+        assert_eq!(text.matches("chapter|").count(), 2, "{text}");
+        assert!(text.contains("codec_type=attachment") && text.contains("tag:MOOD=dry") && text.contains("tag:title=Commentary"), "{text}");
     }
     #[test]
     fn native_export_crop_inspection_and_failure_cleanup_need_no_helpers() {

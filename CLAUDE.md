@@ -446,8 +446,11 @@ the "VIDEO QUALITY TESTING TOOLKIT" line that used to be a second text run.
   Timeline packet/chapter/stream metadata is native too; AVI/MXF/MPEG/Y4M/APV adapters
   live in `src/media_packets.rs`. There is no production FFmpeg/FFprobe process. The other non-obvious dependencies are
   `png`, for the wordmark texture, and `fastmkv` (git-pinned, the user's own crate), which
-  writes Matroska exports' tags and display rotation after the mux and reads Matroska
-  sources' tags. Exports read subtitles and tags once from the ORIGINAL source
+  writes Matroska exports' global tags and display rotation after the mux and reads Matroska
+  sources' tags. Track names, track tags and attachments come from the Filmcraft demuxer
+  and are appended by `remux_mkv`, which lists every element it appends in the SeekHead
+  (`index_appended`) — an element after the clusters that the index does not name is
+  invisible to ffmpeg and players. Exports read subtitles and tags once from the ORIGINAL source
   (`subtitle_tracks`, `source_meta`) whatever the video goes through.
 - **`./packaging/build-app.sh [--open|--install]` builds `Abner.app`** — switchblade's
   recipe: release build, `assets/app-icon.png` → `AppIcon.icns`, `Info.plist.in` with

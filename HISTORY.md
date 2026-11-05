@@ -3,6 +3,18 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-11-06 — Matroska track tags, names and attachments; chapters indexed
+
+A Matroska → Matroska export now carries track names, the tags aimed at a track
+or an attachment, and the attachments themselves (copied from the source, never
+held in memory). Track tags are re-aimed at the output's track UIDs; a tag whose
+targets did not survive is dropped rather than widened into a global one. Packet
+statistics (`DURATION`, `BPS`, `NUMBER_OF_*`, `_STATISTICS_TAGS`) and `ENCODER` are
+not carried, because a cut makes them wrong. Found on the way: the Chapters
+`remux_mkv` appended after the clusters were never listed in the SeekHead, so
+ffprobe and players never saw them. Every appended element is now indexed
+(`index_appended`), and the test reads the output the way ffmpeg does.
+
 ## 2026-11-05 — Export settings panel
 
 Export now groups Codec, Container and Destination under an Export Settings title,

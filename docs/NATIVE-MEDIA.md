@@ -45,6 +45,16 @@ comment, description, date, album, genre, composer, copyright, location) are map
 MP4 outputs get an iTunes `meta/ilst`, which Apple reads; MOV keeps QuickTime `udta`
 atoms; Matroska gets `Info\Title` from the muxer and `Tags` through fastmkv.
 
+Matroska → Matroska also carries track names, tags aimed at a track or an attachment
+(re-aimed at the output's track UIDs), and attachments (fonts, cover art), each file's
+bytes copied straight from the source. Per-track tags that describe the source's packets
+(`DURATION`, `BPS`, `NUMBER_OF_FRAMES`, `NUMBER_OF_BYTES`, anything listed in
+`_STATISTICS_TAGS`) and `ENCODER` are dropped: a cut makes them wrong. Tags aimed at a
+chapter or edition are dropped, since the export writes its own chapters. WebM output
+drops attachments with a log line. None of this has a place in MP4/MOV, so it does not
+cross containers. Chapters, attachments and track tags are appended after the clusters
+and listed in the SeekHead, which is where ffmpeg and players look for them.
+
 Chapter titles use Nero MP4 chapter boxes plus a QuickTime chapter track (what Apple
 reads) in MP4/MOV, or Matroska Chapters. Chapter titles in MP4 are limited to 255
 UTF-8 bytes and 255 entries. These are not archival remux
@@ -108,8 +118,9 @@ conversion. The header indicator accounts for all enabled stages and saved crops
 HEVC uses macOS VideoToolbox at 35 Mb/s; ProRes
 uses native ProRes 422 Standard. HEVC supports MP4 and MKV; choosing ProRes selects
 MKV and disables MP4. In processed exports, audio is encoded to AAC-LC at 48 kHz / 192 kb/s with the kept
-ranges' timing. Subtitles, chapters and global tags are carried as described above;
-attachments and other source metadata are not. Unprocessed exports retain the existing
+ranges' timing. Subtitles, chapters, global tags and (Matroska → Matroska)
+track names, track tags and attachments are carried as described above; other source
+metadata is not. Unprocessed exports retain the existing
 packet-copy preservation limits.
 
 The pixel-processing path is explicitly SDR and constant-rate: native RGBA8
