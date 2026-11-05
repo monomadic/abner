@@ -173,7 +173,7 @@ from one to the other, keeping its number.
   the timeline's cut ranges each tick, and timeline thumbnail jobs don't start while a
   seek is landing (switchblade's "attention owns the decoder").
   **Keys**: `1`–`9` pick a clip directly (`select`), `V`/Shift-V cycle the view.
-  ⌃⇧[ / ⌃⇧] (`Key::PrevMode`/`NextMode`, matched in lib.rs on both the bracket
+  ⌘⇧[ / ⌘⇧] (or ⌃⇧; `Key::PrevMode`/`NextMode`, matched in lib.rs on both the bracket
   and its shifted brace) walk the header tabs in `ModeSelector::ORDER` without
   wrapping (`cycle_workspace_mode`). On the Process page `[`/`]` walk the
   sources, `+` duplicates, ←/→ step a frame (`Panel::key`); `R` / the footer's

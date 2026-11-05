@@ -838,9 +838,10 @@ impl ApplicationHandler for Runner {
                 if event.state != ElementState::Pressed {
                     return;
                 }
-                // ⌃⇧[ / ⌃⇧]: the header tabs. Shift turns the bracket into a
-                // brace on most layouts, so both spellings count.
-                if self.mods.control_key() && self.mods.shift_key()
+                // ⌘⇧[ / ⌘⇧] (or ⌃⇧): back / forward a page through the header
+                // tabs. Shift turns the bracket into a brace on most layouts,
+                // so both spellings count.
+                if (self.mods.super_key() || self.mods.control_key()) && self.mods.shift_key()
                     && let WinitKey::Character(s) = &event.logical_key
                     && let Some(key) = match s.as_str() { "[" | "{" => Some(Key::PrevMode), "]" | "}" => Some(Key::NextMode), _ => None } {
                     self.app.key(key);
