@@ -18,6 +18,10 @@
 //! pub fn factories() -> Vec<Box<dyn abner_processor_api::Factory>>
 //! ```
 //!
+//! A plugin folder may be a symbolic link to a crate kept in its own project;
+//! the launcher then depends on the link's target, so the crate's relative
+//! path dependencies resolve where it really lives.
+//!
 //! `ABNER_PLUGINS` overrides the plugin directory.
 
 use anyhow::{Context, Result, bail, ensure};
@@ -128,6 +132,15 @@ fn discover(dir: &Path, allow_missing: bool) -> Result<Vec<Plugin>> {
         if hidden || !path.is_dir() {
             continue;
         }
+        // A plugin kept in its own project is
+        // linked here. The launcher must name the real directory, or the
+        // crate's own relative path dependencies resolve against the link.
+        let path = if path.symlink_metadata()?.file_type().is_symlink() {
+            std::fs::canonicalize(&path)
+                .with_context(|| format!("resolving plugin link {}", path.display()))?
+        } else {
+            path
+        };
         let manifest = path.join("Cargo.toml");
         if !manifest.is_file() {
             continue;
@@ -413,6 +426,28 @@ mod tests {
         assert_eq!(
             manifest["patch"][SDK_GIT]["abner-processor-api"],
             manifest["dependencies"]["abner-processor-api"]
+        );
+    }
+    #[test]
+    fn a_linked_plugin_is_emitted_at_its_real_directory() {
+        let f = Fixture::new();
+        let real = f.0.join("elsewhere").join("example");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(
+            real.join("Cargo.toml"),
+            "[package]\nname = \"example-effect\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let plugins = f.0.join("plugins");
+        std::fs::create_dir(&plugins).unwrap();
+        std::os::unix::fs::symlink(Path::new("../elsewhere/example"), plugins.join("example"))
+            .unwrap();
+        let crates = discover(&plugins, false).unwrap();
+        assert_eq!(crates.len(), 1);
+        assert_eq!(crates[0].path, std::fs::canonicalize(&real).unwrap());
+        assert!(
+            !crates[0].path.starts_with(&plugins),
+            "the link itself must not be the dependency path"
         );
     }
     #[test]
