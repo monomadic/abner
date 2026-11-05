@@ -4447,8 +4447,8 @@ impl App {
             Key::Char('`') => CutAction::TimeDisplay(!self.cut_frames),
             Key::Char('{') => CutAction::Chapter(-1),
             Key::Char('}') => CutAction::Chapter(1),
-            Key::Char('i' | 'I') => CutAction::In,
-            Key::Char('o' | 'O') => CutAction::Out,
+            // I / O (set in / out) are disabled until their role is settled;
+            // CutAction::In/Out and Cut::set_in/set_out stay for that.
             Key::Char('s' | 'S') => CutAction::Split,
             Key::Char('j' | 'J') => CutAction::Join,
             Key::Backspace if !self.cut_picks.is_empty() => CutAction::DeletePicked,
@@ -4602,7 +4602,7 @@ impl App {
                         cut.cut_selection();
                         cut.status = format!("{} {:.2} s", if restoring { "Restored" } else { "Cut" }, b - a);
                     }
-                    None => cut.status = "Set in (I) and out (O) first".into(),
+                    None => cut.status = "Nothing selected to cut".into(),
                 }
             }
             CutAction::Undo => {
@@ -4674,7 +4674,6 @@ impl App {
         let mut x = self.cut_tools_x();
         let keyframe = cut.snap == Snap::Keyframe;
         for (label, action, hint) in [
-            ("Set in", CutAction::In, "I"), ("Set out", CutAction::Out, "O"),
             ("Split tool", CutAction::ToggleSplit, "Esc to leave · S split"),
             (match (self.cut_picks.len(), self.cut_gop) { (0, _) => if self.cut_restore.is_some() || cut.selection_is_cut() { "Restore selection" } else { "Cut selection" }, (1, true) => "Delete selected GOP", (1, false) => "Delete selected clip", (_, true) => "Delete selected GOPs", (_, false) => "Delete selected clips" }, if !self.cut_picks.is_empty() { CutAction::DeletePicked } else { CutAction::Apply }, if !self.cut_picks.is_empty() { "Backspace" } else { "X" }),
             (if keyframe { "Snap to keyframes: on" } else { "Snap to keyframes: off" },
@@ -4697,7 +4696,7 @@ impl App {
         }
     }
 
-    /// Edit tools follow playback; the clock follows the five edit buttons.
+    /// Edit tools follow playback; the clock follows the three edit buttons.
     fn cut_tools_x(&self) -> f32 {
         self.workspace().transport.x + 254.0
     }
@@ -6896,7 +6895,10 @@ impl Workspace {
 #[derive(Clone, Copy)]
 enum Action { LaunchEditor(bool), ResetEdit, ApplyEdit, CancelEdit, Duplicate, OpenFiles, ClearSources, ToggleSources, ToggleInspector, ToggleDetail, Tool(usize), View(Mode), Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
 #[derive(Clone, Copy, PartialEq)]
-enum CutAction { TogglePosters, FrameChanges(bool), TimeDisplay(bool), In, Out, Split, ToggleSplit, Join, Apply, DeletePicked, Undo, Export, SaveProject, EncodeAll, Encode(f64), Snap(Snap), Play, Zoom(bool), Step(i32), Keyframe(i32), Chapter(i32) }
+enum CutAction { TogglePosters, FrameChanges(bool), TimeDisplay(bool),
+    // Set in / out: no key or button reaches these while the feature is disabled.
+    #[allow(dead_code)] In, #[allow(dead_code)] Out,
+    Split, ToggleSplit, Join, Apply, DeletePicked, Undo, Export, SaveProject, EncodeAll, Encode(f64), Snap(Snap), Play, Zoom(bool), Step(i32), Keyframe(i32), Chapter(i32) }
 /// `hint` is the key cap a cut-mode button carries ("" for none).
 struct Control { r: RectPx, label: String, selected: bool, action: Action, hint: &'static str }
 impl Control {
@@ -8533,9 +8535,9 @@ mod tests {
 
         // A removed clip selects itself on a click, ready for X to restore it.
         app.seek_all(1.4, true);
-        app.key(Key::Char('i'));
+        app.cut_action(CutAction::In);
         app.seek_all(1.7, true);
-        app.key(Key::Char('o'));
+        app.cut_action(CutAction::Out);
         app.key(Key::Char('x'));
         assert!(app.cut.as_ref().unwrap().selection().is_none());
         let v = app.cut_lanes().video;
@@ -9289,9 +9291,9 @@ mod tests {
         assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.cut.as_ref().is_some_and(|c| !c.scanning())));
         app.key(Key::Space);
         app.seek_all(1.4, true);
-        app.key(Key::Char('i'));
+        app.cut_action(CutAction::In);
         app.seek_all(1.7, true);
-        app.key(Key::Char('o'));
+        app.cut_action(CutAction::Out);
         app.key(Key::Char('x'));
         assert_eq!(app.cut.as_ref().unwrap().cuts().len(), 1);
         app.key(Key::Char('u'));
@@ -9379,9 +9381,9 @@ mod tests {
         app.key(Key::Space);
         assert!(!app.playing);
         app.seek_all(1.4, true);
-        app.key(Key::Char('i'));
+        app.cut_action(CutAction::In);
         app.seek_all(1.7, true);
-        app.key(Key::Char('o'));
+        app.cut_action(CutAction::Out);
         assert_eq!(app.cut.as_ref().unwrap().selection(), Some((1.0, 2.0)));
         app.key(Key::Char('x'));
         assert_eq!(app.cut.as_ref().unwrap().cuts(), [(1.0, 2.0)]);

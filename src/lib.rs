@@ -103,7 +103,7 @@ keys:
   { / }        previous / next chapter in Timeline
   T            cut mode: the focused clip on a timeline (--cut opens there;
                --cut in,out sets the selection, in seconds)
-               I / O set in / out (snapped to keyframes; K toggles frame snap)
+               K toggles keyframe / frame snap
                X cut the selection, S split (under the pointer when it is
                over the clips), drag a clip's edge to trim, Cmd-Z undo, ← → frame,
                Shift-← → keyframe, E export <name>.cut.<ext> (stream copy
