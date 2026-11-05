@@ -39,13 +39,8 @@ Effort estimates come from the 2026-09-04 comparison against switchblade.
    target as `late_before` from Abner (the rewind window would then need its own decode
    after landing).
 
-21. **Process page: render a range, and export.** A frame render fills one source
-   frame's outputs, so seeing retimed motion play means rendering frame by frame;
-   a "render span" (the segment, or N frames from the playhead) bounded by
-   `processors.preview_cache_mb` would make it playable. The Export workspace now
-   writes the enabled chain at its declared output rate, preserving packet copy
-   without processing and repairing only boundary GOPs for exact trims. Render-span
-   preview remains open; see HISTORY.md for the completed export work.
+21. *(done 2026-11-05 — Process Render segment uses the preview cache budget;
+    Export supports the enabled chain and selective packet copy; see HISTORY.md)*
 
 4. *(done 2026-10-22 — coalescing decoder waker; see HISTORY.md)*
 5. **Mip floor for many-up layouts.** `MIP_LEVELS = 4` floors a 3840-wide source at

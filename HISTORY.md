@@ -1921,3 +1921,15 @@ preview output. Export no longer overwrites the header with READY/ENCODING.
 The default preset is labelled Auto / HEVC to expose its behavior.
 Regression coverage checks exact copied video packets in MP4/MKV, untouched middle
 GOPs through pipeline export for CFR/VFR and B-frames, and indicator state.
+
+## 2026-11-05 — 21. Render a Process preview segment
+
+Process now offers Render segment (Shift-R) alongside Render frame (R). It rewinds
+to the current timeline segment's start, resets the processing sessions there, and
+renders until the segment end or the paired-frame preview cache budget is reached.
+Without timeline segments, the clip is the segment. The old 24-frame ceiling no
+longer limits multi-frame previews; retimed output also stops at the budget's pair
+count. Completed frames remain available for playback, scrubbing, stepping and A/B
+comparison through the existing preview cache. Cancellation and generation checks
+remain shared with frame rendering. Export and footer status reserve room for the
+new control at the minimum window width.

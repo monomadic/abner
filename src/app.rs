@@ -3829,7 +3829,7 @@ impl App {
     /// own footer buttons (`footer_export_rect`).
     fn footer_export(&self) -> RectPx {
         let left = if self.cut_mode { self.cut_footer_render().x + 116.0 }
-            else if self.processors.open { crate::processor_gui::Panel::render_button(self.vp).x + 140.0 }
+            else if self.processors.open { crate::processor_gui::Panel::segment_button(self.vp).x + 174.0 }
             else { 90.0 };
         footer_export_rect(self.vp, left)
     }

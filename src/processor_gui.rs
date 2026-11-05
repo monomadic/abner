@@ -627,7 +627,7 @@ fn render(
                 .into(),
         );
     }
-    let count = (r.budget / per_frame).clamp(1, FRAMES);
+    let count = (r.budget / per_frame).max(1);
     let fps = r.info.fps;
     if !fps.is_finite() || fps <= 0.0 || fps > 1000.0 {
         return Err("Preview needs a valid frame rate".into());
@@ -648,13 +648,14 @@ fn render(
     player.seek(r.start, true);
     let started = Instant::now();
     let mut originals = BTreeMap::new();
-    let mut received = 0;
+    let received = std::cell::Cell::new(0usize);
     let mut emit = |frames: Vec<Frame>,
                     originals: &mut BTreeMap<i64, (Rgba, f64)>|
      -> Result<bool, String> {
         let mut delivered = false;
         for frame in frames {
             r.cancel.check()?;
+            if r.target.is_none() && received.get() >= count { break; }
             frame.validate()?;
             if frame.width != ow || frame.height != oh || (!retimed && frame.time_base != [1, 1_000_000]) {
                 return Err("Preview processor changed its declared geometry or time base".into());
@@ -703,7 +704,7 @@ fn render(
             {
                 continue;
             }
-            received += 1;
+            received.set(received.get() + 1);
             delivered = true;
             tx.send(Event::Frame(
                 r.generation,
@@ -790,7 +791,7 @@ fn render(
         )?;
         // A targeted preview is complete once its output arrives. Dropping the
         // sessions here avoids starting another batch or flushing unwanted tails.
-        if delivered && r.target.is_some() { return Ok(()); }
+        if delivered && (r.target.is_some() || received.get() >= count) { return Ok(()); }
     }
     r.cancel.check()?;
     for i in 0..sessions.len() {
@@ -799,9 +800,9 @@ fn render(
             process_chain(&mut sessions, i + 1, tail, &r.cancel, r.budget)?,
             &mut originals,
         )?;
-        if delivered && r.target.is_some() { return Ok(()); }
+        if delivered && (r.target.is_some() || received.get() >= count) { return Ok(()); }
     }
-    if received == 0 {
+    if received.get() == 0 {
         return Err("No preview frames at this position".into());
     }
     if !retimed && !originals.is_empty() {
@@ -896,6 +897,7 @@ pub struct Panel {
     generation: u64,
     cancel: Cancellation,
     dirty: Option<Instant>,
+    render_segment: bool,
     context: Option<(std::path::PathBuf, u64, Option<u64>)>,
     frames: Vec<Preview>,
     status: String,
@@ -960,6 +962,7 @@ impl Default for Panel {
             generation: 0,
             cancel: Cancellation::default(),
             dirty: None,
+            render_segment: false,
             context: None,
             frames: vec![],
             status: String::new(),
@@ -1252,7 +1255,13 @@ impl Panel {
     pub fn take_seek(&mut self) -> Option<f64> {
         self.seek.take()
     }
+    fn request_segment(&mut self) {
+        self.request_preview();
+        self.render_segment = true;
+        self.seek = Some(self.segment_start);
+    }
     fn request_preview(&mut self) {
+        self.render_segment = false;
         self.cancel.cancel();
         if let Some(w) = &self.worker {
             w.cancel();
@@ -1497,7 +1506,11 @@ impl Panel {
                 self.jump(true);
                 true
             }
-            Key::Char('r' | 'R') => {
+            Key::Char('R') => {
+                self.request_segment();
+                true
+            }
+            Key::Char('r') => {
                 self.request_preview();
                 true
             }
@@ -1536,6 +1549,9 @@ impl Panel {
     /// Render frame, where the Timeline's footer keeps Split.
     pub(crate) fn render_button(vp: (f32, f32)) -> RectPx {
         RectPx { x: 90.0, y: Self::bottom(vp) + 6.0, w: 132.0, h: 26.0 }
+    }
+    pub(crate) fn segment_button(vp: (f32, f32)) -> RectPx {
+        RectPx { x: 230.0, y: Self::bottom(vp) + 6.0, w: 166.0, h: 26.0 }
     }
     /// The Sources rail's width, so switching modes doesn't move the edge.
     fn left(vp: (f32, f32)) -> f32 {
@@ -1869,6 +1885,8 @@ impl Panel {
         if hit(Self::footer(vp), x, y) {
             if hit(Self::render_button(vp), x, y) {
                 self.request_preview();
+            } else if hit(Self::segment_button(vp), x, y) {
+                self.request_segment();
             }
             return true;
         }
@@ -2078,7 +2096,9 @@ impl Panel {
             } else if let Some(worker) = &self.worker {
                 self.cancel = Cancellation::default();
                 self.busy = true;
-                self.status = "Rendering current frame through the enabled chain…".into();
+                self.status = if self.render_segment {
+                    "Rendering segment · stops at the preview cache limit…"
+                } else { "Rendering current frame through the enabled chain…" }.into();
                 self.pending = Some(start);
                 self.progress = None;
                 self.busy_since = Instant::now();
@@ -2088,7 +2108,7 @@ impl Panel {
                     chain,
                     // The source frame under the playhead: a retimed chain
                     // returns every output frame paired with it.
-                    target: Some(self.source_frame(start)),
+                    target: (!self.render_segment).then(|| self.source_frame(start)),
                     info: info.clone(),
                     start: self.segment_start,
                     end,
@@ -2687,12 +2707,17 @@ impl Panel {
             false,
         );
         // Export and the build stamp are `App::draw_footer_end`'s, painted after.
-        let export = footer_export_rect(vp, b.x + b.w + 8.0);
+        let span = Self::segment_button(vp);
+        draw_cut_footer_button(items, span, "Render segment", "⇧R", false,
+            hit(span, self.cursor.0, self.cursor.1), false);
+        let export = footer_export_rect(vp, span.x + span.w + 8.0);
         let hint = "[ ] source   + duplicate   ← → frame   native 8-bit SDR";
         let hint_w = if vp.0 >= 1220.0 + status_build_width() { 400.0 } else { 0.0 };
-        let x = b.x + b.w + 14.0;
-        ui_label(items, x, cy, 10.0, WORKSPACE_DIM, self.status.as_str(), Align::Left,
-            (export.x - 12.0 - x - hint_w).max(40.0));
+        let x = span.x + span.w + 14.0;
+        let status_w = export.x - 12.0 - x - hint_w;
+        if status_w > 0.0 {
+            ui_label(items, x, cy, 10.0, WORKSPACE_DIM, self.status.as_str(), Align::Left, status_w);
+        }
         if hint_w > 0.0 {
             ui_label(items, export.x - 12.0, cy, 10.0, WORKSPACE_MUTED, hint, Align::Right, hint_w);
         }
@@ -3486,6 +3511,11 @@ mod tests {
             assert!(Arc::ptr_eq(&pair[0].before, &pair[1].before));
             assert_ne!(pair[1].after, pair[1].before);
         }
+        let mut bounded = request(3, None);
+        bounded.budget = 5 * 64 * 64 * 8;
+        render(&reg, &bounded, &tx, None, None).unwrap();
+        let bounded: Vec<_> = rx.try_iter().filter_map(|e| match e { Event::Frame(_, f) => Some(f), _ => None }).collect();
+        assert_eq!(bounded.len(), 5, "retiming must not exceed the output-pair budget");
         // A frame render returns every output frame its source frame owns.
         render(&reg, &request(2, Some(2.0 * period)), &tx, None, None).unwrap();
         let owned: Vec<Preview> = rx.try_iter().filter_map(|e| match e { Event::Frame(_, f) => Some(f), _ => None }).collect();
@@ -3514,6 +3544,46 @@ mod tests {
         assert!((p.take_seek().unwrap() - 2.0 * period).abs() < 1e-9, "one output frame back");
         let _ = std::fs::remove_dir_all(&dir);
     }
+    #[test]
+    fn segment_preview_exceeds_old_frame_limit_and_stops_at_budget_or_boundary() {
+        let dir = std::env::temp_dir().join(format!("abner-segment-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("source.mp4");
+        assert!(std::process::Command::new("ffmpeg").args([
+            "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=30",
+            "-frames:v", "40", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        ]).arg(&path).status().unwrap().success());
+        let info = crate::probe::probe(&path).unwrap();
+        let mut request = Request {
+            inputs: Default::default(), generation: 1, chain: vec![], target: None,
+            info, start: 0., end: None, cancel: Cancellation::default(), budget: 32 * 64 * 64 * 8,
+        };
+        let (tx, rx) = mpsc::sync_channel(64);
+        render(&Registry::default(), &request, &tx, None, None).unwrap();
+        let frames: Vec<_> = rx.try_iter().filter_map(|e| match e { Event::Frame(_, f) => Some(f), _ => None }).collect();
+        assert_eq!(frames.len(), 32, "segment uses the budget, not the old 24-frame ceiling");
+        assert!(frames.windows(2).all(|p| (p[0].pts + p[0].duration - p[1].pts).abs() < 0.00001));
+        assert!(frames.iter().map(|f| f.before.len() + f.after.len()).sum::<usize>() <= request.budget);
+        request.start = 0.5;
+        request.end = Some(1.0);
+        render(&Registry::default(), &request, &tx, None, None).unwrap();
+        let frames: Vec<_> = rx.try_iter().filter_map(|e| match e { Event::Frame(_, f) => Some(f), _ => None }).collect();
+        assert_eq!(frames.len(), 15);
+        assert!(frames.iter().all(|f| f.pts >= 0.5 && f.pts < 1.0));
+        let mut panel = Panel::default();
+        panel.open = true;
+        panel.segment_start = 0.5;
+        assert!(panel.key(Key::Char('R')));
+        assert!(panel.render_segment);
+        assert_eq!(panel.take_seek(), Some(0.5));
+        assert!(panel.key(Key::Char('r')));
+        assert!(!panel.render_segment);
+        let button = Panel::segment_button((720., 480.));
+        assert!(panel.click(button.x + 1., button.y + 1., (720., 480.)));
+        assert!(panel.render_segment);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn ordered_chain_bypass_settings_and_frame_navigation() {
         let mut r = Registry::default();

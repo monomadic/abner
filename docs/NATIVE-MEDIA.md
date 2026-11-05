@@ -112,3 +112,15 @@ and published without replacing an existing file. The save dialog chooses the fi
 Packet-copy jobs check cancellation before work and before publishing; cancellation
 can wait for the native copy/repair operation to finish. They do not populate the
 rendered-frame review cache.
+
+## Process preview spans
+
+Render frame (R) previews the source frame at the playhead. Render segment
+(Shift-R) rewinds to the current timeline segment's start and renders from there,
+stopping at its end or `processors.preview_cache_mb`, whichever comes first.
+Without a timeline segment it starts at the beginning of the source. Every session
+starts at the segment boundary so temporal history does not cross cuts. The cache
+keeps native-size before/after pairs for playback, scrubbing, stepping and A/B;
+retimed output uses the declared output grid. Render segment replaces the old
+24-frame worker ceiling with the cache budget. It does not write media; use Export
+for a complete processed file.
