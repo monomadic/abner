@@ -4680,7 +4680,9 @@ impl App {
                 CutAction::Snap(if keyframe { Snap::Frame } else { Snap::Keyframe }), "K"),
         ] {
             // The snap control is the keyframe glyph and a switch.
-            let w = if matches!(action, CutAction::Snap(_)) { CUT_SNAP_W } else { 32.0 };
+            // It carries its name when the toolbar has room before the clock.
+            let w = if !matches!(action, CutAction::Snap(_)) { 32.0 }
+                else if self.cut_clock_x() - x >= CUT_SNAP_LABEL_W + 16.0 { CUT_SNAP_LABEL_W } else { CUT_SNAP_W };
             push(RectPx { x, y: cy - 16.0, w, h: 32.0 }, label, matches!(action, CutAction::Snap(_)) && keyframe, action, hint);
             x += w + 6.0;
         }
@@ -5737,10 +5739,16 @@ impl App {
                 // The keyframe glyph, then an iOS-style switch: knob left on a
                 // grey track = off, knob right on the keyframe green = on.
                 let on = cut.snap == Snap::Keyframe;
-                if hovered {
-                    items.push(Item::Rect(RectItem { radius: 7.0, ..RectItem::new(r, mix(CUT_BAR, 0xffffff, 0.07)) }));
+                if hovered || on {
+                    items.push(Item::Rect(RectItem { radius: 8.0, border_w: if on { 2.0 } else { 0.0 },
+                        border_color: hex_color(SOURCE_RING),
+                        ..RectItem::new(r, if hovered { mix(CUT_BAR, 0xffffff, 0.07) } else { [0.0; 4] }) }));
                 }
                 draw_icon(items, Icon::SnapKeyframe, r.x + 16.0, cy, hex_color(if on { FRAME_KEY } else { 0xececec }));
+                if r.w > CUT_SNAP_W {
+                    ui_label(items, r.x + 30.0, cy, 13.0, hex_color(if on || hovered { CUT_INK } else { 0xc8c8c8 }),
+                        "Snap to Keyframe", Align::Left, r.w - 30.0 - CUT_SWITCH_W - 12.0);
+                }
                 let track = RectPx { x: r.x + r.w - 6.0 - CUT_SWITCH_W, y: cy - CUT_SWITCH_H / 2.0, w: CUT_SWITCH_W, h: CUT_SWITCH_H };
                 items.push(Item::Rect(RectItem { radius: CUT_SWITCH_H / 2.0,
                     ..RectItem::new(track, if on { hex_color(FRAME_KEY) } else { hex_color(0x3a3a3c) }) }));
@@ -7083,6 +7091,8 @@ const RAIL_GRIP_DOT_FILL: u32 = 0x2a2a2a;
 pub(crate) const SOURCE_RING: u32 = 0xff9d00;
 /// Cut mode's snap control: keyframe glyph + switch.
 const CUT_SNAP_W: f32 = 70.0;
+/// The same with its "Snap to Keyframe" label, when the toolbar has room.
+const CUT_SNAP_LABEL_W: f32 = 196.0;
 const CUT_SWITCH_W: f32 = 36.0;
 const CUT_SWITCH_H: f32 = 20.0;
 pub(crate) const SOURCE_EDGE: u32 = 0x444444;
