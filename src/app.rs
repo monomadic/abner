@@ -8920,16 +8920,27 @@ mod tests {
     fn movie_icon_toggles_clip_posters_without_seeking() {
         let Some(clip) = test_clip() else { return };
         let mut app = mk_app(&clip, 1);
+        const WIN: (f32, f32) = (1100.0, 800.0);
         app.set_cut_default(true);
         app.playing = false;
-        app.tick(0.0, (1280.0, 800.0), 2.0);
-        app.cut.as_mut().unwrap().pps = 100.0;
+        app.tick(0.0, WIN, 2.0);
+        // The zoom never goes below the whole clip, so the window sets it: at
+        // 1280 px this 4 s, 30 fps clip fits at >10 px a frame, where frame
+        // markers replace the posters. The keyframe scan refits the zoom when
+        // it lands, so let it land first.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.cut.as_ref().unwrap().scanning() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+            app.tick(0.0, WIN, 2.0);
+        }
+        assert!(!app.cut.as_ref().unwrap().scanning(), "keyframe scan never finished");
+        assert!(!app.frame_markers_visible(), "the fitted zoom should be below frame markers");
         assert!(!app.cut_thumb_rects().is_empty());
         let control = app.controls().into_iter().find(|c| matches!(c.action, Action::Cut(CutAction::TogglePosters))).unwrap();
         let t = app.t;
         app.mouse_down(control.r.x + 12.0, control.r.y + 12.0);
         app.mouse_up();
-        app.tick(0.0, (1280.0, 800.0), 2.0);
+        app.tick(0.0, WIN, 2.0);
         assert!(app.cut_thumb_rects().is_empty());
         assert!(app.cut_thumb.play.is_none());
         assert_eq!(app.t, t);
