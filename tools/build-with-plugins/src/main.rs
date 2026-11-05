@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const LAUNCHER_NAME: &str = "abner-with-plugins";
+const SDK_GIT: &str = "https://github.com/monomadic/abner";
 
 fn main() -> Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -86,6 +87,7 @@ struct Plugin {
     /// The package name as written in its manifest (may contain `-`).
     name: String,
     path: PathBuf,
+    uses_git_sdk: bool,
 }
 
 impl Plugin {
@@ -157,7 +159,21 @@ fn discover(dir: &Path, allow_missing: bool) -> Result<Vec<Plugin>> {
             "{}: a plugin may not be named {name:?}",
             manifest.display()
         );
-        found.push(Plugin { name, path });
+        let uses_git_sdk = doc
+            .get("dependencies")
+            .and_then(|deps| deps.get("abner-processor-api"))
+            .and_then(|sdk| sdk.get("git"))
+            .and_then(toml::Value::as_str)
+            == Some(SDK_GIT);
+        // Resolve provider links before Cargo interprets relative dependencies.
+        let path = path
+            .canonicalize()
+            .with_context(|| format!("resolving plugin directory {}", path.display()))?;
+        found.push(Plugin {
+            name,
+            path,
+            uses_git_sdk,
+        });
     }
     found.sort_by(|a, b| a.name.cmp(&b.name));
     for pair in found.windows(2) {
@@ -211,6 +227,14 @@ fn write_launcher(root: &Path, launcher: &Path, crates: &[Plugin]) -> Result<()>
     // Its own workspace: never a member of a parent, so its lockfile stays here.
     manifest.insert("workspace".into(), toml::Value::Table(toml::Table::new()));
     manifest.insert("dependencies".into(), toml::Value::Table(deps));
+    if crates.iter().any(|plugin| plugin.uses_git_sdk) {
+        let sdk = toml::Table::from_iter([(
+            "abner-processor-api".into(),
+            path_dep(&root.join("crates/processor-api")),
+        )]);
+        let patch = toml::Table::from_iter([(SDK_GIT.into(), toml::Value::Table(sdk))]);
+        manifest.insert("patch".into(), toml::Value::Table(patch));
+    }
     // Profiles come from the root package only, so abner's are repeated:
     // wgpu + shader-heavy code is unusably slow at opt-level 0.
     let profiles: toml::Table = r#"
@@ -353,8 +377,41 @@ mod tests {
                 .unwrap(),
         );
         assert!(emitted.is_absolute());
-        assert_eq!(launcher.join(emitted), crate_dir);
+        assert_eq!(launcher.join(emitted), crate_dir.canonicalize().unwrap());
         assert!(launcher.join(emitted).join("Cargo.toml").is_file());
+        assert!(!manifest.contains_key("patch"));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn linked_provider_uses_its_own_directory_and_the_host_sdk() {
+        let f = Fixture::new();
+        let provider = f.0.join("provider");
+        let plugins = f.0.join("plugins");
+        std::fs::create_dir(&provider).unwrap();
+        std::fs::create_dir(&plugins).unwrap();
+        std::fs::write(f.0.join("Cargo.toml"), "[package]\nversion = \"0.1.0\"\n").unwrap();
+        std::fs::write(
+            provider.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"example-effect\"\n[dependencies]\n\
+                 abner-processor-api = {{ git = \"{SDK_GIT}\", rev = \"example\" }}\n"
+            ),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&provider, plugins.join("linked")).unwrap();
+
+        let crates = discover(&plugins, false).unwrap();
+        assert_eq!(crates[0].path, provider.canonicalize().unwrap());
+        let launcher = plugins.join(".launcher");
+        write_launcher(&f.0, &launcher, &crates).unwrap();
+        let manifest: toml::Table = std::fs::read_to_string(launcher.join("Cargo.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            manifest["patch"][SDK_GIT]["abner-processor-api"],
+            manifest["dependencies"]["abner-processor-api"]
+        );
     }
     #[test]
     fn absolute_override_is_preserved() {

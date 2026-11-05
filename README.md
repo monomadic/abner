@@ -259,11 +259,18 @@ repository root: drop processor crates into the gitignored `plugins/` directory
 generates a launcher under `plugins/.launcher` that registers every one of them,
 then builds it into `target/<profile>/abner-with-plugins` with the flags you
 passed (`--release` and friends). A plugin crate depends on
-`abner-processor-api` by path and exports one function:
+`abner-processor-api` and exports one function:
 
 ```rust
 pub fn factories() -> Vec<Box<dyn abner_processor_api::Factory>>
 ```
+
+A provider can keep its processor crate in its own repository and symlink the
+crate directory into `plugins/`. Relative dependencies resolve from the real
+crate directory. For standalone builds, declare `abner-processor-api` as a Git
+dependency using `https://github.com/monomadic/abner` and pin a compatible
+revision. The generated launcher patches that SDK dependency to the host's
+local SDK so the registry and plugin share the same Rust types.
 
 The launcher is its own package with its own lockfile, so a run changes nothing
 git tracks — not even the root `Cargo.lock` — and the build stamp keeps the real
