@@ -3,6 +3,15 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-11-05 — Export settings panel
+
+Export now groups Codec, Container and Destination under an Export Settings title,
+with section dividers, a single row of codec choices, output metadata and a full-width
+blue Export button. Filename and directory open the native save chooser; the selected
+destination is displayed and reused when exporting, with its extension following the
+container. Settings compress vertically in small windows. Unavailable Copy stays dim
+and explains the reason on hover. Container support remains MKV and MP4.
+
 ## 2026-11-03 — Finder opens replace, rail drops add
 
 Opening a file from Finder (Open With / double-click) while Abner is running now

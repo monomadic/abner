@@ -28,6 +28,7 @@ pub(crate) enum Action {
     Lossless,
     Container(bool),
     Export,
+    Destination,
     Cancel,
     Compare,
     Follow,
@@ -62,6 +63,7 @@ pub(crate) struct Page {
     started: Instant,
     elapsed: f64,
     pub status: String,
+    destination: Option<PathBuf>,
     path: Option<PathBuf>,
     pub duration: f64,
     count: u64,
@@ -90,6 +92,7 @@ impl Default for Page {
             started: Instant::now(),
             elapsed: 0.,
             status: "Choose a preset and export the enabled pipeline.".into(),
+            destination: None,
             path: None,
             duration: 0.,
             count: 0,
@@ -183,6 +186,19 @@ fn hit(r: RectPx, x: f32, y: f32) -> bool {
     x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h
 }
 impl Page {
+    fn settings_geometry(l: Layout) -> (f32, f32, f32, f32) {
+        let step = ((l.sidebar.h - 84.) / 12.).clamp(22., 44.);
+        (l.sidebar.x + 20., l.sidebar.w - 40., l.sidebar.y + 65., step)
+    }
+    fn destination_name(&self) -> String {
+        let ext = if self.mkv { "mkv" } else { "mp4" };
+        let mut path = self.destination.clone().unwrap_or_else(|| {
+            let stem = self.source.as_ref().and_then(|p| p.file_stem()).unwrap_or_default().to_string_lossy();
+            PathBuf::from(format!("{stem}.export.{ext}"))
+        });
+        path.set_extension(ext);
+        path.file_name().unwrap_or_default().to_string_lossy().into_owned()
+    }
     pub fn set_copy_unavailable(&mut self, reason: Option<&'static str>) {
         self.copy_unavailable = reason;
         if reason.is_some() { self.lossless = false; }
@@ -210,6 +226,7 @@ impl Page {
             self.path = None;
             self.count = 0;
             self.rendered_time = 0.;
+            self.destination = None;
             self.source = Some(info.path.clone());
             self.duration = info.duration;
             self.dirty = true;
@@ -236,12 +253,10 @@ impl Page {
             return;
         }
         let ext = if self.mkv { "mkv" } else { "mp4" };
-        let stem = info.path.file_stem().unwrap_or_default().to_string_lossy();
-        let Some(mut dest) = crate::open::export_destination(&format!("{stem}.export.{ext}"))
-        else {
-            return;
-        };
+        let Some(mut dest) = self.destination.clone().or_else(||
+            crate::open::export_destination(&self.destination_name())) else { return; };
         dest.set_extension(ext);
+        self.destination = Some(dest.clone());
         if dest.exists() {
             self.status = "Output already exists. Choose a new filename.".into();
             return;
@@ -436,32 +451,19 @@ impl Page {
     }
     pub fn actions(&self, vp: (f32, f32)) -> Vec<(RectPx, &'static str, bool, Action)> {
         let l = Layout::new(vp);
-        let x = l.sidebar.x + 16.;
-        let w = l.sidebar.w - 32.;
-        let half = (w - 8.) / 2.;
-        let r = |x, y, w| RectPx { x, y, w, h: 36. };
+        let (x, w, y, step) = Self::settings_geometry(l);
+        let third = (w - 12.) / 3.;
+        let half = (w - 6.) / 2.;
+        let r = |x, y, w| RectPx { x, y, w, h: step * 0.78 };
         vec![
-            (
-                r(x, 140., half),
-                "Auto / HEVC",
-                !self.prores && !self.lossless,
-                Action::Preset(false),
-            ),
-            (
-                r(x + half + 8., 140., half),
-                "ProRes",
-                self.prores && !self.lossless,
-                Action::Preset(true),
-            ),
-            (r(x, 184., w), "Lossless copy", self.lossless, Action::Lossless),
-            (r(x, 264., half), "MP4", !self.mkv, Action::Container(false)),
-            (
-                r(x + half + 8., 264., half),
-                "MKV",
-                self.mkv,
-                Action::Container(true),
-            ),
-            (r(x, 316., w), "Export", false, Action::Export),
+            (r(x, y + step, third), "Copy", self.lossless, Action::Lossless),
+            (r(x + third + 6., y + step, third), "HEVC", !self.prores && !self.lossless, Action::Preset(false)),
+            (r(x + 2. * (third + 6.), y + step, third), "ProRes", self.prores && !self.lossless, Action::Preset(true)),
+            (r(x, y + 3. * step, half), "MKV", self.mkv, Action::Container(true)),
+            (r(x + half + 6., y + 3. * step, half), "MP4", !self.mkv, Action::Container(false)),
+            (r(x, y + 5.6 * step, w), "", false, Action::Destination),
+            (r(x, y + 7.1 * step, w), "", false, Action::Destination),
+            (r(x, y + 11. * step, w), "Export", false, Action::Export),
             (
                 r(
                     l.context.x + l.context.w * 0.28,
@@ -544,6 +546,12 @@ impl Page {
                     self.status = "ProRes requires MKV.".into();
                 } else {
                     self.mkv = m;
+                }
+            }
+            Action::Destination if !self.busy() => {
+                if let Some(mut path) = crate::open::export_destination(&self.destination_name()) {
+                    path.set_extension(if self.mkv { "mkv" } else { "mp4" });
+                    self.destination = Some(path);
                 }
             }
             Action::Cancel => self.cancel(),
@@ -820,25 +828,36 @@ impl Page {
             l.progress.y + 22.,
             10.,
             dim,
-            &self.status,
+            if self.actions(vp).iter().any(|(r, _, _, a)| *a == Action::Lossless && hit(*r, cursor.0, cursor.1)) {
+                self.copy_unavailable.unwrap_or(&self.status)
+            } else { &self.status },
             Align::Left,
             l.progress.w,
         );
-        for (y, t) in [(84., "EXPORT"), (116., "PRESET"), (244., "CONTAINER")] {
-            ui_label(
-                items,
-                l.sidebar.x + 16.,
-                y,
-                12.,
-                blue,
-                t,
-                Align::Left,
-                l.sidebar.w - 32.,
-            );
+        let (x, w, y, step) = Self::settings_geometry(l);
+        let text = |items: &mut Vec<Item>, yy, size, color, value: &str| {
+            ui_label(items, x, yy, size, color, value, Align::Left, w);
+        };
+        text(items, l.sidebar.y + 25., 18., ink, "Export Settings");
+        for (offset, title) in [(0., "Codec"), (2., "Container"), (4.4, "Destination")] {
+            text(items, y + offset * step, 15., ink, title);
         }
-        if let Some(reason) = self.copy_unavailable {
-            ui_label(items, l.sidebar.x + 16., 368., 10., dim, reason,
-                Align::Left, l.sidebar.w - 32.);
+        for offset in [-0.55, 1.8, 3.95, 8.3] {
+            items.push(Item::Rect(RectItem::new(RectPx { x, y: y + offset * step, w, h: 1. }, hex_color(0x292b29))));
+        }
+        text(items, y + 5.25 * step, 12., dim, "Filename");
+        text(items, y + 6.75 * step, 12., dim, "Directory · click to choose");
+        let dims = self.current().map(|f| (f.dims[0], f.dims[1]))
+            .or_else(|| self.crop.map(|(_, _, w, h)| (w, h)))
+            .unwrap_or((info.width, info.height));
+        let codec = if self.lossless { info.codec.as_str() } else if self.prores { "ProRes" } else { "HEVC" };
+        for (offset, key, value) in [
+            (8.85, "Video", format!("{codec} · {} × {}", dims.0, dims.1)),
+            (9.6, "Frame rate", format!("{fps:.2} fps")),
+            (10.35, "Duration", format!("{:02}:{:02}", self.duration as u64 / 60, self.duration as u64 % 60)),
+        ] {
+            ui_label(items, x, y + offset * step, 12., dim, key, Align::Left, w * 0.35);
+            ui_label(items, x + w, y + offset * step, 12., ink, value, Align::Right, w * 0.65);
         }
         items.push(Item::Rect(RectItem::new(l.footer, hex_color(0x0b0c0c))));
         for (r, t, selected, a) in self.actions(vp) {
@@ -849,7 +868,7 @@ impl Page {
                 Action::Reveal => self.path.is_none(),
                 Action::Lossless => self.busy() || self.copy_unavailable.is_some(),
                 Action::Container(false) => self.busy() || (self.prores && !self.lossless),
-                Action::Preset(_) | Action::Container(true) => self.busy(),
+                Action::Preset(_) | Action::Container(true) | Action::Destination => self.busy(),
                 _ => false,
             };
             if r.y >= l.footer.y {
@@ -878,12 +897,14 @@ impl Page {
                 );
             } else {
                 items.push(Item::Rect(RectItem {
-                    radius: 5.,
+                    radius: 7.,
                     border_w: 1.,
                     border_color: hex_color(if selected { 0x008cff } else { 0x3b3d3b }),
                     ..RectItem::new(
                         r,
-                        hex_color(if selected || (a == Action::Export && !disabled) {
+                        hex_color(if disabled {
+                            0x151715
+                        } else if selected || a == Action::Export {
                             0x008cff
                         } else {
                             0x222422
@@ -896,7 +917,10 @@ impl Page {
                     r.y + r.h / 2.,
                     12.,
                     if disabled { dim } else { ink },
-                    t,
+                    if a == Action::Destination {
+                        if r.y < y + 6. * step { self.destination_name() }
+                        else { self.destination.as_ref().and_then(|p| p.parent()).or_else(|| info.path.parent()).map(|p| p.display().to_string()).unwrap_or_default() }
+                    } else { t.to_string() },
                     Align::Left,
                     r.w - 20.,
                 );
