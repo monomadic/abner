@@ -782,7 +782,8 @@ impl Page {
         } else {
             self.elapsed
         };
-        let fps = self.count as f64 / elapsed.max(0.001);
+        // Render throughput, not the clip's rate: `fps` (above) is the output's.
+        let render_fps = self.count as f64 / elapsed.max(0.001);
         let done = (self.rendered_time / self.duration.max(0.001)).clamp(0., 1.);
         let eta = if done > 0. && self.busy() {
             format!("~{:.0}s remaining", elapsed * (1. - done) / done)
@@ -799,7 +800,7 @@ impl Page {
                 "RENDER + ENCODE    {:.1}% · {} frames   {:.1} fps   {:.0}s elapsed   {}",
                 done * 100.,
                 self.count,
-                fps,
+                render_fps,
                 elapsed,
                 eta
             ),
