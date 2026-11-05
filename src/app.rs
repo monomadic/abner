@@ -5738,15 +5738,16 @@ impl App {
             CutAction::Snap(_) => {
                 // The keyframe glyph, then an iOS-style switch: knob left on a
                 // grey track = off, knob right on the keyframe green = on.
+                // On: the orange selection ring. Off: the footer buttons' 1px grey
+                // edge (`draw_cut_footer_button`). The glyph takes the label's ink.
                 let on = cut.snap == Snap::Keyframe;
-                if hovered || on {
-                    items.push(Item::Rect(RectItem { radius: 8.0, border_w: if on { 2.0 } else { 0.0 },
-                        border_color: hex_color(SOURCE_RING),
-                        ..RectItem::new(r, if hovered { mix(CUT_BAR, 0xffffff, 0.07) } else { [0.0; 4] }) }));
-                }
-                draw_icon(items, Icon::SnapKeyframe, r.x + 16.0, cy, hex_color(if on { FRAME_KEY } else { 0xececec }));
+                let (border_w, border) = if on { (2.0, SOURCE_RING) } else { (1.0, if hovered { 0x555555 } else { 0x303030 }) };
+                items.push(Item::Rect(RectItem { radius: 8.0, border_w, border_color: hex_color(border),
+                    ..RectItem::new(r, if hovered { mix(CUT_BAR, 0xffffff, 0.07) } else { [0.0; 4] }) }));
+                let ink = hex_color(if on || hovered { CUT_INK } else { 0xc8c8c8 });
+                draw_icon(items, Icon::SnapKeyframe, r.x + 16.0, cy, ink);
                 if r.w > CUT_SNAP_W {
-                    ui_label(items, r.x + 30.0, cy, 13.0, hex_color(if on || hovered { CUT_INK } else { 0xc8c8c8 }),
+                    ui_label(items, r.x + 30.0, cy, 13.0, ink,
                         "Snap to Keyframe", Align::Left, r.w - 30.0 - CUT_SWITCH_W - 12.0);
                 }
                 let track = RectPx { x: r.x + r.w - 6.0 - CUT_SWITCH_W, y: cy - CUT_SWITCH_H / 2.0, w: CUT_SWITCH_W, h: CUT_SWITCH_H };
