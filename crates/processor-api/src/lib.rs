@@ -169,8 +169,14 @@ pub trait Session {
     fn set_progress_reporter(&mut self, _reporter: ProgressReporter) {}
     fn process(&mut self, input: Frame) -> Result<Vec<Frame>>;
     /// Named spatial inputs accompany the unmodified primary frame. Opt in explicitly.
-    fn process_with_inputs(&mut self, input: Frame, inputs: Vec<SpatialInput>) -> Result<Vec<Frame>> {
-        if !inputs.is_empty() { return Err("Session does not accept spatial inputs".into()); }
+    fn process_with_inputs(
+        &mut self,
+        input: Frame,
+        inputs: Vec<SpatialInput>,
+    ) -> Result<Vec<Frame>> {
+        if !inputs.is_empty() {
+            return Err("Session does not accept spatial inputs".into());
+        }
         self.process(input)
     }
     fn finish(&mut self) -> Result<Vec<Frame>>;
@@ -182,7 +188,9 @@ pub trait Session {
 /// Factories can move to a preview worker; sessions stay on their creating thread.
 pub trait Factory: Send {
     /// Optional controls shown by the host, independently of numeric settings.
-    fn spatial_inputs(&self) -> Vec<SpatialInputDescriptor> { Vec::new() }
+    fn spatial_inputs(&self) -> Vec<SpatialInputDescriptor> {
+        Vec::new()
+    }
     /// Declarations describe the plugin, not a guarantee of host execution support.
     fn capabilities(&self) -> Capabilities {
         Capabilities::default()
