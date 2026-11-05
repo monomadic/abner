@@ -64,7 +64,7 @@ config: abner.default.toml (built in) overlaid by the first of
   ~/.config/abner.toml — set only the keys you change. A config error
   stops startup.
 
-processor previews (composed launcher):
+processor previews:
   --processor ID                    open the runtime settings and preview panel
   --processor-settings JSON         optional initial settings object
   --export                          open the minimal Export workspace
@@ -120,8 +120,22 @@ keys:
   Esc          leave fullscreen, else quit
 ";
 
-/// Start the host with externally composed processor factories.
+/// Start the host with built-in and externally composed processor factories.
 pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    let registry = {
+        let mut registry = registry;
+        let defaults = abner_builtin_rife_metal::factories()
+            .into_iter()
+            .chain(abner_builtin_vt_interpolate::factories());
+        for factory in defaults {
+            // Older composed launchers may still supply these adapters.
+            if registry.get(&factory.descriptor().id).is_err() {
+                registry.register(factory).map_err(anyhow::Error::msg)?;
+            }
+        }
+        registry
+    };
     if processor_cli::handle(&registry)? { return Ok(()); }
     env_logger::init();
     let args: Vec<String> = std::env::args().skip(1).collect();

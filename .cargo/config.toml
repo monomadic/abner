@@ -1,5 +1,5 @@
-# `cargo build-with-plugins [cargo build flags]`: discover the crates in the
-# gitignored plugins/ directory, generate a launcher that registers them, and
+# `cargo build-with-plugins [cargo build flags]`: discover local crates in
+# plugins/, generate a launcher that registers them, and
 # build it into target/ (tools/build-with-plugins/src/main.rs). An alias can
 # only name a cargo subcommand, so it runs that helper; the helper's own
 # artifacts land in target/ too. Run it from the repository root.

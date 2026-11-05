@@ -244,18 +244,24 @@ MIT
 
 ## Build-time composition
 
-The library entry point `abner::run(registry)` accepts an external processor
-registry; the ordinary executable supplies an empty one. The experimental API
-is in `crates/processor-api`. A separately generated launcher can depend on
-independent processor crates and register their factories before calling `run`.
+The library entry point `abner::run(registry)` adds built-in processors to the
+supplied registry. On Apple silicon Macs, standard builds include
+[RIFE Metal](plugins/defaults/rife-metal/README.md) and
+[VideoToolbox Interpolate](plugins/defaults/vt-interpolate/README.md).
+RIFE Metal loads its separately installed runtime when selected for
+processing. The experimental API is in `crates/processor-api`, with a
+pass-through [Identity example](examples/identity/) for plugin developers.
+A generated launcher can register additional processor crates before calling
+`run`.
 
 Keep that generated project outside the committed tree. Committed host files must
 not identify, document or depend on external processors (generic examples and
 builtins excepted).
 
 The quick way is **`cargo build-with-plugins [cargo build flags]`**, run from the
-repository root: drop processor crates into the gitignored `plugins/` directory
-(one crate per folder; `ABNER_PLUGINS` points elsewhere) and the command
+repository root. Abner owns the crates under `plugins/defaults/`. Place any
+additional processor crates or links directly under `plugins/`. Git ignores
+these local entries, and `ABNER_PLUGINS` can point elsewhere. The command
 generates a launcher under `plugins/.launcher` that registers every one of them,
 then builds it into `target/<profile>/abner-with-plugins` with the flags you
 passed (`--release` and friends). A plugin crate depends on
@@ -274,7 +280,7 @@ local SDK so the registry and plugin share the same Rust types.
 
 The launcher is its own package with its own lockfile, so a run changes nothing
 git tracks — not even the root `Cargo.lock` — and the build stamp keeps the real
-commit hash. Plain `cargo build` still produces the empty-registry binary.
+commit hash. Plain `cargo build` includes the built-in processors.
 `packaging/build-app.sh --with-plugins` bundles the composed launcher instead. Runtime descriptors and settings may contain full processor
 information. `--list-processors` prints descriptors; `--check-processor ID
 SETTINGS_JSON` processes four synthetic frames without opening a window. These
@@ -348,4 +354,4 @@ negotiation and processor export remain future work. Process does not write medi
 Timeline’s existing export still exports its source edits, without processing.
 
 `--processor ID --processor-settings JSON` opens Process focused on a registered
-processor. Ordinary builds with an empty registry show an empty processor list.
+processor.

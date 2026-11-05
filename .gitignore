@@ -1,5 +1,6 @@
 /target
 .DS_Store
 .claude/settings.local.json
-# Locally composed processor plugins and their generated launcher (see README).
-/plugins/
+# Track Abner's built-ins, but leave local providers and the launcher untracked.
+/plugins/*
+!/plugins/defaults/

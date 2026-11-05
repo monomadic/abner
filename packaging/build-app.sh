@@ -32,7 +32,7 @@
 #   --sign <identity>  codesign with a real identity instead of ad-hoc ("-")
 #   --with-cli-tools  copy ffmpeg/ffprobe into the bundle too
 #   --with-plugins    bundle the launcher `cargo build-with-plugins` composes
-#                      from the gitignored plugins/ directory instead of the
+#                      with local plugins/ entries instead of the
 #                      plain binary (same name inside the bundle)
 #   --install         copy the built app to /Applications (replacing any
 #                      existing Abner.app there)
