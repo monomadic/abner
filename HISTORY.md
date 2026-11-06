@@ -3,6 +3,34 @@
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 
+## 2026-11-06 — Downsize input: Focus Fix for any upscaling processor
+
+Topaz's Focus Fix turned out to be no model at all: the v4.1.0 release note
+(January 2024) describes it as shrinking the input to 50% (Standard) or 25%
+(Strong) and running the chosen enhancement model's 2x or 4x network back to
+size. Every upscaling model can do it, so the host does it generically.
+`Factory::scales() -> Vec<ScaleOption>` (new in the processor API, empty by
+default) declares a processor's integer upscales with the settings overlay that
+selects each; for a processor declaring 2 or 4 the Process page leads its
+settings with a "Downsize input" row (Off · 1/2 · 1/4, only the factors
+declared), stored in the settings object under `$downsize` and stripped by
+`split_downsize` before any plugin sees it. `render` creates the stage at
+`dims / factor` with the overlay applied and wraps it in `Downsized`, a Session
+adapter that shrinks each frame first. The shrink is `src/resample.rs`:
+swscale's spline (`SWS_SPLINE`, p = −2.196152422706632, size factor 20, the
+kernel stretched by the ratio when shrinking, swscale's sample-centre
+convention and clamp-to-edge) as a float separable resampler on RGB16, with a
+parity test against ffmpeg's own `scale=...:flags=spline` on a testsrc2 frame
+(45 dB+, worst pixel ≤ 6). Finding the right reference took a detour: packed
+RGB first came out 38 dB off horizontally while gray and the impulse response
+matched exactly — swscale scales RGB as Y'CbCr planes and halves the chroma
+horizontally on input unless `full_chroma_inp` is set. The before stays the
+untouched source and the caption says "input downsized"; spatial inputs refuse
+the combination. Tests: a scaling fixture asserts the row appears only for
+declared scales, leads the list, cycles on click, rides the chain and never
+reaches the plugin, and that a 1/2 + 2x render lands at the source size while
+a plain 2x doubles it.
+
 ## 2026-11-06 — Honest processor preview feedback
 
 Unknown processor progress now uses a steady activity mark instead of repeatedly

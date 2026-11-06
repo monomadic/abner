@@ -342,6 +342,14 @@ frame is cached. This can take time for distant frames; context preparation show
 frame progress. Reconfiguration cancels old work and rejects late results. Device
 calls already executing may finish before cancellation takes effect.
 
+**Downsize input** (Topaz's "Focus Fix", for any processor that upscales): a
+processor that declares its 2x and/or 4x models gets a first settings row, Off ·
+1/2 · 1/4. The frame is shrunk by that factor with swscale's spline before the
+stage and the stage's matching model brings it back to the source size, so the
+network has to invent the detail instead of preserving the blur. The before is
+the untouched source; the caption says "input downsized". It cannot be combined
+with spatial inputs.
+
 Plugins are fed the source at its **native size** (display dimensions, rotation
 applied), decoded as 8-bit SDR RGBA then expanded to RGB16, and their output is
 rounded back to 8 bits for display — so a preview is what the plugin makes of the

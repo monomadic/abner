@@ -518,6 +518,22 @@ and `oneOf: [{const, title, description}]` names and explains each choice of a
 selector (plain `enum` still works); the tooltip is the setting's text then the
 current choice's. Long text is wrapped by the renderer (`TextItem::wrap`, measured
 like `max_width`), never app-side.
+**Downsize input** (2026-11-06; Topaz's "Focus Fix" is exactly this, not a model:
+since Video AI 4.1.0 it shrinks the input to 50% / 25% and runs the chosen
+enhancement model's 2x / 4x network back to size): a processor declares its
+integer upscales with `Factory::scales() -> Vec<ScaleOption>` (factor + the
+settings overlay that selects it, `{"scale": "2x"}` say); for a stage that
+declares 2 or 4 the panel leads its settings with a host-owned "Downsize input"
+row (Off · 1/2 · 1/4, only the factors declared), kept in the settings object
+under `DOWNSIZE_KEY` (`$downsize`) and stripped by `split_downsize` before any
+plugin sees it (`chain_rate`, `render`). `render` creates the session at
+`dims / factor` with the overlay applied and wraps it in `Downsized`, which
+shrinks each frame with `resample::spline_resize_rgb16` — swscale's spline
+(`SWS_SPLINE`, what Topaz's export graph sets) as a float separable kernel,
+verified against ffmpeg's own scale to within an LSB or two; its parity test
+needs `full_chroma_inp`, since swscale otherwise halves RGB chroma on the way
+in. The before stays the untouched source; the caption says "input downsized".
+Refused with spatial inputs.
 The generic API lives in `crates/processor-api`; processor implementations are
 maintained independently. **`cargo build-with-plugins`** (alias → the committed,
 generic helper `tools/build-with-plugins`) is the sanctioned way to compose them

@@ -16,7 +16,7 @@ use crate::{
 };
 use abner_processor_api::{
     Cancellation, Capabilities, Category, Descriptor, Frame, InputRequirement, Progress, Rate,
-    Registry, Role, Session,
+    Registry, Role, ScaleOption, Session,
 };
 use serde_json::{Value, json};
 use std::{
@@ -43,6 +43,51 @@ const CHIP_H: f32 = 18.0;
 const CHIP_PITCH: f32 = 24.0;
 const CHIP_PX: f32 = 10.0;
 const CHIP_TRACK: f32 = 0.4;
+/// The host's own setting in a processor's settings object: how much to
+/// shrink the frame before the stage (1 = off; 2 and 4 pick the stage's 2x /
+/// 4x model, declared through `Factory::scales`). Stripped before the plugin
+/// sees the settings. Topaz's "Focus Fix", for any processor that upscales.
+const DOWNSIZE_KEY: &str = "$downsize";
+/// The plugin's view of a settings object and the host's downsize factor.
+fn split_downsize(settings: &Value) -> (Value, usize) {
+    let mut plain = settings.clone();
+    let factor = plain
+        .as_object_mut()
+        .and_then(|m| m.remove(DOWNSIZE_KEY))
+        .and_then(|v| v.as_u64())
+        .map_or(1, |f| f.max(1) as usize);
+    (plain, factor)
+}
+/// The Downsize input row for a processor declaring `scales`: Off plus one
+/// choice per 2x / 4x model it offers. None when it offers neither.
+fn downsize_field(scales: &[ScaleOption]) -> Option<Field> {
+    let mut choices = vec![Choice {
+        value: json!(1),
+        title: Some("Off".into()),
+        description: Some("The stage sees the frame at its native size.".into()),
+    }];
+    for (factor, label) in [(2usize, "1/2 · 2x model"), (4, "1/4 · 4x model")] {
+        if scales.iter().any(|s| s.factor == factor) {
+            choices.push(Choice {
+                value: json!(factor),
+                title: Some(label.into()),
+                description: Some(format!(
+                    "Shrink the frame to 1/{factor} with swscale's spline, run the {factor}x model, and land back at the source size."
+                )),
+            });
+        }
+    }
+    (choices.len() > 1).then(|| Field {
+        key: DOWNSIZE_KEY.into(),
+        title: "Downsize input".into(),
+        kind: Kind::Enum(choices),
+        default: Some(json!(1)),
+        required: false,
+        description: Some(
+            "Topaz's Focus Fix, for any upscaling processor: the frame goes in smaller so the model's upscale has to invent the detail, instead of preserving the blur. The Scale setting is overridden to match.".into(),
+        ),
+    })
+}
 /// The page's footer bar: the Timeline's height, since it carries the same
 /// kind of button (Render frame, drawn as the cut footer's Split).
 const FOOTER_H: f32 = CUT_STATUS_H;
@@ -215,7 +260,7 @@ fn chain_rate(registry: &Registry, chain: &[(String, Value)], fps: f64) -> Resul
     let mut rate = rational(fps);
     for (id, settings) in chain {
         let factory = registry.get(id)?;
-        rate = factory.output_rate(settings, rate)?;
+        rate = factory.output_rate(&split_downsize(settings).0, rate)?;
         if rate.contains(&0) || rate_fps(rate) > 1000.0 {
             return Err(format!("{}: unsupported output frame rate", factory.descriptor().name));
         }
@@ -450,6 +495,8 @@ struct Preview {
     after: Rgba,
     input: [u32; 2],
     output: [u32; 2],
+    /// Some stage was fed a downsized copy of its input.
+    downsized: bool,
     /// The output frame's own time and length, seconds: a retimed chain
     /// puts new frames between the source's.
     pts: f64,
@@ -545,9 +592,29 @@ fn render(
     r.inputs.validate_geometry(w,h)?;
     let mut sessions = Vec::new();
     let mut dims = [w as usize, h as usize];
-    for (index, (id, settings)) in r.chain.iter().enumerate() {
+    let downsized = r.chain.iter().any(|(_, s)| split_downsize(s).1 > 1);
+    for (index, (id, raw)) in r.chain.iter().enumerate() {
         let factory = registry.get(id)?;
         if index>0 && r.inputs.bindings.get(id).is_some_and(|b|!b.is_empty()) {return Err("Spatial inputs currently require the first enabled processor; move this processor first".into());}
+        let (mut settings, downsize) = split_downsize(raw);
+        let mut stage_dims = dims;
+        if downsize > 1 {
+            if r.inputs.bindings.get(id).is_some_and(|b| !b.is_empty()) {
+                return Err("Downsize input cannot be combined with spatial inputs".into());
+            }
+            let option = factory
+                .scales()
+                .into_iter()
+                .find(|s| s.factor == downsize)
+                .ok_or_else(|| format!("{}: no {downsize}x model to bring a 1/{downsize} input back to size", factory.descriptor().name))?;
+            if let (Some(map), Some(over)) = (settings.as_object_mut(), option.settings.as_object()) {
+                for (k, v) in over {
+                    map.insert(k.clone(), v.clone());
+                }
+            }
+            stage_dims = [(dims[0] / downsize).max(1), (dims[1] / downsize).max(1)];
+        }
+        let settings = &settings;
         let caps = factory.capabilities();
         if !matches!(caps.role, Role::Processor)
             || matches!(caps.input, InputRequirement::WholeClip)
@@ -582,7 +649,7 @@ fn render(
             }
         });
         report(Progress { phase: "Preparing processor".into(), completed: 0, total: None });
-        let mut session = abner_processor_api::create_bound(factory,dims[0],dims[1],settings,r.inputs.bindings.get(id).cloned().unwrap_or_default())?;
+        let mut session = abner_processor_api::create_bound(factory,stage_dims[0],stage_dims[1],settings,r.inputs.bindings.get(id).cloned().unwrap_or_default())?;
         if let Some(target) = r.target {
             session.set_preview_target((target * 1e6).round() as i64, [1, 1_000_000]);
         }
@@ -599,6 +666,11 @@ fn render(
             frames,
             callbacks,
         });
+        let session: Box<dyn Session> = if downsize > 1 {
+            Box::new(Downsized { inner: session, factor: downsize })
+        } else {
+            session
+        };
         dims = session.output_dimensions();
         if dims.contains(&0)
             || dims.iter().any(|d| *d > 8192)
@@ -710,6 +782,7 @@ fn render(
                 Preview {
                     before,
                     after: Arc::new(rgba),
+                    downsized,
                     input: [w, h],
                     output: [ow as u32, oh as u32],
                     pts: frame.pts as f64 / 1e6,
@@ -809,6 +882,39 @@ fn render(
     }
     Ok(())
 }
+/// A stage fed a spline-shrunk copy of its input (the Downsize input row):
+/// the frame goes in at 1/factor and the stage's own factor-x model brings
+/// it back to size. Spatial inputs are refused upstream, so `process` is
+/// the only way in.
+struct Downsized {
+    inner: Box<dyn Session>,
+    factor: usize,
+}
+impl Session for Downsized {
+    fn set_preview_target(&mut self, pts: i64, time_base: [u32; 2]) {
+        self.inner.set_preview_target(pts, time_base);
+    }
+    fn set_progress_reporter(&mut self, reporter: abner_processor_api::ProgressReporter) {
+        self.inner.set_progress_reporter(reporter);
+    }
+    fn process(&mut self, input: Frame) -> Result<Vec<Frame>, String> {
+        let (w, h) = ((input.width / self.factor).max(1), (input.height / self.factor).max(1));
+        let pixels = crate::resample::spline_resize_rgb16(&input.pixels, input.width, input.height, w, h);
+        self.inner.process(Frame { width: w, height: h, pixels, ..input })
+    }
+    fn finish(&mut self) -> Result<Vec<Frame>, String> {
+        self.inner.finish()
+    }
+    fn output_dimensions(&self) -> [usize; 2] {
+        self.inner.output_dimensions()
+    }
+    fn cancellation(&self) -> Cancellation {
+        self.inner.cancellation()
+    }
+    fn progress(&self) -> Progress {
+        self.inner.progress()
+    }
+}
 pub(crate) fn process_chain(
     sessions: &mut [Box<dyn abner_processor_api::Session>],
     from: usize,
@@ -862,6 +968,8 @@ pub struct Panel {
     supported: Vec<bool>,
     capabilities: Vec<Capabilities>,
     categories: Vec<Vec<Category>>,
+    /// Each processor's declared integer upscales (`Factory::scales`).
+    scales: Vec<Vec<ScaleOption>>,
     /// Last pointer position, for the rail's hover states.
     cursor: (f32, f32),
     /// The focused-processor inspector under the list, folded by its grip
@@ -936,6 +1044,7 @@ impl Default for Panel {
             supported: vec![],
             capabilities: vec![],
             categories: vec![],
+            scales: vec![],
             cursor: (-1.0, -1.0),
             show_detail: true,
             detail_at: None,
@@ -1028,6 +1137,7 @@ impl Panel {
         // Plugins start bypassed: running one is always the user's choice.
         let enabled = vec![false; descriptors.len()];
         let declarations=descriptors.iter().map(|d|(d.id.clone(),registry.get(&d.id).unwrap().spatial_inputs())).collect();
+        let scales: Vec<Vec<ScaleOption>> = descriptors.iter().map(|d| registry.get(&d.id).unwrap().scales()).collect();
         let registry = Arc::new(Mutex::new(registry));
         let worker = (!descriptors.is_empty()).then(|| Worker::new(registry.clone()));
         let mut s = Self::default();
@@ -1042,6 +1152,7 @@ impl Panel {
         s.supported = supported;
         s.capabilities = capabilities;
         s.categories = categories;
+        s.scales = scales;
         s.worker = worker;
         s.select(0);
         s
@@ -1066,7 +1177,13 @@ impl Panel {
                 }
             }
         }
+        if let Some(field) = downsize_field(self.scales.get(index).map_or(&[][..], Vec::as_slice)) {
+            self.fields.insert(0, field);
+        }
         self.settings = self.saved[index].clone();
+        if self.fields.iter().any(|f| f.key == DOWNSIZE_KEY) && self.settings.get(DOWNSIZE_KEY).is_none() {
+            self.settings[DOWNSIZE_KEY] = json!(1);
+        }
         self.scroll = 0.0;
         self.editing = None;
         self.changed();
@@ -2399,8 +2516,9 @@ impl Panel {
                     )
                 } else {
                     format!(
-                        "{}×{} → {}×{} · through focused processor",
-                        f.input[0], f.input[1], f.output[0], f.output[1]
+                        "{}×{} → {}×{} · through focused processor{}",
+                        f.input[0], f.input[1], f.output[0], f.output[1],
+                        if f.downsized { " · input downsized" } else { "" }
                     )
                 },
                 DIM,
@@ -3085,10 +3203,89 @@ mod tests {
             }
         }
     }
+    /// Nearest-neighbour upscaler declaring a 2x model (`{"scale": 2}`),
+    /// the fixture for the Downsize input row.
+    struct ScalingFactory;
+    impl abner_processor_api::Factory for ScalingFactory {
+        fn descriptor(&self) -> Descriptor {
+            Descriptor {
+                id: "example.scaling".into(),
+                name: "Scaling example".into(),
+                settings_schema: json!({"properties":{"scale":{"type":"integer","minimum":1,"maximum":4,"default":1}}}),
+                presets: vec![],
+            }
+        }
+        fn scales(&self) -> Vec<ScaleOption> {
+            vec![ScaleOption { factor: 2, settings: json!({"scale": 2}) }]
+        }
+        fn create(&self, w: usize, h: usize, s: &Value) -> Result<Box<dyn abner_processor_api::Session>, String> {
+            let factor = s["scale"].as_u64().unwrap_or(1) as usize;
+            Ok(Box::new(Scaling { input: [w, h], factor, cancel: Cancellation::default() }))
+        }
+    }
+    struct Scaling {
+        input: [usize; 2],
+        factor: usize,
+        cancel: Cancellation,
+    }
+    impl abner_processor_api::Session for Scaling {
+        fn process(&mut self, f: Frame) -> Result<Vec<Frame>, String> {
+            if [f.width, f.height] != self.input {
+                return Err(format!("fed {}x{}, created for {}x{}", f.width, f.height, self.input[0], self.input[1]));
+            }
+            let (w, h, k) = (f.width, f.height, self.factor);
+            let mut pixels = Vec::with_capacity(w * h * k * k * 3);
+            for y in 0..h * k {
+                for x in 0..w * k {
+                    let i = ((y / k) * w + x / k) * 3;
+                    pixels.extend_from_slice(&f.pixels[i..i + 3]);
+                }
+            }
+            Ok(vec![Frame { width: w * k, height: h * k, pixels, ..f }])
+        }
+        fn finish(&mut self) -> Result<Vec<Frame>, String> {
+            Ok(vec![])
+        }
+        fn output_dimensions(&self) -> [usize; 2] {
+            [self.input[0] * self.factor, self.input[1] * self.factor]
+        }
+        fn cancellation(&self) -> Cancellation {
+            self.cancel.clone()
+        }
+        fn progress(&self) -> abner_processor_api::Progress {
+            abner_processor_api::Progress { phase: "example".into(), completed: 0, total: None }
+        }
+    }
     fn registry() -> Registry {
         let mut r = Registry::default();
         r.register(Box::new(BufferedFactory)).unwrap();
+        r.register(Box::new(ScalingFactory)).unwrap();
         r
+    }
+    #[test]
+    fn downsize_row_appears_only_for_declared_scales_and_stays_out_of_plugin_settings() {
+        let mut panel = Panel::new(registry());
+        panel.open = true;
+        let scaling = panel.descriptors.iter().position(|d| d.id == "example.scaling").unwrap();
+        let buffered = panel.descriptors.iter().position(|d| d.id == "example.buffered").unwrap();
+        panel.select(buffered);
+        assert!(panel.fields.iter().all(|f| f.key != DOWNSIZE_KEY), "no scales, no row");
+        panel.select(scaling);
+        let row = panel.fields.iter().position(|f| f.key == DOWNSIZE_KEY).expect("Downsize input row");
+        assert_eq!(row, 0, "the host's row leads the plugin's settings");
+        assert!(matches!(&panel.fields[row].kind, Kind::Enum(c) if c.len() == 2), "Off and 1/2 only: no 4x model declared");
+        assert_eq!(panel.settings[DOWNSIZE_KEY], json!(1));
+        let vp = (1280.0, 900.0);
+        let r = panel.row(row, vp);
+        assert!(panel.click(r.x + r.w / 2.0, r.y + 25.0, vp));
+        assert_eq!(panel.settings[DOWNSIZE_KEY], json!(2), "a click cycles to the 2x choice");
+        panel.enabled[scaling] = true;
+        let chain = panel.chain();
+        let stage = chain.iter().find(|(id, _)| id == "example.scaling").unwrap();
+        assert_eq!(stage.1[DOWNSIZE_KEY], json!(2), "the chain carries the host key");
+        let (plain, factor) = split_downsize(&stage.1);
+        assert_eq!(factor, 2);
+        assert!(plain.get(DOWNSIZE_KEY).is_none(), "the plugin never sees it");
     }
     #[test]
     fn gui_controls_edit_runtime_settings_and_cancel_on_drag() {
@@ -3202,6 +3399,37 @@ mod tests {
         };
         let err = render(&registry(), &starved, &tx, None, None).unwrap_err();
         assert!(err.contains("preview_cache_mb"), "{err}");
+        // Downsize input: the stage sees a 1/2 frame and its 2x model lands
+        // back at the source size; without it the 2x model doubles the frame.
+        for (settings, expect) in [
+            (json!({DOWNSIZE_KEY: 2}), [info.width, info.height]),
+            (json!({"scale": 2}), [info.width * 2, info.height * 2]),
+        ] {
+            let scaled = Request {
+                inputs: Default::default(),
+                generation: 8,
+                chain: vec![("example.scaling".into(), settings.clone())],
+                target: Some(frames[1].pts),
+                info: info.clone(),
+                start: 0.0,
+                end: None,
+                cancel: Cancellation::default(),
+                budget: DEFAULT_PREVIEW_BYTES,
+            };
+            render(&registry(), &scaled, &tx, None, None).unwrap();
+            let mut got = vec![];
+            while let Ok(event) = rx.try_recv() {
+                if let Event::Frame(_, f) = event {
+                    got.push(f);
+                }
+            }
+            assert_eq!(got.len(), 1, "{settings}");
+            assert_eq!(got[0].output, expect, "{settings}");
+            assert_eq!(got[0].input, [info.width, info.height], "the before is the untouched source");
+            assert_eq!(got[0].before.len(), (info.width * info.height * 4) as usize);
+            assert_eq!(got[0].after.len(), (expect[0] * expect[1] * 4) as usize);
+            assert_eq!(got[0].downsized, settings.get(DOWNSIZE_KEY).is_some());
+        }
         let limited = Request {
             inputs:Default::default(),
             generation: 9,
@@ -3381,6 +3609,7 @@ mod tests {
     }
     fn mark(pts: f64) -> Preview {
         Preview {
+            downsized: false,
             before: Arc::new(vec![0; 16]),
             after: Arc::new(vec![0; 16]),
             input: [2, 2],

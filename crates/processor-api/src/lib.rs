@@ -185,8 +185,27 @@ pub trait Session {
     /// Completed output frames; the host owns timeline totals and job-wide progress.
     fn progress(&self) -> Progress;
 }
+/// An integer upscale a processor offers, and the settings overlay that
+/// selects it. The host uses these for "Downsize input": it shrinks the frame
+/// by `factor` with a spline, applies `settings` over the user's, and the
+/// model's own upscale brings the frame back to its size — a generic form of
+/// the "downscale, then upscale" focus trick, available to any processor
+/// whose output is an integer multiple of its input.
+#[derive(Clone, Debug, Serialize)]
+pub struct ScaleOption {
+    pub factor: usize,
+    pub settings: serde_json::Value,
+}
 /// Factories can move to a preview worker; sessions stay on their creating thread.
 pub trait Factory: Send {
+    /// The integer upscales this processor can produce, each with the
+    /// settings that select it (`{"scale": "2x"}`, say). Empty by default,
+    /// which hides the host's Downsize input row. Cheap and side-effect free:
+    /// the host reads it on the UI thread.
+    fn scales(&self) -> Vec<ScaleOption> {
+        Vec::new()
+    }
+
     /// Optional controls shown by the host, independently of numeric settings.
     fn spatial_inputs(&self) -> Vec<SpatialInputDescriptor> {
         Vec::new()
