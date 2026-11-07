@@ -1,0 +1,22 @@
+[package]
+name = "abner-processing"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+abner-processor-api = { path = "../processor-api" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+sha2 = "0.11"
+filmcraft-codecs = { git = "https://github.com/monomadic/filmcraft", rev = "45c12135b8744ed150367d4aa9a0d7f3b5f47362" }
+filmcraft-media = { git = "https://github.com/monomadic/filmcraft", rev = "45c12135b8744ed150367d4aa9a0d7f3b5f47362" }
+filmcraft-frame = { git = "https://github.com/monomadic/filmcraft", rev = "45c12135b8744ed150367d4aa9a0d7f3b5f47362" }
+filmcraft-color = { git = "https://github.com/monomadic/filmcraft", rev = "45c12135b8744ed150367d4aa9a0d7f3b5f47362" }
+filmcraft-time = { git = "https://github.com/monomadic/filmcraft", rev = "45c12135b8744ed150367d4aa9a0d7f3b5f47362" }
+filmcraft-isobmff = { git = "https://github.com/monomadic/filmcraft", rev = "45c12135b8744ed150367d4aa9a0d7f3b5f47362" }
+filmcraft-prores = { git = "https://github.com/monomadic/filmcraft", rev = "45c12135b8744ed150367d4aa9a0d7f3b5f47362" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+filmcraft-platform = { git = "https://github.com/monomadic/filmcraft", rev = "45c12135b8744ed150367d4aa9a0d7f3b5f47362" }

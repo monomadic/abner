@@ -3385,7 +3385,7 @@ pub(crate) fn pipeline_export_with_inputs(
                     e.dims() == [f.width as u32, f.height as u32],
                     "Output dimensions changed between segments"
                 );
-                let packets = e.encode(&rgba, index)?;
+                let packets = e.encode(&f.pixels, &rgba, index)?;
                 let ti = match track {
                     Some(t) => t,
                     None => {
@@ -3493,12 +3493,10 @@ pub(crate) fn pipeline_export_with_inputs(
             )?;
         }
         for i in 0..sessions.len() {
-            let tail = sessions[i].finish().map_err(anyhow::Error::msg)?;
             accept(
-                crate::processor_gui::process_chain(
+                abner_processing::finish_stage(
                     &mut sessions,
-                    i + 1,
-                    tail,
+                    i,
                     cancel,
                     512 * 1024 * 1024,
                 )
@@ -3623,7 +3621,7 @@ impl PipelineEncoder {
             Self::Hevc { encoder, .. } => encoder.sample_entry(),
         }
     }
-    fn encode(&mut self, rgba: &[u8], index: u64) -> Result<Vec<filmcraft_export::EncodedPacket>> {
+    fn encode(&mut self, rgb16: &[u16], _display_rgba: &[u8], index: u64) -> Result<Vec<filmcraft_export::EncodedPacket>> {
         match self {
             Self::ProRes {
                 encoder,
@@ -3631,16 +3629,8 @@ impl PipelineEncoder {
                 duration,
             } => {
                 let [w, h] = *dims;
-                let mut p = filmcraft_prores::Frame::new(
-                    w,
-                    h,
-                    filmcraft_prores::ChromaFormat::Yuv422,
-                    10,
-                    false,
-                );
-                filmcraft_export::rgba_to_yuv422_10(
-                    rgba, w as usize, h as usize, &mut p.y, &mut p.cb, &mut p.cr,
-                );
+                let p = abner_processing::media::prores_frame(rgb16, w as usize, h as usize)
+                    .map_err(anyhow::Error::msg)?;
                 Ok(vec![filmcraft_export::EncodedPacket {
                     data: encoder.encode(&p)?,
                     duration: *duration,
@@ -3650,10 +3640,11 @@ impl PipelineEncoder {
             }
             #[cfg(target_os = "macos")]
             Self::Hevc { encoder, dims } => {
+                // Reuse the preview pixels only for this RGBA8 encoder.
                 Ok(encoder.encode(&filmcraft_export::EncoderFrame {
                     width: dims[0],
                     height: dims[1],
-                    rgba,
+                    rgba: _display_rgba,
                     hdr: None,
                     index,
                 })?)

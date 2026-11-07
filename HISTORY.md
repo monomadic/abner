@@ -1,5 +1,18 @@
 # abner — history
 
+## 2026-11-07 — Shared headless processor runtime
+
+Added `crates/processing`: common session-chain execution and flushing used by
+preview and export, plus a native FilmCraft media runner and reusable CLI.
+`build-with-plugins --cli` generates a GUI-free launcher. Host logic stays in
+the shared library; plugin responsibilities and the RGB16 API are unchanged.
+ProRes export now converts RGB16 directly to 10-bit YUV422 instead of reducing
+the frame to RGBA8 first. Existing timeline orchestration stays in the GUI host.
+The initial standalone transport supports SDR CFR MP4/MOV to ProRes HQ MOV,
+with verified packet-copy audio and no-overwrite publication. See
+[the runtime contract and limitations](crates/processing/README.md).
+
+
 Completed work, newest first. Task numbers refer to [TASKS.md](TASKS.md) where a task
 existed there before it landed; earlier entries predate the task list.
 

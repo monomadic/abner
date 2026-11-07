@@ -10,6 +10,7 @@ version = 2
 
 [dependencies]
 abner-processor-api = { path = "crates/processor-api" }
+abner-processing = { path = "crates/processing" }
 anyhow = "1"
 log = "0.4"
 env_logger = "0.11"

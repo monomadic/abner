@@ -1,4 +1,5 @@
-//! `cargo build-with-plugins [cargo build flags]`
+//! `cargo build-with-plugins [--cli] [cargo build flags]`
+//! `--cli` composes the shared headless processing frontend instead of the GUI.
 //!
 //! Cargo resolves dependencies from manifests before anything runs, so a
 //! directory of crates cannot be discovered at build time. This helper does
@@ -39,7 +40,9 @@ fn main() -> Result<()> {
         .to_path_buf();
     let configured = std::env::var_os("ABNER_PLUGINS").map(PathBuf::from);
     let plugins = plugin_directory(&root, &std::env::current_dir()?, configured.as_deref());
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let cli = args.iter().any(|a| a == "--cli");
+    args.retain(|a| a != "--cli");
 
     let crates = discover(&plugins, configured.is_none())?;
     if crates.is_empty() {
@@ -58,8 +61,8 @@ fn main() -> Result<()> {
         }
     }
 
-    let launcher = plugins.join(".launcher");
-    write_launcher(&root, &launcher, &crates)?;
+    let launcher = plugins.join(if cli { ".cli-launcher" } else { ".launcher" });
+    write_launcher_mode(&root, &launcher, &crates, cli)?;
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let target_dir = root.join("target");
@@ -78,6 +81,11 @@ fn main() -> Result<()> {
     }
 
     let bin = output_binary(&target_dir, &args);
+    let bin = if cli {
+        bin.with_file_name("abner-process")
+    } else {
+        bin
+    };
     ensure!(
         bin.is_file(),
         "cargo succeeded but no binary at {}",
@@ -203,7 +211,11 @@ fn discover(dir: &Path, allow_missing: bool) -> Result<Vec<Plugin>> {
 
 /// Writes the launcher's manifest and `main.rs`, only when their text changes,
 /// so an unchanged plugin set does not invalidate cargo's fingerprint.
+#[cfg(test)]
 fn write_launcher(root: &Path, launcher: &Path, crates: &[Plugin]) -> Result<()> {
+    write_launcher_mode(root, launcher, crates, false)
+}
+fn write_launcher_mode(root: &Path, launcher: &Path, crates: &[Plugin], cli: bool) -> Result<()> {
     let version = std::fs::read_to_string(root.join("Cargo.toml"))?
         .parse::<toml::Table>()?
         .get("package")
@@ -221,7 +233,14 @@ fn write_launcher(root: &Path, launcher: &Path, crates: &[Plugin]) -> Result<()>
         toml::Value::Table(t)
     };
     let mut deps = toml::Table::new();
-    deps.insert("abner".into(), path_dep(root));
+    if cli {
+        deps.insert(
+            "abner-processing".into(),
+            path_dep(&root.join("crates/processing")),
+        );
+    } else {
+        deps.insert("abner".into(), path_dep(root));
+    }
     deps.insert(
         "abner-processor-api".into(),
         path_dep(&root.join("crates/processor-api")),
@@ -231,7 +250,10 @@ fn write_launcher(root: &Path, launcher: &Path, crates: &[Plugin]) -> Result<()>
         deps.insert(c.name.clone(), path_dep(&c.path));
     }
     let mut package = toml::Table::new();
-    package.insert("name".into(), toml::Value::String(LAUNCHER_NAME.into()));
+    package.insert(
+        "name".into(),
+        toml::Value::String(if cli { "abner-process" } else { LAUNCHER_NAME }.into()),
+    );
     package.insert("version".into(), toml::Value::String(version));
     package.insert("edition".into(), toml::Value::String("2024".into()));
     package.insert("publish".into(), toml::Value::Boolean(false));
@@ -280,7 +302,11 @@ fn write_launcher(root: &Path, launcher: &Path, crates: &[Plugin]) -> Result<()>
             c.ident()
         ));
     }
-    main.push_str("    abner::run(registry)\n}\n");
+    main.push_str(if cli {
+        "    abner_processing::cli::run(&registry).map_err(anyhow::Error::msg)\n}\n"
+    } else {
+        "    abner::run(registry)\n}\n"
+    });
 
     std::fs::create_dir_all(launcher.join("src"))?;
     write_if_changed(&launcher.join("Cargo.toml"), &manifest_text)?;
@@ -359,6 +385,26 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+    #[test]
+    fn cli_launcher_has_no_gui_dependency() {
+        let f = Fixture::new();
+        std::fs::write(
+            f.0.join("Cargo.toml"),
+            "[package]\nname = \"host\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let launcher = f.0.join(".cli-launcher");
+        write_launcher_mode(&f.0, &launcher, &[], true).unwrap();
+        let manifest: toml::Table = std::fs::read_to_string(launcher.join("Cargo.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(manifest["dependencies"].get("abner").is_none());
+        assert!(manifest["dependencies"].get("abner-processing").is_some());
+        assert_eq!(manifest["package"]["name"].as_str(), Some("abner-process"));
+        let source = std::fs::read_to_string(launcher.join("src/main.rs")).unwrap();
+        assert!(source.contains("abner_processing::cli::run"));
     }
     #[test]
     fn relative_override_emits_absolute_dependency_and_launcher_paths() {

@@ -867,9 +867,8 @@ fn render(
     }
     r.cancel.check()?;
     for i in 0..sessions.len() {
-        let tail = sessions[i].finish()?;
         let delivered = emit(
-            process_chain(&mut sessions, i + 1, tail, &r.cancel, r.budget)?,
+            abner_processing::finish_stage(&mut sessions, i, &r.cancel, r.budget)?,
             &mut originals,
         )?;
         if delivered && (r.target.is_some() || received.get() >= count) { return Ok(()); }
@@ -915,30 +914,8 @@ impl Session for Downsized {
         self.inner.progress()
     }
 }
-pub(crate) fn process_chain(
-    sessions: &mut [Box<dyn abner_processor_api::Session>],
-    from: usize,
-    mut frames: Vec<Frame>,
-    cancel: &Cancellation,
-    budget: usize,
-) -> Result<Vec<Frame>, String> {
-    for session in &mut sessions[from..] {
-        let mut outputs = Vec::new();
-        for frame in frames {
-            cancel.check()?;
-            outputs.extend(session.process(frame)?);
-            let bytes: usize = outputs
-                .iter()
-                .map(|f| f.pixels.len().saturating_mul(2))
-                .sum();
-            if bytes > budget {
-                return Err("Processor batch exceeds the preview memory budget".into());
-            }
-        }
-        frames = outputs;
-    }
-    Ok(frames)
-}
+pub(crate) use abner_processing::process_chain;
+
 fn check_sdr(path: &std::path::Path) -> Result<(), String> {
     crate::probe::metadata(path, Duration::from_secs(5))
         .map_err(|e| e.to_string())?
