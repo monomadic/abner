@@ -1,5 +1,16 @@
 # abner — history
 
+## 2026-11-08 — Avoid rendering discarded preview history
+
+Single-frame Process previews now seek directly to the target for independent-frame
+processors, or include the combined preceding context for declared window processors.
+The input limit includes the combined following context and stops when the target
+arrives. Previously every preview processed from the segment start, discarding all
+earlier outputs. Recurrent, batch, undeclared and retimed chains preserve their
+segment origin so state, batch alignment and output timing remain unchanged.
+Regression coverage verifies that an independent preview away from the segment
+start invokes processing exactly once and returns the requested source frame.
+
 ## 2026-11-07 — Shared headless processor runtime
 
 Added `crates/processing`: common session-chain execution and flushing used by

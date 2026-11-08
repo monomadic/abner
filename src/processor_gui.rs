@@ -574,6 +574,19 @@ impl Drop for Worker {
         cv.notify_one();
     }
 }
+// Only declared, finite context permits skipping segment history. Batch alignment,
+// recurrent state, undeclared requirements and retiming retain the original origin.
+fn preview_context(inputs: impl IntoIterator<Item = InputRequirement>) -> Option<(u64, u64)> {
+    inputs.into_iter().try_fold((0u64, 0u64), |(before, after), input| {
+        match input {
+            InputRequirement::IndependentFrame => Some((before, after)),
+            InputRequirement::Window { before: b, after: a } =>
+                Some((before.checked_add(b as u64)?, after.checked_add(a as u64)?)),
+            _ => None,
+        }
+    })
+}
+
 fn render(
     registry: &Registry,
     r: &Request,
@@ -591,6 +604,7 @@ fn render(
     let [w, h] = [r.info.width, r.info.height];
     r.inputs.validate_geometry(w,h)?;
     let mut sessions = Vec::new();
+    let mut requirements = Vec::new();
     let mut dims = [w as usize, h as usize];
     let downsized = r.chain.iter().any(|(_, s)| split_downsize(s).1 > 1);
     for (index, (id, raw)) in r.chain.iter().enumerate() {
@@ -616,6 +630,7 @@ fn render(
         }
         let settings = &settings;
         let caps = factory.capabilities();
+        requirements.push(caps.input);
         if !matches!(caps.role, Role::Processor)
             || matches!(caps.input, InputRequirement::WholeClip)
         {
@@ -716,7 +731,12 @@ fn render(
         8 * 1024 * 1024,
     )
     .ok_or("Could not open preview decoder")?;
-    player.seek(r.start, true);
+    let context = if retimed { None } else { preview_context(requirements) };
+    let decode_start = match (r.target, context) {
+        (Some(target), Some((before, _))) => (target - before as f64 / fps).max(r.start),
+        _ => r.start,
+    };
+    player.seek(decode_start, true);
     let started = Instant::now();
     let mut originals = BTreeMap::new();
     let received = std::cell::Cell::new(0usize);
@@ -816,7 +836,10 @@ fn render(
     };
     let mut next = read_frame()?;
     let decode_count = r.target.map_or(count, |target| {
-        (((target - r.start).max(0.0) * fps).ceil() as usize).saturating_add(FRAMES)
+        let tail = context.map_or(FRAMES, |(_, after)| {
+            usize::try_from(after).unwrap_or(usize::MAX).saturating_add(1)
+        });
+        (((target - decode_start).max(0.0) * fps).ceil() as usize).saturating_add(tail)
     });
     for decoded in 0..decode_count {
         if r.target.is_some() {
@@ -3296,6 +3319,17 @@ mod tests {
         assert!(panel.cancel.check().is_err());
     }
     #[test]
+    fn preview_context_keeps_required_history() {
+        use InputRequirement::*;
+        assert_eq!(preview_context([IndependentFrame, IndependentFrame]), Some((0, 0)));
+        assert_eq!(preview_context([Window { before: 2, after: 3 }, IndependentFrame,
+            Window { before: 4, after: 5 }]), Some((6, 8)));
+        for requirement in [Unspecified, Recurrent { startup_frames: 4 },
+            Batch { min_frames: 4, max_frames: 8 }, WholeClip] {
+            assert_eq!(preview_context([IndependentFrame, requirement]), None);
+        }
+    }
+    #[test]
     fn preview_drains_buffered_tail_and_matches_fractional_rate_source() {
         let dir = std::env::temp_dir().join(format!(
             "abner-preview-{}-{}",
@@ -3488,6 +3522,33 @@ mod tests {
             Event::Frame(g, f) => Some((g, f.pts)), _ => None,
         }).collect();
         assert_eq!(delivered, [(12, 0.0)]);
+        // An independent processor late in the source receives only the target,
+        // rather than rendering and discarding every preceding frame.
+        struct IndependentFactory(Arc<std::sync::atomic::AtomicUsize>);
+        impl abner_processor_api::Factory for IndependentFactory {
+            fn descriptor(&self) -> Descriptor { ScalingFactory.descriptor() }
+            fn capabilities(&self) -> Capabilities {
+                Capabilities { role: Role::Processor, input: InputRequirement::IndependentFrame }
+            }
+            fn create(&self, w: usize, h: usize, settings: &Value) -> Result<Box<dyn Session>, String> {
+                Ok(Box::new(GuardSession(ScalingFactory.create(w, h, settings)?, self.0.clone())))
+            }
+        }
+        calls.store(0, std::sync::atomic::Ordering::Relaxed);
+        let mut independent = Registry::default();
+        independent.register(Box::new(IndependentFactory(calls.clone()))).unwrap();
+        let late = Request {
+            chain: vec![("example.scaling".into(), json!({}))],
+            target: Some(frames[4].pts),
+            ..first
+        };
+        render(&independent, &late, &guard_tx, None, None).unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        let delivered: Vec<_> = guard_rx.try_iter().filter_map(|event| match event {
+            Event::Frame(_, f) => Some(f.source_pts), _ => None,
+        }).collect();
+        assert_eq!(delivered.len(), 1);
+        assert!((delivered[0] - frames[4].pts).abs() < 1e-6);
         // Already-cancelled requests must never publish output.
         r.cancel.cancel();
         assert!(render(&registry(), &r, &tx, None, None).is_err());
