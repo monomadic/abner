@@ -127,6 +127,15 @@ impl SyncTable {
         self.times[k.saturating_sub(1)]
     }
 
+    /// Closest indexed keyframe; ties prefer the earlier frame.
+    pub(crate) fn nearest(&self, t: f64) -> f64 {
+        let before = self.before(t);
+        match self.at_or_after(t) {
+            Some(after) if after - t < t - before => after,
+            _ => before,
+        }
+    }
+
     /// The smallest sync time ≥ `t`, if any.
     pub(crate) fn at_or_after(&self, t: f64) -> Option<f64> {
         let k = self.times.partition_point(|&x| x < t - 1e-6);
@@ -530,6 +539,14 @@ fn resize_bilinear(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize, out: 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn nearest_sync_prefers_closest_and_earlier_tie() {
+        let table = super::SyncTable { times: vec![0.0, 2.0, 5.0] };
+        for (time, expected) in [(0.0, 0.0), (1.0, 0.0), (1.1, 2.0),
+            (3.0, 2.0), (4.0, 5.0), (8.0, 5.0)] {
+            assert_eq!(table.nearest(time), expected);
+        }
+    }
     use super::*;
 
     #[test]

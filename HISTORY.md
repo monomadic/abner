@@ -2,14 +2,14 @@
 
 ## 2026-11-08 — Avoid rendering discarded preview history
 
-Single-frame Process previews now seek directly to the target for independent-frame
-processors, or include the combined preceding context for declared window processors.
-The input limit includes the combined following context and stops when the target
-arrives. Previously every preview processed from the segment start, discarding all
-earlier outputs. Recurrent, batch, undeclared and retimed chains preserve their
-segment origin so state, batch alignment and output timing remain unchanged.
-Regression coverage verifies that an independent preview away from the segment
-start invokes processing exactly once and returns the requested source frame.
+Single-frame Process previews feed only the requested source frame, then flush
+buffered output. Recurrent and batch implementations receive an isolated frame
+and handle their own short-input padding; the result may differ from a full
+segment render because no preceding history is replayed. Segment rendering keeps
+its streaming behaviour. Previously previews processed from the segment start
+and discarded earlier outputs. Process seek-bar clicks/drags now choose the nearest
+indexed keyframe; frame nudges retain the output frame cadence. Containers without
+a sync index retain exact frame-grid pointer seeks.
 
 ## 2026-11-07 — Shared headless processor runtime
 
