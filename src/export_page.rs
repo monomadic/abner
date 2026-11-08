@@ -29,6 +29,7 @@ pub(crate) enum Action {
     Container(bool),
     Export,
     Destination,
+    RevealDirectory,
     Cancel,
     Compare,
     Follow,
@@ -154,6 +155,10 @@ fn hit(r: RectPx, x: f32, y: f32) -> bool {
 impl Page {
     fn settings_geometry(l: Layout) -> (f32, f32, f32, f32) {
         (16., l.sidebar.w - 32., l.sidebar.y + 54., 28.)
+    }
+    fn directory(&self) -> Option<PathBuf> {
+        self.destination.as_ref().or(self.source.as_ref())
+            .and_then(|p| p.parent()).map(|p| p.to_path_buf())
     }
     fn destination_name(&self) -> String {
         let ext = if self.mkv { "mkv" } else { "mp4" };
@@ -420,20 +425,24 @@ impl Page {
         let third = (w - 8.) / 3.;
         let half = (w - 4.) / 2.;
         let r = |x, y, w| RectPx { x, y, w, h: 26. };
-        vec![
+        let mut actions = vec![
             (r(x, y + 16., third), "Copy", self.lossless, Action::Lossless),
             (r(x + third + 4., y + 16., third), "HEVC", !self.prores && !self.lossless, Action::Preset(false)),
             (r(x + 2. * (third + 4.), y + 16., third), "ProRes", self.prores && !self.lossless, Action::Preset(true)),
             (r(x, y + 76., half), "MKV", self.mkv, Action::Container(true)),
             (r(x + half + 4., y + 76., half), "MP4", !self.mkv, Action::Container(false)),
             (r(x, y + 136., w), "", false, Action::Destination),
-            (r(x, y + 196., w), "", false, Action::Destination),
+            (r(x + w - 24., y + 196., 24.), "", false, Action::RevealDirectory),
             (r(l.context.x + 12., l.context.y + 7., 124.), "Original / Output", self.original, Action::Compare),
             (r(l.context.x + 144., l.context.y + 7., 112.), "Follow render", self.following, Action::Follow),
             (r(vp.0 - 124., l.footer.y + 6., 108.), "Export", false, Action::Export),
-            (r(16., l.footer.y + 6., 76.), "Cancel", false, Action::Cancel),
-            (r(100., l.footer.y + 6., 112.), "Reveal output", false, Action::Reveal),
-        ]
+        ];
+        if self.busy() {
+            actions.push((r(x, l.footer.y - 36., w), "Cancel export", false, Action::Cancel));
+        } else if self.path.is_some() {
+            actions.push((r(x, l.footer.y - 36., w), "Reveal output", false, Action::Reveal));
+        }
+        actions
     }
 
     pub fn click(&self, vp: (f32, f32), x: f32, y: f32) -> Option<Action> {
@@ -501,6 +510,7 @@ impl Page {
                     self.dirty = true;
                 }
             }
+            Action::RevealDirectory => return self.directory(),
             Action::Reveal => return self.path.clone(),
             _ => {}
         }
@@ -585,11 +595,14 @@ impl Page {
         ] { items.push(Item::Rect(RectItem::new(r, hex_color(0x191919)))); }
         items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle,
             max_width: Some(l.sidebar.w - 32.),
-            ..TextItem::new(14., l.sidebar.y + 18., 13., ink, "Export") }));
+            ..TextItem::new(14., l.sidebar.y + 18., 13., ink, "Settings") }));
         let (x, w, y, _) = Self::settings_geometry(l);
         for (offset, title) in [(0., "Codec"), (60., "Container"), (120., "Filename"), (180., "Directory")] {
             mono(items, x, y + offset, 11., dim, title.into(), Align::Left, w);
         }
+        mono(items, x, y + 209., 10., ink,
+            self.directory().map(|p| p.display().to_string()).unwrap_or_default(),
+            Align::Left, w - 34.);
         let summary_y = (l.footer.y - 146.).max(y + 250.);
         items.push(Item::Rect(RectItem::new(RectPx { x: 0., y: summary_y - 18.,
             w: l.sidebar.w - 1., h: l.footer.y - summary_y + 18. }, hex_color(0x0f0f0f))));
@@ -617,17 +630,13 @@ impl Page {
             x: l.seek.x + l.seek.w * fraction - 6., y: l.seek.y - 4., w: 12., h: 12. }, ACCENT) }));
         ui_label(items, l.seek.x + l.seek.w + 18., l.transport.y + 30., 11., ink,
             format!("{:02}:{:06.3} / {:02}:{:06.3}", time as u64 / 60, time % 60., self.duration as u64 / 60, self.duration % 60.), Align::Left, 166.);
-        if l.context.w > 600. {
-            ui_label(items, vp.0 - 16., l.context.y + 20., 10., dim,
-                if self.original { "ORIGINAL" } else if current.is_some() { "OUTPUT" } else { "SOURCE PREVIEW" }, Align::Right, 130.);
-        }
         if self.busy() {
             let done = (self.rendered_time / self.duration.max(0.001)).clamp(0., 1.);
             items.push(Item::Rect(RectItem::new(l.progress, hex_color(0x292929))));
             items.push(Item::Rect(RectItem::new(RectPx { w: l.progress.w * done as f32, ..l.progress }, ACCENT)));
 
         }
-        ui_label(items, l.sidebar.w + 16., l.footer.y + 19., 10., ACCENT, "EXPORT", Align::Left, 60.);
+        ui_label(items, 16., l.footer.y + 19., 10., ACCENT, "EXPORT", Align::Left, 60.);
         let render_status = if self.busy() {
             let elapsed = self.started.elapsed().as_secs_f64().max(0.001);
             let done = (self.rendered_time / self.duration.max(0.001)).clamp(0., 1.);
@@ -637,8 +646,8 @@ impl Page {
         let status = if self.actions(vp).iter().any(|(r, _, _, a)| *a == Action::Lossless && hit(*r, cursor.0, cursor.1)) {
             self.copy_unavailable.unwrap_or(&self.status)
         } else { &render_status };
-        ui_label(items, l.sidebar.w + 90., l.footer.y + 19., 10., dim,
-            status, Align::Left, (vp.0 - l.sidebar.w - 230.).max(0.));
+        ui_label(items, 98., l.footer.y + 19., 10., dim,
+            status, Align::Left, (vp.0 - 238.).max(0.));
         for (r, t, selected, a) in self.actions(vp) {
             let hovered = hit(r, cursor.0, cursor.1);
             let disabled = match a {
@@ -650,6 +659,15 @@ impl Page {
                 Action::Preset(_) | Action::Container(true) | Action::Destination => self.busy(),
                 _ => false,
             };
+            if a == Action::RevealDirectory {
+                let color = if hovered { ACCENT } else { hex_color(crate::app::INSPECTOR_PATH) };
+                let folder = RectPx { x: r.x + 5., y: r.y + 9., w: 14., h: 10. };
+                items.push(Item::Rect(RectItem { radius: 1., border_w: 1.3, border_color: color,
+                    ..RectItem::new(folder, [0.; 4]) }));
+                items.push(Item::Rect(RectItem { radius: 0.5, ..RectItem::new(
+                    RectPx { x: folder.x, y: folder.y - 2.5, w: 6., h: 2.5 }, color) }));
+                continue;
+            }
             if r.y >= l.footer.y {
                 crate::app::draw_cut_footer_button(items, r, t, "", false, hovered, disabled);
                 continue;
@@ -660,8 +678,7 @@ impl Page {
                 border_color: hex_color(if disabled { 0x252525 } else if selected { 0x315576 } else if hovered { 0x555555 } else { 0x2d2d2d }),
                 ..RectItem::new(r, hex_color(if selected { if toolbar { 0x1a1a1a } else { 0x0b1926 } } else if toolbar { 0x050506 } else { 0x10151a })) }));
             let title = if a == Action::Destination {
-                if r.y < y + 180. { self.destination_name() }
-                else { self.destination.as_ref().and_then(|p| p.parent()).or_else(|| info.path.parent()).map(|p| p.display().to_string()).unwrap_or_default() }
+                self.destination_name()
             } else { t.to_string() };
             if a == Action::Destination {
                 mono(items, r.x + 8., r.y + r.h / 2., 10., if disabled { dim } else { ink }, title, Align::Left, r.w - 16.);
@@ -813,6 +830,10 @@ mod tests {
             source: PathBuf::from("source"),
             copy_cancel: Arc::default(),
         });
+        let actions = p.actions((720., 480.));
+        let cancel = actions.iter().find(|(.., a)| *a == Action::Cancel).unwrap();
+        assert!(cancel.0.y < Layout::new((720., 480.)).footer.y);
+        assert!(!actions.iter().any(|(.., a)| *a == Action::Reveal));
         let mut uploads = vec![];
         p.poll(&mut uploads, 3);
         assert_eq!(p.seek.take(), Some(1.));
@@ -831,6 +852,7 @@ mod tests {
     #[test]
     fn minimal_controls_fit_and_footer_only_has_export_actions() {
         let p = Page::default();
+        assert!(!p.actions((720., 480.)).iter().any(|(.., a)| matches!(a, Action::Cancel | Action::Reveal)));
         for vp in [(720., 480.), (900., 600.), (1280., 800.), (1440., 900.)] {
             let l = Layout::new(vp);
             assert_eq!(l.sidebar.x, 0.);
@@ -850,11 +872,24 @@ mod tests {
                 if r.y >= l.footer.y {
                     assert!(matches!(
                         a,
-                        Action::Export | Action::Cancel | Action::Reveal
+                        Action::Export
                     ));
                 }
             }
         }
+    }
+    #[test]
+    fn directory_reveal_uses_destination_parent_and_completion_reveal_stays_in_panel() {
+        let mut p = Page::default();
+        p.source = Some(PathBuf::from("/clips/source.mp4"));
+        assert_eq!(p.apply(Action::RevealDirectory), Some(PathBuf::from("/clips")));
+        p.destination = Some(PathBuf::from("/exports/output.mp4"));
+        assert_eq!(p.apply(Action::RevealDirectory), Some(PathBuf::from("/exports")));
+        p.path = p.destination.clone();
+        let actions = p.actions((720., 480.));
+        let reveal = actions.iter().find(|(.., a)| *a == Action::Reveal).unwrap();
+        assert!(reveal.0.y < Layout::new((720., 480.)).footer.y);
+        assert_eq!(p.apply(Action::Reveal), p.destination);
     }
     #[test]
     fn native_pipeline_writes_selected_codecs_containers_audio_and_processed_pixels() {

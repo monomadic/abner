@@ -1,5 +1,13 @@
 # abner — history
 
+## 2026-11-09 — Export settings and contextual actions
+
+Renamed the left heading to Settings, restored the shared header separator,
+and removed the source-preview label. Directory is plain monospace text with
+a folder icon that reveals it in Finder; Filename retains the destination picker.
+The footer starts with EXPORT and status. Cancel export appears in the left
+panel only while running; Reveal output appears there after success.
+
 ## 2026-11-09 — Export matches Sources layout and typography
 
 Moved Export settings to the shared-width left rail, using Sources’ monospace

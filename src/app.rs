@@ -2899,6 +2899,7 @@ impl App {
             self.export_page.draw(&mut items,vp,self.active,n+1,&self.videos[self.active].info,self.cursor,self.videos[self.active].shown_pts,self.show_ui);
             if self.show_ui {
             items.push(Item::Rect(RectItem::new(RectPx{x:0.,y:0.,w:vp.0,h:HEADER_H},WORKSPACE_PANEL)));
+            items.push(Item::Rect(RectItem::new(RectPx { x: 0., y: HEADER_H - 1., w: vp.0, h: 1. }, WORKSPACE_RULE)));
             self.mode_selector().draw(&mut items,self.cursor,self.cursor_inside);
             let (text, lamp) = self.encode_status();
             draw_status_chip(&mut items, self.status_chip(), lamp, text, WORKSPACE_TEXT);
