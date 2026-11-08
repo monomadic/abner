@@ -1,5 +1,12 @@
 # abner — history
 
+## 2026-11-09 — Preserve existing text when editing
+
+Focusing a processor field or naming a saved preset now places the caret at
+the end without silently selecting the entire value. Typing appends and
+Backspace removes the last character; explicit ⌘A still replaces the value.
+Regression coverage checks preset names, reopening populated fields, and ⌘A.
+
 ## 2026-11-09 — Blinking caret in processor text fields
 
 Editable settings and preset names retain their normal text color and use a

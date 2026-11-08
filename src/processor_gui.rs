@@ -1822,7 +1822,7 @@ impl Panel {
                     }
                 }),
         );
-        self.text_selected = true;
+        self.text_selected = false;
         self.status = "Name the preset, then press Enter or Save. Escape cancels.".into();
     }
     fn save_preset(&mut self) {
@@ -2061,7 +2061,7 @@ impl Panel {
             match button {
                 3=>self.save_preset(),
                 4=>self.delete_preset(),
-                0 if self.preset_name.is_some()=>self.text_selected=true,
+                0 if self.preset_name.is_some()=>self.text_selected=false,
                 1|2=>{let count=self.descriptors[self.selected].presets.len()+1;let at=if self.preset<count-1{self.preset+1}else{0};let next=if button==1{(at+count-1)%count}else{(at+1)%count};self.preset=if next==0{usize::MAX}else{next-1};self.apply_preset();},
                 _=>{}
             }
@@ -2076,7 +2076,7 @@ impl Panel {
                 }
                 let f = &self.fields[i];
                 if matches!(f.kind, Kind::Number { .. }) && y < row.y + 17.0 {
-                    self.text_selected = true;
+                    self.text_selected = false;
                     self.editing = Some((i, self.settings[&f.key].to_string()));
                     return true;
                 }
@@ -2098,7 +2098,7 @@ impl Panel {
                             json!(!self.settings[&f.key].as_bool().unwrap_or(false))
                     }
                     Kind::Text => {
-                        self.text_selected = true;
+                        self.text_selected = false;
                         self.editing = Some((
                             i,
                             self.settings[&f.key]
@@ -3359,6 +3359,12 @@ mod tests {
         assert!(panel.text_input("/tmp/example"));
         panel.key(Key::Enter);
         assert_eq!(panel.settings["path"], json!("/tmp/example"));
+        panel.click(row.x + 20.0, row.y + 25.0, vp);
+        panel.text_input("/child");panel.key(Key::Enter);
+        assert_eq!(panel.settings["path"], json!("/tmp/example/child"));
+        panel.click(row.x + 20.0, row.y + 25.0, vp);
+        panel.shortcut('a');panel.text_input("replacement");panel.key(Key::Enter);
+        assert_eq!(panel.settings["path"], json!("replacement"));
         panel.close();
         assert!(panel.cancel.check().is_err());
     }
@@ -4071,7 +4077,12 @@ mod tests {
         let click=|panel:&mut Panel,index:usize|{let r=Panel::preset_buttons(vp)[index];assert!(panel.click(r.x+r.w/2.,r.y+r.h/2.,vp));};
         let mut panel=Panel::with_presets(registry(),Some(root.clone()));panel.open=true;
         panel.settings["strength"]=json!(0.75);
-        click(&mut panel,3);assert!(panel.preset_name.is_some());panel.text_input("Soft restoration");panel.key(Key::Enter);
+        click(&mut panel,3);assert_eq!(panel.preset_name.as_deref(),Some("Custom 1"));
+        panel.text_input(" extended");assert_eq!(panel.preset_name.as_deref(),Some("Custom 1 extended"));
+        panel.shortcut('a');click(&mut panel,0);panel.text_input(" again");
+        assert_eq!(panel.preset_name.as_deref(),Some("Custom 1 extended again"));
+        panel.key(Key::Backspace);assert_eq!(panel.preset_name.as_deref(),Some("Custom 1 extended agai"));
+        panel.shortcut('a');panel.text_input("Soft restoration");panel.key(Key::Enter);
         assert!(panel.preset_name.is_none());assert_eq!(panel.user_presets.len(),1);
         let file=panel.user_presets.values().next().unwrap().clone();assert!(file.is_file());
         let mut reloaded=Panel::with_presets(registry(),Some(root.clone()));reloaded.open=true;
