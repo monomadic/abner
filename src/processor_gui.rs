@@ -720,7 +720,7 @@ fn render(
     // finish() lets implementations pad their own short input without replaying
     // the segment. Segment rendering retains the normal streaming contract.
     let decode_start = r.target.unwrap_or(r.start);
-    player.seek((decode_start - 0.5 / fps).max(r.start), true);
+    player.seek(decode_start, true);
     let started = Instant::now();
     let mut originals = BTreeMap::new();
     let received = std::cell::Cell::new(0usize);
@@ -3336,6 +3336,10 @@ mod tests {
                 "libx264",
                 "-crf",
                 "18",
+                // Frame 4 is a sync sample: preview seeks must land even
+                // without a preceding cached span to verify the target.
+                "-g",
+                "2",
                 "-pix_fmt",
                 "yuv420p",
             ])
@@ -3535,7 +3539,8 @@ mod tests {
         transport.sync_table = crate::fc::SyncTable::open(&info.path);
         assert!(transport.sync_table.is_some());
         let track = Panel::timeline((1280.0, 900.0));
-        assert_eq!(transport.pointer_time(track.x + track.w * 0.6, track), 0.0);
+        let expected = transport.sync_table.as_ref().unwrap().nearest(info.duration * 0.6);
+        assert_eq!(transport.pointer_time(track.x + track.w * 0.6, track), expected);
         transport.step(1);
         assert!((transport.take_seek().unwrap() - 1.0 / info.fps).abs() < 1e-6);
         // Already-cancelled requests must never publish output.

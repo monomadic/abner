@@ -1,5 +1,28 @@
 # abner — history
 
+## 2026-11-08 — Real Proteus preview validation at 60%
+
+Exercised the Process page's `render` function with the actual local
+`proteus-v4.mlpackage` through `topaz-abner-processor` / Core ML (`compute=all`,
+manual parameters, 1x). A temporary host copy added a forwarding session wrapper
+that recorded every input PTS; inference was not mocked. A generated 10-second,
+24 fps, 320×180 H.264 clip requested frame 144 at 6 seconds (60%). Tested GOPs of
+48 frames (target is a keyframe) and 96 frames (target is between keyframes).
+Both runs delivered exactly one model input at PTS 6,000,000 with microsecond
+time base and one processed output at 6 seconds. Proteus completed one output
+frame, with five internal warmup passes on the same input; two tiles per pass
+accounted for the 12 reported tile operations. Changed RGBA bytes: 76,223 / 76,684;
+whole preview elapsed: 1.294 / 1.268 seconds respectively, excluding test build.
+This validates the small local test, not full-resolution throughput or other models.
+
+The first real run exposed a preview seek offset just before a keyframe that
+could stall landing. Preview decoding now requests the exact frame timestamp.
+The existing fractional-rate regression fixture now has keyframes every two
+frames so its later isolated-frame request covers this boundary.
+
+Raw evidence: [keyframe run](docs/validation/proteus-preview-60pct-keyframe.txt),
+[between-keyframes run](docs/validation/proteus-preview-60pct-nonkeyframe.txt).
+
 ## 2026-11-08 — Avoid rendering discarded preview history
 
 Single-frame Process previews feed only the requested source frame, then flush
