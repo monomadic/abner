@@ -120,21 +120,18 @@ pub(crate) struct Layout {
 }
 impl Layout {
     pub fn new(vp: (f32, f32)) -> Self {
-        // Match the other workspaces: a flush canvas, a fixed inspector,
-        // and full-width status footer. Keep all hit targets on these bounds.
-        let side = if vp.0 < 1000. { 240. } else { 300. };
+        let side = crate::app::rail_full_width(vp.0);
         let footer_y = vp.1 - crate::app::CUT_STATUS_H;
-        let panel = RectPx { x: 0., y: crate::app::HEADER_H,
-            w: vp.0 - side, h: footer_y - crate::app::HEADER_H };
-        let sidebar = RectPx { x: panel.w, y: panel.y, w: side, h: panel.h };
-        let video = RectPx { h: panel.h - 156., ..panel };
-        let context = RectPx { x: 12., y: panel.y + 10., w: panel.w - 24., h: 28. };
-        let transport = RectPx { x: 16., y: video.y + video.h + 12.,
-            w: panel.w - 32., h: 52. };
-        let seek = RectPx { x: transport.x + 156., y: transport.y + 36.,
-            w: transport.w - 172., h: 4. };
-        let progress = RectPx { x: transport.x, y: transport.y + 92.,
-            w: transport.w, h: 4. };
+        let sidebar = RectPx { x: 0., y: crate::app::HEADER_H,
+            w: side, h: footer_y - crate::app::HEADER_H };
+        let context = RectPx { x: side, y: sidebar.y, w: vp.0 - side, h: 40. };
+        let transport = RectPx { x: side, y: footer_y - 60., w: vp.0 - side, h: 60. };
+        let video = RectPx { x: side, y: context.y + context.h,
+            w: context.w, h: transport.y - context.y - context.h };
+        let seek = RectPx { x: transport.x + 20., y: transport.y + 29.,
+            w: (transport.w - 212.).max(80.), h: 4. };
+        let progress = RectPx { x: side + 20., y: footer_y - 8., w: vp.0 - side - 40., h: 4. };
+
         Self {
             sidebar,
             video,
@@ -156,8 +153,7 @@ fn hit(r: RectPx, x: f32, y: f32) -> bool {
 }
 impl Page {
     fn settings_geometry(l: Layout) -> (f32, f32, f32, f32) {
-        let step = ((l.sidebar.h - 84.) / 12.).clamp(22., 32.);
-        (l.sidebar.x + 16., l.sidebar.w - 32., l.sidebar.y + 65., step)
+        (16., l.sidebar.w - 32., l.sidebar.y + 54., 28.)
     }
     fn destination_name(&self) -> String {
         let ext = if self.mkv { "mkv" } else { "mp4" };
@@ -420,62 +416,26 @@ impl Page {
     }
     pub fn actions(&self, vp: (f32, f32)) -> Vec<(RectPx, &'static str, bool, Action)> {
         let l = Layout::new(vp);
-        let (x, w, y, step) = Self::settings_geometry(l);
-        let third = (w - 12.) / 3.;
-        let half = (w - 6.) / 2.;
-        let r = |x, y, w| RectPx { x, y, w, h: step * 0.78 };
+        let (x, w, y, _) = Self::settings_geometry(l);
+        let third = (w - 8.) / 3.;
+        let half = (w - 4.) / 2.;
+        let r = |x, y, w| RectPx { x, y, w, h: 26. };
         vec![
-            (r(x, y + step, third), "Copy", self.lossless, Action::Lossless),
-            (r(x + third + 6., y + step, third), "HEVC", !self.prores && !self.lossless, Action::Preset(false)),
-            (r(x + 2. * (third + 6.), y + step, third), "ProRes", self.prores && !self.lossless, Action::Preset(true)),
-            (r(x, y + 3. * step, half), "MKV", self.mkv, Action::Container(true)),
-            (r(x + half + 6., y + 3. * step, half), "MP4", !self.mkv, Action::Container(false)),
-            (r(x, y + 5.6 * step, w), "", false, Action::Destination),
-            (r(x, y + 7.1 * step, w), "", false, Action::Destination),
-            (
-                r(
-                    l.context.x + l.context.w - 224.,
-                    l.context.y,
-                    112.,
-                ),
-                "TAB · Compare",
-                false,
-                Action::Compare,
-            ),
-            (
-                r(
-                    l.context.x + l.context.w - 104.,
-                    l.context.y,
-                    104.,
-                ),
-                if self.following {
-                    "Following"
-                } else {
-                    "Follow render"
-                },
-                self.following,
-                Action::Follow,
-            ),
-            (
-                RectPx { x: vp.0 - 112., y: l.footer.y + 5., w: 96., h: 28. },
-                "Export",
-                false,
-                Action::Export,
-            ),
-            (
-                RectPx { x: 16., y: l.footer.y + 5., w: 84., h: 28. },
-                "Cancel",
-                false,
-                Action::Cancel,
-            ),
-            (
-                RectPx { x: 112., y: l.footer.y + 5., w: 132., h: 28. },
-                "Reveal output",
-                false,
-                Action::Reveal,
-            ),
+            (r(x, y + 16., third), "Copy", self.lossless, Action::Lossless),
+            (r(x + third + 4., y + 16., third), "HEVC", !self.prores && !self.lossless, Action::Preset(false)),
+            (r(x + 2. * (third + 4.), y + 16., third), "ProRes", self.prores && !self.lossless, Action::Preset(true)),
+            (r(x, y + 76., half), "MKV", self.mkv, Action::Container(true)),
+            (r(x + half + 4., y + 76., half), "MP4", !self.mkv, Action::Container(false)),
+            (r(x, y + 136., w), "", false, Action::Destination),
+            (r(x, y + 196., w), "", false, Action::Destination),
+            (r(l.context.x + 12., l.context.y + 7., 124.), "Original / Output", self.original, Action::Compare),
+            (r(l.context.x + 144., l.context.y + 7., 112.), "Follow render", self.following, Action::Follow),
+            (r(vp.0 - 124., l.footer.y + 6., 108.), "Export", false, Action::Export),
+            (r(16., l.footer.y + 6., 76.), "Cancel", false, Action::Cancel),
+            (r(100., l.footer.y + 6., 112.), "Reveal output", false, Action::Reveal),
         ]
     }
+
     pub fn click(&self, vp: (f32, f32), x: f32, y: f32) -> Option<Action> {
         let l = Layout::new(vp);
         if hit(
@@ -589,240 +549,96 @@ impl Page {
             }
             return;
         }
+        use crate::app::{WORKSPACE_PANEL, WORKSPACE_TEXT, WORKSPACE_DIM, ACCENT};
+        use crate::render::{TextItem, VAlign};
         let l = Layout::new(vp);
-        let ink = hex_color(0xd1d1d1);
-        let dim = hex_color(0x919191);
-        let blue = hex_color(0x1580de);
-        items.push(Item::Rect(RectItem::new(
-            RectPx {
-                x: 0.,
-                y: 44.,
-                w: vp.0,
-                h: vp.1 - 44.,
-            },
-            hex_color(0x111212),
-        )));
-        items.push(Item::Rect(RectItem::new(l.video, hex_color(0x2c2c2c))));
-        items.push(Item::Rect(RectItem::new(l.sidebar, hex_color(0x0f0f0f))));
-        for r in [
-            RectPx { x: l.sidebar.x, y: l.sidebar.y, w: 1., h: l.sidebar.h },
-            RectPx { x: l.sidebar.x, y: l.sidebar.y + 36., w: l.sidebar.w, h: 1. },
-            RectPx { x: 0., y: l.footer.y, w: vp.0, h: 1. },
-        ] {
-            items.push(Item::Rect(RectItem::new(r, hex_color(0x252525))));
-        }
+        let ink = WORKSPACE_TEXT;
+        let dim = WORKSPACE_DIM;
+        let mono = |items: &mut Vec<Item>, x, y, size, color, value: String, align, width| {
+            items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle,
+                align, max_width: Some(width), ..TextItem::new(x, y, size, color, value) }));
+        };
+        items.push(Item::Rect(RectItem::new(RectPx { x: 0., y: l.sidebar.y,
+            w: vp.0, h: vp.1 - l.sidebar.y }, WORKSPACE_PANEL)));
+        items.push(Item::Rect(RectItem::new(l.video, hex_color(0x1d1b1b))));
         let current = self.current();
         let fps = current.map_or(info.fps, |f| 1. / f.frame_duration);
-        let dims = current
-            .filter(|_| !self.original)
+        let dims = current.filter(|_| !self.original)
             .map_or((info.width, info.height), |f| (f.dims[0], f.dims[1]));
-        let idx = if current.is_some() && !self.original {
-            slot
-        } else {
-            source
-        };
-        let picture = crate::app::App::fit_rect(dims, l.video);
+        let idx = if current.is_some() && !self.original { slot } else { source };
+        let inset = if vp.0 < 900. { 16. } else { 24. };
+        let picture = crate::app::App::fit_rect(dims, RectPx {
+            x: l.video.x + inset, y: l.video.y + inset,
+            w: l.video.w - inset * 2., h: l.video.h - inset * 2. });
         items.push(Item::Clip(Some(l.video)));
-        if self.original
-            && current.is_some_and(|f| (f.source_pts - shown_pts).abs() > 0.51 / info.fps.max(1.))
-        {
-            items.push(Item::Rect(RectItem::new(l.video, hex_color(0x0c0d0d))));
-            ui_label(
-                items,
-                l.video.x + l.video.w / 2.,
-                l.video.y + l.video.h / 2.,
-                12.,
-                dim,
-                "Seeking matching original…",
-                Align::Center,
-                l.video.w,
-            );
+        if self.original && current.is_some_and(|f| (f.source_pts - shown_pts).abs() > 0.51 / info.fps.max(1.)) {
+            ui_label(items, l.video.x + l.video.w / 2., l.video.y + l.video.h / 2.,
+                12., dim, "Seeking matching original…", Align::Center, l.video.w);
         } else {
-            items.push(Item::Video {
-                a: idx,
-                b: idx,
-                r: picture,
-                uv: [0., 0., 1., 1.],
-                mode: VideoMode::Tex,
-                p0: 0.,
-                p1: 0.,
-            });
+            items.push(Item::Video { a: idx, b: idx, r: picture,
+                uv: [0., 0., 1., 1.], mode: VideoMode::Tex, p0: 0., p1: 0. });
         }
         items.push(Item::Clip(None));
-        items.push(Item::Rect(RectItem {
-            radius: 5.,
-            ..RectItem::new(RectPx { x: l.context.x - 4., w: l.context.w + 8., ..l.context }, hex_color(0x0f0f0f))
-        }));
-        let label = |items: &mut Vec<Item>, r: RectPx, text: &str, color| {
-            ui_label(items, r.x, r.y, 12., color, text, Align::Left, r.w)
-        };
-        label(
-            items,
-            RectPx {
-                w: l.context.w - 236.,
-                y: l.context.y + 18.,
-                ..l.context
-            },
-            if self.original {
-                "ORIGINAL"
-            } else if self.following {
-                "OUTPUT · LIVE"
-            } else {
-                "OUTPUT · REVIEW"
-            },
-            ink,
-        );
-
-        let lcd = RectPx {
-            w: 140.,
-            ..l.transport
-        };
-        items.push(Item::Rect(RectItem {
-            radius: 5.,
-            ..RectItem::new(lcd, hex_color(0x131313))
-        }));
-        ui_label(
-            items,
-            lcd.x + 12.,
-            lcd.y + 10.,
-            10.,
-            ink,
-            format!("OUTPUT · {:.0} FPS", fps),
-            Align::Left,
-            lcd.w - 24.,
-        );
-        let time = current.map_or(0., |f| (f.output_time - f.frame_duration).max(0.));
-        let whole = time.floor() as u64;
-        let frame = ((time - time.floor()) * fps).round() as u64;
-        items.push(Item::Text(crate::render::TextItem {
-            valign: crate::render::VAlign::Middle,
-            max_width: Some(lcd.w - 24.),
-            ..crate::render::TextItem::new(
-                lcd.x + 12.,
-                lcd.y + 38.,
-                16.,
-                ink,
-                format!(
-                    "{:02}:{:02}:{:02}:{:02}",
-                    whole / 3600,
-                    whole / 60 % 60,
-                    whole % 60,
-                    frame
-                ),
-            )
-        }));
-        ui_label(
-            items,
-            l.seek.x,
-            l.transport.y + 12.,
-            10.,
-            dim,
-            format!(
-                "Recent rendered frames · {:.2}s / {:.2}s",
-                self.rendered_time, self.duration
-            ),
-            Align::Left,
-            l.seek.w,
-        );
-        items.push(Item::Rect(RectItem::new(l.seek, hex_color(0x292b2b))));
-        let fraction = if self.frames.len() > 1 {
-            self.selected as f32 / (self.frames.len() - 1) as f32
-        } else {
-            0.
-        };
-        if fraction > 0. {
-            items.push(Item::Rect(RectItem::new(
-                RectPx {
-                    w: l.seek.w * fraction,
-                    ..l.seek
-                },
-                blue,
-            )));
+        for r in [
+            RectPx { x: l.sidebar.w - 1., y: l.sidebar.y, w: 1., h: l.sidebar.h },
+            RectPx { x: 0., y: l.footer.y, w: vp.0, h: 1. },
+        ] { items.push(Item::Rect(RectItem::new(r, hex_color(0x191919)))); }
+        items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle,
+            max_width: Some(l.sidebar.w - 32.),
+            ..TextItem::new(14., l.sidebar.y + 18., 13., ink, "Export") }));
+        let (x, w, y, _) = Self::settings_geometry(l);
+        for (offset, title) in [(0., "Codec"), (60., "Container"), (120., "Filename"), (180., "Directory")] {
+            mono(items, x, y + offset, 11., dim, title.into(), Align::Left, w);
         }
-        let elapsed = if self.busy() {
-            self.started.elapsed().as_secs_f64()
-        } else {
-            self.elapsed
-        };
-        // Render throughput, not the clip's rate: `fps` (above) is the output's.
-        let render_fps = self.count as f64 / elapsed.max(0.001);
-        let done = (self.rendered_time / self.duration.max(0.001)).clamp(0., 1.);
-        let eta = if done > 0. && self.busy() {
-            format!("~{:.0}s remaining", elapsed * (1. - done) / done)
-        } else {
-            String::new()
-        };
-        ui_label(
-            items,
-            l.progress.x,
-            l.progress.y - 22.,
-            11.,
-            ink,
-            format!(
-                "RENDER + ENCODE    {:.1}% · {} frames   {:.1} fps   {:.0}s elapsed   {}",
-                done * 100.,
-                self.count,
-                render_fps,
-                elapsed,
-                eta
-            ),
-            Align::Left,
-            l.progress.w,
-        );
-        items.push(Item::Rect(RectItem {
-            radius: 3.,
-            ..RectItem::new(l.progress, hex_color(0x292b2b))
-        }));
-        if done > 0. {
-            items.push(Item::Rect(RectItem {
-                radius: 3.,
-                ..RectItem::new(
-                    RectPx {
-                        w: l.progress.w * done as f32,
-                        ..l.progress
-                    },
-                    blue,
-                )
-            }));
-        }
-        ui_label(
-            items,
-            l.progress.x,
-            l.progress.y + 22.,
-            10.,
-            dim,
-            if self.actions(vp).iter().any(|(r, _, _, a)| *a == Action::Lossless && hit(*r, cursor.0, cursor.1)) {
-                self.copy_unavailable.unwrap_or(&self.status)
-            } else { &self.status },
-            Align::Left,
-            l.progress.w,
-        );
-        let (x, w, y, step) = Self::settings_geometry(l);
-        let text = |items: &mut Vec<Item>, yy, size, color, value: &str| {
-            ui_label(items, x, yy, size, color, value, Align::Left, w);
-        };
-        text(items, l.sidebar.y + 18., 12., ink, "Export settings");
-        for (offset, title) in [(0., "Codec"), (2., "Container"), (4.4, "Destination")] {
-            text(items, y + offset * step, 11., dim, title);
-        }
-        for offset in [-0.55, 1.8, 3.95, 8.3] {
-            items.push(Item::Rect(RectItem::new(RectPx { x, y: y + offset * step, w, h: 1. }, hex_color(0x292b29))));
-        }
-        text(items, y + 5.25 * step, 12., dim, "Filename");
-        text(items, y + 6.75 * step, 12., dim, "Directory · click to choose");
-        let dims = self.current().map(|f| (f.dims[0], f.dims[1]))
-            .or_else(|| self.crop.map(|(_, _, w, h)| (w, h)))
-            .unwrap_or((info.width, info.height));
+        let summary_y = (l.footer.y - 146.).max(y + 250.);
+        items.push(Item::Rect(RectItem::new(RectPx { x: 0., y: summary_y - 18.,
+            w: l.sidebar.w - 1., h: l.footer.y - summary_y + 18. }, hex_color(0x0f0f0f))));
+        let output_dims = current.map(|f| (f.dims[0], f.dims[1]))
+            .or_else(|| self.crop.map(|(_, _, w, h)| (w, h))).unwrap_or((info.width, info.height));
         let codec = if self.lossless { info.codec.as_str() } else if self.prores { "ProRes" } else { "HEVC" };
-        for (offset, key, value) in [
-            (8.85, "Video", format!("{codec} · {} × {}", dims.0, dims.1)),
-            (9.6, "Frame rate", format!("{fps:.2} fps")),
-            (10.35, "Duration", format!("{:02}:{:02}", self.duration as u64 / 60, self.duration as u64 % 60)),
-        ] {
-            ui_label(items, x, y + offset * step, 12., dim, key, Align::Left, w * 0.35);
-            ui_label(items, x + w, y + offset * step, 12., ink, value, Align::Right, w * 0.65);
+        for (i, (key, value)) in [
+            ("Video", codec.to_string()),
+            ("Resolution", format!("{}×{}", output_dims.0, output_dims.1)),
+            ("Framerate", format!("{fps:.3} fps")),
+            ("Duration", format!("{:02}:{:02}", self.duration as u64 / 60, self.duration as u64 % 60)),
+        ].into_iter().enumerate() {
+            let yy = summary_y + i as f32 * 23.;
+            mono(items, x, yy, 11., dim, key.into(), Align::Left, 78.);
+            mono(items, x + w, yy, 11., ink, value, Align::Right, w - 82.);
         }
-        items.push(Item::Rect(RectItem::new(l.footer, hex_color(0x050506))));
+        // One transport row, with the same height, track and type as Sources.
+        let time = current.map_or(0., |f| (f.output_time - f.frame_duration).max(0.));
+        let fraction = if self.frames.len() > 1 { self.selected as f32 / (self.frames.len() - 1) as f32 } else { 0. };
+        items.push(Item::Rect(RectItem { radius: 2., ..RectItem::new(l.seek, hex_color(0x454545)) }));
+        if fraction > 0. {
+            items.push(Item::Rect(RectItem { radius: 2., ..RectItem::new(RectPx { w: l.seek.w * fraction, ..l.seek }, ACCENT) }));
+        }
+        items.push(Item::Rect(RectItem { radius: 6., ..RectItem::new(RectPx {
+            x: l.seek.x + l.seek.w * fraction - 6., y: l.seek.y - 4., w: 12., h: 12. }, ACCENT) }));
+        ui_label(items, l.seek.x + l.seek.w + 18., l.transport.y + 30., 11., ink,
+            format!("{:02}:{:06.3} / {:02}:{:06.3}", time as u64 / 60, time % 60., self.duration as u64 / 60, self.duration % 60.), Align::Left, 166.);
+        if l.context.w > 600. {
+            ui_label(items, vp.0 - 16., l.context.y + 20., 10., dim,
+                if self.original { "ORIGINAL" } else if current.is_some() { "OUTPUT" } else { "SOURCE PREVIEW" }, Align::Right, 130.);
+        }
+        if self.busy() {
+            let done = (self.rendered_time / self.duration.max(0.001)).clamp(0., 1.);
+            items.push(Item::Rect(RectItem::new(l.progress, hex_color(0x292929))));
+            items.push(Item::Rect(RectItem::new(RectPx { w: l.progress.w * done as f32, ..l.progress }, ACCENT)));
+
+        }
+        ui_label(items, l.sidebar.w + 16., l.footer.y + 19., 10., ACCENT, "EXPORT", Align::Left, 60.);
+        let render_status = if self.busy() {
+            let elapsed = self.started.elapsed().as_secs_f64().max(0.001);
+            let done = (self.rendered_time / self.duration.max(0.001)).clamp(0., 1.);
+            let eta = if done > 0. { format!(" · ~{:.0}s left", elapsed * (1. - done) / done) } else { String::new() };
+            format!("{:.0}% · {} frames · {:.1} fps{eta}", done * 100., self.count, self.count as f64 / elapsed)
+        } else { self.status.clone() };
+        let status = if self.actions(vp).iter().any(|(r, _, _, a)| *a == Action::Lossless && hit(*r, cursor.0, cursor.1)) {
+            self.copy_unavailable.unwrap_or(&self.status)
+        } else { &render_status };
+        ui_label(items, l.sidebar.w + 90., l.footer.y + 19., 10., dim,
+            status, Align::Left, (vp.0 - l.sidebar.w - 230.).max(0.));
         for (r, t, selected, a) in self.actions(vp) {
             let hovered = hit(r, cursor.0, cursor.1);
             let disabled = match a {
@@ -835,60 +651,27 @@ impl Page {
                 _ => false,
             };
             if r.y >= l.footer.y {
-                let r = RectPx { h: 28., ..r };
-                items.push(Item::Rect(RectItem {
-                    radius: 7.,
-                    border_w: 1.,
-                    border_color: hex_color(if disabled {
-                        0x252525
-                    } else if hovered {
-                        0x666666
-                    } else {
-                        0x3b3d3b
-                    }),
-                    ..RectItem::new(r, if a == Action::Export && !disabled { blue } else { hex_color(0x050506) })
-                }));
-                ui_label(
-                    items,
-                    r.x + 10.,
-                    r.y + r.h / 2.,
-                    12.,
-                    if disabled { hex_color(0x686868) } else { ink },
-                    t,
-                    Align::Left,
-                    r.w - 20.,
-                );
+                crate::app::draw_cut_footer_button(items, r, t, "", false, hovered, disabled);
+                continue;
+            }
+            let toolbar = matches!(a, Action::Compare | Action::Follow);
+            items.push(Item::Rect(RectItem { radius: 6.,
+                border_w: if toolbar { 0. } else { 1. },
+                border_color: hex_color(if disabled { 0x252525 } else if selected { 0x315576 } else if hovered { 0x555555 } else { 0x2d2d2d }),
+                ..RectItem::new(r, hex_color(if selected { if toolbar { 0x1a1a1a } else { 0x0b1926 } } else if toolbar { 0x050506 } else { 0x10151a })) }));
+            let title = if a == Action::Destination {
+                if r.y < y + 180. { self.destination_name() }
+                else { self.destination.as_ref().and_then(|p| p.parent()).or_else(|| info.path.parent()).map(|p| p.display().to_string()).unwrap_or_default() }
+            } else { t.to_string() };
+            if a == Action::Destination {
+                mono(items, r.x + 8., r.y + r.h / 2., 10., if disabled { dim } else { ink }, title, Align::Left, r.w - 16.);
             } else {
-                items.push(Item::Rect(RectItem {
-                    radius: 7.,
-                    border_w: 1.,
-                    border_color: hex_color(if disabled { 0x252525 } else if selected { 0x315576 } else if hovered { 0x555555 } else { 0x2d2d2d }),
-                    ..RectItem::new(
-                        r,
-                        hex_color(if disabled {
-                            0x111111
-                        } else if selected || a == Action::Export {
-                            0x0b1926
-                        } else {
-                            0x1a1a1a
-                        }),
-                    )
-                }));
-                ui_label(
-                    items,
-                    r.x + 10.,
-                    r.y + r.h / 2.,
-                    12.,
-                    if disabled { dim } else { ink },
-                    if a == Action::Destination {
-                        if r.y < y + 6. * step { self.destination_name() }
-                        else { self.destination.as_ref().and_then(|p| p.parent()).or_else(|| info.path.parent()).map(|p| p.display().to_string()).unwrap_or_default() }
-                    } else { t.to_string() },
-                    Align::Left,
-                    r.w - 20.,
-                );
+                ui_label(items, r.x + r.w / 2., r.y + r.h / 2., 11.,
+                    if disabled { hex_color(0x686868) } else if selected || hovered { ink } else { dim },
+                    title, Align::Center, r.w - 12.);
             }
         }
+
     }
 }
 
@@ -1048,18 +831,22 @@ mod tests {
     #[test]
     fn minimal_controls_fit_and_footer_only_has_export_actions() {
         let p = Page::default();
-        for vp in [(720., 480.), (1280., 800.), (1440., 900.)] {
+        for vp in [(720., 480.), (900., 600.), (1280., 800.), (1440., 900.)] {
             let l = Layout::new(vp);
-            assert_eq!(l.video.x, 0.);
-            assert_eq!(l.video.y, crate::app::HEADER_H);
-            assert_eq!(l.video.w, l.sidebar.x);
-            assert_eq!(l.sidebar.x + l.sidebar.w, vp.0);
+            assert_eq!(l.sidebar.x, 0.);
+            assert_eq!(l.video.x, l.sidebar.w);
+            assert_eq!(l.video.y, crate::app::HEADER_H + 40.);
+            assert_eq!(l.video.w + l.sidebar.w, vp.0);
+            assert_eq!(l.sidebar.y, crate::app::HEADER_H);
             assert_eq!(p.actions(vp).iter().filter(|(.., a)| *a == Action::Export).count(), 1);
             assert!(l.progress.y + 7. < l.footer.y);
             for (r, _, _, a) in p.actions(vp) {
                 assert!(r.x >= 0. && r.x + r.w <= vp.0 + 0.1);
                 assert!(r.y >= crate::app::HEADER_H && r.y + r.h <= vp.1);
-                assert!(!hit(l.video, r.x, r.y) || matches!(a, Action::Compare | Action::Follow));
+                assert!(!hit(l.video, r.x, r.y));
+                if matches!(a, Action::Compare | Action::Follow) {
+                    assert!(r.y >= l.context.y && r.y + r.h <= l.context.y + l.context.h);
+                }
                 if r.y >= l.footer.y {
                     assert!(matches!(
                         a,

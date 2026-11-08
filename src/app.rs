@@ -6954,9 +6954,10 @@ pub(crate) fn draw_cut_footer_button(items: &mut Vec<Item>, r: RectPx, label: &s
     items.push(Item::Rect(RectItem { radius: 7.0, border_w: 1.0, border_color: hex_color(border),
         ..RectItem::new(r, hex_color(0x050506)) }));
     if icon { draw_split_icon(items, r.x + 13.0, cy, ink, 0.6); }
-    let key_w = if key_label.chars().count() > 1 { 29.0 } else { 23.0 };
+    let key_w = if key_label.is_empty() { 0.0 } else if key_label.chars().count() > 1 { 29.0 } else { 23.0 };
     ui_label(items, r.x + if icon { 28.0 } else { 10.0 }, cy, 12.0, ink, label, Align::Left,
         r.w - if icon { 37.0 + key_w } else { 20.0 + key_w });
+    if key_label.is_empty() { return; }
     let key = RectPx { x: r.x + r.w - key_w - 6.0, y: cy - 9.0, w: key_w, h: 18.0 };
     items.push(Item::Rect(RectItem { radius: 5.0, ..RectItem::new(key, hex_color(if disabled { 0x151515 } else { 0x1b1b1b })) }));
     ui_label(items, key.x + key.w / 2.0, cy, 10.0, ink, key_label, Align::Center, key.w);

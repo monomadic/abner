@@ -1,5 +1,15 @@
 # abner — history
 
+## 2026-11-09 — Export matches Sources layout and typography
+
+Moved Export settings to the shared-width left rail, using Sources’ monospace
+heading and metadata fonts, fixed field spacing, and bottom inspector summary.
+The viewer now has Sources’ separate 40px toolbar, inset charcoal canvas,
+and single 60px transport row. Removed the idle progress dashboard; active
+exports show one progress track with throughput and ETA in the status footer.
+Footer buttons share the existing neutral style without empty shortcut badges.
+Verified the rebuilt native page visually with the bundled sample clip.
+
 ## 2026-11-09 — Export follows the shared workspace design
 
 Replaced Export’s inset cards with a flush charcoal canvas and a compact,
