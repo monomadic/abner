@@ -1,5 +1,16 @@
 # abner — history
 
+## 2026-11-09 — Keep completed isolated previews after a seek
+
+Removed the history-replay timestamp filter from isolated frame previews. The
+worker already feeds exactly one decoded source frame, so rejecting its returned
+output by distance from the requested nominal timestamp can discard a successful
+render when header and decoder timing differ. Timestamp-preserving previews now
+attach to their requested playhead position while retaining the actual source PTS
+for inspection. Failure feedback also clears the last running phase. Regression
+coverage renders once, seeks, renders again with differing declared/decoded rates,
+and verifies both cached results remain visible at their requested positions.
+
 ## 2026-11-08 — Real Proteus preview validation at 60%
 
 Exercised the Process page's `render` function with the actual local

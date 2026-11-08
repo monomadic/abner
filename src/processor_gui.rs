@@ -774,11 +774,10 @@ fn render(
                     255,
                 ]);
             }
-            if r.target
-                .is_some_and(|target| (source_pts - target).abs() > 0.51 / fps)
-            {
-                continue;
-            }
+            // Targeted requests feed exactly one decoded source frame. Its
+            // timestamp may differ from the requested grid (container timing,
+            // rounded rates or a clamped end seek). Never discard its completed
+            // output using the old history-replay timestamp filter.
             received.set(received.get() + 1);
             delivered = true;
             tx.send(Event::Frame(
@@ -789,7 +788,11 @@ fn render(
                     downsized,
                     input: [w, h],
                     output: [ow as u32, oh as u32],
-                    pts: frame.pts as f64 / 1e6,
+                    // Keep an isolated, timestamp-preserving preview attached
+                    // to the playhead position that requested it. source_pts
+                    // still records the actual decoded frame for inspection.
+                    pts: if retimed { frame.pts as f64 / 1e6 }
+                        else { r.target.unwrap_or(frame.pts as f64 / 1e6) },
                     duration: frame.duration as f64 / 1e6,
                     source_pts,
                     elapsed: started.elapsed().as_secs_f64(),
@@ -2260,6 +2263,7 @@ impl Panel {
                         self.pending = None;
                         self.progress = None;
                         if let Err(e) = result {
+                            self.feedback = None;
                             self.status = e;
                         } else {
                             self.status = if self.changed_count == 0 && self.preview_count > 0 {
@@ -3532,6 +3536,35 @@ mod tests {
             assert_eq!(delivered.len(), 1);
             assert!((delivered[0] - frames[4].pts).abs() < 1e-6);
         }
+        // Render, move, render again with slightly different header/decoder
+        // rates. A valid landing can lie outside the old nominal tolerance;
+        // its completed output must still be visible at the requested position.
+        let mut previews = Vec::new();
+        let later = frames[4].pts + 0.499 / info.fps;
+        let mut rounded_info = info.clone();
+        rounded_info.fps = 25.0;
+        for target in [0.0, later] {
+            let request = Request {
+                inputs: Default::default(), generation: 20, chain: r.chain.clone(),
+                target: Some(target), info: rounded_info.clone(), start: 0.0, end: None,
+                cancel: Cancellation::default(), budget: r.budget,
+            };
+            render(&registry(), &request, &guard_tx, None, None).unwrap();
+            let mut output: Vec<_> = guard_rx.try_iter().filter_map(|e| match e {
+                Event::Frame(_, f) => Some(f), _ => None,
+            }).collect();
+            assert_eq!(output.len(), 1);
+            assert_eq!(output[0].pts, target);
+            previews.push(output.remove(0));
+        }
+        assert!((previews[1].source_pts - later).abs() > 0.51 / rounded_info.fps);
+        let mut display = Panel::default();
+        display.frames = previews;
+        display.rate = info.fps;
+        display.time = later;
+        assert_eq!(display.shown().unwrap().pts, later);
+        display.time = 0.0;
+        assert_eq!(display.shown().unwrap().pts, 0.0);
         let mut transport = Panel::default();
         transport.duration = info.duration;
         transport.rate = info.fps;
