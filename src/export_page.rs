@@ -28,6 +28,7 @@ pub(crate) enum Action {
     Lossless,
     Container(bool),
     Export,
+    EditFilename,
     Destination,
     RevealDirectory,
     Cancel,
@@ -65,6 +66,8 @@ pub(crate) struct Page {
     elapsed: f64,
     pub status: String,
     destination: Option<PathBuf>,
+    filename_edit: Option<String>,
+    filename_selected: bool,
     path: Option<PathBuf>,
     pub duration: f64,
     count: u64,
@@ -94,6 +97,8 @@ impl Default for Page {
             elapsed: 0.,
             status: "Choose a preset and export the enabled pipeline.".into(),
             destination: None,
+            filename_edit: None,
+            filename_selected: false,
             path: None,
             duration: 0.,
             count: 0,
@@ -156,6 +161,37 @@ impl Page {
     fn settings_geometry(l: Layout) -> (f32, f32, f32, f32) {
         (16., l.sidebar.w - 32., l.sidebar.y + 54., 28.)
     }
+    pub fn editing_filename(&self) -> bool { self.open && self.filename_edit.is_some() }
+    pub fn finish_filename(&mut self) -> bool {
+        let Some(name) = self.filename_edit.as_ref() else { return true; };
+        if name.trim().is_empty() || matches!(name.as_str(), "." | "..") || name.contains(['/', '\0', ':']) {
+            self.status = "Enter a filename without path separators.".into();
+            return false;
+        }
+        let Some(dir) = self.directory() else { return false; };
+        let stem = name.strip_suffix(".mp4").or_else(|| name.strip_suffix(".mkv")).unwrap_or(name);
+        let ext = if self.mkv { "mkv" } else { "mp4" };
+        self.destination = Some(dir.join(format!("{stem}.{ext}")));
+        self.filename_edit = None;
+        self.filename_selected = false;
+        true
+    }
+    pub fn text_input(&mut self, text: &str) -> bool {
+        if !self.editing_filename() { return false; }
+        let value = self.filename_edit.as_mut().unwrap();
+        if self.filename_selected { value.clear(); self.filename_selected = false; }
+        value.extend(text.chars().filter(|c| !c.is_control() && !matches!(c, '/' | ':')));
+        true
+    }
+    pub fn shortcut(&mut self, c: char) -> bool {
+        if !self.editing_filename() { return false; }
+        match c.to_ascii_lowercase() {
+            'a' => self.filename_selected = true,
+            'v' => { if let Some(text) = crate::open::paste_text() { self.text_input(&text); } }
+            _ => {}
+        }
+        true
+    }
     fn directory(&self) -> Option<PathBuf> {
         self.destination.as_ref().or(self.source.as_ref())
             .and_then(|p| p.parent()).map(|p| p.to_path_buf())
@@ -197,6 +233,7 @@ impl Page {
             self.count = 0;
             self.rendered_time = 0.;
             self.destination = None;
+            self.filename_edit = None;
             self.source = Some(info.path.clone());
             self.duration = info.duration;
             self.dirty = true;
@@ -222,6 +259,7 @@ impl Page {
             self.status = "ProRes requires MKV. Select MKV to export.".into();
             return;
         }
+        if !self.finish_filename() { return; }
         let ext = if self.mkv { "mkv" } else { "mp4" };
         let Some(mut dest) = self.destination.clone().or_else(||
             crate::open::export_destination(&self.destination_name())) else { return; };
@@ -393,6 +431,20 @@ impl Page {
         self.dirty = true;
     }
     pub fn key(&mut self, k: Key) -> bool {
+        if self.editing_filename() {
+            match k {
+                Key::Escape => { self.filename_edit = None; self.filename_selected = false; }
+                Key::Enter | Key::Tab => { self.finish_filename(); }
+                Key::Backspace => {
+                    let value = self.filename_edit.as_mut().unwrap();
+                    if self.filename_selected { value.clear(); self.filename_selected = false; } else { value.pop(); }
+                }
+                Key::Char(c) => { self.text_input(&c.to_string()); }
+                Key::Space => { self.text_input(" "); }
+                _ => {}
+            }
+            return true;
+        }
         match k {
             Key::Escape if self.busy() => {
                 self.cancel();
@@ -431,7 +483,8 @@ impl Page {
             (r(x + 2. * (third + 4.), y + 16., third), "ProRes", self.prores && !self.lossless, Action::Preset(true)),
             (r(x, y + 76., half), "MKV", self.mkv, Action::Container(true)),
             (r(x + half + 4., y + 76., half), "MP4", !self.mkv, Action::Container(false)),
-            (r(x, y + 136., w), "", false, Action::Destination),
+            (r(x, y + 136., w - 32.), "", self.filename_edit.is_some(), Action::EditFilename),
+            (r(x + w - 26., y + 136., 26.), "Save as", false, Action::Destination),
             (r(x + w - 24., y + 196., 24.), "", false, Action::RevealDirectory),
             (r(l.context.x + 12., l.context.y + 7., 124.), "Original / Output", self.original, Action::Compare),
             (r(l.context.x + 144., l.context.y + 7., 112.), "Follow render", self.following, Action::Follow),
@@ -466,7 +519,14 @@ impl Page {
             .map(|(.., a)| a)
     }
     pub fn apply(&mut self, a: Action) -> Option<PathBuf> {
+        if a != Action::EditFilename && !self.finish_filename() { return None; }
         match a {
+            Action::EditFilename if !self.busy() => {
+                if self.filename_edit.is_none() {
+                    self.filename_edit = Some(self.destination_name());
+                    self.filename_selected = false;
+                }
+            }
             Action::Preset(p) if !self.busy() => {
                 self.lossless = false;
                 self.prores = p;
@@ -656,9 +716,20 @@ impl Page {
                 Action::Reveal => self.path.is_none(),
                 Action::Lossless => self.busy() || self.copy_unavailable.is_some(),
                 Action::Container(false) => self.busy() || (self.prores && !self.lossless),
-                Action::Preset(_) | Action::Container(true) | Action::Destination => self.busy(),
+                Action::Preset(_) | Action::Container(true) | Action::Destination | Action::EditFilename => self.busy(),
                 _ => false,
             };
+            if a == Action::Destination {
+                let color = if disabled { dim } else if hovered { ACCENT } else { ink };
+                let disk = RectPx { x: r.x + 6., y: r.y + 6., w: 14., h: 14. };
+                items.push(Item::Rect(RectItem { radius: 1., border_w: 1.2, border_color: color,
+                    ..RectItem::new(disk, [0.; 4]) }));
+                for mark in [
+                    RectPx { x: disk.x + 3., y: disk.y, w: 8., h: 5. },
+                    RectPx { x: disk.x + 3., y: disk.y + 9., w: 8., h: 5. },
+                ] { items.push(Item::Rect(RectItem { border_w: 1., border_color: color, ..RectItem::new(mark, [0.; 4]) })); }
+                continue;
+            }
             if a == Action::RevealDirectory {
                 let color = if hovered { ACCENT } else { hex_color(crate::app::INSPECTOR_PATH) };
                 let folder = RectPx { x: r.x + 5., y: r.y + 9., w: 14., h: 10. };
@@ -677,11 +748,15 @@ impl Page {
                 border_w: if toolbar { 0. } else { 1. },
                 border_color: hex_color(if disabled { 0x252525 } else if selected { 0x315576 } else if hovered { 0x555555 } else { 0x2d2d2d }),
                 ..RectItem::new(r, hex_color(if selected { if toolbar { 0x1a1a1a } else { 0x0b1926 } } else if toolbar { 0x050506 } else { 0x10151a })) }));
-            let title = if a == Action::Destination {
-                self.destination_name()
+            let title = if a == Action::EditFilename {
+                self.filename_edit.clone().unwrap_or_else(|| self.destination_name())
             } else { t.to_string() };
-            if a == Action::Destination {
-                mono(items, r.x + 8., r.y + r.h / 2., 10., if disabled { dim } else { ink }, title, Align::Left, r.w - 16.);
+            if a == Action::EditFilename {
+                items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle,
+                    caret: self.filename_edit.is_some() && !self.filename_selected,
+                    max_width: Some(r.w - 16.),
+                    color: if self.filename_selected { ACCENT } else { ink },
+                    ..TextItem::new(r.x + 8., r.y + r.h / 2., 10., if disabled { dim } else { ink }, title) }));
             } else {
                 ui_label(items, r.x + r.w / 2., r.y + r.h / 2., 11.,
                     if disabled { hex_color(0x686868) } else if selected || hovered { ink } else { dim },
@@ -890,6 +965,36 @@ mod tests {
         let reveal = actions.iter().find(|(.., a)| *a == Action::Reveal).unwrap();
         assert!(reveal.0.y < Layout::new((720., 480.)).footer.y);
         assert_eq!(p.apply(Action::Reveal), p.destination);
+    }
+    #[test]
+    fn filename_edits_commit_in_place_without_changing_directory() {
+        let mut p = Page::default();
+        p.open = true;
+        p.source = Some(PathBuf::from("/clips/source.mp4"));
+        p.apply(Action::EditFilename);
+        p.text_input(" extra");
+        assert_eq!(p.filename_edit.as_deref(), Some("source.export.mp4 extra"));
+        p.shortcut('a');
+        p.text_input("My render.mp4");
+        p.key(Key::Enter);
+        assert_eq!(p.destination, Some(PathBuf::from("/clips/My render.mp4")));
+        p.apply(Action::EditFilename);
+        p.shortcut('a');
+        p.text_input("discard");
+        p.key(Key::Escape);
+        assert_eq!(p.destination_name(), "My render.mp4");
+        p.apply(Action::EditFilename);
+        p.shortcut('a');
+        p.key(Key::Backspace);
+        assert!(!p.finish_filename());
+        p.text_input("final");
+        p.key(Key::Tab);
+        assert_eq!(p.destination_name(), "final.mp4");
+        let actions = p.actions((720., 480.));
+        let field = actions.iter().find(|(.., a)| *a == Action::EditFilename).unwrap().0;
+        let save_as = actions.iter().find(|(.., a)| *a == Action::Destination).unwrap().0;
+        assert!(save_as.x >= field.x + field.w);
+        assert_eq!(field.y, save_as.y);
     }
     #[test]
     fn native_pipeline_writes_selected_codecs_containers_audio_and_processed_pixels() {

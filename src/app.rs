@@ -1866,10 +1866,10 @@ impl App {
         }
     }
     pub fn processor_shortcut(&mut self, c: char) -> bool {
-        self.processors.shortcut(c)
+        if self.export_page.open { self.export_page.shortcut(c) } else { self.processors.shortcut(c) }
     }
     pub fn processor_text(&mut self, text: &str) -> bool {
-        self.processors.text_input(text)
+        if self.export_page.open { self.export_page.text_input(text) } else { self.processors.text_input(text) }
     }
     pub fn set_processors(&mut self, registry: abner_processor_api::Registry) {
         self.processors = crate::processor_gui::Panel::new(registry);
@@ -1877,6 +1877,7 @@ impl App {
     }
 
     pub fn key(&mut self, mut k: Key) {
+        if self.export_page.editing_filename() && self.export_page.key(k) { return; }
         if self.editor.is_some() {
             if k==Key::Escape {self.finish_editor(false);return}
             if k==Key::Enter {self.finish_editor(true);return}
@@ -2216,9 +2217,11 @@ impl App {
         if self.export_page.open && self.ready() {
             self.cursor = (x,y);
             if !self.show_ui {return;}
+            let action = self.export_page.click(self.vp, x, y);
+            if action != Some(crate::export_page::Action::EditFilename) && !self.export_page.finish_filename() { return; }
             if y < HEADER_H {
                 if let Some(control) = self.mode_selector().controls().into_iter().find(|c| contains(c.r,x,y)) { self.activate(control.action); }
-            } else if let Some(action) = self.export_page.click(self.vp,x,y) { self.export_action(action); }
+            } else if let Some(action) = action { self.export_action(action); }
             return;
         }
         if self.show_ui && self.ready() && self.processors.open && contains(self.footer_export(), x, y) {

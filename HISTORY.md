@@ -1,5 +1,14 @@
 # abner — history
 
+## 2026-11-09 — Edit the export filename in place
+
+Filename is an inline text field with a measured caret, direct typing,
+Backspace, select-all and paste. Enter, Tab or clicking away commits; Escape
+restores the previous name. Editing retains the output directory and selected
+container extension. A separate floppy-disk Save As button opens the existing
+destination picker. Empty names are rejected, and typing cannot trigger
+workspace shortcuts or start an export.
+
 ## 2026-11-09 — Export settings and contextual actions
 
 Renamed the left heading to Settings, restored the shared header separator,
