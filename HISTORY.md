@@ -1,5 +1,14 @@
 # abner — history
 
+## 2026-11-09 — Export follows the shared workspace design
+
+Replaced Export’s inset cards with a flush charcoal canvas and a compact,
+edge-aligned settings inspector. Neutral segmented controls, smaller headings,
+quiet separators and a monochrome time display match the other workspaces.
+Compare and follow controls overlay the preview; progress stays below it.
+The shared-height footer has one blue Export action at the right, with Cancel
+and Reveal at the left. Drawing and hit testing share the responsive bounds.
+
 ## 2026-11-09 — Process canvas meets the surrounding panels
 
 Removed the Process viewer’s side gutters and top label strip so the canvas

@@ -110,7 +110,6 @@ impl Drop for Page {
 }
 #[derive(Clone, Copy)]
 pub(crate) struct Layout {
-    pub panel: RectPx,
     pub sidebar: RectPx,
     pub video: RectPx,
     pub context: RectPx,
@@ -121,52 +120,22 @@ pub(crate) struct Layout {
 }
 impl Layout {
     pub fn new(vp: (f32, f32)) -> Self {
-        let side = if vp.0 < 1000. { 220. } else { 332. };
-        let panel = RectPx {
-            x: 16.,
-            y: 60.,
-            w: (vp.0 - side - 48.).max(280.),
-            h: (vp.1 - 114.).max(280.),
-        };
-        let sidebar = RectPx {
-            x: panel.x + panel.w + 16.,
-            y: 60.,
-            w: side,
-            h: panel.h,
-        };
-        let pad = if vp.0 < 1000. { 12. } else { 24. };
-        let context = RectPx {
-            x: panel.x + pad,
-            y: panel.y + 16.,
-            w: panel.w - 2. * pad,
-            h: 36.,
-        };
-        let video = RectPx {
-            x: context.x,
-            y: context.y + 48.,
-            w: context.w,
-            h: (panel.h - 220.).max(80.),
-        };
-        let transport = RectPx {
-            x: video.x,
-            y: video.y + video.h + 12.,
-            w: video.w,
-            h: 64.,
-        };
-        let seek = RectPx {
-            x: transport.x + transport.w * 0.32,
-            y: transport.y + 42.,
-            w: transport.w * 0.46,
-            h: 6.,
-        };
-        let progress = RectPx {
-            x: video.x,
-            y: transport.y + 100.,
-            w: video.w,
-            h: 7.,
-        };
+        // Match the other workspaces: a flush canvas, a fixed inspector,
+        // and full-width status footer. Keep all hit targets on these bounds.
+        let side = if vp.0 < 1000. { 240. } else { 300. };
+        let footer_y = vp.1 - crate::app::CUT_STATUS_H;
+        let panel = RectPx { x: 0., y: crate::app::HEADER_H,
+            w: vp.0 - side, h: footer_y - crate::app::HEADER_H };
+        let sidebar = RectPx { x: panel.w, y: panel.y, w: side, h: panel.h };
+        let video = RectPx { h: panel.h - 156., ..panel };
+        let context = RectPx { x: 12., y: panel.y + 10., w: panel.w - 24., h: 28. };
+        let transport = RectPx { x: 16., y: video.y + video.h + 12.,
+            w: panel.w - 32., h: 52. };
+        let seek = RectPx { x: transport.x + 156., y: transport.y + 36.,
+            w: transport.w - 172., h: 4. };
+        let progress = RectPx { x: transport.x, y: transport.y + 92.,
+            w: transport.w, h: 4. };
         Self {
-            panel,
             sidebar,
             video,
             context,
@@ -177,7 +146,7 @@ impl Layout {
                 x: 0.,
                 y: vp.1 - 38.,
                 w: vp.0,
-                h: 38.,
+                h: crate::app::CUT_STATUS_H,
             },
         }
     }
@@ -187,8 +156,8 @@ fn hit(r: RectPx, x: f32, y: f32) -> bool {
 }
 impl Page {
     fn settings_geometry(l: Layout) -> (f32, f32, f32, f32) {
-        let step = ((l.sidebar.h - 84.) / 12.).clamp(22., 44.);
-        (l.sidebar.x + 20., l.sidebar.w - 40., l.sidebar.y + 65., step)
+        let step = ((l.sidebar.h - 84.) / 12.).clamp(22., 32.);
+        (l.sidebar.x + 16., l.sidebar.w - 32., l.sidebar.y + 65., step)
     }
     fn destination_name(&self) -> String {
         let ext = if self.mkv { "mkv" } else { "mp4" };
@@ -463,25 +432,24 @@ impl Page {
             (r(x + half + 6., y + 3. * step, half), "MP4", !self.mkv, Action::Container(false)),
             (r(x, y + 5.6 * step, w), "", false, Action::Destination),
             (r(x, y + 7.1 * step, w), "", false, Action::Destination),
-            (r(x, y + 11. * step, w), "Export", false, Action::Export),
             (
                 r(
-                    l.context.x + l.context.w * 0.28,
+                    l.context.x + l.context.w - 224.,
                     l.context.y,
-                    l.context.w * 0.23,
+                    112.,
                 ),
-                "TAB · Original / Output",
+                "TAB · Compare",
                 false,
                 Action::Compare,
             ),
             (
                 r(
-                    l.context.x + l.context.w * 0.53,
+                    l.context.x + l.context.w - 104.,
                     l.context.y,
-                    l.context.w * 0.21,
+                    104.,
                 ),
                 if self.following {
-                    "Following render"
+                    "Following"
                 } else {
                     "Follow render"
                 },
@@ -489,19 +457,19 @@ impl Page {
                 Action::Follow,
             ),
             (
-                r(16., l.footer.y + 5., 120.),
+                RectPx { x: vp.0 - 112., y: l.footer.y + 5., w: 96., h: 28. },
                 "Export",
                 false,
                 Action::Export,
             ),
             (
-                r(148., l.footer.y + 5., 100.),
+                RectPx { x: 16., y: l.footer.y + 5., w: 84., h: 28. },
                 "Cancel",
                 false,
                 Action::Cancel,
             ),
             (
-                r(260., l.footer.y + 5., 150.),
+                RectPx { x: 112., y: l.footer.y + 5., w: 132., h: 28. },
                 "Reveal output",
                 false,
                 Action::Reveal,
@@ -622,9 +590,9 @@ impl Page {
             return;
         }
         let l = Layout::new(vp);
-        let ink = hex_color(0xededec);
-        let dim = hex_color(0xaaaaa6);
-        let blue = hex_color(0x008cff);
+        let ink = hex_color(0xd1d1d1);
+        let dim = hex_color(0x919191);
+        let blue = hex_color(0x1580de);
         items.push(Item::Rect(RectItem::new(
             RectPx {
                 x: 0.,
@@ -634,47 +602,17 @@ impl Page {
             },
             hex_color(0x111212),
         )));
-        for r in [l.panel, l.sidebar] {
-            items.push(Item::Rect(RectItem {
-                radius: 6.,
-                border_w: 1.,
-                border_color: hex_color(0x252626),
-                ..RectItem::new(r, hex_color(0x0c0d0d))
-            }));
+        items.push(Item::Rect(RectItem::new(l.video, hex_color(0x2c2c2c))));
+        items.push(Item::Rect(RectItem::new(l.sidebar, hex_color(0x0f0f0f))));
+        for r in [
+            RectPx { x: l.sidebar.x, y: l.sidebar.y, w: 1., h: l.sidebar.h },
+            RectPx { x: l.sidebar.x, y: l.sidebar.y + 36., w: l.sidebar.w, h: 1. },
+            RectPx { x: 0., y: l.footer.y, w: vp.0, h: 1. },
+        ] {
+            items.push(Item::Rect(RectItem::new(r, hex_color(0x252525))));
         }
-        let label = |items: &mut Vec<Item>, r: RectPx, text: &str, color| {
-            ui_label(items, r.x, r.y, 12., color, text, Align::Left, r.w)
-        };
-        label(
-            items,
-            RectPx {
-                w: l.context.w * 0.26,
-                y: l.context.y + 18.,
-                ..l.context
-            },
-            if self.original {
-                "ORIGINAL / MATCHED FRAME"
-            } else if self.following {
-                "OUTPUT / LATEST FRAME"
-            } else {
-                "OUTPUT / MANUAL REVIEW"
-            },
-            ink,
-        );
         let current = self.current();
         let fps = current.map_or(info.fps, |f| 1. / f.frame_duration);
-        if l.context.w > 650. {
-            ui_label(
-                items,
-                l.context.x + l.context.w * 0.77,
-                l.context.y + 18.,
-                10.,
-                dim,
-                format!("{} × {} / {:.0} fps", info.width, info.height, fps),
-                Align::Left,
-                l.context.w * 0.23,
-            );
-        }
         let dims = current
             .filter(|_| !self.original)
             .map_or((info.width, info.height), |f| (f.dims[0], f.dims[1]));
@@ -711,21 +649,45 @@ impl Page {
             });
         }
         items.push(Item::Clip(None));
+        items.push(Item::Rect(RectItem {
+            radius: 5.,
+            ..RectItem::new(RectPx { x: l.context.x - 4., w: l.context.w + 8., ..l.context }, hex_color(0x0f0f0f))
+        }));
+        let label = |items: &mut Vec<Item>, r: RectPx, text: &str, color| {
+            ui_label(items, r.x, r.y, 12., color, text, Align::Left, r.w)
+        };
+        label(
+            items,
+            RectPx {
+                w: l.context.w - 236.,
+                y: l.context.y + 18.,
+                ..l.context
+            },
+            if self.original {
+                "ORIGINAL"
+            } else if self.following {
+                "OUTPUT · LIVE"
+            } else {
+                "OUTPUT · REVIEW"
+            },
+            ink,
+        );
+
         let lcd = RectPx {
-            w: l.transport.w * 0.28,
+            w: 140.,
             ..l.transport
         };
         items.push(Item::Rect(RectItem {
             radius: 5.,
-            ..RectItem::new(lcd, hex_color(0x304b39))
+            ..RectItem::new(lcd, hex_color(0x131313))
         }));
         ui_label(
             items,
             lcd.x + 12.,
             lcd.y + 10.,
             10.,
-            hex_color(0xa5c877),
-            format!("OUTPUT TIME / {:.0} FPS", fps),
+            ink,
+            format!("OUTPUT · {:.0} FPS", fps),
             Align::Left,
             lcd.w - 24.,
         );
@@ -738,8 +700,8 @@ impl Page {
             ..crate::render::TextItem::new(
                 lcd.x + 12.,
                 lcd.y + 38.,
-                20.,
-                hex_color(0xa5c877),
+                16.,
+                ink,
                 format!(
                     "{:02}:{:02}:{:02}:{:02}",
                     whole / 3600,
@@ -839,9 +801,9 @@ impl Page {
         let text = |items: &mut Vec<Item>, yy, size, color, value: &str| {
             ui_label(items, x, yy, size, color, value, Align::Left, w);
         };
-        text(items, l.sidebar.y + 25., 18., ink, "Export Settings");
+        text(items, l.sidebar.y + 18., 12., ink, "Export settings");
         for (offset, title) in [(0., "Codec"), (2., "Container"), (4.4, "Destination")] {
-            text(items, y + offset * step, 15., ink, title);
+            text(items, y + offset * step, 11., dim, title);
         }
         for offset in [-0.55, 1.8, 3.95, 8.3] {
             items.push(Item::Rect(RectItem::new(RectPx { x, y: y + offset * step, w, h: 1. }, hex_color(0x292b29))));
@@ -860,7 +822,7 @@ impl Page {
             ui_label(items, x, y + offset * step, 12., dim, key, Align::Left, w * 0.35);
             ui_label(items, x + w, y + offset * step, 12., ink, value, Align::Right, w * 0.65);
         }
-        items.push(Item::Rect(RectItem::new(l.footer, hex_color(0x0b0c0c))));
+        items.push(Item::Rect(RectItem::new(l.footer, hex_color(0x050506))));
         for (r, t, selected, a) in self.actions(vp) {
             let hovered = hit(r, cursor.0, cursor.1);
             let disabled = match a {
@@ -884,7 +846,7 @@ impl Page {
                     } else {
                         0x3b3d3b
                     }),
-                    ..RectItem::new(r, hex_color(0x0b0c0c))
+                    ..RectItem::new(r, if a == Action::Export && !disabled { blue } else { hex_color(0x050506) })
                 }));
                 ui_label(
                     items,
@@ -900,15 +862,15 @@ impl Page {
                 items.push(Item::Rect(RectItem {
                     radius: 7.,
                     border_w: 1.,
-                    border_color: hex_color(if selected { 0x008cff } else { 0x3b3d3b }),
+                    border_color: hex_color(if disabled { 0x252525 } else if selected { 0x315576 } else if hovered { 0x555555 } else { 0x2d2d2d }),
                     ..RectItem::new(
                         r,
                         hex_color(if disabled {
-                            0x151715
+                            0x111111
                         } else if selected || a == Action::Export {
-                            0x008cff
+                            0x0b1926
                         } else {
-                            0x222422
+                            0x1a1a1a
                         }),
                     )
                 }));
@@ -1088,10 +1050,16 @@ mod tests {
         let p = Page::default();
         for vp in [(720., 480.), (1280., 800.), (1440., 900.)] {
             let l = Layout::new(vp);
-            assert!(l.sidebar.x + l.sidebar.w <= vp.0);
+            assert_eq!(l.video.x, 0.);
+            assert_eq!(l.video.y, crate::app::HEADER_H);
+            assert_eq!(l.video.w, l.sidebar.x);
+            assert_eq!(l.sidebar.x + l.sidebar.w, vp.0);
+            assert_eq!(p.actions(vp).iter().filter(|(.., a)| *a == Action::Export).count(), 1);
             assert!(l.progress.y + 7. < l.footer.y);
             for (r, _, _, a) in p.actions(vp) {
                 assert!(r.x >= 0. && r.x + r.w <= vp.0 + 0.1);
+                assert!(r.y >= crate::app::HEADER_H && r.y + r.h <= vp.1);
+                assert!(!hit(l.video, r.x, r.y) || matches!(a, Action::Compare | Action::Follow));
                 if r.y >= l.footer.y {
                     assert!(matches!(
                         a,
