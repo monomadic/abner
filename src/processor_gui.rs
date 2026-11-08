@@ -2433,6 +2433,21 @@ impl Panel {
         }
         draw_rail_grip(items, grip, l, hit(grip, self.cursor.0, self.cursor.1));
     }
+    /// Use the dimensions and fit of the image actually displayed, including
+    /// A/B source selection and the fullscreen viewer's different fit geometry.
+    pub(crate) fn actual_zoom(&self, vp: (f32, f32), show_ui: bool, scale: f32) -> Option<f32> {
+        let dims = self.shown().filter(|_| self.show_rendered)
+            .map_or(self.source_dims, |f| f.output);
+        let dims = (dims[0], dims[1]);
+        if dims.0 == 0 || dims.1 == 0 { return None; }
+        let base = if show_ui {
+            Canvas { r: Self::viewer(vp) }.fit(dims)
+        } else {
+            crate::app::App::fit_rect(dims, RectPx { x: 0.0, y: 0.0, w: vp.0, h: vp.1 })
+        };
+        (base.w > 0.0).then(|| dims.0 as f32 / (base.w * scale.max(0.1)))
+    }
+
     /// `view` is the app's shared zoom/center, which the viewer's canvas
     /// applies exactly as the timeline's does.
     pub fn draw(&self, items: &mut Vec<Item>, vp: (f32, f32), slot: usize, view: (f32, (f32, f32)), show_ui: bool) {
@@ -2865,6 +2880,38 @@ mod tests {
         p.close();
         assert!(!p.animating(), "hidden controls never keep the loop hot");
     }
+    #[test]
+    fn actual_zoom_matches_displayed_upscaled_pixels() {
+        let mut panel = Panel::default();
+        panel.open = true;
+        panel.source_dims = [1920, 1080];
+        let mut preview = mark(0.0);
+        preview.input = panel.source_dims;
+        preview.output = [3840, 2160];
+        panel.frames.push(preview);
+        let vp = (1280.0, 800.0);
+        for show_ui in [true, false] {
+            for scale in [1.0, 2.0] {
+                for rendered in [true, false] {
+                    panel.show_rendered = rendered;
+                    let zoom = panel.actual_zoom(vp, show_ui, scale).unwrap();
+                    let mut items = Vec::new();
+                    panel.draw(&mut items, vp, 1, (zoom, (0.5, 0.5)), show_ui);
+                    let picture = items.iter().find_map(|item| match item {
+                        Item::Video { r, .. } => Some(r), _ => None,
+                    }).unwrap();
+                    let expected = if rendered { 3840.0 } else { 1920.0 };
+                    assert!((picture.w * scale - expected).abs() < 0.01);
+                }
+            }
+        }
+        panel.frames.clear();
+        panel.show_rendered = true;
+        let fallback = panel.actual_zoom(vp, true, 2.0);
+        panel.show_rendered = false;
+        assert_eq!(fallback, panel.actual_zoom(vp, true, 2.0));
+    }
+
     #[test]
     fn fullscreen_preview_covers_header_and_omits_panel_controls() {
         let mut panel = Panel::new(Registry::default());

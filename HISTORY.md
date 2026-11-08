@@ -1,5 +1,14 @@
 # abner — history
 
+## 2026-11-09 — Actual-size zoom follows the displayed Process image
+
+⌘0 and the 1:1 zoom readout now use the displayed Process preview dimensions
+and its actual canvas fit, including fullscreen. A 1920×1080 source upscaled
+2× uses 3840×2160 for actual-size zoom. Switching to the source side of A/B
+uses source dimensions, as does a position without a cached preview. Tests
+measure the drawn image in physical pixels for both A/B sides, windowed and
+fullscreen, at 1× and 2× display backing scales.
+
 ## 2026-11-09 — Keep completed isolated previews after a seek
 
 Removed the history-replay timestamp filter from isolated frame previews. The

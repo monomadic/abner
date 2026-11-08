@@ -2455,6 +2455,9 @@ impl App {
     /// The zoom at which the focused video shows at its original size:
     /// its native width over its fit width in physical pixels.
     fn actual_zoom(&self) -> Option<f32> {
+        if self.processors.open {
+            return self.processors.actual_zoom(self.vp, self.show_ui, self.scale);
+        }
         let v = self.videos.get(self.active)?;
         let base = self.base_rect(self.active);
         (base.w > 0.0 && v.info.width > 0).then(|| v.info.width as f32 / (base.w * self.scale.max(0.1)))
