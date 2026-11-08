@@ -937,6 +937,7 @@ pub struct Panel {
     preset_dir: Option<std::path::PathBuf>,
     user_presets: BTreeMap<String,std::path::PathBuf>,
     preset_name: Option<String>,
+    caret_at: Instant,
     /// Shared with the worker (locked for a whole render), so the page can
     /// ask the chain's output rate without waiting on one, and Export can
     /// hand the same registry to its own job.
@@ -1017,6 +1018,7 @@ impl Default for Panel {
             preset_dir: None,
             user_presets: BTreeMap::new(),
             preset_name: None,
+            caret_at: Instant::now(),
             registry: Arc::new(Mutex::new(Registry::default())),
             open: false,
             descriptors: vec![],
@@ -1247,6 +1249,7 @@ impl Panel {
         true
     }
     pub fn text_input(&mut self, text: &str) -> bool {
+        self.caret_at = Instant::now();
         if self.open && let Some(value)=&mut self.preset_name {
             if self.text_selected {value.clear();self.text_selected=false;}
             if value.len()+text.len()<=160 {value.push_str(text);}
@@ -1535,6 +1538,7 @@ impl Panel {
         }
     }
     pub fn key(&mut self, key: Key) -> bool {
+        self.caret_at = Instant::now();
         if self.open && self.preset_name.is_some() {
             match key {
                 Key::Escape=>self.preset_name=None,
@@ -1901,6 +1905,7 @@ impl Panel {
         let muted = hex_color(0xa3a5a8);
         let dim = hex_color(0x777b82);
         let blue = hex_color(0x007be5);
+        let caret = self.caret_at.elapsed().as_millis() % 1000 < 500;
         text(items, x, top + 20.0, 9.0, "PROCESSOR SETTINGS", dim, w - 70.0);
         let Some(d) = self.descriptors.get(self.selected) else { return; };
         text(items, x, top + 40.0, 15.0, &d.name, ink, w);
@@ -1909,12 +1914,13 @@ impl Panel {
         let switch = Self::settings_switch(vp);
         draw_processor_switch(items, switch, self.enabled[self.selected], self.switch_position(self.selected, Instant::now()));
         text(items, x, top + 88.0, 9.0, "PRESET", dim, w);
-        let name=self.preset_name.as_ref().map(|n|format!("{n}▏"));
-        let preset = name.as_deref().unwrap_or_else(||d.presets.get(self.preset).map_or("Default", |p| p.name.as_str()));
+        let name=self.preset_name.as_deref();
+        let preset = name.unwrap_or_else(||d.presets.get(self.preset).map_or("Default", |p| p.name.as_str()));
         let custom=d.presets.get(self.preset).is_some_and(|p|self.user_presets.contains_key(&p.id));
         for (index,(r, label)) in Self::preset_buttons(vp).into_iter().zip([preset, "‹", "›", "Save", "Delete"]).enumerate() {
             items.push(Item::Rect(RectItem { radius: 6.0, border_w: 1.0, border_color: hex_color(0x303234), ..RectItem::new(r, hex_color(0x0a0a0a)) }));
-            ui_label(items, r.x + r.w / 2.0, r.y + r.h / 2.0, 10.0, if index==4&&!custom {dim} else if index==0&&name.is_some(){blue}else{muted}, label, Align::Center, r.w - 4.0);
+            ui_label(items, r.x + r.w / 2.0, r.y + r.h / 2.0, 10.0, if index==4&&!custom {dim} else {muted}, label, Align::Center, r.w - 4.0);
+            if index == 0 && name.is_some() { set_caret(items, caret); }
         }
         items.push(Item::Rect(RectItem::new(RectPx { x, y: top + 136.0, w, h: 1.0 }, hex_color(0x303234))));
         let clip = RectPx { x: x - 16.0, y: top + 158.0, w: Self::right(vp), h: (Self::bottom(vp) - top - 158.0).max(1.0) };
@@ -1928,7 +1934,7 @@ impl Panel {
             let shown = if let Kind::Spatial{key,crop}=&f.kind {
                 let configured=self.binding(&self.descriptors[self.selected].id,key).is_some_and(|b| if *crop {b.crop.is_some()}else{b.mask.is_some()});
                 if configured {"Edit…".into()} else {"Choose…".into()}
-            } else { editing.map_or_else(|| if value.is_null() { "Automatic".into() } else { f.shown(value) }, |(_, s)| format!("{s}▏")) };
+            } else { editing.map_or_else(|| if value.is_null() { "Automatic".into() } else { f.shown(value) }, |(_, s)| s.clone()) };
             if let Kind::Number { min, max, .. } = f.kind {
                 text(items, row.x, row.y + 15.0, 9.0, f.description.as_deref().unwrap_or(""), muted, row.w);
                 let amount = ((value.as_f64().unwrap_or(min) - min) / (max - min)).clamp(0.0, 1.0) as f32;
@@ -1938,11 +1944,13 @@ impl Panel {
                 items.push(Item::Rect(RectItem { radius: 8.0, ..RectItem::new(RectPx { x: track.x + track.w * amount - 8.0, y: track.y - 6.0, w: 16.0, h: 16.0 }, ink) }));
                 for (at, label, align) in [(row.x, display_value(&json!(min)), Align::Left), (row.x + row.w / 2.0, shown, Align::Center), (row.x + row.w, display_value(&json!(max)), Align::Right)] {
                     ui_label(items, at, row.y + 72.0, 9.0, muted, &label, align, row.w / 3.0);
+                    if matches!(align, Align::Center) && editing.is_some() { set_caret(items, caret); }
                 }
             } else {
                 let r = RectPx { x: row.x, y: row.y + 21.0, w: row.w, h: 31.0 };
                 items.push(Item::Rect(RectItem { radius: 6.0, border_w: 1.0, border_color: hex_color(0x303234), ..RectItem::new(r, hex_color(0x0a0a0a)) }));
-                ui_label(items, r.x + r.w / 2.0, r.y + r.h / 2.0, 10.0, if editing.is_some() { blue } else { muted }, &shown, Align::Center, r.w - 12.0);
+                ui_label(items, r.x + r.w / 2.0, r.y + r.h / 2.0, 10.0, muted, &shown, Align::Center, r.w - 12.0);
+                if editing.is_some() { set_caret(items, caret); }
                 text(items, row.x, row.y + 65.0, 9.0, f.description.as_deref().unwrap_or(""), muted, row.w);
             }
         }
@@ -1983,6 +1991,7 @@ impl Panel {
         false
     }
     pub fn click(&mut self, x: f32, y: f32, vp: (f32, f32)) -> bool {
+        self.caret_at = Instant::now();
         if !self.open {
             return false;
         }
@@ -4077,4 +4086,9 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+}
+
+/// Attach to the label so placement uses the renderer's font metrics.
+fn set_caret(items: &mut [Item], visible: bool) {
+    if let Some(Item::Text(text)) = items.last_mut() { text.caret = visible; }
 }

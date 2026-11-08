@@ -1,5 +1,11 @@
 # abner — history
 
+## 2026-11-09 — Blinking caret in processor text fields
+
+Editable settings and preset names retain their normal text color and use a
+thin drawn caret, positioned from the renderer’s measured text width. The caret
+blinks every half second and restarts on input, using the existing idle redraws.
+
 ## 2026-11-09 — Actual-size zoom follows the displayed Process image
 
 ⌘0 and the 1:1 zoom readout now use the displayed Process preview dimensions

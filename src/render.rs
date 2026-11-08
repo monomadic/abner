@@ -325,6 +325,8 @@ pub struct TextItem {
     /// Extra advance per glyph, logical px (CSS letter-spacing).
     pub tracking: f32,
     pub bg: Option<TextBg>,
+    /// Draw an insertion caret after the measured text run.
+    pub caret: bool,
     /// Maximum logical width, ellipsized using the renderer's font metrics.
     pub max_width: Option<f32>,
     /// Word-wrap into lines no wider than this (logical px), measured by the
@@ -346,6 +348,7 @@ impl TextItem {
             valign: VAlign::Top,
             tracking: 0.0,
             bg: None,
+            caret: false,
             max_width: None,
             wrap: None,
         }
@@ -1442,6 +1445,12 @@ impl Gpu {
                             radius: bg.radius,
                             ..Default::default()
                         }));
+                    }
+                    if t.caret {
+                        push(&mut data, &mut batches, clip, None, rect_inst(&RectItem::new(
+                            RectPx { x: ((x0 + tw + 1.0) * scale).round() / scale,
+                                y: y0, w: 1.0 / scale, h: th.max(t.px) }, t.color,
+                        )));
                     }
                     for (n, line) in laid.iter().enumerate() {
                         let ly = y0 + lead * n as f32;
