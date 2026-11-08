@@ -1727,15 +1727,15 @@ impl Panel {
         let l = Self::left(vp);
         let r = Self::right(vp);
         RectPx {
-            x: l + 16.0,
-            y: 88.0,
-            w: (vp.0 - l - r - 32.0).max(1.0),
-            h: (Self::transport_y(vp) - 105.0 - 88.0).max(1.0),
+            x: l,
+            y: HEADER_H,
+            w: (vp.0 - l - r).max(1.0),
+            h: (Self::transport_y(vp) - 105.0 - HEADER_H).max(1.0),
         }
     }
     fn progress_button(vp: (f32, f32)) -> RectPx {
         let v = Self::viewer(vp);
-        RectPx { x: v.x + v.w - 103.0, y: Self::transport_y(vp) - 70.0, w: 91.0, h: 26.0 }
+        RectPx { x: v.x + v.w - 119.0, y: Self::transport_y(vp) - 70.0, w: 91.0, h: 26.0 }
     }
     fn timeline(vp: (f32, f32)) -> RectPx {
         // The viewer's span, computed directly: the viewer's height asks
@@ -2505,20 +2505,10 @@ impl Panel {
             title = format!("{title} · {} → {} FPS", fps_label(self.fps), fps_label(self.rate));
         }
         let title = title.as_str();
-        text(
-            items,
-            v.x,
-            61.0,
-            11.0,
-            title,
-            if cached.is_some() { BLUE } else { DIM },
-            v.w,
-        );
-        text(items, v.x, 78.0, 10.0, &self.filename, DIM, v.w);
         if let Some(f) = cached {
             text(
                 items,
-                v.x,
+                v.x + 16.0,
                 v.y + v.h + 10.0,
                 10.0,
                 &if self.retimed {
@@ -2558,6 +2548,16 @@ impl Panel {
             p1: 0.0,
         });
         board.recess(items);
+        text(
+            items,
+            v.x + 16.0,
+            61.0,
+            11.0,
+            title,
+            if cached.is_some() { BLUE } else { DIM },
+            (v.w - 32.0).max(1.0),
+        );
+        text(items, v.x + 16.0, 78.0, 10.0, &self.filename, DIM, (v.w - 32.0).max(1.0));
         items.push(Item::Clip(Some(r)));
         self.draw_progress(items, vp);
         self.draw_transport(items, vp);
@@ -2694,7 +2694,7 @@ impl Panel {
     /// Kept outside the video canvas so zoom/pan cannot cover render feedback.
     fn draw_progress(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
         let v = Self::viewer(vp);
-        let r = RectPx { x: v.x, y: Self::transport_y(vp) - 78.0, w: v.w, h: 67.0 };
+        let r = RectPx { x: v.x + 16.0, y: Self::transport_y(vp) - 78.0, w: (v.w - 32.0).max(1.0), h: 67.0 };
         let ink = hex_color(0xededed);
         let secondary = hex_color(0xa4a7ad);
         let accent = hex_color(CUT_HEADER_BLUE);
@@ -4068,6 +4068,16 @@ mod tests {
         );
         cancel.cancel();
         assert!(process_chain(&mut sessions, 0, vec![make()], &cancel, DEFAULT_PREVIEW_BYTES).is_err());
+    }
+    #[test]
+    fn process_canvas_meets_columns_and_header() {
+        for vp in [(720.0, 480.0), (1280.0, 900.0), (1920.0, 1080.0)] {
+            let canvas = Panel::viewer(vp);
+            assert_eq!(canvas.x, Panel::left(vp));
+            assert_eq!(canvas.x + canvas.w, vp.0 - Panel::right(vp));
+            assert_eq!(canvas.y, HEADER_H);
+            assert!(canvas.y + canvas.h < Panel::transport_y(vp) - 78.0);
+        }
     }
     #[test]
     fn custom_presets_save_reload_update_delete_and_keep_builtins() {

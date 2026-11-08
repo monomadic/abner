@@ -1,5 +1,12 @@
 # abner — history
 
+## 2026-11-09 — Process canvas meets the surrounding panels
+
+Removed the Process viewer’s side gutters and top label strip so the canvas
+meets both sidebars and the header, matching the other workspaces. Frame labels
+now overlay the canvas; transport and render feedback retain their spacing below.
+The shared viewer bounds also drive zoom and pointer handling.
+
 ## 2026-11-09 — Preserve existing text when editing
 
 Focusing a processor field or naming a saved preset now places the caret at
