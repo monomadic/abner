@@ -4528,6 +4528,8 @@ impl App {
         if matches!(action, CutAction::Keyframe(_) | CutAction::Chapter(_)) {
             let Some(cut) = self.cut.as_ref() else { return };
             let to = match action {
+                // All-intra: the buttons are dead (a keyframe step is a frame step).
+                CutAction::Keyframe(_) if cut.all_intra() => None,
                 CutAction::Keyframe(dir) => Some(cut.key_step(t, dir)),
                 CutAction::Chapter(dir) => cut.chapter_step(t, dir),
                 _ => None,
@@ -4671,6 +4673,9 @@ impl App {
             (146.5, "Forward one frame", CutAction::Step(1), "→"),
             (177.5, "Next keyframe", CutAction::Keyframe(1), "⇧→"),
         ] {
+            let (label, hint) = if matches!(action, CutAction::Keyframe(_)) && cut.all_intra() {
+                ("Every frame is a keyframe", "")
+            } else { (label, hint) };
             push(RectPx { x: bar.x + x, y: cy - 12.0, w: 24.0, h: 24.0 }, label, false, action, hint);
         }
         push(RectPx { x: bar.x + 105.5, y: cy - 17.0, w: 34.0, h: 34.0 }, if self.playing { "Pause" } else { "Play" }, false, CutAction::Play, "space");
@@ -5831,7 +5836,8 @@ impl App {
                 draw_icon(items, if zoom_in { Icon::ZoomIn } else { Icon::ZoomOut }, cx, cy, color);
             }
             _ => {
-                let dead = action == CutAction::Apply && cut.selection().is_none() && self.cut_picks.is_empty() && self.cut_restore.is_none();
+                let dead = (action == CutAction::Apply && cut.selection().is_none() && self.cut_picks.is_empty() && self.cut_restore.is_none())
+                    || (matches!(action, CutAction::Keyframe(_)) && cut.all_intra());
                 let selected = action == CutAction::ToggleSplit && self.split_tool;
                 let fill = if selected { hex_color(CUT_TOOL_ON) } else if hovered && !dead { mix(CUT_BAR, 0xffffff, 0.07) } else { [0.0; 4] };
                 if selected || (hovered && !dead) {
@@ -8358,6 +8364,37 @@ mod tests {
     /// rectangles never overlap the canvas.
     /// The inspector: icon tabs, the list / thumbnail toggle, chapter rows
     /// that seek, and a removed clip that selects itself for X to restore.
+    #[test]
+    fn keyframe_buttons_are_dead_on_all_intra_clips() {
+        // ProRes: every frame is a keyframe, so a keyframe step would be a
+        // frame step. The buttons dim, say why, and don't move the playhead.
+        let Some(_) = test_clip() else { return };
+        let clip = std::env::temp_dir().join("abner_app_test").join("intra.mov");
+        if !clip.exists() {
+            let ok = Command::new("ffmpeg")
+                .args(["-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=duration=2:size=320x180:rate=30"])
+                .args(["-c:v", "prores_ks", "-profile:v", "0"]).arg(&clip)
+                .status().map(|s| s.success()).unwrap_or(false);
+            assert!(ok, "failed to generate the ProRes clip");
+        }
+        let mut app = mk_app(&clip, 1);
+        assert!(tick_until(&mut app, Duration::from_secs(5), |a| a.started));
+        app.key(Key::Char('t'));
+        assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.cut.as_ref().is_some_and(|c| !c.scanning())));
+        app.playing = false;
+        assert!(app.cut.as_ref().unwrap().all_intra());
+        app.seek_all(1.0, true);
+        tick_until(&mut app, Duration::from_secs(3), |a| !a.seek_in_flight() && a.queued_seek.is_none());
+        for dir in [1, -1] {
+            let c = app.controls().into_iter().find(|c| matches!(c.action, Action::Cut(CutAction::Keyframe(d)) if d == dir)).expect("button");
+            assert_eq!(c.label, "Every frame is a keyframe");
+            let before = app.t;
+            app.mouse_down(c.r.x + c.r.w / 2.0, c.r.y + c.r.h / 2.0);
+            app.mouse_up();
+            assert_eq!(app.t, before, "a dead keyframe button moved the playhead");
+        }
+    }
+
     #[test]
     fn cut_inspector_tabs_toggle_chapters_seek_and_ghosts_select() {
         let Some(base) = test_clip() else { return };

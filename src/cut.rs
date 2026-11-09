@@ -451,6 +451,13 @@ impl Cut {
     }
 
     /// The keyframe strictly before / after `t`, for ⇧← / ⇧→.
+    /// Every frame is a keyframe (ProRes, DNxHD, MJPEG, all-intra H.264):
+    /// a keyframe step is a frame step, so the transport's keyframe buttons
+    /// are dead. False until the scan lands.
+    pub fn all_intra(&self) -> bool {
+        self.frames.len() > 1 && self.keys.len() >= self.frames.len()
+    }
+
     pub fn key_step(&self, t: f64, dir: i32) -> f64 {
         if dir > 0 {
             let i = self.keys.partition_point(|k| *k <= t + EPS);
