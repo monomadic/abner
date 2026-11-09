@@ -706,8 +706,9 @@ fn render(
         r.cancel.check()?;
         sessions.push(session);
     }
-    let source_format = if r.inputs.crops.is_empty() { PixelFormat::Rgba8 } else { PixelFormat::Rgb16 };
-    let format_plan = abner_processing::negotiation::FormatPlan::new(&mut sessions, source_format, PixelFormat::Rgba8)?;
+    // Decoder formats are discovered on the first native frame, then fixed for
+    // the segment. The display's RGBA8 format never becomes the processor input.
+    let mut format_plan: Option<abner_processing::negotiation::FormatPlan> = None;
     let [ow, oh] = dims;
     if ow < 2 || oh < 2 || ow > 8192 || oh > 8192 {
         return Err("Unsupported preview output dimensions".into());
@@ -728,14 +729,7 @@ fn render(
     // latest original at or before it instead of the original it replaces.
     let retimed = !same_rate(chain_rate(registry, &r.chain, fps)?, rational(fps));
     let mut last_out: Option<i64> = None;
-    let player = Player::spawn(
-        &r.info.path,
-        w,
-        h,
-        crate::probe::vt_accel(&r.info.codec),
-        r.info.rotation,
-        8 * 1024 * 1024,
-    )
+    let player = Player::spawn_native(&r.info.path, w, h, 8 * 1024 * 1024)
     .ok_or("Could not open preview decoder")?;
     // A frame preview is an isolated input, including for recurrent/batch models.
     // finish() lets implementations pad their own short input without replaying
@@ -815,11 +809,11 @@ fn render(
         }
         Ok(delivered)
     };
-    let read_frame = || -> Result<Option<(f64, Rgba)>, String> {
+    let read_frame = || -> Result<Option<(f64, crate::player::NativeFrame)>, String> {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             r.cancel.check()?;
-            if let Some(frame) = player.take_next() {
+            if let Some(frame) = player.take_next_native() {
                 return Ok(Some(frame));
             }
             if player.failed() {
@@ -840,7 +834,7 @@ fn render(
         if r.target.is_some() {
             let _ = tx.try_send(Event::Progress(r.generation, decoded, decode_count));
         }
-        let Some((source_pts, rgba)) = next.take() else {
+        let Some((source_pts, decoded_frame)) = next.take() else {
             break;
         };
         if r.end.is_some_and(|end| source_pts >= end - 1e-6) {
@@ -858,15 +852,20 @@ fn render(
             return Err("This preview currently requires constant-rate video".into());
         }
         if originals.len() >= count { return Err("Processor buffered too many frames for preview".into()); }
-        originals.insert(pts, (rgba.clone(), source_pts));
-        let mut input = VideoFrame {width:w as usize,height:h as usize,format:PixelFormat::Rgba8,pixels:FramePixels::Rgba8(rgba),pts,duration,time_base:[1,1_000_000]};
+        let mut input = abner_processing::color::from_decoded(&decoded_frame, pts, duration, [1,1_000_000])?;
+        // Before/after presentation is a separate display branch of the native frame.
+        let before = abner_processing::color::rgba8(&input)?;
+        originals.insert(pts, (before, source_pts));
         if !r.inputs.crops.is_empty() {
             let mut rgb = abner_processing::color::convert(input, PixelFormat::Rgb16)?.into_rgb16()?;
             crate::spatial::apply_crop(&mut rgb,&r.inputs.crops);
             input = rgb.into();
         }
+        if format_plan.is_none() {
+            format_plan = Some(abner_processing::negotiation::FormatPlan::new(&mut sessions, input.format, PixelFormat::Rgba8)?);
+        }
         let delivered = emit(
-            format_plan.process(
+            format_plan.as_ref().unwrap().process(
                 &mut sessions,
                 0,
                 vec![input],
@@ -881,8 +880,9 @@ fn render(
     }
     r.cancel.check()?;
     for i in 0..sessions.len() {
+        let Some(plan) = &format_plan else { break; };
         let delivered = emit(
-            format_plan.finish_stage(&mut sessions, i, &r.cancel, r.budget)?,
+            plan.finish_stage(&mut sessions, i, &r.cancel, r.budget)?,
             &mut originals,
         )?;
         if delivered && (r.target.is_some() || received.get() >= count) { return Ok(()); }
@@ -3515,6 +3515,28 @@ mod tests {
         assert!(panel.cancel.check().is_err());
     }
     #[test]
+    fn native_preview_preserves_yuv_and_low_rgb16_bits_through_buffered_sessions() {
+        use crate::native_decode_tests::{Fixture,Observe,reference};
+        let fixture=Fixture::new();let info=crate::probe::probe(&fixture.path).unwrap();
+        for format in [PixelFormat::Yuv422p10,PixelFormat::Rgb16] {
+            let frames=Arc::new(Mutex::new(Vec::new()));let mut registry=Registry::default();
+            registry.register(Box::new(Observe{format,frames:frames.clone()})).unwrap();
+            let request=Request {inputs:Default::default(),generation:1,chain:vec![("fixture.observe".into(),json!({}))],target:None,info:info.clone(),start:0.,end:None,cancel:Cancellation::default(),budget:DEFAULT_PREVIEW_BYTES};
+            let (tx,rx)=mpsc::sync_channel(FRAMES+2);render(&registry,&request,&tx,None,None).unwrap();
+            let mut displayed=0;while let Ok(Event::Frame(_,f))=rx.try_recv(){assert_eq!(f.before,f.after);displayed+=1;}assert_eq!(displayed,12);
+            let frames=frames.lock().unwrap();assert_eq!(frames.len(),12);
+            for (i,f) in frames.iter().enumerate() {
+                let expected=abner_processing::color::convert(reference(&fixture.path,i as u64),format).unwrap();
+                match (&f.pixels,expected.pixels) {
+                    (FramePixels::Yuv16(a),FramePixels::Yuv16(b))=>{assert_eq!(a,&b);assert!(a[0].iter().any(|v|v%4!=0));},
+                    (FramePixels::Rgb16(a),FramePixels::Rgb16(b))=>{assert_eq!(a,&b);assert!(a.iter().any(|v|v%257!=0));},
+                    _=>panic!("negotiated storage changed"),
+                }
+            }
+        }
+    }
+
+    #[test]
     fn preview_drains_buffered_tail_and_matches_fractional_rate_source() {
         let dir = std::env::temp_dir().join(format!(
             "abner-preview-{}-{}",
@@ -3586,7 +3608,7 @@ mod tests {
         assert_eq!(frames[0].pts, 0.0);
         assert!(frames.windows(2).all(|f| f[1].pts > f[0].pts));
         // A native RGBA-only session must survive the spatial/reporting wrappers
-        // and reach the display without RGB16 expansion or a new allocation.
+        // and reach the display without an intermediate RGB16 plugin contract.
         struct NativeRgba([usize; 2]);
         impl Session for NativeRgba {
             fn format_pairs(&self) -> Vec<abner_processor_api::FormatPair> { vec![abner_processor_api::FormatPair::same(PixelFormat::Rgba8)] }
@@ -3608,7 +3630,7 @@ mod tests {
         let native = Request { chain:vec![("native".into(),json!({}))], inputs:Default::default(),generation:10,target:None,info:info.clone(),start:0.,end:None,cancel:Cancellation::default(),budget:DEFAULT_PREVIEW_BYTES };
         render(&native_registry,&native,&tx,None,None).unwrap();
         let mut native_count=0;
-        while let Ok(Event::Frame(_,f))=rx.try_recv() { assert!(Arc::ptr_eq(&f.before,&f.after));native_count+=1; }
+        while let Ok(Event::Frame(_,f))=rx.try_recv() { assert_eq!(f.before,f.after);native_count+=1; }
         assert_eq!(native_count,6);
         // A budget too small for one native pair refuses, naming the config key.
         let starved = Request {

@@ -503,7 +503,13 @@ The normal executable supplies an empty registry to the library's `run` entry po
 made every plugin read as a quality loss): `processor_gui::render` decodes at the
 clip's display dimensions and `processors.preview_cache_mb` (default 1024) is the
 whole memory rule — paired frames per section, frames kept across the timeline.
-Still 8-bit RGBA in and out.
+Processing preview/export now use `Player::spawn_native` and `take_next_native`:
+FilmCraft planes, bit depth and color metadata stay native through the cache;
+shared format negotiation converts only at plugin/geometry/sink boundaries.
+Before/after display textures remain RGBA8. Ordinary playback/thumbnails keep
+the optimized display reader. Native processing requires matching source geometry;
+it never falls back to an 8-bit display fit. Cache accounting uses actual plane
+bytes with the existing minimum budget.
 **Retiming previews** (2026-11-01): a stage that changes the frame rate declares it
 with `Factory::output_rate(settings, input) -> Rate` (identity by default; a
 `[num, den]` rational) and emits frames on that grid in any time base (the host

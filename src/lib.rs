@@ -21,6 +21,8 @@ mod spatial;
 mod open;
 mod fc;
 mod player;
+#[cfg(test)]
+mod native_decode_tests;
 mod probe;
 mod media_metadata;
 mod media_packets;

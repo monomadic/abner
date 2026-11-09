@@ -1,5 +1,24 @@
 # abner — history
 
+## 2026-11-09 — Native decoder frames for processing
+
+Processing preview/export now retain FilmCraft's native planes and color metadata
+in the player's existing seek/cache machinery, then negotiate from the first
+native frame. RGBA conversion is a display/encoder boundary, not processor input.
+Legacy RGB16 plugins receive high-precision samples directly from decoded YUV.
+Arbitrary export crops use RGB16 to avoid odd-origin chroma phase mistakes.
+Native cache accounting uses plane bytes without increasing the cache floor;
+regular playback and thumbnail conversion remain unchanged. Native geometry
+mismatches fail explicitly instead of using a display fit.
+
+Synthetic 10-bit gradient checks cover cache identity, exact forward/back seeks,
+eviction accounting, reader shutdown, buffered native/RGB16 previews and
+ProRes exports with an odd-origin crop. Processor inputs match direct decoded
+reference planes/RGB16 exactly and retain low bits. Full library suite: 201
+passed, three ignored. These are pipeline checks, not GPU/HDR support or a
+live window visual validation.
+
+
 ## 2026-11-09 — Process renders survive a stage switched off and on
 
 `Panel::changed` used to wipe every rendered frame on any chain change, so a

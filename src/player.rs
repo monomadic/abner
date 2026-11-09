@@ -25,8 +25,9 @@
 //! software decoders as the fallback; the `use_vt` argument is advisory now.
 //!
 //! Decode is at NATIVE resolution: this is a comparison tool, pixels are the product. Frames are
-//! converted to RGBA in one fixed-point pass (`fc::fit_rgba_into`); a player asked for another
-//! size (thumbnails) decimates and resamples.
+//! retained as native FilmCraft planes for processing (`spawn_native`). Display-only readers
+//! convert to RGBA (`fc::fit_rgba_into`); thumbnail readers may decimate and resample.
+//! Both modes share the same bounded cache, seek, prefetch and delivery machinery.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -42,6 +43,22 @@ pub type Notify = Arc<dyn Fn() + Send + Sync>;
 /// A delivered frame: the cache keeps its own reference, so handing one
 /// out is a refcount, not a copy — and the consumer just drops it.
 pub type Rgba = Arc<Vec<u8>>;
+
+/// The decoder's original planes and metadata. Cloning shares their storage.
+pub type NativeFrame = Arc<filmcraft_frame::VideoFrame>;
+#[derive(Clone)]
+enum CachedFrame {
+    Display(Rgba),
+    Native(NativeFrame),
+}
+impl CachedFrame {
+    fn byte_size(&self) -> usize {
+        match self { Self::Display(p) => p.len(), Self::Native(f) => f.byte_size() }
+    }
+    fn display(&self) -> Option<Rgba> {
+        match self { Self::Display(p) => Some(p.clone()), Self::Native(_) => None }
+    }
+}
 
 /// Cache budget for players that only ever show a few frames (the launch
 /// backdrop, thumbnails, the split preview).
@@ -67,7 +84,7 @@ pub struct Player {
 /// frame at or after t" is known to be the TRUE next frame and not the
 /// far side of a gap), where the consumer is, and what it is waiting for.
 struct Cache {
-    frames: BTreeMap<i64, Rgba>,
+    frames: BTreeMap<i64, CachedFrame>,
     /// Contiguous decoded spans `[first, last]`, sorted, non-overlapping.
     /// A span grows as the reader decodes on; a seek starts a new one at
     /// its landing keyframe; two merge when decoding runs into cached
@@ -208,9 +225,9 @@ impl Cache {
         })
     }
 
-    fn remove(&mut self, key: i64) -> Option<Rgba> {
+    fn remove(&mut self, key: i64) -> Option<CachedFrame> {
         let f = self.frames.remove(&key)?;
-        self.bytes -= f.len();
+        self.bytes -= f.byte_size();
         if let Some(i) = self.run_of(key) {
             let (a, b) = self.runs[i];
             if a == b {
@@ -319,7 +336,8 @@ impl Shared {
         (buf, reused, lock_ms)
     }
 
-    fn recycle_buf(&self, buf: Rgba) {
+    fn recycle_buf(&self, buf: CachedFrame) {
+        let CachedFrame::Display(buf) = buf else { return; };
         if let Ok(buf) = Arc::try_unwrap(buf) {
             let mut pool = self.pool.lock().unwrap();
             if pool.len() < POOL_CAP {
@@ -353,12 +371,23 @@ impl Player {
         cache_bytes: usize,
     ) -> Option<Self> {
         let _ = (use_vt, rotation); // FilmCraft decides the decoder and applies the rotation
+        Self::spawn_mode(path, w, h, cache_bytes, false)
+    }
+
+    /// Processing reader: retain decoded planes, bit depth and color metadata.
+    /// Requires native geometry; no implicit display fit or 8-bit fallback.
+    pub fn spawn_native(path: &Path, w: u32, h: u32, cache_bytes: usize) -> Option<Self> {
+        Self::spawn_mode(path, w, h, cache_bytes, true)
+    }
+    fn spawn_mode(path: &Path, w: u32, h: u32, cache_bytes: usize, native: bool) -> Option<Self> {
         let (w, h) = (w.max(2), h.max(2));
         let cfg = ReaderCfg {
             path: path.to_path_buf(),
             w,
             h,
+            native,
         };
+        // Keep the existing cache floor; admission/eviction use actual plane bytes.
         let frame_bytes = (w as usize) * (h as usize) * 4;
         let shared = Arc::new(Shared {
             cache: Mutex::new(Cache {
@@ -539,7 +568,7 @@ impl Player {
                 return None;
             }
         };
-        let f = c.frames.get(&key)?.clone();
+        let f = c.frames.get(&key)?.display()?;
         c.took(key);
         self.shared.set_position(key);
         drop(c);
@@ -553,12 +582,26 @@ impl Player {
     pub fn take_next(&self) -> Option<(f64, Rgba)> {
         let mut c = self.shared.cache.lock().unwrap();
         let key = c.next_key()?;
-        let f = c.frames.get(&key)?.clone();
+        let f = c.frames.get(&key)?.display()?;
         c.took(key);
         self.shared.set_position(key);
         drop(c);
         self.shared.space.notify_all();
         Some((key as f64 * 1e-6, f))
+    }
+
+    /// Native counterpart to `take_next`, with identical seek/delivery semantics.
+    /// Only available on a reader created with `spawn_native`.
+    pub fn take_next_native(&self) -> Option<(f64, NativeFrame)> {
+        let mut c = self.shared.cache.lock().unwrap();
+        let key = c.next_key()?;
+        let CachedFrame::Native(frame) = c.frames.get(&key)? else { return None; };
+        let frame = frame.clone();
+        c.took(key);
+        self.shared.set_position(key);
+        drop(c);
+        self.shared.space.notify_all();
+        Some((key as f64 * 1e-6, frame))
     }
 
     /// Seconds into the clip: the pts of the frame currently on screen, or
@@ -567,7 +610,7 @@ impl Player {
     /// `take_upto`/`take_next` leave frames resident, so the frame on
     /// screen is normally still here). None once eviction took it.
     pub fn frame_at(&self, pts: f64) -> Option<Rgba> {
-        self.shared.cache.lock().unwrap().frames.get(&us(pts)).cloned()
+        self.shared.cache.lock().unwrap().frames.get(&us(pts))?.display()
     }
 
     #[allow(dead_code)]
@@ -627,6 +670,7 @@ struct ReaderCfg {
     path: PathBuf,
     w: u32,
     h: u32,
+    native: bool,
 }
 
 enum Flow {
@@ -651,7 +695,7 @@ fn reader(shared: &Arc<Shared>, cfg: &ReaderCfg) -> Result<(), String> {
         Some(s) => to_index(s.before(index as f64 * frame_s)),
         None => index,
     };
-    let frame_bytes = cfg.w as usize * cfg.h as usize * 4;
+    let frame_bytes = cfg.w as usize * cfg.h as usize * if cfg.native { 8 } else { 4 };
     let mut hw_noted = false;
     let hw0 = fc::hw_frames();
     let mut index: u64 = 0;
@@ -840,23 +884,29 @@ fn reader(shared: &Arc<Shared>, cfg: &ReaderCfg) -> Result<(), String> {
         if active_target.is_some_and(|t| key < t - SAME_FRAME_US) {
             seen_before_target = true;
         }
-        let prepare_start = profile.then(std::time::Instant::now);
-        let (mut buf, reused, pool_lock_ms) = shared.take_buf(frame_bytes, profile);
-        let prepare_ms = elapsed_ms(prepare_start);
-        let convert_start = profile.then(std::time::Instant::now);
-        fc::fit_rgba_into(&frame, Fit::Exact { w: cfg.w, h: cfg.h }, &mut buf);
-        let convert_ms = elapsed_ms(convert_start);
-        drop(frame);
-        if buf.len() != frame_bytes {
-            buf.resize(frame_bytes, 0);
-        }
+        let (buf, reused, pool_lock_ms, prepare_ms, convert_ms) = if cfg.native {
+            if frame.width != cfg.w || frame.height != cfg.h {
+                return Err("native processing requires decoded geometry to match the source; display resizing is not implicit".into());
+            }
+            (CachedFrame::Native(frame), false, 0., 0., 0.)
+        } else {
+            let prepare_start = profile.then(std::time::Instant::now);
+            let (mut buf, reused, pool_lock_ms) = shared.take_buf(frame_bytes, profile);
+            let prepare_ms = elapsed_ms(prepare_start);
+            let convert_start = profile.then(std::time::Instant::now);
+            fc::fit_rgba_into(&frame, Fit::Exact { w: cfg.w, h: cfg.h }, &mut buf);
+            let convert_ms = elapsed_ms(convert_start);
+            drop(frame);
+            if buf.len() != frame_bytes { buf.resize(frame_bytes, 0); }
+            (CachedFrame::Display(Arc::new(buf)), reused, pool_lock_ms, prepare_ms, convert_ms)
+        };
         let push_start = profile.then(std::time::Instant::now);
         let flow = push(shared, key, buf, active_target, seen_before_target);
         let push_ms = elapsed_ms(push_start);
         if profile {
-            let rgba_bytes = shared.cache.lock().unwrap().bytes;
+            let resident_bytes = shared.cache.lock().unwrap().bytes;
             let pool_capacity: usize = shared.pool.lock().unwrap().iter().map(Vec::capacity).sum();
-            eprintln!("seek-profile thread={:?} source={} frame={index} target={active_target:?} request_ms={request_ms:.3} prepare_ms={prepare_ms:.3} rgba_reused={reused} rgba_pool_lock_ms={pool_lock_ms:.3} convert_ms={convert_ms:.3} push_including_wait_ms={push_ms:.3} rgba_cache_bytes={} rgba_pool_capacity={} planar_cache_bytes={} planar_pool={:?}", std::thread::current().id(), cfg.path.display(), rgba_bytes, pool_capacity, filmcraft_codecs::gop::cached_bytes(), filmcraft_frame::pool::stats());
+            eprintln!("seek-profile thread={:?} source={} frame={index} target={active_target:?} request_ms={request_ms:.3} prepare_ms={prepare_ms:.3} rgba_reused={reused} rgba_pool_lock_ms={pool_lock_ms:.3} convert_ms={convert_ms:.3} push_including_wait_ms={push_ms:.3} resident_frame_bytes={} rgba_pool_capacity={} planar_cache_bytes={} planar_pool={:?}", std::thread::current().id(), cfg.path.display(), resident_bytes, pool_capacity, filmcraft_codecs::gop::cached_bytes(), filmcraft_frame::pool::stats());
         }
         match flow {
             Flow::Stop => return Ok(()),
@@ -875,11 +925,11 @@ fn reader(shared: &Arc<Shared>, cfg: &ReaderCfg) -> Result<(), String> {
 fn push(
     shared: &Arc<Shared>,
     key: i64,
-    buf: Vec<u8>,
+    buf: CachedFrame,
     active_target: Option<i64>,
     seen_before: bool,
 ) -> Flow {
-    let need = buf.len();
+    let need = buf.byte_size();
     let mut c = shared.cache.lock().unwrap();
     loop {
         if shared.closed.load(Ordering::Relaxed) {
@@ -902,8 +952,8 @@ fn push(
         c = shared.space.wait(c).unwrap();
     }
     let dry = c.deliverable() == 0;
-    c.bytes += buf.len();
-    c.frames.insert(key, Arc::new(buf));
+    c.bytes += need;
+    c.frames.insert(key, buf);
     c.note_run(key);
     verify_target(&mut c, key, active_target, seen_before);
     if c.landing {
@@ -953,6 +1003,42 @@ mod tests {
     use super::*;
     use std::process::Command;
     use std::time::Instant;
+
+    #[test]
+    fn native_cache_keeps_ten_bit_planes_and_seek_identity_without_rgba_buffers() {
+        let fixture=crate::native_decode_tests::Fixture::new();
+        let p=Player::spawn_native(&fixture.path,64,64,1).unwrap();
+        assert!(wait_buffered(&p,1,Duration::from_secs(5)));
+        assert!(p.take_next().is_none(), "native frames cannot silently become display buffers");
+        let (pts,frame)=p.take_next_native().unwrap();assert_eq!(pts,0.);
+        assert_eq!(frame.color,filmcraft_color::ColorInfo::REC709);
+        assert_eq!(frame.par,(1,1));
+        let filmcraft_frame::PixelData::Yuv16{planes,bits,..}=&frame.data else{panic!("native frame lost YUV storage")};
+        assert_eq!(*bits,10);assert!(planes[0].iter().any(|v|v%4!=0));
+        p.seek(pts,true);let (_,again)=p.take_next_native().unwrap();assert!(Arc::ptr_eq(&frame,&again));
+        assert!(p.shared.pool.lock().unwrap().is_empty());
+        {
+            let mut cache=p.shared.cache.lock().unwrap();
+            assert_eq!(cache.bytes,cache.frames.values().map(CachedFrame::byte_size).sum::<usize>());
+            assert!(cache.frames.values().all(|f|matches!(f,CachedFrame::Native(_))));
+            assert!(cache.bytes<=cache.budget);
+            let key=cache.farthest().unwrap();let before=cache.bytes;
+            let removed=cache.remove(key).unwrap();assert_eq!(cache.bytes+removed.byte_size(),before);
+        }
+        p.seek(8.*1001./24000.,true);assert!(wait_buffered(&p,1,Duration::from_secs(5)));
+        let (pts,_) = p.take_next_native().unwrap();assert!((pts-8.*1001./24000.).abs()<1e-6);
+        p.seek(2.*1001./24000.,true);assert!(wait_buffered(&p,1,Duration::from_secs(5)));
+        let (pts,_) = p.take_next_native().unwrap();assert!((pts-2.*1001./24000.).abs()<1e-6);
+        let weak=Arc::downgrade(&p.shared);drop(p);
+        let deadline=Instant::now()+Duration::from_secs(5);
+        while weak.upgrade().is_some() && Instant::now()<deadline {thread::sleep(Duration::from_millis(2));}
+        assert!(weak.upgrade().is_none(),"native reader must wake and stop on drop");
+        let resized=Player::spawn_native(&fixture.path,32,32,1).unwrap();
+        let deadline=Instant::now()+Duration::from_secs(5);
+        while !resized.failed() && Instant::now()<deadline {thread::sleep(Duration::from_millis(2));}
+        assert!(resized.failed(),"native geometry mismatch must fail instead of using an 8-bit display fit");
+        assert!(resized.take_next_native().is_none());
+    }
 
     /// Generate (once) a small h264 test clip. Returns None when ffmpeg
     /// isn't on PATH (tests skip quietly).
@@ -1015,7 +1101,7 @@ mod tests {
             gap_refill: false,
         };
         for key in [100_000, 110_000, 120_000, 200_000, 210_000, 220_000] {
-            c.frames.insert(key, Arc::new(vec![0]));
+            c.frames.insert(key, CachedFrame::Display(Arc::new(vec![0])));
         }
         assert_eq!(c.upto_key(220_000), Some(120_000));
         c.took(120_000);

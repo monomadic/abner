@@ -3219,7 +3219,7 @@ pub(crate) fn pipeline_export_with_inputs(
     active: &Mutex<Vec<abner_processor_api::Cancellation>>,
     mut emit: impl FnMut(crate::export_page::Rendered) -> Result<(), String>,
 ) -> Result<()> {
-    use abner_processor_api::{VideoFrame, FramePixels, PixelFormat, InputRequirement, Role};
+    use abner_processor_api::{VideoFrame, PixelFormat, InputRequirement, Role};
     inputs.validate_geometry(info.width,info.height).map_err(anyhow::Error::msg)?;
     ensure!(crop.is_none() || inputs.crops.is_empty(), "Use either the timeline crop or an export crop");
     validate_ranges(keeps)?;
@@ -3316,18 +3316,9 @@ pub(crate) fn pipeline_export_with_inputs(
             );
             sessions.push(session);
         }
-        let source_format = if inputs.crops.is_empty() { PixelFormat::Rgba8 } else { PixelFormat::Rgb16 };
         let sink_format = if prores { PixelFormat::Yuv422p10 } else { PixelFormat::Rgba8 };
-        let format_plan = abner_processing::negotiation::FormatPlan::new(&mut sessions, source_format, sink_format)
-            .map_err(anyhow::Error::msg)?;
-        let player = crate::player::Player::spawn(
-            &info.path,
-            info.width,
-            info.height,
-            crate::probe::vt_accel(&info.codec),
-            info.rotation,
-            16 * 1024 * 1024,
-        )
+        let mut format_plan: Option<abner_processing::negotiation::FormatPlan> = None;
+        let player = crate::player::Player::spawn_native(&info.path, info.width, info.height, 16 * 1024 * 1024)
         .context("Could not open export decoder")?;
         player.seek(start, true);
         let mut previous_end: Option<f64> = None;
@@ -3417,11 +3408,11 @@ pub(crate) fn pipeline_export_with_inputs(
         // A rounded nominal duration cannot join independently rounded PTS values:
         // 24 fps alternates between 41,666 and 41,667 microseconds. Look ahead
         // once, as the Process preview does, so every input ends at the next PTS.
-        let read_next = || -> Result<Option<(f64, crate::player::Rgba)>> {
+        let read_next = || -> Result<Option<(f64, crate::player::NativeFrame)>> {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             loop {
                 cancel.check().map_err(anyhow::Error::msg)?;
-                if let Some(frame) = player.take_next() {
+                if let Some(frame) = player.take_next_native() {
                     return Ok(Some(frame));
                 }
                 ensure!(!player.failed(), "Export decoder failed");
@@ -3437,7 +3428,7 @@ pub(crate) fn pipeline_export_with_inputs(
         };
         let nominal = (1e6 / info.fps).round().max(1.) as i64;
         let mut next = read_next()?;
-        while let Some((pts, rgba)) = next.take() {
+        while let Some((pts, decoded_frame)) = next.take() {
             cancel.check().map_err(anyhow::Error::msg)?;
             if pts >= end - 1e-6 {
                 break;
@@ -3451,22 +3442,32 @@ pub(crate) fn pipeline_export_with_inputs(
                 duration > 0 && (duration - nominal).abs() < 2000,
                 "Export currently requires constant-rate input"
             );
-            let pixels = if cx == 0 && cy == 0 && cw == info.width && ch == info.height { rgba } else {
-                Arc::new((cy..cy + ch).flat_map(|y| {
-                    let start = ((y * info.width + cx) * 4) as usize;
-                    rgba[start..start + (cw * 4) as usize].iter().copied()
-                }).collect())
-            };
-            let mut f = VideoFrame { width:cw as usize, height:ch as usize, format:PixelFormat::Rgba8,
-                pixels:FramePixels::Rgba8(pixels), pts:timestamp, duration, time_base:[1,1_000_000] };
+            let mut f = abner_processing::color::from_decoded(&decoded_frame, timestamp, duration, [1,1_000_000])
+                .map_err(anyhow::Error::msg)?;
+            if cx != 0 || cy != 0 || cw != info.width || ch != info.height {
+                // Arbitrary crop origins can split a chroma sample. Crop in RGB16
+                // rather than inventing chroma phase or reducing to display depth.
+                let mut rgb = abner_processing::color::convert(f, PixelFormat::Rgb16)
+                    .and_then(VideoFrame::into_rgb16).map_err(anyhow::Error::msg)?;
+                rgb.pixels = (cy..cy + ch).flat_map(|y| {
+                    let start = ((y * info.width + cx) * 3) as usize;
+                    rgb.pixels[start..start + (cw * 3) as usize].iter().copied()
+                }).collect();
+                rgb.width = cw as usize; rgb.height = ch as usize;
+                f = rgb.into();
+            }
             if !inputs.crops.is_empty() {
                 let mut rgb = abner_processing::color::convert(f, PixelFormat::Rgb16)
                     .and_then(VideoFrame::into_rgb16).map_err(anyhow::Error::msg)?;
                 crate::spatial::apply_crop(&mut rgb,&inputs.crops);
                 f = rgb.into();
             }
+            if format_plan.is_none() {
+                format_plan = Some(abner_processing::negotiation::FormatPlan::new(&mut sessions, f.format, sink_format)
+                    .map_err(anyhow::Error::msg)?);
+            }
             accept(
-                format_plan.process_native(
+                format_plan.as_ref().unwrap().process_native(
                     &mut sessions,
                     0,
                     vec![f],
@@ -3477,8 +3478,9 @@ pub(crate) fn pipeline_export_with_inputs(
             )?;
         }
         for i in 0..sessions.len() {
+            let Some(plan) = &format_plan else { break; };
             accept(
-                format_plan.finish_stage_native(
+                plan.finish_stage_native(
                     &mut sessions,
                     i,
                     cancel,

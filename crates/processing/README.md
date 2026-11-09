@@ -84,11 +84,22 @@ shared host converters only when needed. Matching ProRes planes are moved into
 the encoder if uniquely owned, otherwise copied without a color transform.
 This is not a general GPU zero-copy claim.
 
-Abner's preview and export negotiate from the player's existing RGBA8 boundary;
-preview and HEVC end in RGBA8, ProRes in YUV422p10. The player still prepares
-RGBA8 for display, so high-bit-depth decode preservation currently applies to
-the standalone native media runner. Timeline crops/downsize are host RGB16
-operations, and spatial bindings require an RGB16-capable plugin contract.
+Abner's processing preview and export now negotiate from the decoder's native
+FilmCraft frames, preserving supported YUV planes, bit depth and color metadata.
+The player offers `spawn_native`/`take_next_native` using the same seek/cache
+machinery as display playback. Native cache admission/eviction counts actual
+plane bytes and keeps the existing minimum cache budget; no RGBA buffers are
+created by this reader. The shared converter derives plugin input directly from
+these frames. Preview and HEVC end in RGBA8, ProRes in YUV422p10, and before/after
+display conversion is a separate branch.
+
+Ordinary playback/thumbnails retain their optimized display reader; this change
+does not add GPU surfaces or HDR processing. Native processing requires decoded
+geometry to match the probed source dimensions, rejecting an implicit display
+fit. FilmCraft applies supported container rotation before delivery. Arbitrary
+export crops (including odd chroma origins), timeline crops and downsize remain
+explicit host RGB16 operations without an 8-bit intermediate. Spatial bindings
+require an RGB16-capable plugin contract.
 `Rgb16Boundary` adapts a native-only plugin behind an RGB16 host operation.
 These explicit boundaries preserve existing behavior while ordinary native
 chains avoid unnecessary RGBA8↔RGB16 expansion/reduction.
