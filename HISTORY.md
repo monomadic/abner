@@ -1,5 +1,14 @@
 # abner — history
 
+## 2026-11-10 — Processor canvas format header
+
+Replaced the canvas's frame-state title and filename with a black header showing
+source → rendered resolution, including frame rates when the chain retimes.
+Source / Rendered sits at the right, disabled until a preview is available;
+the image and its pan/zoom area begin below the header. Until rendering establishes
+the output dimensions, the summary shows an em dash for the output.
+
+
 ## 2026-11-09 — Matroska chapter tags survive an export
 
 Tags aimed at a chapter (`TagChapterUID`) were dropped on every export because the

@@ -30,6 +30,7 @@ use std::{
 /// `processors.preview_cache_mb`'s default, for a `Panel` nobody configured.
 pub const DEFAULT_PREVIEW_BYTES: usize = 1024 * 1024 * 1024;
 const FRAMES: usize = 24;
+const CANVAS_HEADER_H: f32 = 36.0;
 const DIM: [f32; 4] = [0.43, 0.43, 0.43, 1.0];
 const BLUE: [f32; 4] = [0.04, 0.33, 0.7, 1.0];
 /// Compact processor rows (Figma rail): 30px rows on a 3px gap, inside a
@@ -1794,37 +1795,35 @@ impl Panel {
         let r = Self::right(vp);
         RectPx {
             x: l,
-            y: HEADER_H,
+            y: HEADER_H + CANVAS_HEADER_H,
             w: (vp.0 - l - r).max(1.0),
-            h: (Self::transport_y(vp) - 105.0 - HEADER_H).max(1.0),
+            h: (Self::transport_y(vp) - 105.0 - HEADER_H - CANVAS_HEADER_H).max(1.0),
         }
     }
     /// The Source | Rendered switch at the viewer's top-right, level with
-    /// the title. Tab flips the same flag; the zoom is shared, so both sides
+    /// the format summary. Tab flips the same flag; the zoom is shared, so both sides
     /// show the same region of the picture.
     fn compare_switch(vp: (f32, f32)) -> RectPx {
         let v = Self::viewer(vp);
-        RectPx { x: v.x + v.w - 16.0 - 168.0, y: 56.0, w: 168.0, h: 24.0 }
+        RectPx { x: v.x + v.w - 12.0 - 144.0, y: HEADER_H + 6.0, w: 144.0, h: 24.0 }
     }
     fn compare_half(vp: (f32, f32), rendered: bool) -> RectPx {
         let s = Self::compare_switch(vp);
         RectPx { x: s.x + if rendered { s.w / 2.0 } else { 0.0 }, w: s.w / 2.0, ..s }
     }
     fn draw_compare_switch(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
-        if self.shown().is_none() {
-            return;
-        }
+        let available = self.shown().is_some();
         let s = Self::compare_switch(vp);
         items.push(Item::Rect(RectItem { radius: 6.0, border_w: 1.0,
             border_color: hex_color(0x303235), ..RectItem::new(s, hex_color(0x1a1a1a)) }));
         for (rendered, label) in [(false, "Source"), (true, "Rendered")] {
             let h = Self::compare_half(vp, rendered);
-            let on = self.show_rendered == rendered;
+            let on = available && self.show_rendered == rendered;
             if on {
                 let inset = RectPx { x: h.x + 2.0, y: h.y + 2.0, w: h.w - 4.0, h: h.h - 4.0 };
                 items.push(Item::Rect(RectItem { radius: 4.0, ..RectItem::new(inset, hex_color(0x303235)) }));
             }
-            let ink = if on { 0xd1d1d1 } else if hit(h, self.cursor.0, self.cursor.1) { 0xffffff } else { 0x919191 };
+            let ink = if !available { 0x595959 } else if on { 0xd1d1d1 } else if hit(h, self.cursor.0, self.cursor.1) { 0xffffff } else { 0x919191 };
             ui_label(items, h.x + h.w / 2.0, h.y + h.h / 2.0, 10.0, hex_color(ink), label, Align::Center, h.w - 8.0);
         }
     }
@@ -2596,18 +2595,6 @@ impl Panel {
         self.draw_rail(items, vp);
         let v = Self::viewer(vp);
         let cached = self.shown().filter(|_| self.show_rendered);
-        // A retimed chain's new frames say so, and name the original the
-        // A side is holding for them.
-        let new_frame = cached.is_some_and(|f| (f.pts - f.source_pts).abs() > 0.5 / self.rate);
-        let mut title = match (cached.is_some(), new_frame) {
-            (true, true) => "NEW FRAME".to_string(),
-            (true, false) => "RENDERED FRAME".to_string(),
-            _ => "SOURCE FRAME".to_string(),
-        };
-        if self.retimed {
-            title = format!("{title} · {} → {} FPS", fps_label(self.fps), fps_label(self.rate));
-        }
-        let title = title.as_str();
         if let Some(f) = cached {
             text(
                 items,
@@ -2651,16 +2638,26 @@ impl Panel {
             p1: 0.0,
         });
         board.recess(items);
-        text(
-            items,
-            v.x + 16.0,
-            61.0,
-            11.0,
-            title,
-            if cached.is_some() { BLUE } else { DIM },
-            (v.w - 32.0).max(1.0),
-        );
-        text(items, v.x + 16.0, 78.0, 10.0, &self.filename, DIM, (v.w - 32.0).max(1.0));
+        items.push(Item::Clip(Some(r)));
+        let header = RectPx { x: v.x, y: HEADER_H, w: v.w, h: CANVAS_HEADER_H };
+        items.push(Item::Rect(RectItem::new(header, hex_color(0x000000))));
+        let resolution = |dims: [u32; 2]| match dims {
+            [3840, 2160] | [4096, 2160] => "4k".to_owned(),
+            [7680, 4320] => "8k".to_owned(),
+            [w, h] if w as u64 * 9 == h as u64 * 16 => format!("{h}p"),
+            [w, h] => format!("{w}×{h}"),
+        };
+        let describe = |dims| {
+            let size = resolution(dims);
+            if self.retimed { format!("{size} {}fps", fps_label(self.fps)) } else { size }
+        };
+        let output = self.shown().map_or_else(|| "—".to_owned(), |f| {
+            let size = resolution(f.output);
+            if self.retimed { format!("{size} {}fps", fps_label(self.rate)) } else { size }
+        });
+        ui_label(items, v.x + 12.0, header.y + header.h / 2.0, 10.0,
+            hex_color(0xa3a5a8), &format!("{} → {output}", describe(self.source_dims)),
+            Align::Left, (Self::compare_switch(vp).x - v.x - 24.0).max(1.0));
         self.draw_compare_switch(items, vp);
         items.push(Item::Clip(Some(r)));
         self.draw_progress(items, vp);
@@ -4270,7 +4267,7 @@ mod tests {
             let canvas = Panel::viewer(vp);
             assert_eq!(canvas.x, Panel::left(vp));
             assert_eq!(canvas.x + canvas.w, vp.0 - Panel::right(vp));
-            assert_eq!(canvas.y, HEADER_H);
+            assert_eq!(canvas.y, HEADER_H + CANVAS_HEADER_H);
             assert!(canvas.y + canvas.h < Panel::transport_y(vp) - 78.0);
         }
     }
