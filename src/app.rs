@@ -1849,6 +1849,10 @@ impl App {
         self.playing = false;
         Ok(())
     }
+    /// `--processor-render`: what the panel's Render button does, for captures.
+    pub fn render_processor_frame(&mut self) {
+        self.processors.render_frame();
+    }
     fn apply_processor_transport(&mut self) {
         if let Some((id,key,crop))=self.processors.editor_request.take() {self.begin_editor(crop,Some((id,key)));return}
         if std::mem::take(&mut self.processors.toggle_play) {

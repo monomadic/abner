@@ -1006,6 +1006,8 @@ pub struct Panel {
     feedback: Option<StageFeedback>,
     render_result: Option<bool>,
     show_rendered: bool,
+    /// `--processor-render`: a Render press waiting for the first tick.
+    render_queued: bool,
     render_elapsed: Duration,
     preview_count: u64,
     changed_count: u64,
@@ -1075,6 +1077,7 @@ impl Default for Panel {
             feedback: None,
             render_result: None,
             show_rendered: true,
+            render_queued: false,
             render_elapsed: Duration::ZERO,
             preview_count: 0,
             changed_count: 0,
@@ -1379,6 +1382,11 @@ impl Panel {
         self.request_preview();
         self.render_segment = true;
         self.seek = Some(self.segment_start);
+    }
+    /// Render once the first tick has bound the clip: binding it resets
+    /// the panel, which would drop a request made before.
+    pub(crate) fn render_frame(&mut self) {
+        self.render_queued = true;
     }
     fn request_preview(&mut self) {
         self.render_segment = false;
@@ -1743,6 +1751,35 @@ impl Panel {
             h: (Self::transport_y(vp) - 105.0 - HEADER_H).max(1.0),
         }
     }
+    /// The Source | Rendered switch at the viewer's top-right, level with
+    /// the title. Tab flips the same flag; the zoom is shared, so both sides
+    /// show the same region of the picture.
+    fn compare_switch(vp: (f32, f32)) -> RectPx {
+        let v = Self::viewer(vp);
+        RectPx { x: v.x + v.w - 16.0 - 168.0, y: 56.0, w: 168.0, h: 24.0 }
+    }
+    fn compare_half(vp: (f32, f32), rendered: bool) -> RectPx {
+        let s = Self::compare_switch(vp);
+        RectPx { x: s.x + if rendered { s.w / 2.0 } else { 0.0 }, w: s.w / 2.0, ..s }
+    }
+    fn draw_compare_switch(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
+        if self.shown().is_none() {
+            return;
+        }
+        let s = Self::compare_switch(vp);
+        items.push(Item::Rect(RectItem { radius: 6.0, border_w: 1.0,
+            border_color: hex_color(0x303235), ..RectItem::new(s, hex_color(0x1a1a1a)) }));
+        for (rendered, label) in [(false, "Source"), (true, "Rendered")] {
+            let h = Self::compare_half(vp, rendered);
+            let on = self.show_rendered == rendered;
+            if on {
+                let inset = RectPx { x: h.x + 2.0, y: h.y + 2.0, w: h.w - 4.0, h: h.h - 4.0 };
+                items.push(Item::Rect(RectItem { radius: 4.0, ..RectItem::new(inset, hex_color(0x303235)) }));
+            }
+            let ink = if on { 0xd1d1d1 } else if hit(h, self.cursor.0, self.cursor.1) { 0xffffff } else { 0x919191 };
+            ui_label(items, h.x + h.w / 2.0, h.y + h.h / 2.0, 10.0, hex_color(ink), label, Align::Center, h.w - 8.0);
+        }
+    }
     fn progress_button(vp: (f32, f32)) -> RectPx {
         let v = Self::viewer(vp);
         RectPx { x: v.x + v.w - 119.0, y: Self::transport_y(vp) - 70.0, w: 91.0, h: 26.0 }
@@ -2021,6 +2058,10 @@ impl Panel {
             if self.busy { self.cancel_preview(); } else { self.request_preview(); }
             return true;
         }
+        if self.shown().is_some() && hit(Self::compare_switch(vp), x, y) {
+            self.show_rendered = hit(Self::compare_half(vp, true), x, y);
+            return true;
+        }
         if x < Self::left(vp) {
             let (grip, _) = self.detail(vp);
             if grip.h > 0.0 && hit(grip, x, y) {
@@ -2204,6 +2245,9 @@ impl Panel {
         if self.context.as_ref() != Some(&context) {
             self.context = Some(context);
             self.changed();
+        }
+        if std::mem::take(&mut self.render_queued) {
+            self.request_preview();
         }
         self.update_rate(info);
         if self.dirty.is_some() && self.editing.is_none() && self.preset_name.is_none() {
@@ -2568,6 +2612,7 @@ impl Panel {
             (v.w - 32.0).max(1.0),
         );
         text(items, v.x + 16.0, 78.0, 10.0, &self.filename, DIM, (v.w - 32.0).max(1.0));
+        self.draw_compare_switch(items, vp);
         items.push(Item::Clip(Some(r)));
         self.draw_progress(items, vp);
         self.draw_transport(items, vp);
@@ -2992,6 +3037,14 @@ mod tests {
         assert!(p.show_rendered);
         assert!(p.seek.is_none(), "A/B does not seek or switch sources");
         let vp = (1280.0, 800.0);
+        // The on-canvas switch sets the same flag as Tab.
+        let source = Panel::compare_half(vp, false);
+        assert!(p.click(source.x + 5.0, source.y + 5.0, vp));
+        assert!(!p.show_rendered);
+        let rendered = Panel::compare_half(vp, true);
+        assert!(p.click(rendered.x + 5.0, rendered.y + 5.0, vp));
+        assert!(p.show_rendered);
+        assert!(p.seek.is_none() && p.dirty.is_none(), "the switch neither seeks nor renders");
         let button = Panel::progress_button(vp);
         p.click(button.x + 5.0, button.y + 5.0, vp);
         assert!(p.dirty.is_some(), "the panel's Render button requests a preview");

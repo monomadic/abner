@@ -177,7 +177,9 @@ from one to the other, keeping its number.
   and its shifted brace) walk the header tabs in `ModeSelector::ORDER` without
   wrapping (`cycle_workspace_mode`). On the Process page `[`/`]` walk the
   sources, `+` duplicates, ←/→ step a frame (`Panel::key`); `R` / the footer's
-  Render frame button renders.
+  Render frame button renders; Tab or the canvas's Source | Rendered switch
+  (`compare_switch`, shown once a frame is rendered here) flips the picture at the
+  shared zoom, and `--processor-render` renders on open for captures.
   ⌘W (`Key::Close`, from winit's `ModifiersChanged` state) closes the focused clip
   (`close_active`): survivors shift down a slot and are exact-seeked to the current `t`
   so each re-delivers into its new texture slot; `started` is NOT reset (the seek lands

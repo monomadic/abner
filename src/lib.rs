@@ -69,9 +69,11 @@ config: abner.default.toml (built in) overlaid by the first of
 processor previews:
   --processor ID                    open the runtime settings and preview panel
   --processor-settings JSON         optional initial settings object
+  --processor-render                render the current frame on open (captures)
   --export                          open the minimal Export workspace
   --process                         open the Process workspace
   R                                 preview current frame in Process
+  Tab                               flip the Process canvas between source and rendered
   Shift-Left / Shift-Right           previous / next rendered frame
 
 composition probes (no window):
@@ -153,6 +155,7 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
     let mut process_workspace = false;
     let mut export_workspace = false;
     let mut processor_settings = serde_json::json!({});
+    let mut processor_render = false;
     // The Sources sidebar hidden, as the header toggle leaves it: for captures.
     let mut no_sources = false;
     let mut sources_width: Option<f32> = None;
@@ -175,6 +178,8 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
                     .ok_or_else(|| anyhow::anyhow!("--processor needs a registered ID"))?
                     .clone(),
             );
+        } else if a == "--processor-render" {
+            processor_render = true;
         } else if a == "--processor-settings" {
             processor_settings = serde_json::from_str(
                 it.next()
@@ -296,6 +301,7 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
     if let Some(id) = processor {
         app.start_processor(&id, processor_settings)
             .map_err(anyhow::Error::msg)?;
+        if processor_render { app.render_processor_frame(); }
     }
     if export_workspace { app.select_workspace_mode(5); }
     app.set_recent(recent::load());
