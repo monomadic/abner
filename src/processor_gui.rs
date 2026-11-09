@@ -1001,6 +1001,11 @@ pub struct Panel {
     render_segment: bool,
     context: Option<(std::path::PathBuf, u64, Option<u64>)>,
     frames: Vec<Preview>,
+    /// The chain `frames` was rendered through (`chain_key`), and earlier
+    /// chains' frames: switching a stage off and on again, or reselecting,
+    /// brings its renders back. Shares `budget` with `frames`, oldest out.
+    frames_key: String,
+    stash: Vec<(String, Vec<Preview>)>,
     status: String,
     busy: bool,
     feedback: Option<StageFeedback>,
@@ -1072,6 +1077,8 @@ impl Default for Panel {
             render_segment: false,
             context: None,
             frames: vec![],
+            frames_key: String::new(),
+            stash: vec![],
             status: String::new(),
             busy: false,
             feedback: None,
@@ -1197,7 +1204,6 @@ impl Panel {
             worker.cancel();
         }
         self.generation += 1;
-        self.frames.clear();
         self.busy = false;
         self.feedback = None;
         self.render_result = None;
@@ -1208,7 +1214,49 @@ impl Panel {
         if let Some(saved) = self.saved.get_mut(self.selected) {
             *saved = self.settings.clone();
         }
-        self.status = "Render the current frame to inspect the enabled chain.".into();
+        let key = self.chain_key();
+        let old = std::mem::replace(&mut self.frames_key, key.clone());
+        let frames = std::mem::take(&mut self.frames);
+        if old != key {
+            if !frames.is_empty() {
+                self.stash.retain(|(k, _)| *k != old);
+                self.stash.push((old, frames));
+            }
+            if let Some(at) = self.stash.iter().position(|(k, _)| *k == key) {
+                self.frames = self.stash.remove(at).1;
+            }
+        } else {
+            self.frames = frames;
+        }
+        Self::trim_stash(&mut self.stash, Self::frame_bytes(&self.frames), self.budget);
+        self.status = if self.frames.is_empty() {
+            "Render the current frame to inspect the enabled chain.".into()
+        } else {
+            format!("{} rendered frames kept for this chain", self.frames.len())
+        };
+    }
+    /// Everything a render's pixels depend on: the previewed chain with its
+    /// settings, the spatial inputs and crops, and the source and its edits.
+    fn chain_key(&self) -> String {
+        let bindings: Vec<_> = self.inputs.bindings.iter().flat_map(|(stage, b)| {
+            b.iter().map(move |(k, v)| (stage, k, v.dimensions, v.crop, v.revision,
+                v.mask.as_ref().map(|m| Arc::as_ptr(m) as usize)))
+        }).collect();
+        format!("{}|{bindings:?}|{:?}|{:?}|{}",
+            serde_json::to_string(&self.chain()).unwrap_or_default(),
+            self.inputs.crops, self.context, self.input_owner)
+    }
+    fn frame_bytes(frames: &[Preview]) -> usize {
+        frames.iter().map(|f| f.before.len() + f.after.len()).sum()
+    }
+    /// Drop the oldest stashed chains until they, the live frames and
+    /// `extra` more bytes fit the preview budget.
+    fn trim_stash(stash: &mut Vec<(String, Vec<Preview>)>, live: usize, budget: usize) {
+        while !stash.is_empty()
+            && live + stash.iter().map(|(_, f)| Self::frame_bytes(f)).sum::<usize>() > budget
+        {
+            stash.remove(0);
+        }
     }
     fn toggle(&mut self) {
         self.dragging = None;
@@ -2298,6 +2346,7 @@ impl Panel {
                         self.frames
                             .retain(|old| (old.pts - f.pts).abs() > 0.5 * f.duration);
                         let needed = f.before.len() + f.after.len();
+                        Self::trim_stash(&mut self.stash, Self::frame_bytes(&self.frames) + needed, self.budget);
                         while !self.frames.is_empty()
                             && self
                                 .frames
@@ -2788,11 +2837,18 @@ impl Panel {
             format!("{title} · {:.1}s", elapsed.as_secs_f64())
         } else { title.into() };
         ui_label(items, r.x + 12.0, r.y + 16.0, 11.0, ink, &heading, Align::Left, (r.w - 128.0).max(1.0));
-        // The control is a bare label (the reference draws no box): grey at
-        // rest, white under the pointer, the rendering amber while it cancels.
+        // The panel's primary action: a filled blue button that lifts under
+        // the pointer; while rendering it turns into an amber-outlined Cancel.
         let control = Self::progress_button(vp);
         let hover = hit(control, self.cursor.0, self.cursor.1);
-        let control_ink = hex_color(if self.busy { RENDERING } else if hover { 0xffffff } else { 0x919191 });
+        let (fill, border, control_ink) = if self.busy {
+            (hex_color(if hover { 0x2a2219 } else { 0x1a1612 }), hex_color(RENDERING), hex_color(RENDERING))
+        } else {
+            let blue = if hover { 0x2b8cf0 } else { 0x1580de };
+            (hex_color(blue), hex_color(blue), hex_color(0xffffff))
+        };
+        items.push(Item::Rect(RectItem { radius: 5.0, border_w: 1.0, border_color: border,
+            ..RectItem::new(control, fill) }));
         ui_label(items, control.x + control.w / 2.0, control.y + control.h / 2.0, 11.0,
             control_ink, if self.busy { "Cancel" } else { "Render" }, Align::Center, control.w - 12.0);
         let mut line = phase;
@@ -2943,6 +2999,33 @@ mod tests {
         p.toggle_enabled(0);
         p.close();
         assert!(!p.animating(), "hidden controls never keep the loop hot");
+    }
+    #[test]
+    fn switching_a_stage_off_and_on_keeps_its_rendered_frames() {
+        let mut p = Panel::new(registry());
+        p.enter();
+        p.toggle_enabled(0);
+        p.frames = vec![mark(0.0), mark(1.0)];
+        p.toggle_enabled(0);
+        assert!(p.frames.is_empty(), "the stage-off chain has no renders of its own");
+        p.toggle_enabled(0);
+        assert_eq!(p.frames.len(), 2, "back on: the same chain's frames return");
+        p.settings["$probe"] = json!(1);
+        p.changed();
+        assert!(p.frames.is_empty(), "new settings never show the old pixels");
+        p.settings.as_object_mut().unwrap().remove("$probe");
+        p.changed();
+        assert_eq!(p.frames.len(), 2, "settings put back are the same chain again");
+        p.set_budget(16 * 4);
+        p.settings["$probe"] = json!(2);
+        p.changed();
+        p.frames = vec![mark(0.0), mark(1.0)];
+        p.changed();
+        assert!(p.stash.is_empty(), "the stash shares the preview budget, oldest out");
+        p.settings.as_object_mut().unwrap().remove("$probe");
+        p.changed();
+        assert!(p.frames.is_empty(), "evicted chains render afresh");
+        assert_eq!(p.stash.len(), 1);
     }
     #[test]
     fn actual_zoom_matches_displayed_upscaled_pixels() {
@@ -4088,6 +4171,7 @@ mod tests {
         p.jump(true);
         assert_eq!(p.take_seek(), None);
         let old = p.cancel.clone();
+        p.enabled[1] = true; // a different chain: its pixels can't be the old ones
         p.changed();
         assert!(p.frames.is_empty());
         assert!(old.check().is_err());

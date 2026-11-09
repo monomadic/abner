@@ -1,5 +1,15 @@
 # abner — history
 
+## 2026-11-09 — Process renders survive a stage switched off and on
+
+`Panel::changed` used to wipe every rendered frame on any chain change, so a
+stage switched off and back on lost its preview. Rendered frames are now kept
+per chain (`chain_key`: the previewed stages and their settings, spatial inputs,
+crops, source and timeline revision): returning to a chain brings its frames
+back, while new settings or edits never show old pixels. Stashed chains share
+`processors.preview_cache_mb` with the live frames, oldest dropped first.
+
+
 ## 2026-11-09 — Shared CPU frame-format negotiation
 
 Added backward-compatible native frame layouts and per-session input/output
