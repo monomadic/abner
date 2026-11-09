@@ -1,7 +1,9 @@
 //! Headless processor execution shared by GUI hosts and command-line launchers.
 //! Plugins own their algorithms; this crate owns chain execution and media jobs.
 pub mod cli;
+pub mod color;
 pub mod media;
+pub mod negotiation;
 use abner_processor_api::{Cancellation, Frame, InputRequirement, Registry, Result, Role, Session};
 use serde::{Deserialize, Serialize};
 
@@ -96,6 +98,8 @@ pub struct Chain {
     budget: usize,
     dimensions: [usize; 2],
     closed: bool,
+    started: bool,
+    plan: Option<negotiation::FormatPlan>,
 }
 impl Chain {
     pub fn new(
@@ -148,7 +152,73 @@ impl Chain {
             budget,
             dimensions,
             closed: false,
+            started: false,
+            plan: None,
         })
+    }
+    /// Negotiate once before feeding a segment. Recreate the chain at format changes.
+    pub fn negotiate(
+        &mut self,
+        source: abner_processor_api::PixelFormat,
+        sink: abner_processor_api::PixelFormat,
+    ) -> Result<()> {
+        if self.closed || self.started || self.plan.is_some() {
+            return Err("chain already negotiated or closed".into());
+        }
+        match negotiation::FormatPlan::new(&mut self.sessions, source, sink) {
+            Ok(plan) => {
+                self.plan = Some(plan);
+                Ok(())
+            }
+            Err(e) => {
+                self.closed = true;
+                Err(e)
+            }
+        }
+    }
+    pub fn format_plan(&self) -> Option<&negotiation::FormatPlan> {
+        self.plan.as_ref()
+    }
+    pub fn process_video(
+        &mut self,
+        frame: abner_processor_api::VideoFrame,
+    ) -> Result<Vec<abner_processor_api::VideoFrame>> {
+        if self.closed {
+            return Err("processing chain is closed".into());
+        }
+        let plan = self
+            .plan
+            .as_ref()
+            .ok_or("negotiate formats before processing")?;
+        self.started = true;
+        let result = plan.process(
+            &mut self.sessions,
+            0,
+            vec![frame],
+            &self.cancellation,
+            self.budget,
+        );
+        if result.is_err() {
+            self.closed = true;
+        }
+        result
+    }
+    pub fn finish_video(
+        &mut self,
+        mut accept: impl FnMut(Vec<abner_processor_api::VideoFrame>) -> Result<()>,
+    ) -> Result<()> {
+        if self.closed {
+            return Err("processing chain is closed".into());
+        }
+        let plan = self
+            .plan
+            .as_ref()
+            .ok_or("negotiate formats before processing")?;
+        self.closed = true;
+        for i in 0..self.sessions.len() {
+            accept(plan.finish_stage(&mut self.sessions, i, &self.cancellation, self.budget)?)?;
+        }
+        self.cancellation.check()
     }
     pub fn dimensions(&self) -> [usize; 2] {
         self.dimensions
@@ -159,9 +229,10 @@ impl Chain {
         }
     }
     pub fn process(&mut self, frame: Frame) -> Result<Vec<Frame>> {
-        if self.closed {
-            return Err("processing chain is closed".into());
+        if self.closed || self.plan.is_some() {
+            return Err("processing chain is closed or uses negotiated frames".into());
         }
+        self.started = true;
         let result = process_chain(
             &mut self.sessions,
             0,
@@ -175,8 +246,8 @@ impl Chain {
         result
     }
     pub fn finish(&mut self, mut accept: impl FnMut(Vec<Frame>) -> Result<()>) -> Result<()> {
-        if self.closed {
-            return Err("processing chain is closed".into());
+        if self.closed || self.plan.is_some() {
+            return Err("processing chain is closed or uses negotiated frames".into());
         }
         self.closed = true;
         for i in 0..self.sessions.len() {

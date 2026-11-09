@@ -3219,7 +3219,7 @@ pub(crate) fn pipeline_export_with_inputs(
     active: &Mutex<Vec<abner_processor_api::Cancellation>>,
     mut emit: impl FnMut(crate::export_page::Rendered) -> Result<(), String>,
 ) -> Result<()> {
-    use abner_processor_api::{Frame, InputRequirement, Role};
+    use abner_processor_api::{VideoFrame, FramePixels, PixelFormat, InputRequirement, Role};
     inputs.validate_geometry(info.width,info.height).map_err(anyhow::Error::msg)?;
     ensure!(crop.is_none() || inputs.crops.is_empty(), "Use either the timeline crop or an export crop");
     validate_ranges(keeps)?;
@@ -3316,6 +3316,10 @@ pub(crate) fn pipeline_export_with_inputs(
             );
             sessions.push(session);
         }
+        let source_format = if inputs.crops.is_empty() { PixelFormat::Rgba8 } else { PixelFormat::Rgb16 };
+        let sink_format = if prores { PixelFormat::Yuv422p10 } else { PixelFormat::Rgba8 };
+        let format_plan = abner_processing::negotiation::FormatPlan::new(&mut sessions, source_format, sink_format)
+            .map_err(anyhow::Error::msg)?;
         let player = crate::player::Player::spawn(
             &info.path,
             info.width,
@@ -3327,7 +3331,7 @@ pub(crate) fn pipeline_export_with_inputs(
         .context("Could not open export decoder")?;
         player.seek(start, true);
         let mut previous_end: Option<f64> = None;
-        let mut accept = |frames: Vec<Frame>| -> Result<()> {
+        let mut accept = |frames: Vec<VideoFrame>| -> Result<()> {
             for f in frames {
                 cancel.check().map_err(anyhow::Error::msg)?;
                 f.validate().map_err(anyhow::Error::msg)?;
@@ -3360,18 +3364,7 @@ pub(crate) fn pipeline_export_with_inputs(
                 } else {
                     expected_duration = Some(duration);
                 }
-                let rgba: Vec<u8> = f
-                    .pixels
-                    .chunks_exact(3)
-                    .flat_map(|rgb| {
-                        [
-                            ((rgb[0] as u32 + 128) / 257) as u8,
-                            ((rgb[1] as u32 + 128) / 257) as u8,
-                            ((rgb[2] as u32 + 128) / 257) as u8,
-                            255,
-                        ]
-                    })
-                    .collect();
+                let rgba = abner_processing::color::rgba8(&f).map_err(anyhow::Error::msg)?;
                 if encoder.is_none() {
                     encoder = Some(PipelineEncoder::new(
                         f.width as u32,
@@ -3385,7 +3378,7 @@ pub(crate) fn pipeline_export_with_inputs(
                     e.dims() == [f.width as u32, f.height as u32],
                     "Output dimensions changed between segments"
                 );
-                let packets = e.encode(&f.pixels, &rgba, index)?;
+                let packets = e.encode(f, &rgba, index)?;
                 let ti = match track {
                     Some(t) => t,
                     None => {
@@ -3410,8 +3403,8 @@ pub(crate) fn pipeline_export_with_inputs(
                 index += 1;
                 output_time += duration;
                 emit(crate::export_page::Rendered {
-                    pixels: Arc::new(rgba),
-                    dims: [f.width as u32, f.height as u32],
+                    pixels: rgba,
+                    dims: [dims[0] as u32, dims[1] as u32],
                     source_pts,
                     output_time,
                     count: index,
@@ -3458,31 +3451,22 @@ pub(crate) fn pipeline_export_with_inputs(
                 duration > 0 && (duration - nominal).abs() < 2000,
                 "Export currently requires constant-rate input"
             );
-            let pixels = (cy..cy + ch)
-                .flat_map(|y| {
+            let pixels = if cx == 0 && cy == 0 && cw == info.width && ch == info.height { rgba } else {
+                Arc::new((cy..cy + ch).flat_map(|y| {
                     let start = ((y * info.width + cx) * 4) as usize;
-                    rgba[start..start + (cw * 4) as usize]
-                        .chunks_exact(4)
-                        .flat_map(|p| {
-                            [
-                                u16::from(p[0]) * 257,
-                                u16::from(p[1]) * 257,
-                                u16::from(p[2]) * 257,
-                            ]
-                        })
-                })
-                .collect();
-            let mut f = Frame {
-                width: cw as usize,
-                height: ch as usize,
-                pixels,
-                pts: timestamp,
-                duration,
-                time_base: [1, 1_000_000],
+                    rgba[start..start + (cw * 4) as usize].iter().copied()
+                }).collect())
             };
-            crate::spatial::apply_crop(&mut f,&inputs.crops);
+            let mut f = VideoFrame { width:cw as usize, height:ch as usize, format:PixelFormat::Rgba8,
+                pixels:FramePixels::Rgba8(pixels), pts:timestamp, duration, time_base:[1,1_000_000] };
+            if !inputs.crops.is_empty() {
+                let mut rgb = abner_processing::color::convert(f, PixelFormat::Rgb16)
+                    .and_then(VideoFrame::into_rgb16).map_err(anyhow::Error::msg)?;
+                crate::spatial::apply_crop(&mut rgb,&inputs.crops);
+                f = rgb.into();
+            }
             accept(
-                crate::processor_gui::process_chain(
+                format_plan.process_native(
                     &mut sessions,
                     0,
                     vec![f],
@@ -3494,7 +3478,7 @@ pub(crate) fn pipeline_export_with_inputs(
         }
         for i in 0..sessions.len() {
             accept(
-                abner_processing::finish_stage(
+                format_plan.finish_stage_native(
                     &mut sessions,
                     i,
                     cancel,
@@ -3621,15 +3605,14 @@ impl PipelineEncoder {
             Self::Hevc { encoder, .. } => encoder.sample_entry(),
         }
     }
-    fn encode(&mut self, rgb16: &[u16], _display_rgba: &[u8], index: u64) -> Result<Vec<filmcraft_export::EncodedPacket>> {
+    fn encode(&mut self, frame: abner_processor_api::VideoFrame, _display_rgba: &[u8], index: u64) -> Result<Vec<filmcraft_export::EncodedPacket>> {
         match self {
             Self::ProRes {
                 encoder,
-                dims,
                 duration,
+                ..
             } => {
-                let [w, h] = *dims;
-                let p = abner_processing::media::prores_frame(rgb16, w as usize, h as usize)
+                let p = abner_processing::color::into_prores(frame)
                     .map_err(anyhow::Error::msg)?;
                 Ok(vec![filmcraft_export::EncodedPacket {
                     data: encoder.encode(&p)?,

@@ -1,5 +1,18 @@
 # abner — history
 
+## 2026-11-09 — Shared CPU frame-format negotiation
+
+Added backward-compatible native frame layouts and per-session input/output
+pairs to the processor API. The shared runtime plans the full chain and sink,
+keeps compatible buffers, converts only differing boundaries and validates
+buffered tails against the selected contracts. RGB16 plugins need no changes.
+Preview and export use the same planner; compatible RGBA preview frames keep
+the original allocation. The native media runner retains supported YUV planes
+and can feed ProRes directly. Crop/downsize and spatial contracts retain explicit
+RGB16 boundaries. HDR, GPU surfaces and a native-plane GUI decoder remain out
+of scope. See [the runtime contract](crates/processing/README.md).
+
+
 ## 2026-11-09 — Edit the export filename in place
 
 Filename is an inline text field with a measured caret, direct typing,

@@ -1,4 +1,5 @@
 use super::*;
+use abner_processor_api::Frame;
 use std::io::Cursor;
 #[test]
 fn ten_bit_decode_keeps_precision_below_eight_bit() {
@@ -250,4 +251,98 @@ fn retimed_output_keeps_duration_and_failed_jobs_publish_nothing() {
             .to_string_lossy()
             .starts_with(".processing-")
     }));
+}
+
+struct NativeIdentity([usize; 2]);
+impl abner_processor_api::Session for NativeIdentity {
+    fn format_pairs(&self) -> Vec<abner_processor_api::FormatPair> {
+        vec![abner_processor_api::FormatPair::same(
+            abner_processor_api::PixelFormat::Yuv422p10,
+        )]
+    }
+    fn configure_format(&mut self, p: abner_processor_api::FormatPair) -> Result<()> {
+        assert_eq!(p, self.format_pairs()[0]);
+        Ok(())
+    }
+    fn process_video(
+        &mut self,
+        f: abner_processor_api::VideoFrame,
+    ) -> Result<Vec<abner_processor_api::VideoFrame>> {
+        assert_eq!(f.format, abner_processor_api::PixelFormat::Yuv422p10);
+        Ok(vec![f])
+    }
+    fn finish_video(&mut self) -> Result<Vec<abner_processor_api::VideoFrame>> {
+        Ok(vec![])
+    }
+    fn output_dimensions(&self) -> [usize; 2] {
+        self.0
+    }
+    fn cancellation(&self) -> Cancellation {
+        Cancellation::default()
+    }
+    fn progress(&self) -> abner_processor_api::Progress {
+        abner_processor_api::Progress {
+            phase: "native".into(),
+            completed: 0,
+            total: None,
+        }
+    }
+}
+struct NativeFactory;
+impl abner_processor_api::Factory for NativeFactory {
+    fn descriptor(&self) -> abner_processor_api::Descriptor {
+        abner_processor_api::Descriptor {
+            id: "native".into(),
+            name: "Native".into(),
+            settings_schema: serde_json::json!({}),
+            presets: vec![],
+        }
+    }
+    fn create(
+        &self,
+        w: usize,
+        h: usize,
+        _: &serde_json::Value,
+    ) -> Result<Box<dyn abner_processor_api::Session>> {
+        Ok(Box::new(NativeIdentity([w, h])))
+    }
+}
+#[test]
+fn native_yuv_plugin_matches_empty_chain_encoded_packets() {
+    let dir = std::env::temp_dir().join(format!(
+        "native-yuv-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir(&dir).unwrap();
+    let work = Work(dir);
+    let input = work.0.join("in.mov");
+    fixture(&input);
+    let mut job = Job {
+        input,
+        output: work.0.join("identity.mov"),
+        stages: vec![],
+        copy_audio: true,
+        memory_bytes: 1024 * 1024,
+    };
+    let mut registry = Registry::default();
+    registry.register(Box::new(NativeFactory)).unwrap();
+    let c = Cancellation::default();
+    run(&job, &registry, &c, Arc::new(|_| {})).unwrap();
+    let reference = job.output.clone();
+    job.output = work.0.join("native.mov");
+    job.stages.push(Stage {
+        processor: "native".into(),
+        settings: serde_json::json!({}),
+    });
+    run(&job, &registry, &c, Arc::new(|_| {})).unwrap();
+    let a = mp4::open(Reader::open(&reference).unwrap()).unwrap();
+    let b = mp4::open(Reader::open(&job.output).unwrap()).unwrap();
+    assert_eq!(
+        packet_hash(&a, &Reader::open(&reference).unwrap(), 0, &c).unwrap(),
+        packet_hash(&b, &Reader::open(&job.output).unwrap(), 0, &c).unwrap()
+    );
 }

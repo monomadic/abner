@@ -118,6 +118,9 @@ pub fn create_bound(
             return Err(format!("Configure {} first", d.title));
         }
     }
+    if bindings.is_empty() {
+        return factory.create(width, height, settings);
+    }
     Ok(Box::new(BoundSession {
         inner: factory.create(width, height, settings)?,
         declarations,
@@ -130,6 +133,13 @@ struct BoundSession {
     bindings: SpatialBindings,
 }
 impl Session for BoundSession {
+    fn configure_format(&mut self, pair: crate::FormatPair) -> Result<()> {
+        if pair != crate::FormatPair::RGB16 || !self.inner.format_pairs().contains(&pair) {
+            return Err("spatial inputs require an RGB16-capable session".into());
+        }
+        self.inner.configure_format(pair)
+    }
+
     fn process(&mut self, frame: Frame) -> Result<Vec<Frame>> {
         let inputs = self
             .declarations

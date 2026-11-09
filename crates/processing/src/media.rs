@@ -1,7 +1,7 @@
 //! FilmCraft transport. Explicit SDR RGB16 processing, ProRes HQ MOV output,
 //! and packet-preserving audio; no external media programs or display buffers.
 use crate::{Chain, Stage};
-use abner_processor_api::{Cancellation, Frame, Registry, Result};
+use abner_processor_api::{Cancellation, Registry, Result};
 use filmcraft_color::{Matrix, Transfer, normalize_c, normalize_y, rgb_to_ycbcr, ycbcr_to_rgb};
 use filmcraft_frame::{PixelData, VideoFrame};
 use filmcraft_isobmff::{
@@ -518,7 +518,7 @@ pub fn run(
     let mut frames = 0usize;
     let mut next_pts = 0i64;
     {
-        let mut accept = |outputs: Vec<Frame>| -> Result<()> {
+        let mut accept = |outputs: Vec<abner_processor_api::VideoFrame>| -> Result<()> {
             for f in outputs {
                 cancel.check()?;
                 f.validate()?;
@@ -538,7 +538,7 @@ pub fn run(
                     return Err("processor output extends beyond source duration".into());
                 }
                 let bytes = encoder
-                    .encode(&prores_frame(&f.pixels, ow, oh)?)
+                    .encode(&crate::color::into_prores(f)?)
                     .map_err(err)?;
                 mux.write_sample(
                     video,
@@ -574,17 +574,14 @@ pub fn run(
             if [decoded.width as usize, decoded.height as usize] != [w, h] {
                 return Err("decoded dimensions changed".into());
             }
-            let frame = Frame {
-                width: w,
-                height: h,
-                pixels: rgb16(&decoded)?,
-                pts: p,
-                duration: i64::from(delta),
-                time_base: [1, vt.timescale],
-            };
-            accept(chain.process(frame)?)?;
+            let frame =
+                crate::color::from_decoded(&decoded, p, i64::from(delta), [1, vt.timescale])?;
+            if chain.format_plan().is_none() {
+                chain.negotiate(frame.format, abner_processor_api::PixelFormat::Yuv422p10)?;
+            }
+            accept(chain.process_video(frame)?)?;
         }
-        chain.finish(&mut accept)?;
+        chain.finish_video(&mut accept)?;
     }
     if frames == 0 || next_pts != expected_end {
         return Err("processor output does not cover the source duration".into());

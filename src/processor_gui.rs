@@ -1,5 +1,6 @@
 //! Runtime-schema controls and cancellable, bounded display previews.
 //! No processor identity or implementation belongs in this module.
+use abner_processor_api::{VideoFrame, FramePixels, PixelFormat};
 use crate::{
     app::{
         ACCENT, CUT_HEADER_BLUE, CUT_STATUS_H, Canvas, DETAIL_SLIDE_S, HEADER_H, INSPECTOR_BG,
@@ -456,6 +457,24 @@ struct ReportingSession {
     callbacks: Arc<AtomicU64>,
 }
 impl Session for ReportingSession {
+    fn format_pairs(&self) -> Vec<abner_processor_api::FormatPair> { self.inner.format_pairs() }
+    fn configure_format(&mut self, pair: abner_processor_api::FormatPair) -> Result<(), String> { self.inner.configure_format(pair) }
+    fn process_video(&mut self, input: VideoFrame) -> Result<Vec<VideoFrame>, String> {
+        let before = self.callbacks.load(Ordering::Relaxed);
+        if before == 0 { (self.report)(Progress { phase: "Processing".into(), completed: 0, total: None }); }
+        let result = self.inner.process_video(input);
+        if let Ok(frames) = &result { self.frames.fetch_add(frames.len() as u64, Ordering::Relaxed); }
+        if self.callbacks.load(Ordering::Relaxed) == before { (self.report)(self.inner.progress()); }
+        result
+    }
+    fn finish_video(&mut self) -> Result<Vec<VideoFrame>, String> {
+        let before = self.callbacks.load(Ordering::Relaxed);
+        if before == 0 { (self.report)(Progress { phase: "Finishing buffered frames".into(), completed: 0, total: None }); }
+        let result = self.inner.finish_video();
+        if let Ok(frames) = &result { self.frames.fetch_add(frames.len() as u64, Ordering::Relaxed); }
+        if self.callbacks.load(Ordering::Relaxed) == before { (self.report)(self.inner.progress()); }
+        result
+    }
     fn process(&mut self, input: Frame) -> Result<Vec<Frame>, String> {
         let before = self.callbacks.load(Ordering::Relaxed);
         if before == 0 { (self.report)(Progress {
@@ -667,7 +686,7 @@ fn render(
             callbacks,
         });
         let session: Box<dyn Session> = if downsize > 1 {
-            Box::new(Downsized { inner: session, factor: downsize })
+            Box::new(Downsized { inner: Box::new(abner_processing::negotiation::Rgb16Boundary::new(session, r.budget)?), factor: downsize })
         } else {
             session
         };
@@ -687,6 +706,8 @@ fn render(
         r.cancel.check()?;
         sessions.push(session);
     }
+    let source_format = if r.inputs.crops.is_empty() { PixelFormat::Rgba8 } else { PixelFormat::Rgb16 };
+    let format_plan = abner_processing::negotiation::FormatPlan::new(&mut sessions, source_format, PixelFormat::Rgba8)?;
     let [ow, oh] = dims;
     if ow < 2 || oh < 2 || ow > 8192 || oh > 8192 {
         return Err("Unsupported preview output dimensions".into());
@@ -724,7 +745,7 @@ fn render(
     let started = Instant::now();
     let mut originals = BTreeMap::new();
     let received = std::cell::Cell::new(0usize);
-    let mut emit = |frames: Vec<Frame>,
+    let mut emit = |frames: Vec<VideoFrame>,
                     originals: &mut BTreeMap<i64, (Rgba, f64)>|
      -> Result<bool, String> {
         let mut delivered = false;
@@ -741,7 +762,7 @@ fn render(
                 (t as i128 * frame.time_base[0] as i128 * 1_000_000 + frame.time_base[1] as i128 / 2)
                     .div_euclid(frame.time_base[1] as i128) as i64
             };
-            let frame = Frame {
+            let frame = VideoFrame {
                 pts: micros(frame.pts),
                 duration: micros(frame.pts + frame.duration) - micros(frame.pts),
                 time_base: [1, 1_000_000],
@@ -765,15 +786,7 @@ fn render(
                     .remove(&frame.pts)
                     .ok_or("Preview requires timestamp-preserving output frames (or a declared output rate)")?
             };
-            let mut rgba = Vec::with_capacity(ow * oh * 4);
-            for rgb in frame.pixels.as_chunks::<3>().0 {
-                rgba.extend([
-                    ((rgb[0] as u32 + 128) / 257) as u8,
-                    ((rgb[1] as u32 + 128) / 257) as u8,
-                    ((rgb[2] as u32 + 128) / 257) as u8,
-                    255,
-                ]);
-            }
+            let FramePixels::Rgba8(rgba) = frame.pixels else { return Err("preview format mismatch".into()); };
             // Targeted requests feed exactly one decoded source frame. Its
             // timestamp may differ from the requested grid (container timing,
             // rounded rates or a clamped end seek). Never discard its completed
@@ -784,7 +797,7 @@ fn render(
                 r.generation,
                 Preview {
                     before,
-                    after: Arc::new(rgba),
+                    after: rgba,
                     downsized,
                     input: [w, h],
                     output: [ow as u32, oh as u32],
@@ -844,20 +857,16 @@ fn render(
         if duration <= 0 || (duration - nominal).abs() > 2000 {
             return Err("This preview currently requires constant-rate video".into());
         }
-        let pixels = rgba
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .flat_map(|p| [p[0] as u16 * 257, p[1] as u16 * 257, p[2] as u16 * 257])
-            .collect();
-        if originals.len() >= count {
-            return Err("Processor buffered too many frames for preview".into());
+        if originals.len() >= count { return Err("Processor buffered too many frames for preview".into()); }
+        originals.insert(pts, (rgba.clone(), source_pts));
+        let mut input = VideoFrame {width:w as usize,height:h as usize,format:PixelFormat::Rgba8,pixels:FramePixels::Rgba8(rgba),pts,duration,time_base:[1,1_000_000]};
+        if !r.inputs.crops.is_empty() {
+            let mut rgb = abner_processing::color::convert(input, PixelFormat::Rgb16)?.into_rgb16()?;
+            crate::spatial::apply_crop(&mut rgb,&r.inputs.crops);
+            input = rgb.into();
         }
-        originals.insert(pts, (rgba, source_pts));
-        let mut input = Frame {width:w as usize,height:h as usize,pixels,pts,duration,time_base:[1,1_000_000]};
-        crate::spatial::apply_crop(&mut input,&r.inputs.crops);
         let delivered = emit(
-            process_chain(
+            format_plan.process(
                 &mut sessions,
                 0,
                 vec![input],
@@ -873,7 +882,7 @@ fn render(
     r.cancel.check()?;
     for i in 0..sessions.len() {
         let delivered = emit(
-            abner_processing::finish_stage(&mut sessions, i, &r.cancel, r.budget)?,
+            format_plan.finish_stage(&mut sessions, i, &r.cancel, r.budget)?,
             &mut originals,
         )?;
         if delivered && (r.target.is_some() || received.get() >= count) { return Ok(()); }
@@ -919,6 +928,7 @@ impl Session for Downsized {
         self.inner.progress()
     }
 }
+#[cfg(test)]
 pub(crate) use abner_processing::process_chain;
 
 fn check_sdr(path: &std::path::Path) -> Result<(), String> {
@@ -3439,6 +3449,31 @@ mod tests {
         assert_eq!(frames.len(), 6);
         assert_eq!(frames[0].pts, 0.0);
         assert!(frames.windows(2).all(|f| f[1].pts > f[0].pts));
+        // A native RGBA-only session must survive the spatial/reporting wrappers
+        // and reach the display without RGB16 expansion or a new allocation.
+        struct NativeRgba([usize; 2]);
+        impl Session for NativeRgba {
+            fn format_pairs(&self) -> Vec<abner_processor_api::FormatPair> { vec![abner_processor_api::FormatPair::same(PixelFormat::Rgba8)] }
+            fn configure_format(&mut self, p: abner_processor_api::FormatPair) -> Result<(), String> {
+                assert_eq!(p, abner_processor_api::FormatPair::same(PixelFormat::Rgba8)); Ok(())
+            }
+            fn process_video(&mut self, f: VideoFrame) -> Result<Vec<VideoFrame>, String> { Ok(vec![f]) }
+            fn finish_video(&mut self) -> Result<Vec<VideoFrame>, String> { Ok(vec![]) }
+            fn output_dimensions(&self) -> [usize;2] { self.0 }
+            fn cancellation(&self) -> Cancellation { Cancellation::default() }
+            fn progress(&self) -> Progress { Progress { phase:"native".into(),completed:0,total:None } }
+        }
+        struct NativeFactory;
+        impl abner_processor_api::Factory for NativeFactory {
+            fn descriptor(&self) -> Descriptor { Descriptor {id:"native".into(),name:"Native".into(),settings_schema:json!({}),presets:vec![]} }
+            fn create(&self,w:usize,h:usize,_:&serde_json::Value)->Result<Box<dyn Session>,String> {Ok(Box::new(NativeRgba([w,h])))}
+        }
+        let mut native_registry=Registry::default();native_registry.register(Box::new(NativeFactory)).unwrap();
+        let native = Request { chain:vec![("native".into(),json!({}))], inputs:Default::default(),generation:10,target:None,info:info.clone(),start:0.,end:None,cancel:Cancellation::default(),budget:DEFAULT_PREVIEW_BYTES };
+        render(&native_registry,&native,&tx,None,None).unwrap();
+        let mut native_count=0;
+        while let Ok(Event::Frame(_,f))=rx.try_recv() { assert!(Arc::ptr_eq(&f.before,&f.after));native_count+=1; }
+        assert_eq!(native_count,6);
         // A budget too small for one native pair refuses, naming the config key.
         let starved = Request {
             inputs:Default::default(),

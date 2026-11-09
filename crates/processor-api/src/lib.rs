@@ -1,6 +1,9 @@
-//! Experimental streaming CPU frame contract. No implementation dependencies.
+//! Streaming CPU frame contracts, including optional host-negotiated layouts.
+//! No media implementation dependencies.
 use serde::Serialize;
+mod formats;
 mod spatial;
+pub use formats::*;
 pub use spatial::*;
 use std::collections::BTreeMap;
 use std::sync::{
@@ -45,8 +48,8 @@ pub struct Descriptor {
     pub settings_schema: serde_json::Value,
     pub presets: Vec<Preset>,
 }
-/// Packed full-range RGB16, SDR Rec.709; no alpha. Other formats must be rejected
-/// or explicitly converted by the host before using this prototype interface.
+/// Legacy packed full-range RGB16, SDR Rec.709; no alpha. Use `VideoFrame`
+/// through negotiated session methods for other layouts. The host converts.
 pub struct Frame {
     pub width: usize,
     pub height: usize,
@@ -159,15 +162,38 @@ pub struct Capabilities {
 /// cuts, seeks or configuration changes: recurrent history must not cross them.
 /// Construct and use on one thread; only the cancellation handle is thread-safe.
 /// Errors are terminal: discard this session and any unpublished job output.
-/// CPU RGB16 only; this contract does not yet negotiate GPU/color/auxiliary inputs.
+/// Legacy RGB16 methods remain source-compatible. Opt in to other CPU layouts
+/// through format_pairs/configure_format/process_video/finish_video. Conversion
+/// belongs to the host; plugins only implement their declared native layouts.
 pub trait Session {
+    fn format_pairs(&self) -> Vec<FormatPair> {
+        vec![FormatPair::RGB16]
+    }
+    fn configure_format(&mut self, pair: FormatPair) -> Result<()> {
+        if pair == FormatPair::RGB16 {
+            Ok(())
+        } else {
+            Err("session only supports RGB16".into())
+        }
+    }
+    fn process_video(&mut self, input: VideoFrame) -> Result<Vec<VideoFrame>> {
+        self.process(input.into_rgb16()?)
+            .map(|frames| frames.into_iter().map(Into::into).collect())
+    }
+    fn finish_video(&mut self) -> Result<Vec<VideoFrame>> {
+        self.finish()
+            .map(|frames| frames.into_iter().map(Into::into).collect())
+    }
+
     /// Optional requested output timestamp for a timestamp-preserving preview.
     /// Lets implementations aggregate required warmup/context work for progress;
     /// it must not change the model's output or truncate required input history.
     fn set_preview_target(&mut self, _pts: i64, _time_base: [u32; 2]) {}
     /// Implementations may retain this callback to report progress during work.
     fn set_progress_reporter(&mut self, _reporter: ProgressReporter) {}
-    fn process(&mut self, input: Frame) -> Result<Vec<Frame>>;
+    fn process(&mut self, _input: Frame) -> Result<Vec<Frame>> {
+        Err("session requires negotiated frames".into())
+    }
     /// Named spatial inputs accompany the unmodified primary frame. Opt in explicitly.
     fn process_with_inputs(
         &mut self,
@@ -179,7 +205,9 @@ pub trait Session {
         }
         self.process(input)
     }
-    fn finish(&mut self) -> Result<Vec<Frame>>;
+    fn finish(&mut self) -> Result<Vec<Frame>> {
+        Err("session requires negotiated frames".into())
+    }
     fn output_dimensions(&self) -> [usize; 2];
     fn cancellation(&self) -> Cancellation;
     /// Completed output frames; the host owns timeline totals and job-wide progress.
