@@ -5765,7 +5765,8 @@ impl App {
             }
             CutAction::Snap(_) => {
                 // The keyframe glyph, then an iOS-style switch: knob left on a
-                // grey track = off, knob right on the keyframe green = on.
+                // grey track = off, knob right on the keyframe green = on, the
+                // track outlined white like the rail's (`draw_rail_switch`).
                 // On: the orange selection ring. Off: the footer buttons' 1px grey
                 // edge (`draw_cut_footer_button`). The glyph takes the label's ink.
                 let on = cut.snap == Snap::Keyframe;
@@ -5779,12 +5780,13 @@ impl App {
                         "Snap to Keyframe", Align::Left, r.w - 30.0 - CUT_SWITCH_W - 12.0);
                 }
                 let track = RectPx { x: r.x + r.w - 6.0 - CUT_SWITCH_W, y: cy - CUT_SWITCH_H / 2.0, w: CUT_SWITCH_W, h: CUT_SWITCH_H };
-                items.push(Item::Rect(RectItem { radius: CUT_SWITCH_H / 2.0,
+                items.push(Item::Rect(RectItem { radius: CUT_SWITCH_H / 2.0, border_w: 1.5,
+                    border_color: hex_color(if on { 0xffffff } else { 0xdcdcdc }),
                     ..RectItem::new(track, if on { hex_color(FRAME_KEY) } else { hex_color(0x3a3a3c) }) }));
-                let d = CUT_SWITCH_H - 4.0;
-                let kx = if on { track.x + track.w - 2.0 - d } else { track.x + 2.0 };
+                let d = CUT_SWITCH_H - 5.0;
+                let kx = if on { track.x + track.w - 2.5 - d } else { track.x + 2.5 };
                 items.push(Item::Rect(RectItem { radius: d / 2.0,
-                    ..RectItem::new(RectPx { x: kx, y: track.y + 2.0, w: d, h: d }, hex_color(0xffffff)) }));
+                    ..RectItem::new(RectPx { x: kx, y: track.y + 2.5, w: d, h: d }, hex_color(0xffffff)) }));
             }
             // Only the footer carries Split now.
             CutAction::Split => draw_cut_footer_button(items, r, &control.label, control.hint, true, hovered, false),

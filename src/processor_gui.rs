@@ -2769,13 +2769,14 @@ fn draw_processor_switch(items: &mut Vec<Item>, r: RectPx, on: bool, position: f
         max_width: Some(28.0), ..TextItem::new(thumb.x + 14.0, thumb.y + 10.5, 12.0, ink, if on { "ON" } else { "OFF" }) }));
 }
 /// The rail's pill switch (Figma rail): a 14px round thumb on a 16px
-/// travel, grey and outlined off, the focus orange on.
+/// travel, grey off, the focus orange on, outlined white in both states.
 fn draw_rail_switch(items: &mut Vec<Item>, r: RectPx, position: f32) {
     items.push(Item::Rect(RectItem { radius: r.h / 2.0, border_w: 1.5,
-        border_color: mix(0xdcdcdc, 0xc87a00, position),
+        border_color: mix(0xdcdcdc, 0xffffff, position),
         ..RectItem::new(r, mix(0x34373b, SOURCE_RING, position)) }));
-    let d = r.h - 4.0;
-    let thumb = RectPx { x: r.x + 2.0 + (r.w - d - 4.0) * position, y: r.y + 2.0, w: d, h: d };
+    // 2.5px in, so a sliver of track shows between the knob and the outline.
+    let d = r.h - 5.0;
+    let thumb = RectPx { x: r.x + 2.5 + (r.w - d - 5.0) * position, y: r.y + 2.5, w: d, h: d };
     items.push(Item::Rect(RectItem { radius: d / 2.0, ..RectItem::new(thumb, hex_color(0xf7f7f7)) }));
 }
 fn display_value(v: &Value) -> String {
