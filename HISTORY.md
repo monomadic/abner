@@ -1,5 +1,19 @@
 # abner — history
 
+## 2026-11-09 — Matroska chapter tags survive an export
+
+Tags aimed at a chapter (`TagChapterUID`) were dropped on every export because the
+export renumbered chapters 1..n. A chapter now carries its source `ChapterUID`
+(`cut::Chapter::uid`, kept in saved timeline projects) through `output_chapters`
+into `ExportChapter`, the export writes that UID back, and `mkv_tags` re-aims the
+source's chapter tags at the chapters that survived the cut. Chapters added in
+Abner get the lowest UID no other chapter uses; a removed chapter's tags go with
+it; the per-track statistics filter no longer touches chapter tags. Edition tags
+are still dropped, and WebM output skips chapter tags with a log line.
+`matroska_chapter_tags_follow_their_chapters_through_a_cut` covers it, read back
+through ffprobe as well. Full library suite: 202 passed, three ignored.
+
+
 ## 2026-11-09 — Native decoder frames for processing
 
 Processing preview/export now retain FilmCraft's native planes and color metadata

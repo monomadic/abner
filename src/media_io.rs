@@ -308,6 +308,22 @@ const TAG_MAP: &[(&str, &str, &str)] = &[
     ("cprt", "com.apple.quicktime.copyright", "COPYRIGHT"),
     ("©xyz", "com.apple.quicktime.location.ISO6709", "RECORDING_LOCATION"),
 ];
+/// One chapter of an export, on the OUTPUT's clock (seconds).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ExportChapter {
+    pub start: f64,
+    pub end: f64,
+    pub title: String,
+    /// The source chapter's `ChapterUID`, when it came from a Matroska
+    /// source: a Matroska export writes it back so the source's tags for
+    /// that chapter still point at it.
+    pub uid: Option<u64>,
+}
+impl ExportChapter {
+    pub fn new(start: f64, end: f64, title: impl Into<String>) -> Self {
+        Self { start, end, title: title.into(), uid: None }
+    }
+}
 /// The source's global metadata, ready for either output container. The
 /// encoder tag is not carried: this export is not the source's encoder.
 #[derive(Default)]
@@ -346,10 +362,11 @@ fn derived_tag(name: &str, listed: &[String]) -> bool {
         || name.starts_with("_STATISTICS_")
         || listed.iter().any(|l| l == name)
 }
-/// A Matroska source's track metadata: names, the tags aimed at a track or
-/// an attachment (global ones go through fastmkv), and the attachments.
-/// Tags aimed at an edition or a chapter are not carried: the export writes
-/// its own chapters, under new UIDs.
+/// A Matroska source's track metadata: names, the tags aimed at a track, a
+/// chapter or an attachment (global ones go through fastmkv), and the
+/// attachments. Chapter tags are re-aimed at export by the chapter's source
+/// UID (`ExportChapter::uid`). Tags aimed at an edition are not carried: the
+/// export writes one edition of its own.
 fn mkv_track_meta(f: &filmcraft_matroska::MkvFile, meta: &mut SourceMeta) {
     use filmcraft_matroska::TrackKind as K;
     let mut audio = 0;
@@ -365,18 +382,21 @@ fn mkv_track_meta(f: &filmcraft_matroska::MkvFile, meta: &mut SourceMeta) {
     }
     for tag in &f.tags {
         let t = &tag.targets;
-        if !t.edition_uids.is_empty() || !t.chapter_uids.is_empty() {
-            log::warn!("Matroska tag aimed at a chapter or edition not carried");
+        if !t.edition_uids.is_empty() {
+            log::warn!("Matroska tag aimed at an edition not carried");
             continue;
         }
-        if t.track_uids.is_empty() && t.attachment_uids.is_empty() {
+        if t.track_uids.is_empty() && t.attachment_uids.is_empty() && t.chapter_uids.is_empty() {
             continue;
         }
         let listed: Vec<String> = tag.simple.iter()
             .filter(|s| s.name == "_STATISTICS_TAGS")
             .flat_map(|s| s.string.as_deref().unwrap_or("").split_whitespace().map(str::to_owned))
             .collect();
-        let simple: Vec<_> = tag.simple.iter().filter(|s| !derived_tag(&s.name, &listed)).cloned().collect();
+        // The statistics names are only derived on a track's own tag; a
+        // chapter's BPS or DURATION is the author's.
+        let stats = !t.track_uids.is_empty() && t.chapter_uids.is_empty();
+        let simple: Vec<_> = tag.simple.iter().filter(|s| !stats || !derived_tag(&s.name, &listed)).cloned().collect();
         if !simple.is_empty() {
             meta.tags.push(filmcraft_matroska::Tag { targets: t.clone(), simple });
         }
@@ -941,12 +961,12 @@ fn full_box(kind: &[u8; 4], version: u8, flags: u32, data: &[u8]) -> Vec<u8> {
 /// track the video and audio tracks name through `tref/chap`), one sample a
 /// chapter, at movie timescale `movie_ts`. Samples live in their own `mdat`
 /// at `offset`, which the caller writes. Returns (trak, mdat).
-fn chapter_trak(chapters: &[(f64, f64, String)], id: u32, movie_ts: u32, offset: u64) -> Result<(Vec<u8>, Vec<u8>)> {
+fn chapter_trak(chapters: &[ExportChapter], id: u32, movie_ts: u32, offset: u64) -> Result<(Vec<u8>, Vec<u8>)> {
     let ms = |t: f64| (t.max(0.) * 1000.).round() as u64;
     let mut samples = Vec::new();
     let mut sizes = Vec::new();
     let mut durations: Vec<u32> = Vec::new();
-    for (a, b, title) in chapters {
+    for ExportChapter { start: a, end: b, title, .. } in chapters {
         ensure!(title.len() <= 65535, "chapter title too long");
         let d = ms(*b).saturating_sub(ms(*a));
         ensure!(d > 0, "zero-length chapter");
@@ -958,7 +978,7 @@ fn chapter_trak(chapters: &[(f64, f64, String)], id: u32, movie_ts: u32, offset:
         durations.push(u32::try_from(d)?);
         samples.extend(sample);
     }
-    let lead = ms(chapters[0].0);
+    let lead = ms(chapters[0].start);
     let media: u64 = durations.iter().map(|&d| d as u64).sum();
     let movie = |ms: u64| ms * movie_ts as u64 / 1000;
     let duration = movie(lead + media);
@@ -1029,7 +1049,7 @@ fn chapter_trak(chapters: &[(f64, f64, String)], id: u32, movie_ts: u32, offset:
 /// file): a Nero `chpl` list, which VLC/mpv read, and, with `qt_track`, the
 /// QuickTime chapter track Apple's players read. `moov` is rebuilt in place
 /// with the chapter samples in an `mdat` ahead of it; nothing before it moves.
-fn add_mp4_chapters(path: &Path, chapters: &[(f64, f64, String)], qt_track: bool) -> Result<()> {
+fn add_mp4_chapters(path: &Path, chapters: &[ExportChapter], qt_track: bool) -> Result<()> {
     finish_mp4(path, chapters, qt_track, &[])
 }
 /// iTunes-style `meta/ilst` for an MP4's tags: what Apple reads in an MP4
@@ -1056,7 +1076,7 @@ fn ilst(meta: &[(String, String)]) -> Vec<u8> {
     full_box(b"meta", 0, 0, &[full_box(b"hdlr", 0, 0, &hdlr), box_bytes(b"ilst", &items)].concat())
 }
 /// Chapters and iTunes tags for an MP4/MOV the muxer just finished.
-fn finish_mp4(path: &Path, chapters: &[(f64, f64, String)], qt_track: bool, tags: &[(String, String)]) -> Result<()> {
+fn finish_mp4(path: &Path, chapters: &[ExportChapter], qt_track: bool, tags: &[(String, String)]) -> Result<()> {
     use std::io::{Read, Seek, SeekFrom, Write};
     let meta_box = ilst(tags);
     if chapters.is_empty() && meta_box.is_empty() {
@@ -1069,7 +1089,7 @@ fn finish_mp4(path: &Path, chapters: &[(f64, f64, String)], qt_track: bool, tags
     let src = crate::fc::reader(path).map_err(anyhow::Error::msg)?;
     let f = mp4::open(&src)?;
     let mut payload = vec![1, 0, 0, 0, 0, 0, 0, 0, chapters.len() as u8];
-    for (a, _, title) in chapters {
+    for ExportChapter { start: a, title, .. } in chapters {
         ensure!(title.len() <= 255, "chapter title exceeds 255 UTF-8 bytes");
         payload.extend(((*a * 1e7).round() as u64).to_be_bytes());
         payload.push(title.len() as u8);
@@ -1764,7 +1784,7 @@ pub(crate) fn export(
     dest: &Path,
     keeps: &[(f64, f64)],
     copy: bool,
-    chapters: &[(f64, f64, String)],
+    chapters: &[ExportChapter],
     crop: Option<(u32, u32, u32, u32)>,
 ) -> Result<()> {
     export_with_cancel(path, dest, keeps, copy, chapters, crop, &AtomicBool::new(false))
@@ -1775,7 +1795,7 @@ pub(crate) fn export_with_cancel(
     dest: &Path,
     keeps: &[(f64, f64)],
     copy: bool,
-    chapters: &[(f64, f64, String)],
+    chapters: &[ExportChapter],
     crop: Option<(u32, u32, u32, u32)>,
     cancel: &AtomicBool,
 ) -> Result<()> {
@@ -1852,7 +1872,7 @@ fn uint(id: u32, v: u64) -> Vec<u8> {
 fn remux_mkv(
     path: &Path,
     dest: &Path,
-    chapters: &[(f64, f64, String)],
+    chapters: &[ExportChapter],
     meta: &SourceMeta,
     subs: &[SubTrack],
 ) -> Result<()> {
@@ -1998,11 +2018,11 @@ fn remux_mkv(
     let mut parts: Vec<(u32, Vec<u8>)> = Vec::new();
     if !chapters.is_empty() {
         let mut atoms = Vec::new();
-        for (i, (a, b, title)) in chapters.iter().enumerate() {
-            let mut atom = uint(id::CHAPTER_UID, i as u64 + 1);
-            atom.extend(uint(id::CHAPTER_TIME_START, (a * 1e9).round() as u64));
-            atom.extend(uint(id::CHAPTER_TIME_END, (b * 1e9).round() as u64));
-            atom.extend(ebml(id::CHAPTER_DISPLAY, &ebml(id::CHAP_STRING, title.as_bytes())));
+        for (c, uid) in chapters.iter().zip(chapter_uids(chapters)) {
+            let mut atom = uint(id::CHAPTER_UID, uid);
+            atom.extend(uint(id::CHAPTER_TIME_START, (c.start * 1e9).round() as u64));
+            atom.extend(uint(id::CHAPTER_TIME_END, (c.end * 1e9).round() as u64));
+            atom.extend(ebml(id::CHAPTER_DISPLAY, &ebml(id::CHAP_STRING, c.title.as_bytes())));
             atoms.extend(ebml(id::CHAPTER_ATOM, &atom));
         }
         parts.push((id::CHAPTERS, ebml(id::EDITION_ENTRY, &atoms)));
@@ -2021,7 +2041,14 @@ fn remux_mkv(
             let slot = meta.tracks.iter().find(|t| t.uid == source)?.slot;
             slots.iter().position(|s| *s == slot).map(|i| out.tracks[i].uid)
         };
-        let tags = mkv_tags(&meta.tags, uid, attach);
+        // A chapter tag follows its chapter only where the chapter kept its
+        // source UID; one whose chapter was cut away goes with it. WebM keeps
+        // to tags aimed at tracks, as it does for attachments.
+        let kept: Vec<u64> = if webm { Vec::new() } else { chapters.iter().filter_map(|c| c.uid).collect() };
+        if webm && meta.tags.iter().any(|t| !t.targets.chapter_uids.is_empty()) {
+            log::warn!("WebM output: chapter tags not exported; choose MKV to keep them");
+        }
+        let tags = mkv_tags(&meta.tags, uid, |c| kept.contains(&c), attach);
         if !tags.is_empty() {
             parts.push((id::TAGS, tags));
         }
@@ -2065,7 +2092,27 @@ fn remux_mkv(
 /// the output's UIDs (`uid` maps a source track UID). A target that did not
 /// make it into the output is dropped from the tag, and a tag left aiming at
 /// nothing is dropped whole: it must never widen into a global tag.
-fn mkv_tags(tags: &[filmcraft_matroska::Tag], uid: impl Fn(u64) -> Option<u64>, attach: bool) -> Vec<u8> {
+/// Each export chapter's `ChapterUID`: the source's own where it has one (so
+/// the source's chapter tags still point at it), otherwise the lowest
+/// positive value no other chapter uses.
+fn chapter_uids(chapters: &[ExportChapter]) -> Vec<u64> {
+    let mut used: std::collections::HashSet<u64> = chapters.iter().filter_map(|c| c.uid).collect();
+    let mut next = 1;
+    chapters.iter().map(|c| match c.uid {
+        Some(u) => u,
+        None => {
+            while used.contains(&next) { next += 1; }
+            used.insert(next);
+            next
+        }
+    }).collect()
+}
+fn mkv_tags(
+    tags: &[filmcraft_matroska::Tag],
+    uid: impl Fn(u64) -> Option<u64>,
+    chapter: impl Fn(u64) -> bool,
+    attach: bool,
+) -> Vec<u8> {
     use filmcraft_matroska::element_ids as id;
     fn simple(s: &filmcraft_matroska::SimpleTag) -> Vec<u8> {
         let mut b = ebml(id::TAG_NAME, s.name.as_bytes());
@@ -2088,7 +2135,11 @@ fn mkv_tags(tags: &[filmcraft_matroska::Tag], uid: impl Fn(u64) -> Option<u64>, 
         let t = &tag.targets;
         let tracks: Vec<u64> = t.track_uids.iter().filter_map(|&u| uid(u)).collect();
         let files: &[u64] = if attach { &t.attachment_uids } else { &[] };
-        if (!t.track_uids.is_empty() && tracks.is_empty()) || (tracks.is_empty() && files.is_empty()) {
+        let chapters: Vec<u64> = t.chapter_uids.iter().copied().filter(|&u| chapter(u)).collect();
+        if (!t.track_uids.is_empty() && tracks.is_empty())
+            || (!t.chapter_uids.is_empty() && chapters.is_empty())
+            || (tracks.is_empty() && files.is_empty() && chapters.is_empty())
+        {
             continue;
         }
         let mut targets = uint(id::TARGET_TYPE_VALUE, t.type_value);
@@ -2097,6 +2148,9 @@ fn mkv_tags(tags: &[filmcraft_matroska::Tag], uid: impl Fn(u64) -> Option<u64>, 
         }
         for &u in &tracks {
             targets.extend(uint(id::TAG_TRACK_UID, u));
+        }
+        for &u in &chapters {
+            targets.extend(uint(id::TAG_CHAPTER_UID, u));
         }
         for &u in files {
             targets.extend(uint(id::TAG_ATTACHMENT_UID, u));
@@ -2497,13 +2551,7 @@ pub(crate) fn smart(
     let chapters: Vec<_> = chapters
         .iter()
         .enumerate()
-        .map(|(i, (a, title))| {
-            (
-                *a,
-                chapters.get(i + 1).map_or(duration, |c| c.0),
-                title.clone(),
-            )
-        })
+        .map(|(i, c)| ExportChapter::new(c.start, chapters.get(i + 1).map_or(duration, |n| n.start), c.title.clone()))
         .collect();
     add_mp4_chapters(&temp.0, &chapters, false)?;
     let result = Input::open(&temp.0)?;
@@ -2678,7 +2726,7 @@ mod tests {
             "-metadata:s:a:1", "title=Commentary", "-metadata:s:a:1", "MOOD=dry",
             "-metadata:s:s:0", "title=Signs", "-metadata:s:v:0", "CAMERA=B", "src.mkv"]);
         let out = dir.0.join("out.mkv");
-        export(&dir.0.join("src.mkv"), &out, &[(0., 2.), (3., 5.)], true, &[(0., 2., "One".into()), (2., 4., "Two".into())], None).unwrap();
+        export(&dir.0.join("src.mkv"), &out, &[(0., 2.), (3., 5.)], true, &[ExportChapter::new(0., 2., "One"), ExportChapter::new(2., 4., "Two")], None).unwrap();
         // Read the way ffmpeg and players do: stop at the clusters, follow the SeekHead.
         let reader = crate::fc::reader(&out).unwrap();
         let f = filmcraft_matroska::open_with(&reader, &filmcraft_matroska::OpenOptions { index: false, verify_crc: false }).unwrap();
@@ -2707,6 +2755,70 @@ mod tests {
         let text = String::from_utf8_lossy(&probe.stdout);
         assert_eq!(text.matches("chapter|").count(), 2, "{text}");
         assert!(text.contains("codec_type=attachment") && text.contains("tag:MOOD=dry") && text.contains("tag:title=Commentary"), "{text}");
+    }
+    #[test]
+    fn matroska_chapter_tags_follow_their_chapters_through_a_cut() {
+        let dir = Dir::new("chaptags");
+        let ffmpeg = |args: &[&str]| assert!(std::process::Command::new("ffmpeg").args(["-y", "-v", "error"]).args(args)
+            .current_dir(&dir.0).status().unwrap().success());
+        // ffmpeg writes a chapter's non-title metadata as Tags aimed by TagChapterUID.
+        std::fs::write(dir.0.join("chapters.txt"), ";FFMETADATA1\n\
+            [CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=2000\ntitle=Open\nNOTE=first\n\
+            [CHAPTER]\nTIMEBASE=1/1000\nSTART=2200\nEND=2800\ntitle=Gone\nNOTE=cut away\n\
+            [CHAPTER]\nTIMEBASE=1/1000\nSTART=3500\nEND=6000\ntitle=Close\nNOTE=third ✓\nBPS=authored\n").unwrap();
+        ffmpeg(&["-f", "lavfi", "-i", "testsrc2=size=160x90:rate=30", "-i", "chapters.txt", "-t", "6", "-g", "15",
+            "-map", "0", "-map_metadata", "1", "-map_chapters", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", "src.mkv"]);
+        let src = dir.0.join("src.mkv");
+        let mut chapters = crate::media_metadata::timeline(&src).unwrap().unwrap().chapters;
+        assert!(chapters.iter().all(|c| c.uid.is_some()), "{chapters:?}");
+        // One added here, with no source identity: it must not collide.
+        chapters.push(crate::cut::Chapter { start: 4.5, title: "Mine".into(), uid: None });
+        let keeps = [(0., 2.), (3., 5.)];
+        let list = crate::cut::output_chapters(&chapters, &keeps);
+        assert_eq!(list.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(), ["Open", "Close", "Mine"]);
+        for ext in ["mkv", "webm"] {
+            let out = dir.0.join(format!("out.{ext}"));
+            if ext == "webm" {
+                ffmpeg(&["-i", "src.mkv", "-map", "0", "-map_chapters", "0", "-c:v", "libvpx-vp9", "-b:v", "200k",
+                    "-g", "15", "-deadline", "realtime", "src.webm"]);
+                let chapters = crate::media_metadata::timeline(&dir.0.join("src.webm")).unwrap().unwrap().chapters;
+                let list = crate::cut::output_chapters(&chapters, &keeps);
+                export(&dir.0.join("src.webm"), &out, &keeps, true, &list, None).unwrap();
+            } else {
+                export(&src, &out, &keeps, true, &list, None).unwrap();
+            }
+            let reader = crate::fc::reader(&out).unwrap();
+            let f = filmcraft_matroska::open_with(&reader, &filmcraft_matroska::OpenOptions { index: false, verify_crc: false }).unwrap();
+            let atoms: Vec<_> = f.chapters.iter().flat_map(|e| &e.chapters).collect();
+            let uids: std::collections::HashSet<u64> = atoms.iter().map(|c| c.uid).collect();
+            assert_eq!(uids.len(), atoms.len(), "{ext}: chapter UIDs are unique");
+            assert!(!uids.contains(&0));
+            let note = |title: &str| -> Vec<(String, String)> {
+                let uid = atoms.iter().find(|c| c.title() == Some(title)).unwrap().uid;
+                f.tags.iter().filter(|t| t.targets.chapter_uids.contains(&uid))
+                    .flat_map(|t| &t.simple).filter(|s| s.name != "TITLE")
+                    .map(|s| (s.name.clone(), s.string.clone().unwrap_or_default())).collect()
+            };
+            if ext == "webm" {
+                assert!(f.tags.iter().all(|t| t.targets.chapter_uids.is_empty()), "WebM output carries no chapter tags");
+                continue;
+            }
+            assert_eq!(atoms.iter().map(|c| c.uid).collect::<Vec<_>>(), list.iter().take(2).map(|c| c.uid.unwrap()).chain(atoms.last().map(|c| c.uid)).collect::<Vec<_>>(),
+                "source chapters keep their UIDs");
+            assert_eq!(note("Open"), [("NOTE".to_owned(), "first".to_owned())]);
+            // BPS on a chapter is the author's, not a track statistic.
+            assert_eq!(note("Close"), [("NOTE".to_owned(), "third ✓".to_owned()), ("BPS".to_owned(), "authored".to_owned())]);
+            assert!(note("Mine").is_empty());
+            // The cut chapter's tag went with it, and nothing points at a chapter that isn't there.
+            assert!(f.tags.iter().flat_map(|t| &t.simple).all(|s| s.string.as_deref() != Some("cut away")));
+            assert!(f.tags.iter().flat_map(|t| &t.targets.chapter_uids).all(|u| uids.contains(u)));
+            // ffprobe reads them back onto the chapters.
+            let probe = std::process::Command::new("ffprobe")
+                .args(["-v", "error", "-show_chapters", "-of", "compact"]).arg(&out).output().unwrap();
+            let text = String::from_utf8_lossy(&probe.stdout);
+            assert!(text.contains("tag:NOTE=first") && text.contains("tag:NOTE=third ✓"), "{text}");
+            assert!(!text.contains("cut away"), "{text}");
+        }
     }
     #[test]
     fn native_export_crop_inspection_and_failure_cleanup_need_no_helpers() {
@@ -2749,7 +2861,7 @@ mod tests {
             &encoded,
             &[(0., 0.5), (1., 2.)],
             false,
-            &[(0., 1.5, "Kept ✓".into())],
+            &[ExportChapter::new(0., 1.5, "Kept ✓")],
             None,
         )
         .unwrap();
@@ -2764,7 +2876,7 @@ mod tests {
             2
         );
         let meta = crate::media_metadata::timeline(&encoded).unwrap().unwrap();
-        assert_eq!(meta.chapters, vec![(0., "Kept ✓".into())]);
+        assert_eq!(meta.chapters.iter().map(|c| (c.start, c.title.as_str())).collect::<Vec<_>>(), [(0., "Kept ✓")]);
         // Apple reads a `tref/chap` text track, not the Nero list.
         let src = crate::fc::reader(&encoded).unwrap();
         let f = mp4::open(&src).unwrap();
@@ -2848,12 +2960,12 @@ mod tests {
             &mkv,
             &[(0., 1.5)],
             true,
-            &[(0., 1.5, "Chapter".into())],
+            &[ExportChapter::new(0., 1.5, "Chapter")],
             None,
         )
         .unwrap();
         let meta = crate::media_metadata::timeline(&mkv).unwrap().unwrap();
-        assert_eq!(meta.chapters, vec![(0., "Chapter".into())]);
+        assert_eq!(meta.chapters.iter().map(|c| (c.start, c.title.as_str())).collect::<Vec<_>>(), [(0., "Chapter")]);
         assert_eq!(meta.packets.len(), 18);
         let failed = dir.0.join("failed.mp4");
         assert!(export(&encoded, &failed, &[(0.1, 1.5)], true, &[], None).is_err());
@@ -3210,7 +3322,7 @@ pub(crate) fn pipeline_export_with_inputs(
     info: &crate::probe::VideoInfo,
     dest: &Path,
     keeps: &[(f64, f64)],
-    chapters: &[(f64, f64, String)],
+    chapters: &[ExportChapter],
     registry: &abner_processor_api::Registry,
     chain: &[(String, serde_json::Value)],
     prores: bool,

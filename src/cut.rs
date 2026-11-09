@@ -59,6 +59,11 @@ pub struct Segment {
 pub struct Chapter {
     pub start: f64,
     pub title: String,
+    /// The source's `ChapterUID` (Matroska only), kept so an export can
+    /// re-aim the source's tags for this chapter at it. None for a chapter
+    /// added here or read from a file without UIDs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -481,7 +486,7 @@ impl Cut {
             return None;
         }
         let at = self.chapters.partition_point(|c| c.start < t);
-        self.chapters.insert(at, Chapter { start: t, title: "Chapter 0".into() });
+        self.chapters.insert(at, Chapter { start: t, title: "Chapter 0".into(), uid: None });
         for (i, c) in self.chapters.iter_mut().enumerate() {
             let default = c.title.strip_prefix("Chapter ").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
             if default { c.title = format!("Chapter {}", i + 1); }
@@ -1083,11 +1088,7 @@ fn scan(path: &Path) -> anyhow::Result<Scan> {
     frames.sort_by(f64::total_cmp);
     frames.dedup_by(|a, b| (*a - *b).abs() < 1e-7);
     let keys = gops.iter().map(|g| g.start).collect();
-    let chapters = native
-        .chapters
-        .into_iter()
-        .map(|(start, title)| Chapter { start, title })
-        .collect();
+    let chapters = native.chapters;
     Ok(Scan {
         keys,
         chapters,
@@ -1283,12 +1284,12 @@ fn read_wave(path: &Path, cancel: &Arc<AtomicBool>, tx: &std::sync::mpsc::Sender
 /// starts inside a kept range moves up by what was cut before it; one that
 /// starts inside a cut is dropped. Each runs to the next start (the last to
 /// the end of the output). `(start, end, title)`.
-pub fn output_chapters(chapters: &[Chapter], keeps: &[(f64, f64)]) -> Vec<(f64, f64, String)> {
+pub fn output_chapters(chapters: &[Chapter], keeps: &[(f64, f64)]) -> Vec<crate::media_io::ExportChapter> {
     let mut before = 0.0;
-    let mut starts: Vec<(f64, String)> = Vec::new();
+    let mut starts: Vec<(f64, &Chapter)> = Vec::new();
     for &(a, b) in keeps {
         for c in chapters.iter().filter(|c| c.start >= a - EPS && c.start < b - EPS) {
-            starts.push((before + (c.start - a), c.title.clone()));
+            starts.push((before + (c.start - a), c));
         }
         before += b - a;
     }
@@ -1296,14 +1297,19 @@ pub fn output_chapters(chapters: &[Chapter], keeps: &[(f64, f64)]) -> Vec<(f64, 
     // body becomes the start of its kept remainder, titled as it was.
     let total = before;
     starts.iter().enumerate()
-        .map(|(i, (s, t))| (*s, starts.get(i + 1).map_or(total, |n| n.0), t.clone()))
+        .map(|(i, (s, c))| crate::media_io::ExportChapter {
+            start: *s,
+            end: starts.get(i + 1).map_or(total, |n| n.0),
+            title: c.title.clone(),
+            uid: c.uid,
+        })
         .collect()
 }
 
 #[cfg(test)]
-fn ffmetadata(chapters: &[(f64, f64, String)]) -> String {
+fn ffmetadata(chapters: &[crate::media_io::ExportChapter]) -> String {
     let mut text = String::from(";FFMETADATA1\n");
-    for (a, b, title) in chapters {
+    for crate::media_io::ExportChapter { start: a, end: b, title, .. } in chapters {
         let title = title.replace('\\', "\\\\").replace('=', "\\=").replace(';', "\\;").replace('#', "\\#").replace('\n', " ");
         text.push_str(&format!("[CHAPTER]\nTIMEBASE=1/1000\nSTART={}\nEND={}\ntitle={title}\n", (a * 1000.0).round() as i64, (b * 1000.0).round() as i64));
     }
@@ -1327,7 +1333,7 @@ mod tests {
         cut.edit.cuts = vec![(2.0, 3.0)];
         cut.edit.splits = vec![1.0, 5.0];
         cut.snap = Snap::Frame;
-        cut.chapters = vec![Chapter { start: 4.0, title: "Scene".into() }];
+        cut.chapters = vec![Chapter { start: 4.0, title: "Scene".into(), uid: Some(7) }];
         cut.chapters_edited = true;
         let sidecar = cut.save_project().unwrap();
         let mut reopened = Cut::new(&clip, 10.0);
@@ -1335,6 +1341,7 @@ mod tests {
         assert_eq!(reopened.edit, cut.edit);
         assert_eq!(reopened.snap, Snap::Frame);
         assert_eq!(reopened.chapters[0].title, "Scene");
+        assert_eq!(reopened.chapters[0].uid, Some(7), "the source chapter's identity survives a save");
         assert!(reopened.chapters_edited);
         assert!(Cut::new(&clip, 12.0).load_project().is_err());
         std::fs::remove_file(sidecar).unwrap();
@@ -1717,7 +1724,7 @@ mod tests {
         let keeps = [(0.0, 20.0), (40.0, 60.0)];
         c.add_chapter(50.0);
         let out = output_chapters(&c.chapters, &keeps);
-        assert_eq!(out.iter().map(|o| (o.0, o.1)).collect::<Vec<_>>(), [(10.0, 30.0), (30.0, 40.0)]);
+        assert_eq!(out.iter().map(|o| (o.start, o.end)).collect::<Vec<_>>(), [(10.0, 30.0), (30.0, 40.0)]);
         // 50 s in the source is 30 s out (20 s were cut before it).
         let meta = ffmetadata(&out);
         assert!(meta.starts_with(";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=10000\nEND=30000\ntitle=Chapter 1"));

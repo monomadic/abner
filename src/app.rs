@@ -8251,7 +8251,7 @@ mod tests {
         let cut = app.cut.as_mut().unwrap();
         cut.chapters.clear();
         // Closer than `+` allows, to fit a short clip: set them directly.
-        cut.chapters = (0..30).map(|i| crate::cut::Chapter { start: i as f64 * 4.0 / 30.0, title: format!("Chapter {}", i + 1) }).collect();
+        cut.chapters = (0..30).map(|i| crate::cut::Chapter { start: i as f64 * 4.0 / 30.0, title: format!("Chapter {}", i + 1), uid: None }).collect();
         let n = app.cut.as_ref().unwrap().chapters.len();
         assert_eq!(n, 30);
         app.seek_all(0.0, true);

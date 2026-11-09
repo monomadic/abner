@@ -301,8 +301,7 @@ impl Page {
                 let chapters = match chapters {
                     Some(list) => list,
                     None => crate::media_metadata::timeline(&info.path)?
-                        .map(|t| t.chapters.into_iter()
-                            .map(|(start, title)| crate::cut::Chapter { start, title }).collect())
+                        .map(|t| t.chapters)
                         .unwrap_or_default(),
                 };
                 let chapters = crate::cut::output_chapters(&chapters, &keeps);
@@ -1061,7 +1060,7 @@ mod tests {
                 &info,
                 &dest,
                 &[(0., 0.5)],
-                &[(0., 0.25, "One".into()), (0.25, 0.5, "Two".into())],
+                &[crate::media_io::ExportChapter::new(0., 0.25, "One"), crate::media_io::ExportChapter::new(0.25, 0.5, "Two")],
                 &registry,
                 &[("test.red".into(), serde_json::json!({}))],
                 prores,
@@ -1078,7 +1077,7 @@ mod tests {
             assert_eq!(previews, 12);
             // Rendered exports carry chapters like the copy path does.
             let chapters = crate::media_metadata::timeline(&dest).unwrap().unwrap().chapters;
-            assert_eq!(chapters, vec![(0., "One".into()), (0.25, "Two".into())], "{ext}");
+            assert_eq!(chapters.iter().map(|c| (c.start, c.title.as_str())).collect::<Vec<_>>(), [(0., "One"), (0.25, "Two")], "{ext}");
             // ...and the source's subtitles and title.
             let cues = crate::media_io::cues(&dest).unwrap();
             assert_eq!(cues.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(), ["Rendered cue"], "{ext}");

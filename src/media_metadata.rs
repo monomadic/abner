@@ -777,7 +777,7 @@ pub(crate) struct Packet {
 }
 pub(crate) struct Timeline {
     pub packets: Vec<Packet>,
-    pub chapters: Vec<(f64, String)>,
+    pub chapters: Vec<crate::cut::Chapter>,
     pub facts: serde_json::Value,
 }
 fn video_facts(m: &Metadata) -> serde_json::Value {
@@ -1048,12 +1048,13 @@ pub(crate) fn timeline(path: &Path) -> Result<Option<Timeline>, String> {
             TrackKind::Subtitle=>streams.push(serde_json::json!({"codec_type":"subtitle","codec_name":match &t.codec{Codec::SubRip=>"subrip",Codec::Ass{..}=>"ass",Codec::WebVtt=>"webvtt",_=>&t.codec_id}})),_=>{}
         }
         }
-        fn add(c: &filmcraft_matroska::Chapter, out: &mut Vec<(f64, String)>) {
+        fn add(c: &filmcraft_matroska::Chapter, out: &mut Vec<crate::cut::Chapter>) {
             if c.enabled && !c.hidden {
-                out.push((
-                    c.start_ns as f64 / 1e9,
-                    c.title().unwrap_or("Chapter").into(),
-                ));
+                out.push(crate::cut::Chapter {
+                    start: c.start_ns as f64 / 1e9,
+                    title: c.title().unwrap_or("Chapter").into(),
+                    uid: Some(c.uid).filter(|&u| u != 0),
+                });
             }
             for c in &c.children {
                 add(c, out);
@@ -1112,9 +1113,13 @@ pub(crate) fn timeline(path: &Path) -> Result<Option<Timeline>, String> {
                 streams.push(serde_json::json!({"codec_type":"subtitle","codec_name":if t.entries.first().is_some_and(|e|matches!(&e.format.0,b"text"|b"tx3g")){"mov_text"}else{"subtitle"}}));
             }
         }
-        (p, mp4_chapters(&f, &src, t)?)
+        let chapters = mp4_chapters(&f, &src, t)?
+            .into_iter()
+            .map(|(start, title)| crate::cut::Chapter { start, title, uid: None })
+            .collect();
+        (p, chapters)
     };
-    chapters.sort_by(|a, b| a.0.total_cmp(&b.0));
+    chapters.sort_by(|a, b| a.start.total_cmp(&b.start));
     Ok(Some(Timeline {
         packets,
         chapters,
@@ -1205,9 +1210,9 @@ mod timeline_tests {
                 assert_eq!(a.key, b["flags"].as_str().unwrap().contains('K'));
             }
             assert_eq!(native.chapters.len(), 2, "{ext}");
-            assert_eq!(native.chapters[0].1, "First");
-            assert_eq!(native.chapters[1].1, "Second");
-            assert!((native.chapters[1].0 - 0.4).abs() < 1e-6);
+            assert_eq!(native.chapters[0].title, "First");
+            assert_eq!(native.chapters[1].title, "Second");
+            assert!((native.chapters[1].start - 0.4).abs() < 1e-6);
             assert_eq!(native.facts["streams"][0]["codec_name"], "h264");
         }
         std::fs::remove_dir_all(dir).unwrap();

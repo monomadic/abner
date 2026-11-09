@@ -50,8 +50,13 @@ Matroska → Matroska also carries track names, tags aimed at a track or an atta
 bytes copied straight from the source. Per-track tags that describe the source's packets
 (`DURATION`, `BPS`, `NUMBER_OF_FRAMES`, `NUMBER_OF_BYTES`, anything listed in
 `_STATISTICS_TAGS`) and `ENCODER` are dropped: a cut makes them wrong. Tags aimed at a
-chapter or edition are dropped, since the export writes its own chapters. WebM output
-drops attachments with a log line. None of this has a place in MP4/MOV, so it does not
+chapter follow it: a chapter read from a Matroska source keeps its `ChapterUID` through
+the timeline (and a saved timeline project) into the export, so its tags still point at
+it; a chapter the cut removes takes its tags with it, and a chapter added in Abner gets a
+UID no source chapter uses. The statistics names above are only dropped from track tags —
+on a chapter they are the author's. Tags aimed at an edition are dropped, since the export
+writes one edition of its own. WebM output drops attachments and chapter tags with a log
+line (WebM's restricted element set is kept to tags aimed at tracks). None of this has a place in MP4/MOV, so it does not
 cross containers. Chapters, attachments and track tags are appended after the clusters
 and listed in the SeekHead, which is where ffmpeg and players look for them.
 
