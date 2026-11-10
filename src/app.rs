@@ -202,6 +202,9 @@ pub struct App {
     stroke_last: Option<(f32, f32)>,
     cursor_inside: bool,
     mask_status: String,
+    watermark_task: Option<crate::watermark::Task>,
+    // One explicit undo restores the draft before the most recent detection.
+    watermark_undo: Option<(usize, u64, u64, std::sync::Arc<Vec<u8>>)>,
     mask_save: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     /// The ProRes crop export (`E`), a Filmcraft render on a worker. Separate
     /// from `mask_save` because it runs for as long as the clip takes to
@@ -718,6 +721,8 @@ impl App {
             stroke_last: None,
             cursor_inside: false,
             mask_status: String::new(),
+            watermark_task: None,
+            watermark_undo: None,
             mask_save: None,
             crop_export: None,
             frame_copy: None,
@@ -813,7 +818,7 @@ impl App {
         self.processors.input_owner(self.videos[self.active].spatial_id);
         let return_mode=self.workspace_mode();
         let owner=if let Some((id,key))=plugin { crate::spatial::Owner::Plugin{id,key} }
-            else if self.cut_mode {
+            else if self.cut_mode && crop {
                 let segment=self.cut.as_ref().and_then(|c| c.segments().into_iter().find(|s|!s.cut &&
                     if self.cut_picks.len()==1 { let p=self.cut_picks[0]; (s.start-p.0).abs()<1e-6 && (s.end-p.1).abs()<1e-6 }
                     else { self.cut_picks.is_empty() && self.t>=s.start&&self.t<s.end }));
@@ -840,6 +845,8 @@ impl App {
         self.zoom=1.;self.center=(0.5,0.5);self.seek_all(self.t,true);
     }
     fn finish_editor(&mut self, apply:bool) {
+        self.watermark_task = None;
+        self.watermark_undo = None;
         let Some(e)=self.editor.take() else{return};
         let draft=self.masks[e.source].take();
         self.masks[e.source]=e.original_mask;
@@ -1099,6 +1106,67 @@ impl App {
         mask.paint(self.stroke_last.unwrap_or(point), point, self.brush_diameter * 0.5);
         self.stroke_last = Some(point);
         self.mask_status.clear();
+    }
+
+    fn detect_watermark(&mut self) {
+        if self.watermark_task.take().is_some() {
+            self.mask_status="Watermark detection stopped".into();return;
+        }
+        if !self.ready() || !self.mask_mode || self.crop.is_some() {return;}
+        self.playing=false;self.mouse_up();self.ensure_mask();
+        let v=&self.videos[self.active];let mask=self.masks[self.active].as_ref().unwrap();
+        match crate::watermark::Task::spawn(v.info.clone(),self.t,v.spatial_id,mask.id,mask.revision) {
+            Ok(task)=>{self.mask_status=task.status();self.watermark_task=Some(task);}
+            Err(e)=>self.mask_status=e,
+        }
+    }
+    fn watermark_matches(&self, source:usize, id:u64, revision:u64)->bool {
+        self.mask_mode && self.crop.is_none() && self.videos.get(self.active).is_some_and(|v|v.spatial_id==source)
+            && self.masks.get(self.active).and_then(|m|m.as_ref()).is_some_and(|m|m.id==id&&m.revision==revision)
+    }
+    fn poll_watermark(&mut self) {
+        let Some(task)=self.watermark_task.as_ref() else{return;};
+        if !self.watermark_matches(task.source,task.mask_id,task.revision) {
+            self.watermark_task=None;self.mask_status="Detection discarded because the mask changed".into();return;
+        }
+        if task.expired() {self.watermark_task=None;self.mask_status="Watermark detection timed out; try a shorter clip".into();return;}
+        match task.receiver.try_recv() {
+            Ok(result)=>{
+                self.watermark_task=None;
+                match result {
+                    Ok(proposal)=>self.apply_watermark(proposal),
+                    Err(e)=>self.mask_status=format!("Detection failed: {e}"),
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty)=>self.mask_status=task.status(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)=>{
+                self.watermark_task=None;self.mask_status="Detection failed: worker stopped".into();
+            }
+        }
+    }
+    fn apply_watermark(&mut self,proposal:crate::watermark::Proposal) {
+        let mask=self.masks[self.active].as_mut().unwrap();
+        if proposal.pixels.len()!=mask.pixels.len() {self.mask_status="Detection returned the wrong mask size".into();return;}
+        let found=proposal.pixels.iter().filter(|&&p|p!=0).count();
+        if found==0 {self.mask_status="No confident watermark found; try another point in the clip".into();return;}
+        let added=proposal.pixels.iter().zip(mask.pixels.iter()).filter(|(p,old)|**p!=0&&**old==0).count();
+        if added==0 {self.mask_status="Detected watermark is already masked".into();return;}
+        let previous=mask.pixels.clone();
+        let pixels=std::sync::Arc::make_mut(&mut mask.pixels);
+        for (dst,src) in pixels.iter_mut().zip(proposal.pixels) {if src!=0 {*dst=255;}}
+        mask.revision+=1;
+        self.watermark_undo=Some((self.videos[self.active].spatial_id,mask.id,mask.revision,previous));
+        self.mask_status=format!("Added {added} pixels from {} nearby frames · inspect mask, ⌘Z to undo",proposal.samples);
+    }
+    fn can_undo_watermark(&self)->bool {
+        self.watermark_undo.as_ref().is_some_and(|(source,id,revision,_)|self.watermark_matches(*source,*id,*revision))
+    }
+    fn undo_watermark(&mut self) {
+        if !self.can_undo_watermark() {return;}
+        self.watermark_task=None;
+        let (_,_,_,pixels)=self.watermark_undo.take().unwrap();
+        let mask=self.masks[self.active].as_mut().unwrap();mask.pixels=pixels;mask.revision+=1;
+        self.mask_status="Watermark detection undone".into();
     }
 
     /// Export the mask — and, with the marquee up, the crop of it plus the
@@ -2031,6 +2099,8 @@ impl App {
                 Key::Char('[' | '-' | '_') => { self.resize_brush(0.8); return; }
                 Key::Char('c' | 'C') => { self.toggle_crop(); return; }
                 Key::Char('s' | 'S') => { self.save_mask(); return; }
+                Key::Char('d' | 'D') if self.crop.is_none() => { self.detect_watermark(); return; }
+                Key::Undo if self.crop.is_none() => { self.undo_watermark(); return; }
                 Key::Char('e' | 'E') if self.crop.is_some() => { self.export_crop(); return; }
                 Key::Char('a') if self.crop.is_some() => { self.cycle_aspect(1); return; }
                 Key::Char('A') if self.crop.is_some() => { self.cycle_aspect(-1); return; }
@@ -2375,6 +2445,8 @@ impl App {
     /// Leaving mask mode drops the marquee and the frames it was holding
     /// for export — a full RGBA copy per video.
     fn leave_mask_mode(&mut self) {
+        self.watermark_task = None;
+        self.watermark_undo = None;
         self.mouse_up();
         self.crop = None;
         for v in &mut self.videos {
@@ -2607,6 +2679,7 @@ impl App {
             }
             self.frame_detail_boot = false;
         }
+        self.poll_watermark();
         self.keep_chapter_visible();
         self.tick_cut_thumbs(dt);
         self.update_split_preview();
@@ -3292,12 +3365,16 @@ impl App {
                 x += w + 8.0;
             }
         } else {
-            x += 118.0;
+            if self.vp.0-l.rail>740. {x += 118.0;}
+            let detecting=self.watermark_task.is_some();
             for (label, w, action) in [
+                (if detecting {"Stop detection"}else{"Detect watermark"}, 140.0, Action::DetectWatermark),
+                ("Undo", 48.0, Action::UndoWatermark),
                 ("−", 28.0, Action::Brush(false)),
                 ("+", 28.0, Action::Brush(true)),
                 ("Save mask", 100.0, Action::Save),
             ] {
+                if matches!(action,Action::UndoWatermark)&&!self.can_undo_watermark() {continue;}
                 if self.editor.is_some() && x+w>self.vp.0-260. {break}
                 out.push(Control::new(
                     RectPx { x, y, w, h: 27.0 },
@@ -3321,7 +3398,7 @@ impl App {
         self.mouse_up();
         match action {
             Action::LaunchEditor(crop)=>{self.begin_editor(crop,None);return}
-            Action::ResetEdit=>{if self.crop.is_some(){self.crop=Some(self.full_crop())}else{let v=&self.videos[self.active];self.masks[self.active]=Some(Mask::new(v.info.width,v.info.height));}return}
+            Action::ResetEdit=>{self.watermark_task=None;self.watermark_undo=None;if self.crop.is_some(){self.crop=Some(self.full_crop())}else{let v=&self.videos[self.active];self.masks[self.active]=Some(Mask::new(v.info.width,v.info.height));}return}
             Action::ApplyEdit=>{self.finish_editor(true);return}
             Action::CancelEdit=>{self.finish_editor(false);return}
             Action::Tool(1|2)=>{if self.workspace_mode()!=if matches!(action,Action::Tool(2)){2}else{1}{self.begin_editor(matches!(action,Action::Tool(2)),None);}return}
@@ -3383,6 +3460,8 @@ impl App {
                 if self.videos.iter().any(|v|v.input_crop.is_some()) && !matches!(mode,Mode::Overlay|Mode::SideBySide) {self.notify("Use Single or Side by side for cropped sources".into());}
                 else {self.mode=mode;}
             },
+            Action::DetectWatermark => self.detect_watermark(),
+            Action::UndoWatermark => self.undo_watermark(),
             Action::Brush(up) => self.resize_brush(if up { 1.25 } else { 0.8 }),
             Action::Save => self.save_mask(),
             Action::Export => self.export(),
@@ -3606,7 +3685,9 @@ impl App {
                 let (_, _, w, h) = c.pixels(m.width, m.height);
                 format!("{context} · {w} × {h}")
             } else { format!("{context} · {:.0} px", self.brush_diameter) };
-            ui_label(items, l.rail + 20.0, HEADER_H + CONTEXT_H / 2.0, 11.0, WORKSPACE_TEXT, label, Align::Left, 126.0);
+            if self.crop.is_some() || self.vp.0-l.rail>740. {
+                ui_label(items, l.rail + 20.0, HEADER_H + CONTEXT_H / 2.0, 11.0, WORKSPACE_TEXT, label, Align::Left, 126.0);
+            }
         } else if vp.0 - l.rail > 760.0 {
             let parameter = match self.mode {
                 Mode::Delta => format!("gain {:.1}×", self.gain),
@@ -3914,7 +3995,7 @@ impl App {
             else { format!("Clip {} · {}", self.active + 1, self.zoom_label()) };
         let hint = if self.mask_mode { if self.crop.is_some() {
                 format!("a {}   drag move / resize   s save   e export", ASPECTS[self.aspect].0)
-            } else { "drag paint   [ ] brush   s save".into() } }
+            } else { "drag paint   [ ] brush   d detect   ⌘Z undo".into() } }
             else { "1–9 clip   space play   < > step   [ ] speed".into() };
         let export = self.footer_export();
         let hint_width = if vp.0 >= 1120.0 + build_w { 440.0 } else { 0.0 };
@@ -6962,7 +7043,7 @@ impl Workspace {
 }
 
 #[derive(Clone, Copy)]
-enum Action { LaunchEditor(bool), ResetEdit, ApplyEdit, CancelEdit, Duplicate, OpenFiles, ClearSources, ToggleSources, ToggleInspector, ToggleDetail, Tool(usize), View(Mode), Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
+enum Action { LaunchEditor(bool), ResetEdit, ApplyEdit, CancelEdit, Duplicate, OpenFiles, ClearSources, ToggleSources, ToggleInspector, ToggleDetail, Tool(usize), View(Mode), DetectWatermark, UndoWatermark, Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
 #[derive(Clone, Copy, PartialEq)]
 enum CutAction { TogglePosters, FrameChanges(bool), TimeDisplay(bool),
     // Set in / out: no key or button reaches these while the feature is disabled.
@@ -7187,6 +7268,98 @@ const CONTROL_BG: [f32; 4] = [26.0 / 255.0, 26.0 / 255.0, 26.0 / 255.0, 1.0];
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn watermark_from_timeline_applies_to_the_source_mask() {
+        let clip=test_clip().expect("video test fixture");let mut app=mk_app(&clip,1);
+        app.set_cut_mode(true);app.begin_editor(false,None);
+        assert!(matches!(app.editor.as_ref().unwrap().owner,crate::spatial::Owner::Source));
+        let mut pixels=vec![0;app.masks[0].as_ref().unwrap().pixels.len()];pixels[500]=255;
+        app.apply_watermark(crate::watermark::Proposal{pixels,samples:16});
+        app.finish_editor(true);
+        assert_eq!(app.masks[0].as_ref().unwrap().pixels[500],255);
+        assert!(app.cut_mode,"returns to the timeline after applying the source mask");
+    }
+
+    #[test]
+    fn watermark_controls_fit_small_windows_and_results_are_undoable() {
+        let clip=test_clip().expect("video test fixture");
+        let mut app=mk_app(&clip,1);
+        app.begin_editor(false,None);
+        for width in [720.,900.,1280.] {
+            app.vp=(width,800.);
+            let controls=app.controls();
+            let detect=controls.iter().find(|c|matches!(c.action,Action::DetectWatermark)).unwrap();
+            assert!(detect.r.x>=app.workspace().rail);
+            let reset=controls.iter().find(|c|matches!(c.action,Action::ResetEdit)).unwrap();
+            assert!(detect.r.x+detect.r.w<=reset.r.x);
+        }
+        let mask=app.masks[0].as_mut().unwrap();
+        mask.paint((10.,10.),(10.,10.),3.);
+        let before=mask.pixels.clone();
+        let mut proposal=vec![0;before.len()];proposal[500]=255;
+        app.apply_watermark(crate::watermark::Proposal{pixels:proposal.clone(),samples:16});
+        assert_eq!(app.masks[0].as_ref().unwrap().pixels[500],255);
+        assert!(before.iter().zip(app.masks[0].as_ref().unwrap().pixels.iter()).all(|(&a,&b)|a==0||b==255));
+        app.key(Key::Undo);
+        assert_eq!(*app.masks[0].as_ref().unwrap().pixels,*before);
+        app.apply_watermark(crate::watermark::Proposal{pixels:proposal,samples:16});
+        app.finish_editor(false);
+        assert!(app.masks[0].is_none(),"cancel restores pre-editor state");
+    }
+
+    #[test]
+    fn watermark_stale_results_cannot_overwrite_paint_reset_or_closed_sessions() {
+        let clip=test_clip().expect("video test fixture");
+        let mut app=mk_app(&clip,1);app.begin_editor(false,None);
+        let source=app.videos[0].spatial_id;
+        let mask=app.masks[0].as_ref().unwrap();
+        let (task,sender,cancel)=crate::watermark::Task::test_pending(source,mask.id,mask.revision);
+        app.watermark_task=Some(task);
+        let mask=app.masks[0].as_mut().unwrap();mask.paint((10.,10.),(10.,10.),3.);
+        let painted=mask.pixels.clone();
+        sender.send(Ok(crate::watermark::Proposal{pixels:vec![255;painted.len()],samples:16})).unwrap();
+        app.poll_watermark();assert_eq!(*app.masks[0].as_ref().unwrap().pixels,*painted);
+        assert!(cancel.load(std::sync::atomic::Ordering::Relaxed));
+        let mask=app.masks[0].as_ref().unwrap();
+        let (task,_,cancel)=crate::watermark::Task::test_pending(source,mask.id,mask.revision);
+        app.watermark_task=Some(task);app.activate(Action::ResetEdit);
+        assert!(cancel.load(std::sync::atomic::Ordering::Relaxed));
+        let mask=app.masks[0].as_ref().unwrap();
+        let (task,_,cancel)=crate::watermark::Task::test_pending(source,mask.id,mask.revision);
+        app.watermark_task=Some(task);app.finish_editor(false);
+        assert!(cancel.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(app.watermark_task.is_none());
+    }
+
+    #[test]
+    fn watermark_button_runs_native_decode_and_applies_an_editable_draft() {
+        use std::io::Write;
+        let dir=std::env::temp_dir().join(format!("abner-watermark-{}",std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip=dir.join("overlay.mp4");
+        let mut encoder=Command::new("ffmpeg").args(["-v","error","-y","-f","rawvideo","-pix_fmt","rgb24","-s","160x96","-r","4","-i","pipe:0","-c:v","libx264","-crf","10","-pix_fmt","yuv420p"])
+            .arg(&clip).stdin(std::process::Stdio::piped()).spawn().unwrap();
+        let mut state=17u32;let mut input=encoder.stdin.take().unwrap();
+        for _ in 0..16 {let mut frame=Vec::new();for y in 0..96 {for x in 0..160 {
+            for _ in 0..3 {state=state.wrapping_mul(1664525).wrapping_add(1013904223);
+                frame.push(if (110..140).contains(&x)&&(64..80).contains(&y){240}else{(state>>24) as u8});}
+        }}input.write_all(&frame).unwrap();}
+        drop(input);assert!(encoder.wait().unwrap().success());
+        let mut app=mk_app(&clip,1);app.begin_editor(false,None);
+        assert!(tick_until(&mut app,Duration::from_secs(10),|a|a.videos[0].delivered&&!a.videos[0].seeking));
+        let before=app.t;
+        let r=app.controls().into_iter().find(|c|matches!(c.action,Action::DetectWatermark)).unwrap().r;
+        app.mouse_down(r.x+r.w/2.,r.y+r.h/2.);app.mouse_up();
+        assert!(app.watermark_task.is_some());
+        assert!(tick_until(&mut app,Duration::from_secs(30),|a|a.watermark_task.is_none()),"detection did not finish");
+        assert!(app.can_undo_watermark(),"{}",app.mask_status);
+        assert_eq!(app.t,before,"background sampling must not move the playhead");
+        let mask=app.masks[0].as_ref().unwrap();
+        assert_eq!(mask.pixels[70*160+120],255);
+        app.finish_editor(true);assert_eq!(app.masks[0].as_ref().unwrap().pixels[70*160+120],255);
+        assert!(!app.mask_mode);
+    }
+
     #[test]
     fn source_edge_drag_resizes_cards_without_selecting_or_seeking() {
         let Some(clip) = test_clip() else { return };

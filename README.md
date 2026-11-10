@@ -144,6 +144,20 @@ tab closes and returns to Sources, Timeline, or Process. The editor stays attach
 to its original source until closed. Applied source masks persist in memory, and
 playback stays paused until Space.
 
+**Detect watermark** (or **D**) samples up to 16 nearby frames, within 30 seconds
+on either side of the playhead, and adds a proposed static-watermark mask to the
+current draft. This is built into mask mode and uses the native decoder. The
+button becomes **Stop detection** while scanning; progress appears in the status
+line. **Undo** / **Cmd-Z** restores the mask from before detection (until another
+paint edit). **Apply** keeps the draft and **Cancel** restores the original mask.
+Existing painted pixels are preserved. Editing the mask while scanning discards
+the pending result; no confident detection leaves the draft unchanged.
+
+Detection needs background variation and can mistake stationary scenery for an
+overlay. Inspect the result before applying. Sampling stays at native resolution;
+a memory limit and cancellation bound background work. Crop mode does not offer
+the mask detector.
+
 **S** saves beside the focused video: `example.mov` becomes `example.mask.png`.
 The PNG is 8-bit grayscale at the displayed video's native resolution (including
 its display rotation), with **painted blue = white (255)** and **untouched red =

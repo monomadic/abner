@@ -1,5 +1,18 @@
 # abner — history
 
+
+## 2026-11-10 — Built-in watermark detection in mask mode
+
+Added Detect watermark / D to the mask toolbar. A cancellable native decoder
+samples 16 nearby frames and proposes a static mask from persistent boundaries
+and suppressed temporal variation, including enclosed solid emblem interiors.
+The mask draft receives the proposal as an additive edit, with Undo detection,
+normal Apply/Cancel ownership, and identity/revision checks that discard late
+results after painting, reset, source changes or closing the editor. No processor
+registry or external executable is involved. The detection button stays visible
+at the minimum window width. Tests cover the detector, native frame sampling,
+compact control layout, undo/cancel and stale-result rejection.
+
 ## 2026-11-10 — Live processor scrubbing
 
 While dragging the processor seekbar, completed exact source frames now update

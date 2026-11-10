@@ -17,6 +17,7 @@ mod config;
 mod cut;
 mod smart;
 mod mask;
+mod watermark;
 mod spatial;
 mod open;
 mod fc;
@@ -97,6 +98,7 @@ keys:
   pinch        zoom on the pointer, photo-style (drag or scroll to pan; synced)
   M            open mask editor (pauses; Enter applies, Esc cancels)
   [ ]          change brush size in mask mode
+  D            detect static watermark in mask mode (again to stop); Cmd-Z undo
   C            open crop: drag to move, corners to resize
                (--crop opens there; --crop x,y,w,h sets it in image pixels)
   S            save the mask as <name>.mask.png — with a crop up, both it
