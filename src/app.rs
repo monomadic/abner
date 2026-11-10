@@ -1778,9 +1778,9 @@ impl App {
         self.videos.iter().any(|v| v.seeking && !v.stale && !v.player.failed() && v.seek_sent.elapsed() < SEEK_SETTLE)
     }
 
-    /// Whether clip `i` is drawn at all: the timeline shows only its own.
+    /// Timeline and processor views draw only the active source.
     fn on_screen(&self, i: usize) -> bool {
-        !self.cut_mode || i == self.active
+        (!self.cut_mode && !self.processors.open) || i == self.active
     }
 
     fn dispatch_seek(&mut self, target: f64, exact: bool) {
@@ -1861,6 +1861,8 @@ impl App {
         if let Some(t) = self.processors.take_seek() {
             self.playing = false;
             let t = t.min((self.videos[self.active].info.duration - 1.0 / self.fps.max(1.0)).max(0.0));
+            // Pointer events within the same output frame need no new decode.
+            if (t - self.t).abs() < 1e-9 { return; }
             // The panel's time is on the chain's OUTPUT grid, which a retimed
             // chain puts between source frames: the players land on the latest
             // original at or before it while the clock stays on the output time.
@@ -2328,7 +2330,15 @@ impl App {
         if let Some((_, from)) = self.source_resize.take() {
             if !self.show_sources { self.source_width = Some(from); }
         }
-        if self.processors.release(){return;}
+        if self.processors.release() {
+            // While dragging, coalesce to let useful decodes finish. On release,
+            // the final target owns the decoder immediately: do not wait for
+            // an obsolete cold seek (or its two-second settle timeout).
+            if let Some((target, exact)) = self.queued_seek {
+                self.dispatch_seek(target, exact);
+            }
+            return;
+        }
         self.source_copy_drag = None;
         if let Some(CutDrag::Band { x0, add, .. }) = self.cut_drag {
             if self.cut_band_rect().is_none() && !add {
@@ -8636,6 +8646,45 @@ mod tests {
         assert!(app.cut_restore.is_none());
         assert_eq!(app.cut.as_ref().unwrap().in_req, Some(2.5));
         assert_eq!(app.cut.as_ref().unwrap().out_req, Some(3.5));
+    }
+
+    #[test]
+    fn processor_scrub_release_supersedes_old_decode_and_skips_hidden_sources() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 2);
+        let vp = (1280.0, 800.0);
+        assert!(tick_until(&mut app, Duration::from_secs(5), |a| a.started));
+        app.activate(Action::Tool(4));
+        app.playing = false;
+        app.tick(0.0, vp, 1.0);
+        // Use the seekbar's drawn track so the gesture exercises real hit testing.
+        let frame = app.tick(0.0, vp, 1.0);
+        let track = frame.items.iter().rev().find_map(|item| match item {
+            Item::Rect(r) if r.r.h == 4.0 && r.r.w > 100.0
+                && r.r.x > crate::processor_gui::Panel::viewer(vp).x
+                && r.r.y > crate::processor_gui::Panel::viewer(vp).y
+                    + crate::processor_gui::Panel::viewer(vp).h => Some(r.r),
+            _ => None,
+        }).expect("processor seek track");
+        app.mouse_down(track.x + track.w * 0.3, track.y);
+        assert!(app.videos[app.active].seeking);
+        let sent = app.videos[app.active].seek_sent;
+        app.cursor_moved(track.x + track.w * 0.3, track.y);
+        assert_eq!(app.videos[app.active].seek_sent, sent);
+        assert!(app.queued_seek.is_none(), "same-frame pointer motion adds no work");
+        assert!(app.videos.iter().enumerate().all(|(i, v)| i == app.active || v.stale));
+        for fraction in [0.8, 0.2, 0.9, 0.6] {
+            app.cursor_moved(track.x + track.w * fraction, track.y);
+        }
+        assert!(app.queued_seek.is_some());
+        let target = app.t;
+        app.mouse_up();
+        assert!(app.queued_seek.is_none(), "release sends the final target without waiting for old decode");
+        assert_eq!(app.t, target);
+        assert!(!app.adopt_seek);
+        assert!(tick_until(&mut app, Duration::from_secs(5), |a| !a.videos[a.active].pending));
+        assert!((app.videos[app.active].shown_pts - target).abs() < 1.0 / app.fps);
+        assert_eq!(app.t, target, "the final pointer position owns the clock");
     }
 
     /// U undoes like ⌘Z, and a two-finger swipe over the timeline zooms about the pointer

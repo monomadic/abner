@@ -1,5 +1,18 @@
 # abner — history
 
+## 2026-11-10 — Prioritize the final processor scrub target
+
+Processor scrub release immediately dispatches the latest queued target, cancelling
+obsolete decoder work instead of waiting for its landing or the two-second seek
+settle timeout. Movement within the same output frame adds no seek. The processor
+view now seeks and drains only its visible source; hidden sources catch up when
+shown again. Existing coalescing still bounds work during the drag.
+A real-decoder gesture regression covers rapid pointer movement, duplicate targets,
+hidden sources, immediate final dispatch and exact landing. Full library run:
+203 passed, three ignored; the export codec test fails because this machine has
+no HEVC encoder.
+
+
 ## 2026-11-10 — Processor transport beside the seekbar
 
 Moved the processor transport and seekbar into one row immediately below the
