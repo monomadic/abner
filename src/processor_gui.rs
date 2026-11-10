@@ -1160,6 +1160,7 @@ impl Panel {
         s.scales = scales;
         s.worker = worker;
         s.select(0);
+        s.editor_request = None;
         s
     }
     fn select(&mut self, index: usize) {
@@ -1171,19 +1172,28 @@ impl Panel {
         self.preset = usize::MAX;
         self.preset_name = None;
         self.fields = fields(&self.descriptors[index].settings_schema);
+        // Keep discovery overrides available to presets/CLI, but out of the UI.
+        let schema = &self.descriptors[index].settings_schema;
+        self.fields.retain(|f| !matches!(schema["properties"][&f.key]["format"].as_str(), Some("file-path" | "directory-path")));
         if let Some(inputs)=self.declarations.get(&self.descriptors[index].id) {
             use abner_processor_api::SpatialInputKind as K;
             for d in inputs {
                 let tools: &[bool]=match d.kind {K::Image|K::Region=>&[true],K::Mask=>&[false],K::MaskedImage=>&[true,false]};
                 for &crop in tools {
                     self.fields.push(Field { key:format!("__spatial_{}_{}",d.key,crop), title:format!("{} · {}",d.title,if crop {"Crop"} else {"Mask"}),
-                        kind:Kind::Spatial{key:d.key.clone(),crop},default:None,required:false,
+                        kind:Kind::Spatial{key:d.key.clone(),crop},default:None,required:d.required,
                         description:Some(if d.kind==K::Region {"Processing region; keeps the complete input image"} else {"Edit this input without changing other inputs"}.into()) });
                 }
             }
         }
+        self.fields.sort_by_key(|f| match f.kind {
+            Kind::Spatial { crop:false, .. } if f.required => 0,
+            Kind::Spatial { .. } => 1,
+            _ => 2,
+        });
         if let Some(field) = downsize_field(self.scales.get(index).map_or(&[][..], Vec::as_slice)) {
-            self.fields.insert(0, field);
+            let position = self.fields.iter().take_while(|f| matches!(f.kind, Kind::Spatial { .. })).count();
+            self.fields.insert(position, field);
         }
         self.settings = self.saved[index].clone();
         if self.fields.iter().any(|f| f.key == DOWNSIZE_KEY) && self.settings.get(DOWNSIZE_KEY).is_none() {
@@ -1192,6 +1202,7 @@ impl Panel {
         self.scroll = 0.0;
         self.editing = None;
         self.changed();
+        self.request_missing_mask();
     }
     /// Apply the configured preview budget; the next render uses it.
     pub fn set_budget(&mut self, bytes: usize) {
@@ -1419,6 +1430,17 @@ impl Panel {
     pub(crate) fn job_inputs(&self)->crate::spatial::JobInputs {self.inputs.clone()}
     pub(crate) fn set_crops(&mut self,crops:Vec<crate::spatial::ClipCrop>) {
         if self.inputs.crops!=crops {self.inputs.crops=crops;self.changed();}
+    }
+    pub(crate) fn focused_id(&self) -> Option<&str> {
+        self.descriptors.get(self.selected).map(|d| d.id.as_str())
+    }
+    fn request_missing_mask(&mut self) {
+        let Some(d) = self.descriptors.get(self.selected) else { return };
+        if let Some(input) = self.declarations.get(&d.id).into_iter().flatten().find(|input|
+            input.required && matches!(input.kind, abner_processor_api::SpatialInputKind::Mask | abner_processor_api::SpatialInputKind::MaskedImage)
+            && self.binding(&d.id, &input.key).is_none_or(|b| b.mask.is_none())) {
+            self.editor_request = Some((d.id.clone(), input.key.clone(), false));
+        }
     }
     pub(crate) fn binding(&self,id:&str,key:&str)->Option<abner_processor_api::SpatialBinding> {self.inputs.bindings.get(id)?.get(key).cloned()}
     pub(crate) fn set_binding(&mut self,id:String,key:String,b:abner_processor_api::SpatialBinding) {
@@ -2130,6 +2152,8 @@ impl Panel {
                         self.toggle_enabled(index);
                     } else if index != self.selected {
                         self.select(index);
+                    } else {
+                        self.request_missing_mask();
                     }
                 }
             }
@@ -2806,7 +2830,7 @@ impl Panel {
         } else {
             match self.render_result {
                 Some(true) => "Frame preview ready",
-                Some(false) => "Frame preview stopped",
+                Some(false) => "Frame preview error",
                 None => "Frame preview",
             }
         };
@@ -3366,6 +3390,26 @@ mod tests {
         let (all, ..) = p.chips(vp)[0];
         p.click(all.x + 5.0, all.y + 5.0, vp);
         assert_eq!(p.visible(), [0, 1, 2]);
+    }
+    #[test]
+    fn model_locations_are_hidden_and_missing_required_masks_request_editor() {
+        let mut p = Panel::default();
+        p.descriptors = vec![abner_processor_api::Factory::descriptor(&BufferedFactory)];
+        p.descriptors[0].settings_schema["properties"]["model"] = json!({"type":"string","format":"file-path","default":"automatic"});
+        p.saved = vec![defaults(&fields(&p.descriptors[0].settings_schema))];
+        p.enabled = vec![false];
+        p.supported = vec![true];
+        p.declarations.insert("example.buffered".into(),vec![abner_processor_api::SpatialInputDescriptor {
+            key:"mask".into(),title:"Removal mask".into(),kind:abner_processor_api::SpatialInputKind::Mask,required:true,
+        }]);
+        p.select(0);
+        assert!(matches!(p.fields[0].kind,Kind::Spatial{crop:false,..}));
+        assert!(!p.fields.iter().any(|f| f.key=="model"));
+        assert_eq!(p.settings["model"],"automatic");
+        assert_eq!(p.editor_request.take(),Some(("example.buffered".into(),"mask".into(),false)));
+        p.set_binding("example.buffered".into(),"mask".into(),abner_processor_api::SpatialBinding {mask:Some(Arc::new(vec![255])),..Default::default()});
+        p.select(0);
+        assert!(p.editor_request.is_none());
     }
     struct BufferedFactory;
     impl abner_processor_api::Factory for BufferedFactory {

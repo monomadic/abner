@@ -839,7 +839,8 @@ impl App {
             _=>{}
         }
         self.editor=Some(crate::spatial::Editor{owner,source:self.active,return_mode,original_mask});
-        self.processors.close();self.export_page.open=false;self.cut_mode=false;
+        if return_mode != 4 { self.processors.close(); }
+        self.export_page.open=false;self.cut_mode=false;
         self.mask_mode=true;self.playing=false;self.show_ui=true;self.ensure_mask();
         self.crop=if crop {Some(saved_crop.unwrap_or_else(||self.full_crop()))}else{None};
         self.zoom=1.;self.center=(0.5,0.5);self.seek_all(self.t,true);
@@ -1048,7 +1049,7 @@ impl App {
             Some((grab, _)) => Some(grab),
             None => {
                 let (x, y) = self.cursor;
-                if !contains(self.workspace().canvas, x, y) { return None; }
+                if !contains(self.canvas(), x, y) { return None; }
                 self.crop_hit(x, y)
             }
         };
@@ -1094,7 +1095,7 @@ impl App {
         let r = self.content_rect(self.active);
         let (x, y) = self.cursor;
         x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h
-            && contains(self.workspace().canvas, x, y)
+            && contains(self.canvas(), x, y)
     }
 
     fn paint_at_cursor(&mut self) {
@@ -1285,7 +1286,7 @@ impl App {
             }
         }
         // Guides: each side's line carries on across the canvas.
-        let cv = self.workspace().canvas;
+        let cv = self.canvas();
         for y in [r.y, r.y + r.h] {
             if y >= cv.y && y <= cv.y + cv.h {
                 items.push(Item::Rect(RectItem::new(
@@ -1926,6 +1927,9 @@ impl App {
         self.processors.render_frame();
     }
     fn apply_processor_transport(&mut self) {
+        if self.editor.as_ref().is_some_and(|e| matches!(&e.owner, crate::spatial::Owner::Plugin { id, .. } if self.processors.focused_id() != Some(id.as_str()))) {
+            self.finish_editor(false);
+        }
         if let Some((id,key,crop))=self.processors.editor_request.take() {self.begin_editor(crop,Some((id,key)));return}
         if std::mem::take(&mut self.processors.toggle_play) {
             self.playing = !self.playing;
@@ -1980,13 +1984,13 @@ impl App {
         }
         if self.export_page.open && self.ready() && self.export_page.key(k) { return; }
         if self.export_page.open && matches!(k, Key::Space | Key::Render) { self.start_pipeline_export(); return; }
-        if self.processors.key(k) {
+        if !self.mask_mode && self.processors.key(k) {
             self.apply_processor_transport();
             return;
         }
         // The Process page's own keys: [ ] walk the sources, + duplicates
         // (the arrows step a frame inside the panel).
-        if self.processors.open && self.ready() {
+        if self.processors.open && self.ready() && !self.mask_mode {
             match k {
                 Key::Char('[') => { self.select((self.active + self.videos.len() - 1) % self.videos.len()); return; }
                 Key::Char(']') => { self.select((self.active + 1) % self.videos.len()); return; }
@@ -2208,7 +2212,7 @@ impl App {
             return;
         }
         if self.export_page.open { self.cursor=(x,y);self.cursor_inside=true;return; }
-        if self.show_ui && self.processors.pointer(x, y, self.vp) {
+        if self.show_ui && !(self.mask_mode && (self.painting || self.crop_drag.is_some() || contains(self.canvas(), x, y))) && self.processors.pointer(x, y, self.vp) {
             self.cursor = (x, y);
             self.apply_processor_transport();
             return;
@@ -2315,7 +2319,13 @@ impl App {
             self.export();
             return;
         }
-        if self.show_ui && self.ready() && self.processors.click(x, y, self.vp) {
+        if self.mask_mode && self.processors.open {
+            self.cursor = (x,y); self.cursor_inside = true;
+            if let Some(c) = self.embedded_editor_controls().into_iter().find(|c| contains(c.r,x,y)) {
+                self.activate(c.action); return;
+            }
+        }
+        if self.show_ui && self.ready() && !(self.mask_mode && contains(self.canvas(),x,y)) && self.processors.click(x, y, self.vp) {
             self.apply_processor_transport();
             return;
         }
@@ -2335,7 +2345,7 @@ impl App {
             }
             return;
         }
-        if self.show_ui {
+        if self.show_ui && !(self.mask_mode && self.processors.open) {
             if let Some(control) = self.controls().into_iter().find(|c| contains(c.r, x, y)) {
                 self.activate(control.action);
                 return;
@@ -2370,7 +2380,7 @@ impl App {
                 return;
             }
         }
-        if !contains(self.workspace().canvas, x, y) { return; }
+        if !contains(self.canvas(), x, y) { return; }
         if self.mask_mode {
             self.stroke_last = None;
             if self.crop.is_some() {
@@ -2998,6 +3008,24 @@ impl App {
             n,
         );
         self.processors.draw(&mut items, vp, n, self.view(), self.show_ui);
+        if self.processors.open && self.mask_mode && self.show_ui {
+            let canvas = self.canvas();
+            let board = Canvas { r: canvas };
+            items.push(Item::Clip(Some(canvas)));
+            board.ground(&mut items);
+            let picture = self.content_rect(self.active);
+            Canvas::lift(&mut items, picture);
+            items.push(Item::Video { a:self.active, b:self.active, r:picture, uv:[0.,0.,1.,1.], mode:VideoMode::Tex, p0:0., p1:0. });
+            self.build_mask_layer(&mut items);
+            board.recess(&mut items);
+            let header = RectPx { x:canvas.x,y:HEADER_H,w:canvas.w,h:canvas.y-HEADER_H };
+            items.push(Item::Clip(Some(header)));
+            items.push(Item::Rect(RectItem::new(header, WORKSPACE_PANEL)));
+            for c in self.embedded_editor_controls() {
+                ui_label(&mut items,c.r.x+c.r.w/2.,c.r.y+c.r.h/2.,10.,WORKSPACE_TEXT,&c.label,Align::Center,c.r.w-4.);
+            }
+            items.push(Item::Clip(None));
+        }
         if self.processors.open && self.show_ui { self.draw_footer_end(&mut items, vp); }
 
         if self.ready() { self.export_page.reset_source(&self.videos[self.active].info); }
@@ -3235,6 +3263,17 @@ impl App {
             w: 20.0,
             h: 20.0,
         }
+    }
+
+    fn embedded_editor_controls(&self) -> Vec<Control> {
+        let v = self.canvas();
+        let mut buttons = if self.crop.is_some() { vec![("Save still",Action::Save)] } else {
+            vec![("Detect",Action::DetectWatermark),("−",Action::Brush(false)),("+",Action::Brush(true)),("Save mask",Action::Save)]
+        };
+        if self.can_undo_watermark() { buttons.push(("Undo",Action::UndoWatermark)); }
+        buttons.extend([("Reset",Action::ResetEdit),("Cancel",Action::CancelEdit),("Apply",Action::ApplyEdit)]);
+        let w = (v.w / buttons.len() as f32).min(90.);
+        buttons.into_iter().enumerate().map(|(i,(label,action))| Control::new(RectPx {x:v.x+i as f32*w,y:HEADER_H,w,h:v.y-HEADER_H},label,false,action)).collect()
     }
 
     fn controls(&self) -> Vec<Control> {
@@ -7268,6 +7307,28 @@ const CONTROL_BG: [f32; 4] = [26.0 / 255.0, 26.0 / 255.0, 26.0 / 255.0, 1.0];
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn processor_mask_editor_keeps_shell_and_limits_paint_to_canvas() {
+        let clip = test_clip().expect("video test fixture");
+        let mut app = mk_app(&clip, 1);
+        app.activate(Action::Tool(4));
+        app.begin_editor(false, Some(("test.processor".into(), "mask".into())));
+        assert!(app.processors.open && app.mask_mode);
+        assert_eq!(app.workspace_mode(), 4);
+        let canvas = app.canvas();
+        app.cursor = (canvas.x + canvas.w + 10., canvas.y + 30.);
+        app.cursor_inside = true;
+        assert!(!app.brush_cursor_visible());
+        let picture = app.content_rect(0);
+        app.mouse_down(picture.x + picture.w/2., picture.y + picture.h/2.);
+        assert!(app.painting);
+        app.mouse_up();
+        let apply = app.embedded_editor_controls().into_iter().find(|c| matches!(c.action,Action::ApplyEdit)).unwrap();
+        app.mouse_down(apply.r.x + apply.r.w/2.,apply.r.y + apply.r.h/2.);
+        assert!(app.processors.open && !app.mask_mode);
+        assert!(app.processors.binding("test.processor","mask").unwrap().mask.is_some());
+    }
+
     #[test]
     fn watermark_from_timeline_applies_to_the_source_mask() {
         let clip=test_clip().expect("video test fixture");let mut app=mk_app(&clip,1);

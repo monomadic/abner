@@ -1,6 +1,19 @@
 # abner — history
 
 
+## 2026-11-10 — Canvas mask editing and automatic model discovery UI
+
+Process mask/crop editing keeps the processor rail, settings, transport and preview
+status visible. Only the canvas and its header become the editor, with Apply,
+Cancel, Reset, brush, detection and save controls. Painting and crop gestures use
+the Process canvas bounds. Focusing a processor with an unset required mask opens
+its editor; required mask inputs precede other settings, and saved masks suppress
+automatic reopening. Changing processor focus discards the previous draft.
+
+Schema file/directory location controls are hidden from the settings UI while
+preserving defaults and preset/CLI values. Plugin discovery/load failures continue
+to appear in the frame-preview status, now headed “Frame preview error”.
+
 ## 2026-11-10 — Built-in watermark detection in mask mode
 
 Added Detect watermark / D to the mask toolbar. A cancellable native decoder
