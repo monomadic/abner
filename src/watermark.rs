@@ -97,7 +97,9 @@ impl Task {
         source: usize,
         mask_id: u64,
         revision: u64,
+        region: Option<[usize; 4]>,
     ) -> Result<Self, String> {
+        let region = detection_region(region, info.width as usize, info.height as usize)?;
         let times = sample_times(at, info.duration, info.fps)?;
         let n = info.width as usize * info.height as usize;
         // Samples plus statistical maps, graph queues and one display conversion.
@@ -116,7 +118,7 @@ impl Task {
             .spawn(move || {
                 let result = filmcraft_media::cancel::with_cancel(&flag, || {
                     filmcraft_media::cancel::with_background(true, || {
-                        analyze(info.path, info.width, info.height, &times, &flag, &count)
+                        analyze(info.path, info.width, info.height, &times, &flag, &count, Some(region))
                     })
                 });
                 let _ = sender.send(result);
@@ -152,6 +154,21 @@ fn sample_times(at: f64, duration: f64, fps: f64) -> Result<Vec<f64>, String> {
     Ok(times)
 }
 
+fn detection_region(region: Option<[usize;4]>, w:usize, h:usize) -> Result<[usize;4],String> {
+    let [x,y,rw,rh] = region.unwrap_or([0,0,w,h]);
+    if x>=w || y>=h || rw==0 || rh==0 {return Err("The processing region is empty or outside the image".into());}
+    Ok([x,y,rw.min(w-x),rh.min(h-y)])
+}
+fn region_mask(w:usize,h:usize,region:[usize;4],opacity:&[f32],confidence:&[f32]) -> Vec<u8> {
+    let [x,y,rw,rh] = region;
+    let mut pixels = vec![0;w*h];
+    for row in 0..rh { for col in 0..rw {
+        let i = row*rw+col;
+        if opacity[i]>=0.35 && confidence[i]>=0.25 {pixels[(y+row)*w+x+col]=255;}
+    }}
+    pixels
+}
+
 fn analyze(
     path: PathBuf,
     w: u32,
@@ -159,7 +176,9 @@ fn analyze(
     times: &[f64],
     cancel: &AtomicBool,
     progress: &AtomicUsize,
+    region: Option<[usize;4]>,
 ) -> Result<Proposal, String> {
+    let region = detection_region(region, w as usize, h as usize)?;
     let started = Instant::now();
     let mut check = || {
         if cancel.load(Ordering::Relaxed) || started.elapsed() > Duration::from_secs(180) {
@@ -202,14 +221,9 @@ fn analyze(
     }
     progress.store(17, Ordering::Relaxed);
     let maps =
-        static_overlay::detect_checked(&frames, [0, 0, w as usize, h as usize], 32, &mut check)?;
+        static_overlay::detect_checked(&frames, region, 32, &mut check)?;
     check()?;
-    let pixels = maps
-        .opacity
-        .iter()
-        .zip(&maps.confidence)
-        .map(|(&a, &c)| if a >= 0.35 && c >= 0.25 { 255 } else { 0 })
-        .collect();
+    let pixels = region_mask(w as usize, h as usize, region, &maps.opacity, &maps.confidence);
     Ok(Proposal {
         pixels,
         samples: frames.len(),
@@ -219,6 +233,18 @@ fn analyze(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn region_detection_only_marks_pixels_inside_the_processing_region() {
+        let region = detection_region(Some([3,2,99,2]),8,6).unwrap();
+        assert_eq!(region,[3,2,5,2]);
+        let pixels = region_mask(8,6,region,&vec![1.;10],&vec![1.;10]);
+        for y in 0..6 { for x in 0..8 {
+            assert_eq!(pixels[y*8+x],if (2..4).contains(&y) && x>=3 {255}else{0});
+        }}
+        assert!(detection_region(Some([8,0,1,1]),8,6).is_err());
+        assert!(detection_region(Some([0,0,0,1]),8,6).is_err());
+        assert_eq!(detection_region(None,8,6).unwrap(),[0,0,8,6]);
+    }
     #[test]
     fn samples_are_near_playhead_distinct_and_inside_clip() {
         assert_eq!(
@@ -242,6 +268,7 @@ mod tests {
             &[0.; 16],
             &AtomicBool::new(true),
             &AtomicUsize::new(0),
+            None,
         )
         .err()
         .unwrap();

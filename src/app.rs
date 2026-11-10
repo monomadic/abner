@@ -1109,6 +1109,12 @@ impl App {
         self.mask_status.clear();
     }
 
+    fn editor_processing_region(&self) -> Option<[usize;4]> {
+        match &self.editor.as_ref()?.owner {
+            crate::spatial::Owner::Plugin {id,..} => self.processors.processing_region(id),
+            _ => None,
+        }
+    }
     fn detect_watermark(&mut self) {
         if self.watermark_task.take().is_some() {
             self.mask_status="Watermark detection stopped".into();return;
@@ -1116,7 +1122,7 @@ impl App {
         if !self.ready() || !self.mask_mode || self.crop.is_some() {return;}
         self.playing=false;self.mouse_up();self.ensure_mask();
         let v=&self.videos[self.active];let mask=self.masks[self.active].as_ref().unwrap();
-        match crate::watermark::Task::spawn(v.info.clone(),self.t,v.spatial_id,mask.id,mask.revision) {
+        match crate::watermark::Task::spawn(v.info.clone(),self.t,v.spatial_id,mask.id,mask.revision,self.editor_processing_region()) {
             Ok(task)=>{self.mask_status=task.status();self.watermark_task=Some(task);}
             Err(e)=>self.mask_status=e,
         }
@@ -3017,6 +3023,18 @@ impl App {
             Canvas::lift(&mut items, picture);
             items.push(Item::Video { a:self.active, b:self.active, r:picture, uv:[0.,0.,1.,1.], mode:VideoMode::Tex, p0:0., p1:0. });
             self.build_mask_layer(&mut items);
+            if self.crop.is_none() {
+                if let Some(region) = self.editor_processing_region() {
+                    let v = &self.videos[self.active];
+                    crate::processor_gui::draw_region_preview(&mut items,picture,[v.info.width as usize,v.info.height as usize],region);
+                }
+            }
+            let mode_label = if self.crop.is_some() { "Processing region mode" } else { "Mask mode" };
+            let label_y = (picture.y - 18.).max(canvas.y + 18.).min(canvas.y + canvas.h - 18.);
+            ui_label(&mut items,canvas.x+canvas.w/2.,label_y,13.,WORKSPACE_TEXT,mode_label,Align::Center,canvas.w-24.);
+            if !self.mask_status.is_empty() {
+                ui_label(&mut items,canvas.x+canvas.w/2.,canvas.y+canvas.h-16.,10.,WORKSPACE_TEXT,&self.mask_status,Align::Center,canvas.w-24.);
+            }
             board.recess(&mut items);
             let header = RectPx { x:canvas.x,y:HEADER_H,w:canvas.w,h:canvas.y-HEADER_H };
             items.push(Item::Clip(Some(header)));

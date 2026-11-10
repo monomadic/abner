@@ -1,6 +1,16 @@
 # abner — history
 
 
+## 2026-11-11 — Manual mask editing with spatial previews
+
+Removed automatic mask-editor entry on processor focus. Mask and processing-region
+settings now show a video thumbnail with mask coverage or region bounds; clicking
+opens the existing canvas editor. The canvas explicitly labels Mask mode or
+Processing region mode above the image and displays detection feedback inside it.
+For processor masks, a configured Region input is shown on the canvas and bounds
+the logo-detection search. Detection returns a full-resolution mask with no new
+selected pixels outside that region, retaining the existing Apply/Cancel flow.
+
 ## 2026-11-10 — Canvas mask editing and automatic model discovery UI
 
 Process mask/crop editing keeps the processor rail, settings, transport and preview

@@ -169,6 +169,26 @@ impl Field {
             .unwrap_or_else(|| value.as_str().map(str::to_owned).unwrap_or_else(|| display_value(value)))
     }
 }
+// Small coverage cells keep previews independent of the editor's full-size mask texture.
+fn draw_mask_preview(items: &mut Vec<Item>, r: RectPx, dims: [usize;2], pixels: &[u8]) {
+    let [w,h] = dims;
+    if w == 0 || h == 0 || w.checked_mul(h) != Some(pixels.len()) { return; }
+    let cols = w.min(64); let rows = h.min(36);
+    for y in 0..rows { for x in 0..cols {
+        let selected = (y*h/rows..(y+1)*h/rows).any(|py|
+            pixels[py*w+x*w/cols..py*w+(x+1)*w/cols].iter().any(|&p|p!=0));
+        if selected { items.push(Item::Rect(RectItem::new(RectPx {x:r.x+x as f32*r.w/cols as f32,y:r.y+y as f32*r.h/rows as f32,w:r.w/cols as f32,h:r.h/rows as f32},[0.,0.35,1.,0.65]))); }
+    }}
+}
+pub(crate) fn draw_region_preview(items: &mut Vec<Item>, r: RectPx, dims: [usize;2], region: [usize;4]) {
+    let [w,h] = dims; if w==0 || h==0 {return;}
+    let [x,y,rw,rh] = region;
+    let area = RectPx { x:r.x+x as f32/w as f32*r.w,y:r.y+y as f32/h as f32*r.h,w:rw as f32/w as f32*r.w,h:rh as f32/h as f32*r.h };
+    for dim in [RectPx{x:r.x,y:r.y,w:r.w,h:area.y-r.y},RectPx{x:r.x,y:area.y+area.h,w:r.w,h:r.y+r.h-area.y-area.h},RectPx{x:r.x,y:area.y,w:area.x-r.x,h:area.h},RectPx{x:area.x+area.w,y:area.y,w:r.x+r.w-area.x-area.w,h:area.h}] {
+        if dim.w>0. && dim.h>0. { items.push(Item::Rect(RectItem::new(dim,[0.,0.,0.,0.7]))); }
+    }
+    items.push(Item::Rect(RectItem {border_w:1.,border_color:[0.,0.6,1.,1.],..RectItem::new(area,[0.;4])}));
+}
 fn choices(s: &Value) -> Option<Vec<Choice>> {
     let text = |v: &Value| v.as_str().map(str::to_owned);
     if let Some(e) = s["enum"].as_array().filter(|v| !v.is_empty()) {
@@ -1202,7 +1222,6 @@ impl Panel {
         self.scroll = 0.0;
         self.editing = None;
         self.changed();
-        self.request_missing_mask();
     }
     /// Apply the configured preview budget; the next render uses it.
     pub fn set_budget(&mut self, bytes: usize) {
@@ -1434,13 +1453,10 @@ impl Panel {
     pub(crate) fn focused_id(&self) -> Option<&str> {
         self.descriptors.get(self.selected).map(|d| d.id.as_str())
     }
-    fn request_missing_mask(&mut self) {
-        let Some(d) = self.descriptors.get(self.selected) else { return };
-        if let Some(input) = self.declarations.get(&d.id).into_iter().flatten().find(|input|
-            input.required && matches!(input.kind, abner_processor_api::SpatialInputKind::Mask | abner_processor_api::SpatialInputKind::MaskedImage)
-            && self.binding(&d.id, &input.key).is_none_or(|b| b.mask.is_none())) {
-            self.editor_request = Some((d.id.clone(), input.key.clone(), false));
-        }
+    pub(crate) fn processing_region(&self, id: &str) -> Option<[usize; 4]> {
+        self.declarations.get(id)?.iter()
+            .filter(|d| d.kind == abner_processor_api::SpatialInputKind::Region)
+            .find_map(|d| self.binding(id, &d.key)?.crop)
     }
     pub(crate) fn binding(&self,id:&str,key:&str)->Option<abner_processor_api::SpatialBinding> {self.inputs.bindings.get(id)?.get(key).cloned()}
     pub(crate) fn set_binding(&mut self,id:String,key:String,b:abner_processor_api::SpatialBinding) {
@@ -2066,6 +2082,21 @@ impl Panel {
                     ui_label(items, at, row.y + 72.0, 9.0, muted, &label, align, row.w / 3.0);
                     if matches!(align, Align::Center) && editing.is_some() { set_caret(items, caret); }
                 }
+            } else if let Kind::Spatial { key, crop } = &f.kind {
+                let r = RectPx { x: row.x, y: row.y + 21., w: row.w, h: 62. };
+                items.push(Item::Rect(RectItem { radius: 6., border_w: 1., border_color: hex_color(0x303234), ..RectItem::new(r, hex_color(0x0a0a0a)) }));
+                let thumb = crate::app::App::fit_rect((self.source_dims[0],self.source_dims[1]), RectPx { x:r.x+4.,y:r.y+4.,w:88.,h:r.h-8. });
+                items.push(Item::Video { a:self.source,b:self.source,r:thumb,uv:[0.,0.,1.,1.],mode:VideoMode::Tex,p0:0.,p1:0. });
+                if let Some(binding) = self.binding(&d.id,key) {
+                    if *crop {
+                        if let Some(region) = binding.crop {
+                            draw_region_preview(items,thumb,binding.dimensions,region);
+                        }
+                    } else if let Some(mask) = binding.mask {
+                        draw_mask_preview(items,thumb,binding.dimensions,&mask);
+                    }
+                }
+                ui_label(items,r.x+96.+(r.w-100.)/2.,r.y+r.h/2.,10.,muted,&shown,Align::Center,(r.w-100.).max(1.));
             } else {
                 let r = RectPx { x: row.x, y: row.y + 21.0, w: row.w, h: 31.0 };
                 items.push(Item::Rect(RectItem { radius: 6.0, border_w: 1.0, border_color: hex_color(0x303234), ..RectItem::new(r, hex_color(0x0a0a0a)) }));
@@ -2152,8 +2183,6 @@ impl Panel {
                         self.toggle_enabled(index);
                     } else if index != self.selected {
                         self.select(index);
-                    } else {
-                        self.request_missing_mask();
                     }
                 }
             }
@@ -3392,7 +3421,22 @@ mod tests {
         assert_eq!(p.visible(), [0, 1, 2]);
     }
     #[test]
-    fn model_locations_are_hidden_and_missing_required_masks_request_editor() {
+    fn spatial_thumbnails_show_mask_coverage_and_region_bounds() {
+        let r = RectPx { x:10.,y:20.,w:64.,h:36. };
+        let mut items = Vec::new();
+        let mut pixels = vec![0;128*72]; pixels[30*128+40]=255;
+        draw_mask_preview(&mut items,r,[128,72],&pixels);
+        assert_eq!(items.len(),1,"even a small mask must remain visible in the thumbnail");
+        let Item::Rect(cell) = &items[0] else {panic!("mask cell")};
+        assert!(cell.r.x>=r.x && cell.r.x+cell.r.w<=r.x+r.w);
+        items.clear();
+        draw_region_preview(&mut items,r,[128,72],[32,18,64,36]);
+        let Some(Item::Rect(outline)) = items.last() else {panic!("region outline")};
+        assert_eq!(outline.r.x,26.); assert_eq!(outline.r.y,29.);
+        assert_eq!(outline.r.w,32.); assert_eq!(outline.r.h,18.);
+    }
+    #[test]
+    fn model_locations_are_hidden_and_masks_remain_manual() {
         let mut p = Panel::default();
         p.descriptors = vec![abner_processor_api::Factory::descriptor(&BufferedFactory)];
         p.descriptors[0].settings_schema["properties"]["model"] = json!({"type":"string","format":"file-path","default":"automatic"});
@@ -3406,6 +3450,10 @@ mod tests {
         assert!(matches!(p.fields[0].kind,Kind::Spatial{crop:false,..}));
         assert!(!p.fields.iter().any(|f| f.key=="model"));
         assert_eq!(p.settings["model"],"automatic");
+        assert!(p.editor_request.is_none());
+        p.open = true;
+        let row = p.row(0,(1280.,800.));
+        p.click(row.x+10.,row.y+35.,(1280.,800.));
         assert_eq!(p.editor_request.take(),Some(("example.buffered".into(),"mask".into(),false)));
         p.set_binding("example.buffered".into(),"mask".into(),abner_processor_api::SpatialBinding {mask:Some(Arc::new(vec![255])),..Default::default()});
         p.select(0);
