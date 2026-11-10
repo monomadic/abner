@@ -1,6 +1,12 @@
 # abner — history
 
 
+## 2026-11-11 — Paired spatial settings
+
+Mask and Search Area share the first row of processor settings, ahead of regular
+parameters. Drawing, click targets and scroll height share the paired geometry;
+narrow panels wrap the control labels and reduce thumbnail width to fit.
+
 ## 2026-11-11 — Compact mask and search-area controls
 
 Matched the revised Figma spatial controls: Removal (Mask) and Search Area

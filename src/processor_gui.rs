@@ -170,7 +170,7 @@ impl Field {
     }
 }
 // Small coverage cells keep previews independent of the editor's full-size mask texture.
-fn spatial_button(row:RectPx)->RectPx { RectPx{x:row.x,y:row.y+21.,w:97.,h:62.} }
+fn spatial_button(row:RectPx)->RectPx { RectPx{x:row.x,y:row.y+if row.w<122. {33.}else{21.},w:row.w.min(97.),h:62.} }
 fn draw_mask_preview(items: &mut Vec<Item>, r: RectPx, dims: [usize;2], pixels: &[u8]) {
     let [w,h] = dims;
     if w == 0 || h == 0 || w.checked_mul(h) != Some(pixels.len()) { return; }
@@ -2065,7 +2065,11 @@ impl Panel {
         for (i, f) in self.fields.iter().enumerate() {
             let row = self.row(i, vp);
             if row.y + row.h < clip.y || row.y > clip.y + clip.h { continue; }
-            text(items, row.x, row.y, 11.0, &f.title, ink, row.w);
+            if matches!(f.kind,Kind::Spatial{..}) && row.w<122. {
+                let (label,kind)=f.title.rsplit_once(" (").unwrap_or((&f.title,""));
+                text(items,row.x,row.y,11.,label,ink,row.w);
+                text(items,row.x,row.y+12.,11.,&format!("({kind}"),ink,row.w);
+            } else { text(items, row.x, row.y, 11.0, &f.title, ink, row.w); }
             let value = &self.settings[&f.key];
             let editing = self.editing.as_ref().filter(|(n, _)| *n == i);
             let shown = if let Kind::Spatial{key,crop}=&f.kind {
@@ -2088,7 +2092,7 @@ impl Panel {
                 let binding = self.binding(&d.id,key);
                 let configured = binding.as_ref().is_some_and(|b| if *crop { b.crop.is_some() } else { b.mask.is_some() });
                 items.push(Item::Rect(RectItem { radius:6.,border_w:1.,border_color:hex_color(0x303234),..RectItem::new(r,hex_color(0x0a0a0a)) }));
-                let thumb=RectPx{x:r.x+4.,y:r.y+4.,w:88.,h:54.};
+                let thumb=RectPx{x:r.x+4.,y:r.y+4.,w:r.w-8.,h:54.};
                 if configured {
                     let uv = if *crop {
                         let b=binding.as_ref().unwrap();let [x,y,w,h]=b.crop.unwrap();
@@ -2097,8 +2101,8 @@ impl Panel {
                     items.push(Item::Video{a:self.source,b:self.source,r:thumb,uv,mode:VideoMode::Tex,p0:0.,p1:0.});
                     if !crop {let b=binding.as_ref().unwrap();if let Some(mask)=&b.mask {draw_mask_preview(items,thumb,b.dimensions,mask);}}
                 } else {items.push(Item::Rect(RectItem::new(thumb,hex_color(0x232323))));}
-                items.push(Item::Rect(RectItem{radius:6.,..RectItem::new(RectPx{x:thumb.x+24.,y:thumb.y+7.,w:40.,h:40.},[0.,0.,0.,0.7])}));
-                items.push(Item::FrameIcon{x:thumb.x+34.,y:thumb.y+17.,index:if *crop {5}else{4}});
+                items.push(Item::Rect(RectItem{radius:6.,..RectItem::new(RectPx{x:thumb.x+(thumb.w-40.)/2.,y:thumb.y+7.,w:40.,h:40.},[0.,0.,0.,0.7])}));
+                items.push(Item::FrameIcon{x:thumb.x+(thumb.w-20.)/2.,y:thumb.y+17.,index:if *crop {5}else{4}});
             } else {
                 let r = RectPx { x: row.x, y: row.y + 21.0, w: row.w, h: 31.0 };
                 items.push(Item::Rect(RectItem { radius: 6.0, border_w: 1.0, border_color: hex_color(0x303234), ..RectItem::new(r, hex_color(0x0a0a0a)) }));
@@ -2110,12 +2114,25 @@ impl Panel {
         items.push(Item::Clip(None));
         self.draw_tooltip(items, vp, clip);
     }
+    fn spatial_count(&self) -> usize {
+        self.fields.iter().take_while(|f|matches!(f.kind,Kind::Spatial{..})).count()
+    }
+    fn settings_rows(&self) -> usize {
+        let spatial=self.spatial_count();
+        spatial.div_ceil(2)+self.fields.len()-spatial
+    }
     fn row(&self, i: usize, vp: (f32, f32)) -> RectPx {
         let r = Self::bounds(vp);
+        let spatial=self.spatial_count();
+        let width=Self::right(vp)-32.;
+        let paired=i<spatial;
+        let column=if paired {i%2}else{0};
+        let row=if paired {i/2}else{spatial.div_ceil(2)+i-spatial};
+        let w=if paired {(width-12.)/2.}else{width};
         RectPx {
-            x: vp.0 - Self::right(vp) + 16.0,
-            y: r.y + 164.0 + i as f32 * 104.0 - self.scroll,
-            w: Self::right(vp) - 32.0,
+            x: vp.0 - Self::right(vp) + 16.0 + column as f32*(w+12.),
+            y: r.y + 164.0 + row as f32 * 104.0 - self.scroll,
+            w,
             h: 96.0,
         }
     }
@@ -2137,7 +2154,7 @@ impl Panel {
             }
             self.scroll = (self.scroll - dy).clamp(
                 0.0,
-                (self.fields.len() as f32 * 104.0 - (Self::bottom(vp) - 210.0)).max(0.0),
+                (self.settings_rows() as f32 * 104.0 - (Self::bottom(vp) - 210.0)).max(0.0),
             );
             return true;
         }
@@ -3422,6 +3439,25 @@ mod tests {
         let (all, ..) = p.chips(vp)[0];
         p.click(all.x + 5.0, all.y + 5.0, vp);
         assert_eq!(p.visible(), [0, 1, 2]);
+    }
+    #[test]
+    fn paired_spatial_controls_stay_separate_and_leave_room_for_settings() {
+        let mut p=Panel::default();
+        p.fields=vec![
+            Field{key:"mask".into(),title:"Removal (Mask)".into(),kind:Kind::Spatial{key:"mask".into(),crop:false},default:None,required:true,description:None},
+            Field{key:"region".into(),title:"Search Area (Crop)".into(),kind:Kind::Spatial{key:"region".into(),crop:true},default:None,required:false,description:None},
+            Field{key:"strength".into(),title:"Strength".into(),kind:Kind::Bool,default:None,required:false,description:None},
+        ];
+        for width in [720.,900.,1280.] {
+            let vp=(width,800.);let a=p.row(0,vp);let b=p.row(1,vp);let next=p.row(2,vp);
+            assert_eq!(a.y,b.y);
+            let left=spatial_button(a);let right=spatial_button(b);
+            assert!(left.x+left.w<=right.x);
+            assert!(right.x+right.w<=width-16.);
+            assert!(left.y+left.h<next.y && right.y+right.h<next.y);
+            assert_eq!(next.w,Panel::right(vp)-32.);
+        }
+        assert_eq!(p.settings_rows(),2);
     }
     #[test]
     fn spatial_thumbnails_show_mask_coverage_and_region_bounds() {
