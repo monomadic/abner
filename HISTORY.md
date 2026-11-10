@@ -1,6 +1,14 @@
 # abner — history
 
 
+## 2026-11-11 — Visual verification of processor spatial controls
+
+Ran the current build with the installed processors and bundled grid-floor clip.
+Checked manual mask entry, the in-canvas Mask mode label, painting and applying
+a mask, the saved mask thumbnail, resizing/applying a processing region, and its
+thumbnail. Fixed an obsolete fifth-tab width allocation that expanded the main
+navigation on editor entry; the Process shell now keeps the same tab geometry.
+
 ## 2026-11-11 — Manual mask editing with spatial previews
 
 Removed automatic mask-editor entry on processor focus. Mask and processing-region

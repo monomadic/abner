@@ -3660,7 +3660,7 @@ impl App {
     /// 5px gap. They shrink together so the row ends 12px short of what
     /// the header carries at its right — the persistent encode indicator.
     fn mode_selector(&self) -> ModeSelector {
-        let count=if self.editor.is_some(){5.}else{4.};
+        let count = 4.;
         let right = self.status_chip().x;
         let tab_w = ((right - 12.0 - self.header_left() - 5.0 * TAB_GAP) / 6.0).clamp(40.0, TAB_W);
         ModeSelector {
@@ -7330,7 +7330,10 @@ mod tests {
         let clip = test_clip().expect("video test fixture");
         let mut app = mk_app(&clip, 1);
         app.activate(Action::Tool(4));
+        let tabs_before = app.mode_selector().rect;
         app.begin_editor(false, Some(("test.processor".into(), "mask".into())));
+        let tabs_during = app.mode_selector().rect;
+        assert_eq!((tabs_before.x,tabs_before.w),(tabs_during.x,tabs_during.w));
         assert!(app.processors.open && app.mask_mode);
         assert_eq!(app.workspace_mode(), 4);
         let canvas = app.canvas();
