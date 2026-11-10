@@ -1,5 +1,16 @@
 # abner — history
 
+## 2026-11-10 — Frame-accurate processor seekbar
+
+Processor seekbar clicks and drags now use the output frame grid instead of
+snapping to container keyframes, which could hold the same unrelated shot across
+several clicks and move the playhead seconds away. Clicking within four pixels
+of a rendered marker selects its exact cached timestamp. The end of the track
+clamps to the final output frame. Removed the processor panel's keyframe-table
+lookup. All 29 processor tests pass, including a regression covering uncached
+positions, exact marker selection, dragging away and the track endpoint.
+
+
 ## 2026-11-10 — Processor canvas format header
 
 Replaced the canvas's frame-state title and filename with a black header showing

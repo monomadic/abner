@@ -983,7 +983,6 @@ pub struct Panel {
     /// The category chip picked above the list; `None` is ALL.
     filter: Option<Category>,
     scrubbing: bool,
-    sync_table: Option<crate::fc::SyncTable>,
     filename: String,
     fields: Vec<Field>,
     settings: Value,
@@ -1063,7 +1062,6 @@ impl Default for Panel {
             list_scroll: 0.0,
             filter: None,
             scrubbing: false,
-            sync_table: None,
             filename: String::new(),
             fields: vec![],
             settings: json!({}),
@@ -1331,11 +1329,18 @@ impl Panel {
     }
     fn pointer_time(&self, x: f32, timeline: RectPx) -> f64 {
         let t = ((x - timeline.x) / timeline.w).clamp(0.0, 1.0) as f64 * self.duration;
-        self.sync_table.as_ref().map_or_else(
-            || (t * self.rate).floor() / self.rate,
-            |table| table.nearest(t),
-        )
+        (t * self.rate).floor().min((self.duration * self.rate).ceil() - 1.0).max(0.0) / self.rate
     }
+    /// Markers select their exact cached timestamp; the rest of the track
+    /// seeks on the output frame grid, never the container's keyframe grid.
+    fn timeline_time(&self, x: f32, timeline: RectPx) -> f64 {
+        self.frames.iter()
+            .map(|f| (f, (timeline.x + timeline.w * (f.pts / self.duration.max(0.001)) as f32 - x).abs()))
+            .filter(|(_, distance)| *distance <= 4.0)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map_or_else(|| self.pointer_time(x, timeline), |(f, _)| f.pts)
+    }
+
     pub fn pointer(&mut self, x: f32, y: f32, vp: (f32, f32)) -> bool {
         if !self.open {
             return false;
@@ -1343,7 +1348,7 @@ impl Panel {
         self.cursor = (x, y);
         if self.scrubbing {
             let t = Self::timeline(vp);
-            self.seek = Some(self.pointer_time(x, t));
+            self.seek = Some(self.timeline_time(x, t));
             return true;
         }
         if let Some(i) = self.dragging {
@@ -2146,7 +2151,7 @@ impl Panel {
         let timeline = Self::timeline(vp);
         if hit(timeline, x, y) {
             self.scrubbing = true;
-            self.seek = Some(self.pointer_time(x, timeline));
+            self.seek = Some(self.timeline_time(x, timeline));
             return true;
         }
         if !self.descriptors.is_empty() && hit(Self::settings_switch(vp), x, y) {
@@ -2286,9 +2291,6 @@ impl Panel {
             info.duration.to_bits(),
             Some(self.timeline_revision),
         );
-        if self.context.as_ref().is_none_or(|old| old.0 != info.path) {
-            self.sync_table = crate::fc::SyncTable::open(&info.path);
-        }
         if self.context.as_ref() != Some(&context) {
             self.context = Some(context);
             self.changed();
@@ -3098,6 +3100,37 @@ mod tests {
         assert_eq!(text_value(&f[1], &s, "8").unwrap(), Some(json!(8)));
     }
     #[test]
+    fn seekbar_seeks_frames_between_previews_and_selects_exact_markers() {
+        let mut p = Panel::default();
+        p.enter();
+        p.duration = 60.0;
+        p.fps = 30.0;
+        p.rate = 60.0;
+        p.frames = vec![mark(5.123), mark(40.127)];
+        let vp = (1280.0, 800.0);
+        let track = Panel::timeline(vp);
+        let x = |time: f64| track.x + track.w * (time / p.duration) as f32;
+        let (gap, marker, drag) = (x(20.0), x(40.127), x(30.0));
+        let y = track.y + 12.0;
+        assert!(p.click(gap, y, vp));
+        let target = p.take_seek().unwrap();
+        assert!((target - 20.0).abs() <= 1.0 / p.rate);
+        p.time = target;
+        assert!(p.shown().is_none(), "uncached positions must show the source");
+        p.release();
+        assert!(p.click(marker + 1.0, y, vp));
+        assert_eq!(p.take_seek(), Some(40.127));
+        p.time = 40.127;
+        assert_eq!(p.shown().unwrap().pts, p.time);
+        assert!(p.pointer(drag, y, vp));
+        let target = p.take_seek().unwrap();
+        assert!((target - 30.0).abs() <= 1.0 / p.rate);
+        p.time = target;
+        assert!(p.shown().is_none());
+        p.release();
+        assert_eq!(p.pointer_time(track.x + track.w, track), 60.0 - 1.0 / 60.0);
+    }
+    #[test]
     fn invalidation_cancels_and_discards_old_frames() {
         let mut p = Panel::default();
         let c = p.cancel.clone();
@@ -3822,10 +3855,8 @@ mod tests {
         transport.duration = info.duration;
         transport.rate = info.fps;
         transport.time = 0.0;
-        transport.sync_table = crate::fc::SyncTable::open(&info.path);
-        assert!(transport.sync_table.is_some());
         let track = Panel::timeline((1280.0, 900.0));
-        let expected = transport.sync_table.as_ref().unwrap().nearest(info.duration * 0.6);
+        let expected = (info.duration * 0.6 * info.fps).floor() / info.fps;
         assert_eq!(transport.pointer_time(track.x + track.w * 0.6, track), expected);
         transport.step(1);
         assert!((transport.take_seek().unwrap() - 1.0 / info.fps).abs() < 1e-6);
