@@ -1802,7 +1802,7 @@ impl Panel {
             x: l,
             y: HEADER_H + CANVAS_HEADER_H,
             w: (vp.0 - l - r).max(1.0),
-            h: (Self::transport_y(vp) - 105.0 - HEADER_H - CANVAS_HEADER_H).max(1.0),
+            h: (Self::transport_y(vp) - 20.0 - HEADER_H - CANVAS_HEADER_H).max(1.0),
         }
     }
     /// The Source | Rendered switch at the viewer's top-right, level with
@@ -1832,33 +1832,31 @@ impl Panel {
             ui_label(items, h.x + h.w / 2.0, h.y + h.h / 2.0, 10.0, hex_color(ink), label, Align::Center, h.w - 8.0);
         }
     }
+    fn progress_panel(vp: (f32, f32)) -> RectPx {
+        let (l, r) = (Self::left(vp), Self::right(vp));
+        RectPx { x: l + 16.0, y: Self::bottom(vp) - 79.0,
+            w: (vp.0 - l - r - 32.0).max(1.0), h: 67.0 }
+    }
     fn progress_button(vp: (f32, f32)) -> RectPx {
-        let v = Self::viewer(vp);
-        RectPx { x: v.x + v.w - 119.0, y: Self::transport_y(vp) - 70.0, w: 91.0, h: 26.0 }
+        let r = Self::progress_panel(vp);
+        RectPx { x: r.x + r.w - 103.0, y: r.y + 8.0, w: 91.0, h: 26.0 }
     }
     fn timeline(vp: (f32, f32)) -> RectPx {
-        // The viewer's span, computed directly: the viewer's height asks
-        // for the transport, which sits on this rect.
-        let (l, r) = (Self::left(vp), Self::right(vp));
-        RectPx {
-            x: l + 16.0,
-            y: Self::bottom(vp) - 60.0,
-            w: (vp.0 - l - r - 32.0).max(1.0),
-            h: 28.0,
-        }
+        let last = Self::transport(vp, 4);
+        let x = last.x + last.w + 16.0;
+        RectPx { x, y: Self::transport_y(vp) + 1.0,
+            w: (vp.0 - Self::right(vp) - 16.0 - x).max(1.0), h: 28.0 }
     }
     fn transport_y(vp: (f32, f32)) -> f32 {
-        Self::timeline(vp).y - 46.0
+        Self::bottom(vp) - 145.0
     }
     fn transport(vp: (f32, f32), i: usize) -> RectPx {
-        let v = Self::viewer(vp);
-        let total = 5.0 * TRANSPORT_W + 4.0 * TRANSPORT_GAP;
-        RectPx {
-            x: v.x + ((v.w - total) / 2.0).max(0.0) + i as f32 * (TRANSPORT_W + TRANSPORT_GAP),
-            y: Self::transport_y(vp),
-            w: TRANSPORT_W,
-            h: 30.0,
-        }
+        let l = Self::left(vp);
+        let span = vp.0 - l - Self::right(vp) - 32.0;
+        // Keep room for the seekbar even at the minimum window width.
+        let w = ((span * 0.40 - 4.0 * TRANSPORT_GAP) / 5.0).clamp(20.0, TRANSPORT_W);
+        RectPx { x: l + 16.0 + i as f32 * (w + TRANSPORT_GAP),
+            y: Self::transport_y(vp), w, h: 30.0 }
     }
     fn settings_switch(vp: (f32, f32)) -> RectPx {
         RectPx { x: vp.0 - 78.0, y: HEADER_H + 20.0, w: 61.0, h: 27.0 }
@@ -2797,8 +2795,7 @@ impl Panel {
     /// under the pointer names itself beneath the row.
     /// Kept outside the video canvas so zoom/pan cannot cover render feedback.
     fn draw_progress(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
-        let v = Self::viewer(vp);
-        let r = RectPx { x: v.x + 16.0, y: Self::transport_y(vp) - 78.0, w: (v.w - 32.0).max(1.0), h: 67.0 };
+        let r = Self::progress_panel(vp);
         let ink = hex_color(0xededed);
         let secondary = hex_color(0xa4a7ad);
         let accent = hex_color(CUT_HEADER_BLUE);
@@ -2898,7 +2895,8 @@ impl Panel {
             let hover = hit(b, self.cursor.0, self.cursor.1);
             let ink = if i == 2 { FRAME_INK } else if hover { hex_color(0xffffff) } else { WORKSPACE_DIM };
             if i == 2 {
-                let circle = RectPx { x: b.x + (b.w - 32.0) / 2.0, y: b.y - 1.0, w: 32.0, h: 32.0 };
+                let d = b.w.min(32.0);
+                let circle = RectPx { x: b.x + (b.w - d) / 2.0, y: b.y + (b.h - d) / 2.0, w: d, h: d };
                 items.push(Item::Rect(RectItem { radius: 16.0, ..RectItem::new(circle, ACCENT) }));
             }
             let (cx, cy) = (b.x + b.w / 2.0, b.y + b.h / 2.0);
@@ -4299,7 +4297,18 @@ mod tests {
             assert_eq!(canvas.x, Panel::left(vp));
             assert_eq!(canvas.x + canvas.w, vp.0 - Panel::right(vp));
             assert_eq!(canvas.y, HEADER_H + CANVAS_HEADER_H);
-            assert!(canvas.y + canvas.h < Panel::transport_y(vp) - 78.0);
+            assert!(canvas.y + canvas.h < Panel::transport_y(vp));
+            let first = Panel::transport(vp, 0);
+            let last = Panel::transport(vp, 4);
+            let track = Panel::timeline(vp);
+            let info = Panel::progress_panel(vp);
+            assert!(first.x >= canvas.x);
+            assert!(last.x + last.w < track.x);
+            assert!((track.y - first.y).abs() <= 1.0);
+            assert!(track.w >= 100.0);
+            assert!(track.x + track.w <= canvas.x + canvas.w);
+            assert!(track.y + 37.0 < info.y);
+            assert!(info.y + info.h < Panel::bottom(vp));
         }
     }
     #[test]

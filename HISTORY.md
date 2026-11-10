@@ -1,5 +1,14 @@
 # abner — history
 
+## 2026-11-10 — Processor transport beside the seekbar
+
+Moved the processor transport and seekbar into one row immediately below the
+video, with transport at the left and the seekbar at the right. The frame-preview
+info/progress panel now sits beneath that row. Transport spacing contracts at
+narrow window widths to preserve seekbar room; painting and hit testing share the
+same geometry. Updated layout checks cover all three supported window sizes.
+
+
 ## 2026-11-10 — Frame-accurate processor seekbar
 
 Processor seekbar clicks and drags now use the output frame grid instead of
