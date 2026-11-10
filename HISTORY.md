@@ -1,6 +1,13 @@
 # abner — history
 
 
+## 2026-11-11 — Spatial-control hover feedback
+
+Mask and Search Area thumbnail buttons lighten on hover, including their empty
+placeholder and configured video preview. The Figma design-system review now
+pairs Mask and Search Area for unset/configured inputs in rest/hover states,
+with an Interaction variant axis and a scoped hover-surface token.
+
 ## 2026-11-11 — Paired spatial settings
 
 Mask and Search Area share the first row of processor settings, ahead of regular

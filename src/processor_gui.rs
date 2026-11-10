@@ -2089,9 +2089,10 @@ impl Panel {
                 }
             } else if let Kind::Spatial { key, crop } = &f.kind {
                 let r = spatial_button(row);
+                let hovered=hit(r,self.cursor.0,self.cursor.1);
                 let binding = self.binding(&d.id,key);
                 let configured = binding.as_ref().is_some_and(|b| if *crop { b.crop.is_some() } else { b.mask.is_some() });
-                items.push(Item::Rect(RectItem { radius:6.,border_w:1.,border_color:hex_color(0x303234),..RectItem::new(r,hex_color(0x0a0a0a)) }));
+                items.push(Item::Rect(RectItem { radius:6.,border_w:1.,border_color:hex_color(0x303234),..RectItem::new(r,hex_color(if hovered {0x1a1a1a}else{0x0a0a0a})) }));
                 let thumb=RectPx{x:r.x+4.,y:r.y+4.,w:r.w-8.,h:54.};
                 if configured {
                     let uv = if *crop {
@@ -2100,7 +2101,8 @@ impl Panel {
                     } else {[0.,0.,1.,1.]};
                     items.push(Item::Video{a:self.source,b:self.source,r:thumb,uv,mode:VideoMode::Tex,p0:0.,p1:0.});
                     if !crop {let b=binding.as_ref().unwrap();if let Some(mask)=&b.mask {draw_mask_preview(items,thumb,b.dimensions,mask);}}
-                } else {items.push(Item::Rect(RectItem::new(thumb,hex_color(0x232323))));}
+                    if hovered {items.push(Item::Rect(RectItem::new(thumb,[1.,1.,1.,0.025])));}
+                } else {items.push(Item::Rect(RectItem::new(thumb,hex_color(if hovered {0x353535}else{0x232323}))));}
                 items.push(Item::Rect(RectItem{radius:6.,..RectItem::new(RectPx{x:thumb.x+(thumb.w-40.)/2.,y:thumb.y+7.,w:40.,h:40.},[0.,0.,0.,0.7])}));
                 items.push(Item::FrameIcon{x:thumb.x+(thumb.w-20.)/2.,y:thumb.y+17.,index:if *crop {5}else{4}});
             } else {
