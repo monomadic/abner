@@ -127,11 +127,12 @@ fn decode_logo() -> Logo {
 }
 
 // Original Figma card-instance exports, including their intrinsic view boxes.
-const FRAME_ICON_SVGS: [&[u8]; 4] = [
+const FRAME_ICON_SVGS: [&[u8]; 6] = [
     include_bytes!("../assets/frame-icons/key.svg"), include_bytes!("../assets/frame-icons/i.svg"),
     include_bytes!("../assets/frame-icons/p.svg"), include_bytes!("../assets/frame-icons/b.svg"),
+    include_bytes!("../assets/spatial-icons/mask.svg"), include_bytes!("../assets/spatial-icons/crop.svg"),
 ];
-const THUMB_ROWS: usize = recent::ATLAS / recent::ATLAS_COLS + 1;
+const THUMB_ROWS: usize = (recent::ATLAS + FRAME_ICON_SVGS.len()).div_ceil(recent::ATLAS_COLS);
 const ICON_SCALE: f32 = 4.0;
 
 fn frame_icon_tree(index: usize) -> resvg::usvg::Tree {
@@ -490,7 +491,7 @@ pub struct Gpu {
     /// rows of `ATLAS_COLS` — bound in every group like the plate, so mode 14
     /// needs no batch key.
     thumbs: VideoTex,
-    frame_icon_sizes: [(f32, f32); 4],
+    frame_icon_sizes: [(f32, f32); 6],
     mask_tex: wgpu::Texture,
     mask_view: wgpu::TextureView,
     mask_version: Option<(u64, u64)>,
@@ -824,7 +825,7 @@ impl Gpu {
         };
         // Keyless batches (text/rects before any video item) fall back to
         // the (0, 0) pair — make sure it exists.
-        for i in 0..4 { gpu.upload_thumb(&ThumbUpload { slot: recent::ATLAS+i, buf: frame_icon_pixels(i) }); }
+        for i in 0..FRAME_ICON_SVGS.len() { gpu.upload_thumb(&ThumbUpload { slot: recent::ATLAS+i, buf: frame_icon_pixels(i) }); }
         gpu.pair_bg(0, 0);
         Ok(gpu)
     }
@@ -1087,7 +1088,7 @@ impl Gpu {
 
     /// A finished thumbnail into its cell of the recent row's atlas.
     fn upload_thumb(&mut self, up: &ThumbUpload) {
-        if up.slot >= recent::ATLAS + 4 || up.buf.len() != (THUMB_W * THUMB_H * 4) as usize {
+        if up.slot >= recent::ATLAS + FRAME_ICON_SVGS.len() || up.buf.len() != (THUMB_W * THUMB_H * 4) as usize {
             log::warn!("bad thumbnail upload: slot {} {}B", up.slot, up.buf.len());
             return;
         }
@@ -1615,6 +1616,15 @@ mod workspace_tests {
 mod frame_icon_tests {
     use super::*;
 
+    #[test]
+    fn spatial_icons_fit_the_atlas_and_preserve_the_figma_viewbox() {
+        for i in [4,5] {
+            let tree=frame_icon_tree(i);
+            assert_eq!((tree.size().width(),tree.size().height()),(20.,20.));
+            assert!(frame_icon_pixels(i).chunks_exact(4).any(|p|p[3]>200));
+            assert!((recent::ATLAS+i)/recent::ATLAS_COLS<THUMB_ROWS);
+        }
+    }
     #[test]
     fn figma_svg_icons_render_nonempty_distinct_pixels_at_intrinsic_size() {
         let mut images = Vec::new();

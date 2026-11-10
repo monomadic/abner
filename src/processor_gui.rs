@@ -170,6 +170,7 @@ impl Field {
     }
 }
 // Small coverage cells keep previews independent of the editor's full-size mask texture.
+fn spatial_button(row:RectPx)->RectPx { RectPx{x:row.x,y:row.y+21.,w:97.,h:62.} }
 fn draw_mask_preview(items: &mut Vec<Item>, r: RectPx, dims: [usize;2], pixels: &[u8]) {
     let [w,h] = dims;
     if w == 0 || h == 0 || w.checked_mul(h) != Some(pixels.len()) { return; }
@@ -1200,7 +1201,7 @@ impl Panel {
             for d in inputs {
                 let tools: &[bool]=match d.kind {K::Image|K::Region=>&[true],K::Mask=>&[false],K::MaskedImage=>&[true,false]};
                 for &crop in tools {
-                    self.fields.push(Field { key:format!("__spatial_{}_{}",d.key,crop), title:format!("{} · {}",d.title,if crop {"Crop"} else {"Mask"}),
+                    self.fields.push(Field { key:format!("__spatial_{}_{}",d.key,crop), title:if d.kind==K::Region {"Search Area (Crop)".into()} else if !crop {"Removal (Mask)".into()} else {format!("{} (Crop)",d.title)},
                         kind:Kind::Spatial{key:d.key.clone(),crop},default:None,required:d.required,
                         description:Some(if d.kind==K::Region {"Processing region; keeps the complete input image"} else {"Edit this input without changing other inputs"}.into()) });
                 }
@@ -2083,20 +2084,21 @@ impl Panel {
                     if matches!(align, Align::Center) && editing.is_some() { set_caret(items, caret); }
                 }
             } else if let Kind::Spatial { key, crop } = &f.kind {
-                let r = RectPx { x: row.x, y: row.y + 21., w: row.w, h: 62. };
-                items.push(Item::Rect(RectItem { radius: 6., border_w: 1., border_color: hex_color(0x303234), ..RectItem::new(r, hex_color(0x0a0a0a)) }));
-                let thumb = crate::app::App::fit_rect((self.source_dims[0],self.source_dims[1]), RectPx { x:r.x+4.,y:r.y+4.,w:88.,h:r.h-8. });
-                items.push(Item::Video { a:self.source,b:self.source,r:thumb,uv:[0.,0.,1.,1.],mode:VideoMode::Tex,p0:0.,p1:0. });
-                if let Some(binding) = self.binding(&d.id,key) {
-                    if *crop {
-                        if let Some(region) = binding.crop {
-                            draw_region_preview(items,thumb,binding.dimensions,region);
-                        }
-                    } else if let Some(mask) = binding.mask {
-                        draw_mask_preview(items,thumb,binding.dimensions,&mask);
-                    }
-                }
-                ui_label(items,r.x+96.+(r.w-100.)/2.,r.y+r.h/2.,10.,muted,&shown,Align::Center,(r.w-100.).max(1.));
+                let r = spatial_button(row);
+                let binding = self.binding(&d.id,key);
+                let configured = binding.as_ref().is_some_and(|b| if *crop { b.crop.is_some() } else { b.mask.is_some() });
+                items.push(Item::Rect(RectItem { radius:6.,border_w:1.,border_color:hex_color(0x303234),..RectItem::new(r,hex_color(0x0a0a0a)) }));
+                let thumb=RectPx{x:r.x+4.,y:r.y+4.,w:88.,h:54.};
+                if configured {
+                    let uv = if *crop {
+                        let b=binding.as_ref().unwrap();let [x,y,w,h]=b.crop.unwrap();
+                        [x as f32/b.dimensions[0].max(1) as f32,y as f32/b.dimensions[1].max(1) as f32,(x+w) as f32/b.dimensions[0].max(1) as f32,(y+h) as f32/b.dimensions[1].max(1) as f32]
+                    } else {[0.,0.,1.,1.]};
+                    items.push(Item::Video{a:self.source,b:self.source,r:thumb,uv,mode:VideoMode::Tex,p0:0.,p1:0.});
+                    if !crop {let b=binding.as_ref().unwrap();if let Some(mask)=&b.mask {draw_mask_preview(items,thumb,b.dimensions,mask);}}
+                } else {items.push(Item::Rect(RectItem::new(thumb,hex_color(0x232323))));}
+                items.push(Item::Rect(RectItem{radius:6.,..RectItem::new(RectPx{x:thumb.x+24.,y:thumb.y+7.,w:40.,h:40.},[0.,0.,0.,0.7])}));
+                items.push(Item::FrameIcon{x:thumb.x+34.,y:thumb.y+17.,index:if *crop {5}else{4}});
             } else {
                 let r = RectPx { x: row.x, y: row.y + 21.0, w: row.w, h: 31.0 };
                 items.push(Item::Rect(RectItem { radius: 6.0, border_w: 1.0, border_color: hex_color(0x303234), ..RectItem::new(r, hex_color(0x0a0a0a)) }));
@@ -2270,6 +2272,7 @@ impl Panel {
                         return true;
                     }
                     Kind::Spatial{key,crop} => {
+                        if !hit(spatial_button(row),x,y) {return true;}
                         if self.enabled.iter().take(self.selected).any(|e|*e) {self.status="Move this processor first to edit its spatial inputs".into();return true;}
                         self.editor_request=Some((self.descriptors[self.selected].id.clone(),key.clone(),*crop));return true;
                     }

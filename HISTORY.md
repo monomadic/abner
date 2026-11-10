@@ -1,6 +1,15 @@
 # abner — history
 
 
+## 2026-11-11 — Compact mask and search-area controls
+
+Matched the revised Figma spatial controls: Removal (Mask) and Search Area
+(Crop) use compact thumbnail buttons with centered icons on dark chips. Unset
+inputs show a neutral placeholder; configured masks show coverage on video, and
+configured search areas preview the selected region enlarged. The thumbnail
+itself opens the manual editor. Exact Figma SVG icons share the existing icon
+atlas, extended by two cells without changing the original timeline icons.
+
 ## 2026-11-11 — Visual verification of processor spatial controls
 
 Ran the current build with the installed processors and bundled grid-floor clip.
