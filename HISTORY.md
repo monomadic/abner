@@ -1,5 +1,19 @@
 # abner — history
 
+## 2026-11-10 — Live processor scrubbing
+
+While dragging the processor seekbar, completed exact source frames now update
+the picture even when a newer target is waiting; their timestamps never move
+the pointer-owned playhead. Resident targets bypass the in-flight seek immediately.
+Cold targets remain coalesced during continuous movement, then a 40 ms pointer
+dwell dispatches the newest target without waiting for the previous decode or
+mouse release. A scheduled redraw handles that dwell even without further input.
+A real-decoder regression covers visible intermediate landings, held-pointer
+settling, redraw timing, cached-target bypass and exact final positioning.
+Library checks: 204 passed, three ignored; the known unavailable-HEVC export
+test was excluded.
+
+
 ## 2026-11-10 — Prioritize the final processor scrub target
 
 Processor scrub release immediately dispatches the latest queued target, cancelling

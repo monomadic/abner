@@ -145,6 +145,8 @@ pub enum CropCursor {
 const CUT_SCRUB_SLOP: f32 = 3.0;
 /// How long the pointer rests on the timeline before its frame is prefetched.
 const PREFETCH_DWELL: std::time::Duration = std::time::Duration::from_millis(60);
+// A held pointer should settle on its latest frame without requiring release.
+const PROCESSOR_SCRUB_DWELL: std::time::Duration = std::time::Duration::from_millis(40);
 const SEEK_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
 
 pub struct Video {
@@ -247,6 +249,7 @@ pub struct App {
     /// The seek that arrived while one was in flight: `(target, exact)`,
     /// newest wins, dispatched by `tick` once every player has landed.
     queued_seek: Option<(f64, bool)>,
+    processor_scrub_changed: Instant,
     info_scroll: f32,
     cut_frames: bool,
     frame_changes: bool,
@@ -734,6 +737,7 @@ impl App {
             cut_hover_at: None,
             cut_prefetch: None,
             queued_seek: None,
+            processor_scrub_changed: Instant::now(),
             info_scroll: 0.0,
             cut_frames: false,
             frame_changes: false, cut_gop: false, frame_detail_boot: false,
@@ -1866,7 +1870,14 @@ impl App {
             // The panel's time is on the chain's OUTPUT grid, which a retimed
             // chain puts between source frames: the players land on the latest
             // original at or before it while the clock stays on the output time.
-            self.seek_all(self.processors.source_seek(t), true);
+            self.processor_scrub_changed = Instant::now();
+            let source = self.processors.source_seek(t);
+            if self.processors.scrubbing() && self.videos[self.active].player.seek_cached(source) {
+                // A warm target has no decoder work to throttle or wait for.
+                self.dispatch_seek(source, true);
+            } else {
+                self.seek_all(source, true);
+            }
             self.t = t;
             self.adopt_seek = false;
         }
@@ -2677,6 +2688,7 @@ impl App {
         let active = self.active;
         let capture = self.mask_mode;
         let editor_crops=if self.editor.as_ref().is_some_and(|e|matches!(e.owner,crate::spatial::Owner::Plugin{..})) {self.crop_schedule()}else{Vec::new()};
+        let live_scrub = self.processors.scrubbing();
         let superseded_seek = self.queued_seek.is_some();
         let mut adopt = None;
         let shown: Vec<bool> = (0..self.videos.len()).map(|i| self.on_screen(i)).collect();
@@ -2695,9 +2707,10 @@ impl App {
                 continue;
             }
             let was_pending = v.pending;
-            // A newer pointer target is waiting for this seek to settle.
-            // Its intermediate frame must never reach the screen.
-            let got = if superseded_seek {
+            // During a processor drag, show completed exact frames as they
+            // arrive while the decoder follows the newest target. The pointer
+            // still owns the clock; other seek paths suppress old landings.
+            let got = if superseded_seek && !live_scrub {
                 None
             } else if v.pending {
                 let g = v.player.take_next();
@@ -2705,6 +2718,10 @@ impl App {
                     v.pending = false;
                 }
                 g
+            } else if superseded_seek {
+                // Only the pending landing belongs to this intermediate seek;
+                // do not drain its decode-ahead against the newer clock.
+                None
             } else {
                 v.player.take_upto(t + 1e-6)
             };
@@ -2742,9 +2759,12 @@ impl App {
         if !self.playing && let Some(pts) = adopt {
             self.t = pts;
         }
-        // The seek that waited for this landing goes out now; the clock
-        // already sits on its target.
-        if let Some((target, exact)) = self.queued_seek && !self.seek_in_flight() {
+        // Follow the newest target after a landing, or once a held processor
+        // pointer dwells. Continuous motion gets completed frames without
+        // restarting the decoder per event; a pause does not wait on old work.
+        if let Some((target, exact)) = self.queued_seek
+            && (!self.seek_in_flight() || (live_scrub
+                && self.processor_scrub_changed.elapsed() >= PROCESSOR_SCRUB_DWELL)) {
             self.dispatch_seek(target, exact);
         }
         self.prefetch_hover();
@@ -2937,6 +2957,8 @@ impl App {
             animating,
             redraw_at: if animating {
                 None
+            } else if live_scrub && self.queued_seek.is_some() {
+                Some(self.processor_scrub_changed + PROCESSOR_SCRUB_DWELL)
             } else {
                 Some(Instant::now() + std::time::Duration::from_millis(
                     if self.split_preview.as_ref().is_some_and(|p| p.waiting) { 16 } else { 100 }))
@@ -8685,6 +8707,65 @@ mod tests {
         assert!(tick_until(&mut app, Duration::from_secs(5), |a| !a.videos[a.active].pending));
         assert!((app.videos[app.active].shown_pts - target).abs() < 1.0 / app.fps);
         assert_eq!(app.t, target, "the final pointer position owns the clock");
+    }
+
+    #[test]
+    fn processor_drag_shows_landings_and_settles_without_release() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        let vp = (1280.0, 800.0);
+        // Six resident frames make distant targets cold even for this small fixture.
+        let info = &app.videos[0].info;
+        app.videos[0].player = Player::spawn(&clip, info.width, info.height,
+            probe::vt_accel(&info.codec), info.rotation, 0).unwrap();
+        assert!(tick_until(&mut app, Duration::from_secs(5), |a| a.started));
+        app.activate(Action::Tool(4));
+        app.playing = false;
+        let frame = app.tick(0.0, vp, 1.0);
+        let canvas = crate::processor_gui::Panel::viewer(vp);
+        let track = frame.items.iter().rev().find_map(|item| match item {
+            Item::Rect(r) if r.r.h == 4.0 && r.r.w > 100.0
+                && r.r.x > canvas.x && r.r.y > canvas.y + canvas.h => Some(r.r),
+            _ => None,
+        }).unwrap();
+        app.mouse_down(track.x + track.w * 0.3, track.y);
+        // Let this exact landing finish, but do not tick/drain it yet.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.videos[0].player.buffered() == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(app.videos[0].player.buffered() > 0);
+        app.cursor_moved(track.x + track.w * 0.8, track.y);
+        assert!(app.queued_seek.is_some());
+        let target = app.t;
+        let frame = app.tick(0.0, vp, 1.0);
+        assert!(frame.uploads.iter().any(|u| u.idx == 0), "completed frames remain visible during a drag");
+        assert_eq!(app.t, target, "an intermediate landing cannot move the playhead");
+        assert!(app.queued_seek.is_none(), "decoder follows the newest target after a landing");
+
+        // Simulate a slow obsolete seek that cannot land. Holding the pointer
+        // still must cancel it without a mouse-up or a decoder completion.
+        app.dispatch_seek(10.0, true);
+        app.cursor_moved(track.x + track.w * 0.6, track.y);
+        assert!(app.queued_seek.is_some());
+        let target = app.t;
+        let frame = app.tick(0.0, vp, 1.0);
+        assert!(app.queued_seek.is_some());
+        assert!(frame.redraw_at.is_some_and(|at| at <= app.processor_scrub_changed + PROCESSOR_SCRUB_DWELL));
+        app.processor_scrub_changed = Instant::now() - PROCESSOR_SCRUB_DWELL;
+        app.tick(0.0, vp, 1.0);
+        assert!(app.queued_seek.is_none(), "dwell dispatches without waiting for the old decoder");
+        assert!(app.processors.scrubbing(), "mouse button is still held");
+        assert!(tick_until(&mut app, Duration::from_secs(5), |a| !a.videos[0].pending));
+        assert!((app.videos[0].shown_pts - target).abs() < 1.0 / app.fps);
+        assert_eq!(app.t, target);
+        // Return to the same cached source frame from a different playhead:
+        // a warm target must bypass the cold seek's coalescing delay.
+        app.dispatch_seek(10.0, true);
+        app.t = 0.0;
+        app.cursor_moved(track.x + track.w * 0.6, track.y);
+        assert!(app.queued_seek.is_none(), "resident target bypasses the obsolete seek immediately");
+        app.mouse_up();
     }
 
     /// U undoes like ⌘Z, and a two-finger swipe over the timeline zooms about the pointer

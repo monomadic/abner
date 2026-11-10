@@ -489,6 +489,14 @@ impl Player {
         self.shared.space.notify_all();
     }
 
+    /// Whether an exact seek can land from a contiguous resident span.
+    pub(crate) fn seek_cached(&self, target_s: f64) -> bool {
+        let key = us(target_s.max(0.0));
+        let c = self.shared.cache.lock().unwrap();
+        c.frames.range(key - SAME_FRAME_US..).next()
+            .is_some_and(|(&k, _)| c.covers(k, key))
+    }
+
     /// Warm the decoder for an exact seek to `target_s` that may follow (the timeline's hover):
     /// FilmCraft decodes to that frame and keeps the pictures it decoded, nothing is converted
     /// or shown, and the reader then holds still, so decoding ahead can't evict them. The seek

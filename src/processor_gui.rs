@@ -1365,6 +1365,7 @@ impl Panel {
         }
         hit(Self::bounds(vp), x, y)
     }
+    pub(crate) fn scrubbing(&self) -> bool { self.open && self.scrubbing }
     pub fn release(&mut self) -> bool {
         let scrub = std::mem::take(&mut self.scrubbing);
         self.dragging.take().is_some() || scrub
