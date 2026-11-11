@@ -1860,18 +1860,11 @@ impl Panel {
     }
     fn draw_compare_switch(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
         let available = self.shown().is_some();
-        let s = Self::compare_switch(vp);
-        items.push(Item::Rect(RectItem { radius: 6.0, border_w: 1.0,
-            border_color: hex_color(0x303235), ..RectItem::new(s, hex_color(0x1a1a1a)) }));
         for (rendered, label) in [(false, "Source"), (true, "Rendered")] {
             let h = Self::compare_half(vp, rendered);
-            let on = available && self.show_rendered == rendered;
-            if on {
-                let inset = RectPx { x: h.x + 2.0, y: h.y + 2.0, w: h.w - 4.0, h: h.h - 4.0 };
-                items.push(Item::Rect(RectItem { radius: 4.0, ..RectItem::new(inset, hex_color(0x303235)) }));
-            }
-            let ink = if !available { 0x595959 } else if on { 0xd1d1d1 } else if hit(h, self.cursor.0, self.cursor.1) { 0xffffff } else { 0x919191 };
-            ui_label(items, h.x + h.w / 2.0, h.y + h.h / 2.0, 10.0, hex_color(ink), label, Align::Center, h.w - 8.0);
+            let button = RectPx { x: h.x + 2.0, w: h.w - 4.0, ..h };
+            crate::app::draw_canvas_button(items, button, label,
+                self.show_rendered == rendered, hit(button, self.cursor.0, self.cursor.1), !available);
         }
     }
     fn progress_panel(vp: (f32, f32)) -> RectPx {
@@ -2739,7 +2732,7 @@ impl Panel {
         board.recess(items);
         items.push(Item::Clip(Some(r)));
         let header = RectPx { x: v.x, y: HEADER_H, w: v.w, h: CANVAS_HEADER_H };
-        items.push(Item::Rect(RectItem::new(header, hex_color(0x000000))));
+        crate::app::draw_canvas_bar(items, header);
         let resolution = |dims: [u32; 2]| match dims {
             [3840, 2160] | [4096, 2160] => "4k".to_owned(),
             [7680, 4320] => "8k".to_owned(),

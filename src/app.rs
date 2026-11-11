@@ -3104,9 +3104,10 @@ impl App {
             board.recess(&mut items);
             let header = RectPx { x:canvas.x,y:HEADER_H,w:canvas.w,h:canvas.y-HEADER_H };
             items.push(Item::Clip(Some(header)));
-            items.push(Item::Rect(RectItem::new(header, WORKSPACE_PANEL)));
+            draw_canvas_bar(&mut items, header);
             for c in self.embedded_editor_controls() {
-                ui_label(&mut items,c.r.x+c.r.w/2.,c.r.y+c.r.h/2.,10.,WORKSPACE_TEXT,&c.label,Align::Center,c.r.w-4.);
+                let hovered = self.cursor_inside && contains(c.r, self.cursor.0, self.cursor.1);
+                draw_canvas_button(&mut items, c.r, &c.label, c.selected, hovered, false);
             }
             items.push(Item::Clip(None));
         }
@@ -3345,8 +3346,10 @@ impl App {
         };
         if self.can_undo_watermark() { buttons.push(("Undo",Action::UndoWatermark)); }
         buttons.extend([("Reset",Action::ResetEdit),("Cancel",Action::CancelEdit),("Apply",Action::ApplyEdit)]);
-        let w = (v.w / buttons.len() as f32).min(90.);
-        buttons.into_iter().enumerate().map(|(i,(label,action))| Control::new(RectPx {x:v.x+i as f32*w,y:HEADER_H,w,h:v.y-HEADER_H},label,matches!(action,Action::DetectionArea)&&self.detection_area_visible,action)).collect()
+        let gap = 4.0;
+        let inset = 12.0;
+        let w = ((v.w - 2.0 * inset + gap) / buttons.len() as f32 - gap).clamp(1.0, 116.0);
+        buttons.into_iter().enumerate().map(|(i,(label,action))| Control::new(RectPx {x:v.x+inset+i as f32*(w+gap),y:HEADER_H+6.0,w,h:v.y-HEADER_H-12.0},label,matches!(action,Action::DetectionArea)&&self.detection_area_visible,action)).collect()
     }
 
     fn controls(&self) -> Vec<Control> {
@@ -3742,7 +3745,7 @@ impl App {
         // Opaque shell surfaces keep zoomed footage out of the interface.
         for r in [RectPx { x: 0.0, y: 0.0, w: vp.0, h: HEADER_H },
             RectPx { x: 0.0, y: HEADER_H, w: l.rail, h: vp.1 - HEADER_H - STATUS_H },
-            RectPx { x: l.rail, y: HEADER_H, w: vp.0 - l.rail, h: CONTEXT_H }, l.transport] {
+            l.transport] {
             items.push(Item::Rect(RectItem::new(r, panel)));
         }
         for r in [RectPx { x: 0.0, y: HEADER_H - 1.0, w: vp.0, h: 1.0 },
@@ -3751,6 +3754,7 @@ impl App {
             RectPx { x: l.rail, y: l.transport.y, w: l.canvas.w, h: 1.0 }] {
             items.push(Item::Rect(RectItem::new(r, WORKSPACE_RULE)));
         }
+        draw_canvas_bar(items, RectPx { x: l.canvas.x, y: HEADER_H, w: l.canvas.w, h: CONTEXT_H });
         self.mode_selector().draw(items, self.cursor, self.cursor_inside);
         let (text, lamp) = self.encode_status();
         draw_status_chip(items, self.status_chip(), lamp, text, hex_color(0xc8c8c8));
@@ -3762,6 +3766,10 @@ impl App {
             }
             let disabled = matches!(control.action, Action::Save) && self.mask_save.is_some()
                 || matches!(control.action, Action::Export) && self.crop_export.is_some();
+            if (HEADER_H..HEADER_H + CONTEXT_H).contains(&control.r.y) {
+                draw_canvas_button(items, control.r, &control.label, control.selected, hovered, disabled);
+                continue;
+            }
             if matches!(control.action, Action::Duplicate | Action::OpenFiles) {
                 items.push(Item::Rect(RectItem { radius: 8.0, border_w: 1.0,
                     border_color: hex_color(SOURCE_BORDER), ..RectItem::new(control.r, hex_color(SOURCE_SURFACE)) }));
@@ -7220,6 +7228,33 @@ impl Canvas {
         items.push(Item::Shadow { r: self.r, inner: true, blur: 16.0, alpha: 0.28 });
     }
 }
+/// Signal's recessed canvas toolbar and outlined controls.
+pub(crate) fn draw_canvas_bar(items: &mut Vec<Item>, r: RectPx) {
+    items.push(Item::Rect(RectItem {
+        radius: 3.0,
+        border_w: 1.0,
+        border_color: hex_color(0x393737),
+        ..RectItem::new(r, hex_color(0x484646))
+    }));
+    items.push(Item::Shadow { r, inner: true, blur: 4.0, alpha: 0.32 });
+}
+
+pub(crate) fn draw_canvas_button(
+    items: &mut Vec<Item>, r: RectPx, label: &str, selected: bool, hovered: bool, disabled: bool,
+) {
+    let selected = selected && !disabled;
+    let hovered = hovered && !disabled;
+    let fill = if selected { hex_color(0x201f1f) } else if hovered { hex_color(0x535151) } else { [0.0; 4] };
+    items.push(Item::Rect(RectItem {
+        radius: 6.0,
+        border_w: if selected { 0.0 } else { 1.0 },
+        border_color: hex_color(if hovered { 0x999798 } else { 0x706e6e }),
+        ..RectItem::new(r, fill)
+    }));
+    let ink = if disabled { 0x858587 } else if selected || hovered { 0xf1f1f1 } else { 0xb0b0b3 };
+    ui_label(items, r.x + 10.0, r.y + r.h / 2.0, 12.0, hex_color(ink), label, Align::Left, (r.w - 18.0).max(1.0));
+}
+
 /// The Sources rail's full panel width at window width `w` (the processors
 /// panel's left column uses the same, so the two rails line up).
 pub(crate) fn rail_full_width(w: f32) -> f32 {
