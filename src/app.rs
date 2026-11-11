@@ -184,6 +184,8 @@ pub struct Video {
 
 pub struct App {
     editor: Option<crate::spatial::Editor>,
+    detection_range:Option<crate::watermark::Range>,
+    detection_drag:Option<bool>,
     processors: crate::processor_gui::Panel,
     export_page: crate::export_page::Page,
     pub videos: Vec<Video>,
@@ -712,6 +714,7 @@ impl App {
         let wrap = Self::wrap_of(&videos);
         Self {
             editor: None,
+            detection_range:None, detection_drag:None,
             processors: crate::processor_gui::Panel::default(),
             export_page: crate::export_page::Page::default(),
             masks: (0..videos.len()).map(|_| None).collect(),
@@ -841,6 +844,7 @@ impl App {
         self.editor=Some(crate::spatial::Editor{owner,source:self.active,return_mode,original_mask});
         if return_mode != 4 { self.processors.close(); }
         self.export_page.open=false;self.cut_mode=false;
+        self.detection_range=(!crop).then(||crate::watermark::Range::near(self.t,self.videos[self.active].info.duration));
         self.mask_mode=true;self.playing=false;self.show_ui=true;self.ensure_mask();
         self.crop=if crop {Some(saved_crop.unwrap_or_else(||self.full_crop()))}else{None};
         self.zoom=1.;self.center=(0.5,0.5);self.seek_all(self.t,true);
@@ -848,6 +852,7 @@ impl App {
     fn finish_editor(&mut self, apply:bool) {
         self.watermark_task = None;
         self.watermark_undo = None;
+        self.detection_range=None;self.detection_drag=None;
         let Some(e)=self.editor.take() else{return};
         let draft=self.masks[e.source].take();
         self.masks[e.source]=e.original_mask;
@@ -1109,6 +1114,45 @@ impl App {
         self.mask_status.clear();
     }
 
+    fn detection_track(&self)->RectPx {
+        let r=if self.processors.open {crate::processor_gui::Panel::timeline(self.vp)}else{self.seek_rect(self.vp)};
+        RectPx{x:r.x,y:r.y-16.,w:r.w,h:12.}
+    }
+    fn detection_whole(&self)->RectPx {
+        let c=self.canvas();RectPx{x:c.x+c.w-90.,y:c.y+c.h-31.,w:80.,h:24.}
+    }
+    fn detection_press(&mut self,x:f32,y:f32)->bool {
+        if !self.show_ui||!self.mask_mode||self.crop.is_some(){return false;}
+        let Some(range)=self.detection_range else{return false;};
+        let duration=self.videos[self.active].info.duration;
+        if contains(self.detection_whole(),x,y) {
+            self.watermark_task=None;self.mask_status.clear();self.detection_range=Some(crate::watermark::Range{start:0.,end:duration});return true;
+        }
+        let t=self.detection_track();
+        let start=t.x+t.w*(range.start/duration) as f32;let end=t.x+t.w*(range.end/duration) as f32;
+        if y>=t.y-5.&&y<=t.y+t.h+5. && ((x-start).abs()<=9.||(x-end).abs()<=9.) {
+            self.watermark_task=None;self.mask_status.clear();self.detection_drag=Some((x-end).abs()<(x-start).abs());self.playing=false;return true;
+        }
+        false
+    }
+    fn draw_detection_range(&self,items:&mut Vec<Item>) {
+        if !self.mask_mode||self.crop.is_some(){return;}
+        let Some(range)=self.detection_range else{return;};
+        let duration=self.videos[self.active].info.duration.max(0.001);let track=self.detection_track();
+        let x=|t:f64|track.x+track.w*(t/duration) as f32;
+        let color=hex_color(0xff8800);
+        items.push(Item::Clip(None));
+        items.push(Item::Rect(RectItem{radius:2.,..RectItem::new(track,hex_color(0x1a1a1a))}));
+        items.push(Item::Rect(RectItem::new(RectPx{x:x(range.start),w:(x(range.end)-x(range.start)).max(1.),..track},hex_color(0x68421e))));
+        if let Ok(samples)=range.samples(duration,self.fps) {for t in samples {items.push(Item::Rect(RectItem::new(RectPx{x:x(t)-0.5,y:track.y+4.,w:1.,h:4.},color)));}}
+        for t in [range.start,range.end] {items.push(Item::Rect(RectItem{radius:2.,..RectItem::new(RectPx{x:x(t)-3.,y:track.y-2.,w:6.,h:16.},color)}));}
+        let c=self.canvas();let button=self.detection_whole();
+        let label=format!("Detection range · {}–{} · {:.1}s",fmt_time(range.start),fmt_time(range.end),range.end-range.start);
+        ui_label(items,c.x+12.,c.y+c.h-19.,10.,WORKSPACE_TEXT,label,Align::Left,(c.w-112.).max(1.));
+        items.push(Item::Rect(RectItem{radius:4.,border_w:1.,border_color:color,..RectItem::new(button,hex_color(0x171717))}));
+        ui_label(items,button.x+button.w/2.,button.y+button.h/2.,10.,WORKSPACE_TEXT,"Whole clip",Align::Center,button.w-8.);
+    }
+
     fn editor_processing_region(&self) -> Option<[usize;4]> {
         match &self.editor.as_ref()?.owner {
             crate::spatial::Owner::Plugin {id,..} => self.processors.processing_region(id),
@@ -1122,7 +1166,7 @@ impl App {
         if !self.ready() || !self.mask_mode || self.crop.is_some() {return;}
         self.playing=false;self.mouse_up();self.ensure_mask();
         let v=&self.videos[self.active];let mask=self.masks[self.active].as_ref().unwrap();
-        match crate::watermark::Task::spawn(v.info.clone(),self.t,v.spatial_id,mask.id,mask.revision,self.editor_processing_region()) {
+        match crate::watermark::Task::spawn(v.info.clone(),v.spatial_id,mask.id,mask.revision,self.editor_processing_region(),self.detection_range.unwrap_or_else(||crate::watermark::Range::near(self.t,v.info.duration))) {
             Ok(task)=>{self.mask_status=task.status();self.watermark_task=Some(task);}
             Err(e)=>self.mask_status=e,
         }
@@ -2206,6 +2250,12 @@ impl App {
     }
 
     pub fn cursor_moved(&mut self, x: f32, y: f32) {
+        if let Some(end)=self.detection_drag {
+            let track=self.detection_track();let duration=self.videos[self.active].info.duration;
+            if let Some(range)=&mut self.detection_range {range.set_edge(end,((x-track.x)/track.w).clamp(0.,1.) as f64*duration,duration,self.fps);}
+            self.cursor=(x,y);self.cursor_inside=true;return;
+        }
+
         if let Some((offset, _)) = self.source_resize {
             // Past the narrowest panel, halfway to the mini strip, the rail
             // collapses into it; dragging back out in the same gesture
@@ -2306,6 +2356,8 @@ impl App {
     }
 
     pub fn mouse_down(&mut self, x: f32, y: f32) {
+        if self.detection_press(x,y) {return;}
+
         if self.source_resize_hit(x, y) {
             let panel = self.workspace().panel;
             self.source_resize = Some((panel - x, panel));
@@ -2423,6 +2475,7 @@ impl App {
     }
 
     pub fn mouse_up(&mut self) {
+        self.detection_drag=None;
         // Dragged shut: the toggle reopens the rail at the width it had.
         if let Some((_, from)) = self.source_resize.take() {
             if !self.show_sources { self.source_width = Some(from); }
@@ -2461,6 +2514,7 @@ impl App {
     /// Leaving mask mode drops the marquee and the frames it was holding
     /// for export — a full RGBA copy per video.
     fn leave_mask_mode(&mut self) {
+        self.detection_range=None;self.detection_drag=None;
         self.watermark_task = None;
         self.watermark_undo = None;
         self.mouse_up();
@@ -3037,7 +3091,7 @@ impl App {
             let label_y = (picture.y - 18.).max(canvas.y + 18.).min(canvas.y + canvas.h - 18.);
             ui_label(&mut items,canvas.x+canvas.w/2.,label_y,13.,WORKSPACE_TEXT,mode_label,Align::Center,canvas.w-24.);
             if !self.mask_status.is_empty() {
-                ui_label(&mut items,canvas.x+canvas.w/2.,canvas.y+canvas.h-16.,10.,WORKSPACE_TEXT,&self.mask_status,Align::Center,canvas.w-24.);
+                ui_label(&mut items,canvas.x+canvas.w/2.,canvas.y+canvas.h-if self.detection_range.is_some(){42.}else{16.},10.,WORKSPACE_TEXT,&self.mask_status,Align::Center,canvas.w-24.);
             }
             board.recess(&mut items);
             let header = RectPx { x:canvas.x,y:HEADER_H,w:canvas.w,h:canvas.y-HEADER_H };
@@ -3048,6 +3102,7 @@ impl App {
             }
             items.push(Item::Clip(None));
         }
+        if self.show_ui {self.draw_detection_range(&mut items);}
         if self.processors.open && self.show_ui { self.draw_footer_end(&mut items, vp); }
 
         if self.ready() { self.export_page.reset_source(&self.videos[self.active].info); }
@@ -7329,6 +7384,20 @@ const CONTROL_BG: [f32; 4] = [26.0 / 255.0, 26.0 / 255.0, 26.0 / 255.0, 1.0];
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mask_detection_range_drag_does_not_seek_and_whole_clip_resets_it() {
+        let clip=test_clip().expect("video test fixture");let mut app=mk_app(&clip,1);
+        app.activate(Action::Tool(4));app.begin_editor(false,None);
+        let duration=app.videos[0].info.duration;let playhead=app.t;let track=app.detection_track();
+        assert!(app.detection_press(track.x,track.y+6.));
+        app.cursor_moved(track.x+track.w*0.25,track.y+6.);app.mouse_up();
+        let range=app.detection_range.unwrap();assert!(range.start>0.&&range.end<=duration);
+        assert_eq!(app.t,playhead,"selection edits must not move the playhead");
+        let button=app.detection_whole();assert!(app.detection_press(button.x+10.,button.y+10.));
+        assert_eq!(app.detection_range,Some(crate::watermark::Range{start:0.,end:duration}));
+        app.finish_editor(false);assert!(app.detection_range.is_none()&&app.detection_drag.is_none());
+    }
+
     #[test]
     fn processor_mask_editor_keeps_shell_and_limits_paint_to_canvas() {
         let clip = test_clip().expect("video test fixture");

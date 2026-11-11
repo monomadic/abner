@@ -34,6 +34,26 @@ impl Frame {
     }
 }
 
+/// Detection uses source time, independently of the visible playhead.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Range { pub start:f64, pub end:f64 }
+impl Range {
+    pub fn near(at:f64,duration:f64)->Self { Self{start:(at-30.).max(0.),end:(at+30.).min(duration)} }
+    pub fn samples(self,duration:f64,fps:f64)->Result<Vec<f64>,String> {
+        if !duration.is_finite() || !fps.is_finite() || duration<=0. || fps<=0. || !self.start.is_finite() || !self.end.is_finite() || self.start<0. || self.end>duration || self.start>=self.end {return Err("Select a valid detection range inside the clip".into());}
+        let hi=self.end.min((duration-1./fps).max(0.));
+        let mut times:Vec<_>=(0..16).map(|i|((self.start+(hi-self.start)*i as f64/15.)*fps).floor()/fps).collect();
+        times.dedup_by(|a,b|(*a-*b).abs()<0.5/fps);
+        if times.len()<6 {return Err("Select at least six distinct frames for detection".into());}
+        Ok(times)
+    }
+    pub fn set_edge(&mut self,end:bool,at:f64,duration:f64,fps:f64) {
+        let minimum=(6./fps.max(1.)).min(duration);
+        let t=(at*fps.max(1.)).round()/fps.max(1.);
+        if end {self.end=t.clamp((self.start+minimum).min(duration),duration);}else{self.start=t.clamp(0.,(self.end-minimum).max(0.));}
+    }
+}
+
 pub(crate) struct Proposal {
     pub pixels: Vec<u8>,
     pub samples: usize,
@@ -93,14 +113,14 @@ impl Task {
     }
     pub fn spawn(
         info: VideoInfo,
-        at: f64,
         source: usize,
         mask_id: u64,
         revision: u64,
         region: Option<[usize; 4]>,
+        range: Range,
     ) -> Result<Self, String> {
         let region = detection_region(region, info.width as usize, info.height as usize)?;
-        let times = sample_times(at, info.duration, info.fps)?;
+        let times = range.samples(info.duration, info.fps)?;
         let n = info.width as usize * info.height as usize;
         // Samples plus statistical maps, graph queues and one display conversion.
         if n.checked_mul(16 * 3 + 112)
@@ -136,22 +156,9 @@ impl Task {
     }
 }
 
-fn sample_times(at: f64, duration: f64, fps: f64) -> Result<Vec<f64>, String> {
-    if !at.is_finite() || !duration.is_finite() || !fps.is_finite() || duration <= 0. || fps <= 0. {
-        return Err("Watermark detection needs a clip with known duration and frame rate".into());
-    }
-    let last = (duration - 1. / fps).max(0.);
-    let center = at.clamp(0., last);
-    let lo = (center - 30.).max(0.);
-    let hi = (center + 30.).min(last);
-    let mut times: Vec<_> = (0..16)
-        .map(|i| ((lo + (hi - lo) * i as f64 / 15.) * fps).floor() / fps)
-        .collect();
-    times.dedup_by(|a, b| (*a - *b).abs() < 0.5 / fps);
-    if times.len() < 6 {
-        return Err("At least six distinct frames are needed to detect a watermark".into());
-    }
-    Ok(times)
+#[cfg(test)]
+fn sample_times(at:f64,duration:f64,fps:f64)->Result<Vec<f64>,String> {
+    Range::near(at.clamp(0.,duration.max(0.)),duration).samples(duration,fps)
 }
 
 fn detection_region(region: Option<[usize;4]>, w:usize, h:usize) -> Result<[usize;4],String> {
@@ -233,6 +240,17 @@ fn analyze(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explicit_detection_range_samples_only_its_frames_and_clamps_handles() {
+        let range=Range{start:12.,end:18.};let times=range.samples(100.,30.).unwrap();
+        assert_eq!(times.len(),16);assert_eq!(times[0],12.);assert_eq!(*times.last().unwrap(),18.);
+        assert!(times.iter().all(|&t|t>=12.&&t<=18.));
+        let mut selected=range;selected.set_edge(false,90.,100.,30.);
+        assert!(selected.end-selected.start>=6./30.-1e-9);
+        selected.set_edge(true,0.,100.,30.);assert!(selected.end>selected.start);
+        assert!(Range{start:0.,end:0.1}.samples(10.,30.).is_err());
+        let full=Range{start:0.,end:2.};assert!(*full.samples(2.,30.).unwrap().last().unwrap()<2.);
+    }
     #[test]
     fn region_detection_only_marks_pixels_inside_the_processing_region() {
         let region = detection_region(Some([3,2,99,2]),8,6).unwrap();

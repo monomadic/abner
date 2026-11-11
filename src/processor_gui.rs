@@ -1883,7 +1883,7 @@ impl Panel {
         let r = Self::progress_panel(vp);
         RectPx { x: r.x + r.w - 103.0, y: r.y + 8.0, w: 91.0, h: 26.0 }
     }
-    fn timeline(vp: (f32, f32)) -> RectPx {
+    pub(crate) fn timeline(vp: (f32, f32)) -> RectPx {
         let last = Self::transport(vp, 4);
         let x = last.x + last.w + 16.0;
         RectPx { x, y: Self::transport_y(vp) + 1.0,

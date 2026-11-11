@@ -1,5 +1,14 @@
 # abner — history
 
+## 2026-11-11 — Mask autodetection time selection
+
+Mask mode adds a highlighted detection range above the seekbar, draggable in/out
+handles, sixteen sample-frame markers, a source-time range/duration readout and a
+Whole clip shortcut. The initial selection retains the former ±30-second window.
+Seeking stays independent of the selection. Detection samples the explicit range
+and the existing spatial Search Area; changing the range cancels in-flight work.
+Handle edits stay on the frame grid and enforce a minimum six-frame span.
+
 ## 2026-11-11 — Active spatial editor border
 
 The processor's Mask or Search Area thumbnail uses an orange border while its
