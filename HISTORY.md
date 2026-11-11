@@ -1,5 +1,12 @@
 # abner — history
 
+## 2026-11-11 — External processor ownership
+
+Removed a duplicated built-in processor implementation and its root dependency.
+The existing build-time composer now supplies the independently maintained
+adapter through local provider discovery. The host API, saved settings format
+and registry handling are unchanged; use a composed build for external providers.
+
 
 ## 2026-11-11 — Spatial-control hover feedback
 

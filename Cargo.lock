@@ -24,7 +24,6 @@ version = "0.1.0"
 dependencies = [
  "ab_glyph",
  "abner-builtin-rife-metal",
- "abner-builtin-vt-interpolate",
  "abner-processing",
  "abner-processor-api",
  "anyhow",
@@ -73,16 +72,6 @@ version = "0.1.0"
 dependencies = [
  "abner-processor-api",
  "libloading",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "abner-builtin-vt-interpolate"
-version = "0.1.0"
-dependencies = [
- "abner-processor-api",
- "cc",
  "serde",
  "serde_json",
 ]

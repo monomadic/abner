@@ -262,8 +262,7 @@ MIT
 
 The library entry point `abner::run(registry)` adds built-in processors to the
 supplied registry. On Apple silicon Macs, standard builds include
-[RIFE Metal](plugins/defaults/rife-metal/README.md) and
-[VideoToolbox Interpolate](plugins/defaults/vt-interpolate/README.md).
+[RIFE Metal](plugins/defaults/rife-metal/README.md).
 RIFE Metal loads its separately installed runtime when selected for
 processing. The experimental API is in `crates/processor-api`, with a
 pass-through [Identity example](examples/identity/) for plugin developers.

@@ -133,9 +133,7 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     let registry = {
         let mut registry = registry;
-        let defaults = abner_builtin_rife_metal::factories()
-            .into_iter()
-            .chain(abner_builtin_vt_interpolate::factories());
+        let defaults = abner_builtin_rife_metal::factories();
         for factory in defaults {
             // Older composed launchers may still supply these adapters.
             if registry.get(&factory.descriptor().id).is_err() {
