@@ -1,5 +1,17 @@
 # abner — history
 
+## 2026-11-12 — Processor ON/OFF switch drawn by figleaf
+
+The settings panel's ON/OFF switch is drawn by figleaf from Figma's values for
+Process Switch (103:2651), including the label's inner shadow (black 41%, Y 1,
+blur 2.8), which the glyph atlas cannot draw and which is why the label reads
+dimmer than plain EDEDED in Figma. `Item::Label` carries one line of figleaf
+text; figleaf rasterizes it with CoreText from the bundled header face and it
+is painted in list order like `Item::Shape`. Only labels that need a Figma
+text effect use it; all other text stays on the glyph atlas. Figma sets this
+label in Bold and the bundled face is Medium. The off thumb's hairline is
+still the opaque grey that Figma's 20% white makes on the thumb.
+
 ## 2026-11-12 — Rail switch drawn by figleaf
 
 The Process rail's pill switch is drawn by figleaf, a sister checkout at

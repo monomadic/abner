@@ -2855,17 +2855,26 @@ impl Drop for Panel {
         }
     }
 }
-/// Figma Process Switch (103:2651): one thumb and its label travel together.
+/// Figma Process Switch (103:2651), drawn by figleaf from Figma's own values:
+/// a 61x27 frame, fill 0A0A0A, a 1.5 stroke inside, radius 8; a 28x21 thumb,
+/// radius 5, blue when on and grey with a hairline when off; the label in
+/// EDEDED 12 / 12.5 with Figma's inner shadow (black 41%, Y 1, blur 2.8).
+/// The thumb and its label travel together. Figma sets the label in Bold;
+/// the bundled header face is Medium. The off hairline is Figma's white at
+/// 20% written as the opaque grey it makes on the thumb.
 fn draw_processor_switch(items: &mut Vec<Item>, r: RectPx, on: bool, position: f32) {
-    let ink = hex_color(0xededed);
-    items.push(Item::Rect(RectItem { radius: 8.0, border_w: 1.5,
-        border_color: hex_color(0xa4a7ad), ..RectItem::new(r, hex_color(0x0a0a0a)) }));
-    let thumb = RectPx { x: r.x + 3.0 + (r.w - 34.0) * position, y: r.y + 3.0, w: 28.0, h: 21.0 };
-    items.push(Item::Rect(RectItem { radius: 5.0, border_w: if on { 0.0 } else { 0.5 },
-        border_color: hex_color(0x757575),
-        ..RectItem::new(thumb, mix(0x535353, CUT_HEADER_BLUE, position)) }));
-    items.push(Item::Text(TextItem { header: true, align: Align::Center, valign: VAlign::Middle,
-        max_width: Some(28.0), ..TextItem::new(thumb.x + 14.0, thumb.y + 10.5, 12.0, ink, if on { "ON" } else { "OFF" }) }));
+    use figleaf::{Rect, Shape, StrokeAlign, Text, paint::Align as Place};
+    items.push(Item::Shape(Shape::rect(Rect::new(r.x, r.y, r.w, r.h)).radius(8.0)
+        .fill(hex_color(0x0a0a0a))
+        .stroke(1.5, hex_color(0xa4a7ad), StrokeAlign::Inside)));
+    let thumb = Rect::new(r.x + 3.0 + (r.w - 34.0) * position, r.y + 3.0, 28.0, 21.0);
+    let shape = Shape::rect(thumb).radius(5.0).fill(mix(0x535353, CUT_HEADER_BLUE, position));
+    items.push(Item::Shape(if on { shape } else { shape.stroke(0.5, hex_color(0x757575), StrokeAlign::Inside) }));
+    items.push(Item::Label(Text::new(if on { "ON" } else { "OFF" }, thumb)
+        .size(12.0, 12.5)
+        .color(hex_color(0xededed))
+        .inner_shadow([0.0, 0.0, 0.0, 0.41], [0.0, 1.0], 2.8)
+        .align(Place::Center, Place::Center)));
 }
 /// The rail's pill switch, Figma "Processor card · toggle" Switch (143:5040),
 /// drawn by figleaf from Figma's own values: a 32x16 pill, fill FF9D00, a 1px

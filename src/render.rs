@@ -375,6 +375,10 @@ pub enum Item {
     /// A shape drawn by figleaf with Figma's meaning for strokes, shadows
     /// and clips. Logical px like everything else, painted in list order.
     Shape(figleaf::Shape),
+    /// One line of text drawn by figleaf, for labels that carry a Figma text
+    /// effect the glyph atlas cannot draw (an inner shadow). Font 0 is the
+    /// bundled header face. Everything else stays `Item::Text`.
+    Label(figleaf::Text),
     TagRow { x: f32, y: f32, width: f32, labels: Vec<String> },
     /// Soft rectangular shadow. Inner shades the canvas edge; outer sits
     /// behind a fitted video rectangle. Both use logical pixel widths.
@@ -494,6 +498,8 @@ pub struct Gpu {
     figleaf: figleaf::render::Renderer,
     /// This frame's shapes, kept between frames for its allocation.
     shapes: figleaf::Canvas,
+    /// Rasterizes `Item::Label`s from the bundled header face.
+    labels: figleaf::text::coretext::CoreText,
     sampler: wgpu::Sampler,
     bgl: wgpu::BindGroupLayout,
     /// Kept so `set_video_dims` can build mip bind groups for textures
@@ -810,6 +816,11 @@ impl Gpu {
         let instance_capacity = 1024;
         let instances = Self::make_instance_buffer(&device, instance_capacity);
         let figleaf = figleaf::render::Renderer::new(&device, config.format);
+        let labels = figleaf::text::coretext::CoreText::new(&[Some(figleaf::text::FontSource {
+            bytes: include_bytes!("../assets/fonts/JetBrainsMono-Medium.ttf"),
+            axes: &[],
+        })])
+        .expect("bundled JetBrains Mono Medium must load");
 
         let mut gpu = Self {
             surface,
@@ -823,6 +834,7 @@ impl Gpu {
             instance_capacity,
             figleaf,
             shapes: figleaf::Canvas::new(),
+            labels,
             sampler,
             bgl,
             blit_bgl,
@@ -1256,6 +1268,10 @@ impl Gpu {
                     batches.push(((FIGLEAF, shapes.items().len()), clip, 0..0));
                     shapes.shape(shape.clone());
                 }
+                Item::Label(text) => {
+                    batches.push(((FIGLEAF, shapes.items().len()), clip, 0..0));
+                    shapes.text(text.clone());
+                }
                 Item::Shadow { r, inner, blur, alpha } => {
                     let spread = if *inner { 0.0 } else { blur * 1.5 };
                     push(&mut data, &mut batches, clip, None, Instance {
@@ -1569,11 +1585,11 @@ impl Gpu {
         }
 
         let target = [self.config.width, self.config.height];
-        if let Err(e) = self.figleaf.prepare(&self.device, &self.queue, &shapes, target, scale, &mut figleaf::text::NoText) {
+        if let Err(e) = self.figleaf.prepare(&self.device, &self.queue, &shapes, target, scale, &mut self.labels) {
             log::warn!("figleaf: {e}");
         }
         for p in self.figleaf.problems() {
-            log::warn!("figleaf left out shape {}: {}", p.item, p.reason);
+            log::warn!("figleaf left out item {}: {}", p.item, p.reason);
         }
         self.shapes = shapes;
 
