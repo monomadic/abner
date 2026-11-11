@@ -153,6 +153,13 @@ paint edit). **Apply** keeps the draft and **Cancel** restores the original mask
 Existing painted pixels are preserved. Editing the mask while scanning discards
 the pending result; no confident detection leaves the draft unchanged.
 
+**Search area** shows draggable crop-style handles in mask mode. Resize or move
+the rectangle to limit autodetection, then click **Search area** again to hide
+the handles and resume painting. The selected area remains active while hidden;
+double-click inside the rectangle to reset it to the full frame. It changes only
+the detection search area, not the video crop or existing painted mask. Changing
+the rectangle stops pending detection. The area resets when you leave the editor.
+
 Detection needs background variation and can mistake stationary scenery for an
 overlay. Inspect the result before applying. Sampling stays at native resolution;
 a memory limit and cancellation bound background work. Crop mode does not offer

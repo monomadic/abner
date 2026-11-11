@@ -1,5 +1,13 @@
 # abner — history
 
+## 2026-11-11 — Mask detection search rectangle
+
+Mask mode has a Search area toggle with the existing movable, resizable crop
+handles. Hiding the handles restores painting and preserves the detection bounds.
+The bounds affect only detection, remain inside any processor search region, and
+never change the source crop or painted mask. Editing them cancels pending work.
+
+
 ## 2026-11-11 — Foreground tooltips with soft shadows
 
 Tooltips have an explicit renderer overlay flag. They paint after all ordinary

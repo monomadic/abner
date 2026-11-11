@@ -186,6 +186,8 @@ pub struct App {
     editor: Option<crate::spatial::Editor>,
     detection_range:Option<crate::watermark::Range>,
     detection_drag:Option<bool>,
+    detection_area:Option<Crop>,
+    detection_area_visible:bool,
     processors: crate::processor_gui::Panel,
     export_page: crate::export_page::Page,
     pub videos: Vec<Video>,
@@ -715,6 +717,7 @@ impl App {
         Self {
             editor: None,
             detection_range:None, detection_drag:None,
+            detection_area:None, detection_area_visible:false,
             processors: crate::processor_gui::Panel::default(),
             export_page: crate::export_page::Page::default(),
             masks: (0..videos.len()).map(|_| None).collect(),
@@ -844,6 +847,7 @@ impl App {
         self.editor=Some(crate::spatial::Editor{owner,source:self.active,return_mode,original_mask});
         if return_mode != 4 { self.processors.close(); }
         self.export_page.open=false;self.cut_mode=false;
+        self.detection_area=None;self.detection_area_visible=false;
         self.detection_range=(!crop).then(||crate::watermark::Range::near(self.t,self.videos[self.active].info.duration));
         self.mask_mode=true;self.playing=false;self.show_ui=true;self.ensure_mask();
         self.crop=if crop {Some(saved_crop.unwrap_or_else(||self.full_crop()))}else{None};
@@ -853,6 +857,7 @@ impl App {
         self.watermark_task = None;
         self.watermark_undo = None;
         self.detection_range=None;self.detection_drag=None;
+        self.detection_area=None;self.detection_area_visible=false;
         let Some(e)=self.editor.take() else{return};
         let draft=self.masks[e.source].take();
         self.masks[e.source]=e.original_mask;
@@ -971,6 +976,37 @@ impl App {
         ((x - r.x) / r.w * mask.width as f32, (y - r.y) / r.h * mask.height as f32)
     }
 
+    /// Search handles share crop geometry, but never alter the source crop or mask.
+    fn active_marquee(&self) -> Option<Crop> {
+        self.crop.or_else(|| self.detection_area.filter(|_| self.detection_area_visible))
+    }
+    fn set_marquee(&mut self, c: Crop) {
+        if self.crop.is_some() { self.crop=Some(c); }
+        else {
+            self.detection_area=Some(c);
+            self.watermark_task=None;
+        }
+        self.mask_status.clear();
+    }
+    fn toggle_detection_area(&mut self) {
+        if !self.mask_mode || self.crop.is_some() {return;}
+        if self.detection_area.is_none() {
+            let c=self.editor_processing_region().map(|[x,y,w,h]|Crop{x:x as f32,y:y as f32,w:w as f32,h:h as f32}).unwrap_or_else(||self.full_crop());
+            self.detection_area=Some(c);
+        }
+        self.detection_area_visible=!self.detection_area_visible;
+        self.painting=false;self.stroke_last=None;self.crop_drag=None;
+    }
+    fn detection_search_region(&self) -> Option<[usize;4]> {
+        let Some(c)=self.detection_area else{return self.editor_processing_region();};
+        let [bx,by,bw,bh]=self.editor_processing_region().unwrap_or([0,0,self.videos[self.active].info.width as usize,self.videos[self.active].info.height as usize]);
+        let x=(c.x.floor() as usize).max(bx);
+        let y=(c.y.floor() as usize).max(by);
+        let right=((c.x+c.w).ceil() as usize).min(bx+bw);
+        let bottom=((c.y+c.h).ceil() as usize).min(by+bh);
+        Some([x,y,right.saturating_sub(x),bottom.saturating_sub(y)])
+    }
+
     /// The marquee on screen, through the same transform the video uses.
     fn crop_rect(&self, c: Crop) -> RectPx {
         let r = self.content_rect(self.active);
@@ -983,7 +1019,7 @@ impl App {
     /// win over side squares), otherwise the body, else nothing (the dimmed
     /// area isn't part of the export).
     fn crop_hit(&self, x: f32, y: f32) -> Option<CropGrab> {
-        let c = self.crop?;
+        let c = self.active_marquee()?;
         let s = self.crop_rect(c);
         for corner in [Corner::Nw, Corner::Ne, Corner::Sw, Corner::Se] {
             let (hx, hy) = corner.of(c);
@@ -1010,7 +1046,7 @@ impl App {
 
     /// Take hold of whatever `crop_hit` finds under the press.
     fn crop_grab(&mut self, x: f32, y: f32) {
-        let (Some(c), Some(hit)) = (self.crop, self.crop_hit(x, y)) else { return };
+        let (Some(c), Some(hit)) = (self.active_marquee(), self.crop_hit(x, y)) else { return };
         let point = self.image_point(x, y);
         let (hx, hy) = match hit {
             CropGrab::Move => (c.x, c.y),
@@ -1047,7 +1083,7 @@ impl App {
             return (held || self.cut_drag.is_none() && self.cut_edge_at(self.cursor.0, self.cursor.1).is_some())
                 .then_some(CropCursor::EwResize);
         }
-        if !self.mask_mode || self.crop.is_none() || !self.cursor_inside || !self.ready() {
+        if !self.mask_mode || self.active_marquee().is_none() || !self.cursor_inside || !self.ready() {
             return None;
         }
         let grab = match self.crop_drag {
@@ -1070,21 +1106,23 @@ impl App {
     }
 
     fn crop_drag_to(&mut self, x: f32, y: f32) {
-        let (Some(c), Some((grab, (ox, oy)))) = (self.crop, self.crop_drag) else { return };
+        let (Some(c), Some((grab, (ox, oy)))) = (self.active_marquee(), self.crop_drag) else { return };
         let mask = self.masks[self.active].as_ref().unwrap();
         let (w, h) = (mask.width, mask.height);
         let (px, py) = self.image_point(x, y);
-        self.crop = Some(match grab {
+        let aspect=if self.crop.is_some(){ASPECTS[self.aspect].1}else{None};
+        let next = match grab {
             CropGrab::Move => c.moved_to(px - ox, py - oy, w, h),
-            CropGrab::Corner(corner) => match ASPECTS[self.aspect].1 {
+            CropGrab::Corner(corner) => match aspect {
                 Some(r) => c.with_corner_locked(corner, px - ox, py - oy, r, w, h),
                 None => c.with_corner(corner, px - ox, py - oy, w, h),
             },
-            CropGrab::Edge(edge) => match ASPECTS[self.aspect].1 {
+            CropGrab::Edge(edge) => match aspect {
                 Some(r) => c.with_edge_locked(edge, px - ox, py - oy, r, w, h),
                 None => c.with_edge(edge, px - ox, py - oy, w, h),
             },
-        });
+        };
+        self.set_marquee(next);
         self.mask_status.clear();
     }
 
@@ -1094,7 +1132,7 @@ impl App {
     pub fn brush_cursor_visible(&self) -> bool {
         // The marquee owns the pointer while it is up — the brush would be
         // painting into a region the crop is about to throw away.
-        if !self.mask_mode || !self.cursor_inside || !self.ready() || self.crop.is_some() {
+        if !self.mask_mode || !self.cursor_inside || !self.ready() || self.active_marquee().is_some() {
             return false;
         }
         let r = self.content_rect(self.active);
@@ -1166,7 +1204,7 @@ impl App {
         if !self.ready() || !self.mask_mode || self.crop.is_some() {return;}
         self.playing=false;self.mouse_up();self.ensure_mask();
         let v=&self.videos[self.active];let mask=self.masks[self.active].as_ref().unwrap();
-        match crate::watermark::Task::spawn(v.info.clone(),v.spatial_id,mask.id,mask.revision,self.editor_processing_region(),self.detection_range.unwrap_or_else(||crate::watermark::Range::near(self.t,v.info.duration))) {
+        match crate::watermark::Task::spawn(v.info.clone(),v.spatial_id,mask.id,mask.revision,self.detection_search_region(),self.detection_range.unwrap_or_else(||crate::watermark::Range::near(self.t,v.info.duration))) {
             Ok(task)=>{self.mask_status=task.status();self.watermark_task=Some(task);}
             Err(e)=>self.mask_status=e,
         }
@@ -1292,7 +1330,7 @@ impl App {
         // Crop mode shows the footage itself: no red/blue mask tint, just
         // the dimming outside the marquee. The mask is still there (and
         // still exported with `S`), only not drawn.
-        if let Some(c) = self.crop {
+        if let Some(c) = self.active_marquee() {
             self.build_crop_layer(items, c);
         } else {
             items.push(Item::Mask { r, id: mask.id, revision: mask.revision,
@@ -1418,7 +1456,7 @@ impl App {
         }
         if r.w >= CROP_LABEL_MIN.0 && r.h >= CROP_LABEL_MIN.1 {
             let (name, locked) = ASPECTS[self.aspect];
-            let ratio = ratio_label(w, h, locked.map(|_| name));
+            let ratio = ratio_label(w, h, locked.filter(|_|self.crop.is_some()).map(|_| name));
             items.push(chip(r.x + r.w / 2.0, r.y + r.h / 2.0, Align::Center, VAlign::Middle,
                 format!("{w}x{h} - {ratio}")));
         }
@@ -2224,6 +2262,10 @@ impl App {
     /// Show clip `idx` (`keys.next_source`'s flip, or its number key directly).
     fn select(&mut self, idx: usize) {
         if self.editor.is_some() {return}
+        if self.active != idx {
+            self.detection_area=None;self.detection_area_visible=false;
+            self.watermark_task=None;
+        }
         let reopen_cut = self.cut_mode && self.active != idx;
         self.active = idx;
         if reopen_cut { self.cut_mode = false; self.set_cut_mode(true); }
@@ -2441,7 +2483,7 @@ impl App {
         if !contains(self.canvas(), x, y) { return; }
         if self.mask_mode {
             self.stroke_last = None;
-            if self.crop.is_some() {
+            if self.active_marquee().is_some() {
                 // Double-click inside the marquee: back out to the whole frame.
                 let now = std::time::Instant::now();
                 let double = self.last_click.is_some_and(|(t, (lx, ly))| {
@@ -2449,7 +2491,7 @@ impl App {
                 });
                 self.last_click = Some((now, (x, y)));
                 if double && matches!(self.crop_hit(x, y), Some(CropGrab::Move)) {
-                    self.crop = Some(self.full_crop());
+                    self.set_marquee(self.full_crop());
                     self.crop_drag = None;
                     self.last_click = None;
                     self.mask_status.clear();
@@ -2515,6 +2557,7 @@ impl App {
     /// for export — a full RGBA copy per video.
     fn leave_mask_mode(&mut self) {
         self.detection_range=None;self.detection_drag=None;
+        self.detection_area=None;self.detection_area_visible=false;
         self.watermark_task = None;
         self.watermark_undo = None;
         self.mouse_up();
@@ -3345,12 +3388,12 @@ impl App {
     fn embedded_editor_controls(&self) -> Vec<Control> {
         let v = self.canvas();
         let mut buttons = if self.crop.is_some() { vec![("Save still",Action::Save)] } else {
-            vec![("Detect",Action::DetectWatermark),("−",Action::Brush(false)),("+",Action::Brush(true)),("Save mask",Action::Save)]
+            vec![("Detect",Action::DetectWatermark),("Search area",Action::DetectionArea),("−",Action::Brush(false)),("+",Action::Brush(true)),("Save mask",Action::Save)]
         };
         if self.can_undo_watermark() { buttons.push(("Undo",Action::UndoWatermark)); }
         buttons.extend([("Reset",Action::ResetEdit),("Cancel",Action::CancelEdit),("Apply",Action::ApplyEdit)]);
         let w = (v.w / buttons.len() as f32).min(90.);
-        buttons.into_iter().enumerate().map(|(i,(label,action))| Control::new(RectPx {x:v.x+i as f32*w,y:HEADER_H,w,h:v.y-HEADER_H},label,false,action)).collect()
+        buttons.into_iter().enumerate().map(|(i,(label,action))| Control::new(RectPx {x:v.x+i as f32*w,y:HEADER_H,w,h:v.y-HEADER_H},label,matches!(action,Action::DetectionArea)&&self.detection_area_visible,action)).collect()
     }
 
     fn controls(&self) -> Vec<Control> {
@@ -3485,6 +3528,7 @@ impl App {
             let detecting=self.watermark_task.is_some();
             for (label, w, action) in [
                 (if detecting {"Stop detection"}else{"Detect watermark"}, 140.0, Action::DetectWatermark),
+                ("Search area", 88.0, Action::DetectionArea),
                 ("Undo", 48.0, Action::UndoWatermark),
                 ("−", 28.0, Action::Brush(false)),
                 ("+", 28.0, Action::Brush(true)),
@@ -3495,7 +3539,7 @@ impl App {
                 out.push(Control::new(
                     RectPx { x, y, w, h: 27.0 },
                     label,
-                    false,
+                    matches!(action,Action::DetectionArea) && self.detection_area_visible,
                     action,
                 ));
                 x += w + 8.0;
@@ -3576,6 +3620,7 @@ impl App {
                 if self.videos.iter().any(|v|v.input_crop.is_some()) && !matches!(mode,Mode::Overlay|Mode::SideBySide) {self.notify("Use Single or Side by side for cropped sources".into());}
                 else {self.mode=mode;}
             },
+            Action::DetectionArea => self.toggle_detection_area(),
             Action::DetectWatermark => self.detect_watermark(),
             Action::UndoWatermark => self.undo_watermark(),
             Action::Brush(up) => self.resize_brush(if up { 1.25 } else { 0.8 }),
@@ -7159,7 +7204,7 @@ impl Workspace {
 }
 
 #[derive(Clone, Copy)]
-enum Action { LaunchEditor(bool), ResetEdit, ApplyEdit, CancelEdit, Duplicate, OpenFiles, ClearSources, ToggleSources, ToggleInspector, ToggleDetail, Tool(usize), View(Mode), DetectWatermark, UndoWatermark, Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
+enum Action { LaunchEditor(bool), ResetEdit, ApplyEdit, CancelEdit, Duplicate, OpenFiles, ClearSources, ToggleSources, ToggleInspector, ToggleDetail, Tool(usize), View(Mode), DetectionArea, DetectWatermark, UndoWatermark, Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
 #[derive(Clone, Copy, PartialEq)]
 enum CutAction { TogglePosters, FrameChanges(bool), TimeDisplay(bool),
     // Set in / out: no key or button reaches these while the feature is disabled.
@@ -7421,6 +7466,37 @@ mod tests {
         app.mouse_down(apply.r.x + apply.r.w/2.,apply.r.y + apply.r.h/2.);
         assert!(app.processors.open && !app.mask_mode);
         assert!(app.processors.binding("test.processor","mask").unwrap().mask.is_some());
+    }
+
+    #[test]
+    fn watermark_search_area_toggle_resize_and_detection_bounds() {
+        let clip=test_clip().expect("video test fixture");let mut app=mk_app(&clip,1);
+        app.begin_editor(false,None);
+        assert!(app.detection_search_region().is_none());
+        for width in [720.,900.,1280.] {
+            app.vp=(width,800.);
+            assert!(app.controls().iter().any(|c|matches!(c.action,Action::DetectionArea)));
+        }
+        app.activate(Action::DetectionArea);
+        let original=app.full_crop();let r=app.crop_rect(original);
+        let before=app.masks[0].as_ref().unwrap().pixels.clone();
+        app.crop_grab(r.x+r.w,r.y+r.h);
+        app.crop_drag_to(r.x+r.w*0.5,r.y+r.h*0.5);
+        app.mouse_up();
+        let region=app.detection_search_region().unwrap();
+        assert!(region[2]<original.w as usize && region[3]<original.h as usize);
+        assert!(app.crop.is_none() && app.videos[0].input_crop.is_none());
+        assert_eq!(*before,*app.masks[0].as_ref().unwrap().pixels);
+        app.cursor_inside=true;app.cursor=(r.x+r.w*0.25,r.y+r.h*0.25);
+        assert!(!app.brush_cursor_visible());
+        app.activate(Action::DetectionArea);
+        assert!(app.active_marquee().is_none());
+        assert_eq!(app.detection_search_region(),Some(region));
+        assert!(app.brush_cursor_visible());
+        app.activate(Action::DetectionArea);
+        assert_eq!(app.detection_search_region(),Some(region));
+        app.finish_editor(false);
+        assert!(app.detection_area.is_none() && !app.detection_area_visible);
     }
 
     #[test]
