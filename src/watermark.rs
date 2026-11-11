@@ -38,6 +38,7 @@ impl Frame {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Range { pub start:f64, pub end:f64 }
 impl Range {
+    #[cfg(test)]
     pub fn near(at:f64,duration:f64)->Self { Self{start:(at-30.).max(0.),end:(at+30.).min(duration)} }
     pub fn samples(self,duration:f64,fps:f64)->Result<Vec<f64>,String> {
         if !duration.is_finite() || !fps.is_finite() || duration<=0. || fps<=0. || !self.start.is_finite() || !self.end.is_finite() || self.start<0. || self.end>duration || self.start>=self.end {return Err("Select a valid detection range inside the clip".into());}

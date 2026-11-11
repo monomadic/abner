@@ -144,8 +144,8 @@ tab closes and returns to Sources, Timeline, or Process. The editor stays attach
 to its original source until closed. Applied source masks persist in memory, and
 playback stays paused until Space.
 
-**Detect watermark** (or **D**) samples up to 16 nearby frames, within 30 seconds
-on either side of the playhead, and adds a proposed static-watermark mask to the
+**Detect watermark** (or **D**) samples up to 16 frames spread across the entire clip by default
+(or the narrower range you select with the detection slider), and adds a proposed static-watermark mask to the
 current draft. This is built into mask mode and uses the native decoder. The
 button becomes **Stop detection** while scanning; progress appears in the status
 line. **Undo** / **Cmd-Z** restores the mask from before detection (until another

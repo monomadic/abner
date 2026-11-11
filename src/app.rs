@@ -848,7 +848,7 @@ impl App {
         if return_mode != 4 { self.processors.close(); }
         self.export_page.open=false;self.cut_mode=false;
         self.detection_area=None;self.detection_area_visible=false;
-        self.detection_range=(!crop).then(||crate::watermark::Range::near(self.t,self.videos[self.active].info.duration));
+        self.detection_range=(!crop).then(||crate::watermark::Range{start:0.,end:self.videos[self.active].info.duration});
         self.mask_mode=true;self.playing=false;self.show_ui=true;self.ensure_mask();
         self.crop=if crop {Some(saved_crop.unwrap_or_else(||self.full_crop()))}else{None};
         self.zoom=1.;self.center=(0.5,0.5);self.seek_all(self.t,true);
@@ -1204,7 +1204,7 @@ impl App {
         if !self.ready() || !self.mask_mode || self.crop.is_some() {return;}
         self.playing=false;self.mouse_up();self.ensure_mask();
         let v=&self.videos[self.active];let mask=self.masks[self.active].as_ref().unwrap();
-        match crate::watermark::Task::spawn(v.info.clone(),v.spatial_id,mask.id,mask.revision,self.detection_search_region(),self.detection_range.unwrap_or_else(||crate::watermark::Range::near(self.t,v.info.duration))) {
+        match crate::watermark::Task::spawn(v.info.clone(),v.spatial_id,mask.id,mask.revision,self.detection_search_region(),self.detection_range.unwrap_or_else(||crate::watermark::Range{start:0.,end:v.info.duration})) {
             Ok(task)=>{self.mask_status=task.status();self.watermark_task=Some(task);}
             Err(e)=>self.mask_status=e,
         }
@@ -7429,6 +7429,18 @@ const CONTROL_BG: [f32; 4] = [26.0 / 255.0, 26.0 / 255.0, 26.0 / 255.0, 1.0];
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mask_detection_defaults_to_entire_source_independently_of_playhead() {
+        let clip=test_clip().expect("video test fixture");let mut app=mk_app(&clip,1);
+        app.videos[0].info.duration=134.;app.t=70.;
+        app.begin_editor(false,None);
+        let range=app.detection_range.unwrap();
+        assert_eq!(range,crate::watermark::Range{start:0.,end:134.});
+        let times=range.samples(134.,60.).unwrap();
+        assert_eq!(times[0],0.);
+        assert!(*times.last().unwrap()>133.9);
+    }
+
     #[test]
     fn mask_detection_range_drag_does_not_seek_and_whole_clip_resets_it() {
         let clip=test_clip().expect("video test fixture");let mut app=mk_app(&clip,1);
