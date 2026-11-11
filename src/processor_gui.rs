@@ -2070,7 +2070,7 @@ impl Panel {
                 let (label,kind)=f.title.rsplit_once(" (").unwrap_or((&f.title,""));
                 text(items,row.x,row.y,11.,label,ink,row.w);
                 text(items,row.x,row.y+12.,11.,&format!("({kind}"),ink,row.w);
-            } else if !matches!(f.kind,Kind::Number{..}) { text(items, row.x, row.y, 11.0, &f.title, ink, row.w); }
+            } else if !matches!(f.kind,Kind::Number{..}|Kind::Bool) { text(items, row.x, row.y, 11.0, &f.title, ink, row.w); }
             let value = &self.settings[&f.key];
             let editing = self.editing.as_ref().filter(|(n, _)| *n == i);
             let shown = if let Kind::Spatial{key,crop}=&f.kind {
@@ -2113,12 +2113,16 @@ impl Panel {
                 } else {items.push(Item::Rect(RectItem::new(thumb,hex_color(if hovered {0x353535}else{0x232323}))));}
                 items.push(Item::Rect(RectItem{radius:6.,..RectItem::new(RectPx{x:thumb.x+(thumb.w-40.)/2.,y:thumb.y+7.,w:40.,h:40.},[0.,0.,0.,0.7])}));
                 items.push(Item::FrameIcon{x:thumb.x+(thumb.w-20.)/2.,y:thumb.y+17.,index:if *crop {5}else{4}});
+            } else if matches!(f.kind,Kind::Bool) {
+                items.push(Item::Text(TextItem{valign:VAlign::Middle,max_width:Some((row.w-48.).max(1.)),..TextItem::new(row.x,row.y+10.,11.,ink,&f.title)}));
+                let on=value.as_bool().unwrap_or(false);
+                draw_rail_switch(items,RectPx{x:row.x+row.w-32.,y:row.y+2.,w:32.,h:16.},if on{1.}else{0.});
             } else {
-                let r = RectPx { x: row.x, y: row.y + 21.0, w: row.w, h: 31.0 };
-                items.push(Item::Rect(RectItem { radius: 6.0, border_w: 1.0, border_color: hex_color(0x303234), ..RectItem::new(r, hex_color(0x0a0a0a)) }));
-                ui_label(items, r.x + r.w / 2.0, r.y + r.h / 2.0, 10.0, muted, &shown, Align::Center, r.w - 12.0);
+                let r = RectPx { x: row.x, y: row.y + 16.0, w: row.w, h: 20.0 };
+                let hovered=hit(r,self.cursor.0,self.cursor.1);
+                items.push(Item::Rect(RectItem { radius: 4.0, border_w: 1.0, border_color: if editing.is_some(){blue}else{hex_color(0x303234)}, ..RectItem::new(r, hex_color(if hovered||editing.is_some(){0x1a1a1a}else{0x0a0a0a})) }));
+                ui_label(items, r.x + r.w / 2.0, r.y + r.h / 2.0, 10.0, ink, &shown, Align::Center, r.w - 12.0);
                 if editing.is_some() { set_caret(items, caret); }
-                text(items, row.x, row.y + 65.0, 9.0, f.description.as_deref().unwrap_or(""), muted, row.w);
             }
         }
         items.push(Item::Clip(None));
@@ -2133,7 +2137,7 @@ impl Panel {
         spatial.div_ceil(2)+self.fields.len()-spatial
     }
     fn field_pitch(&self,i:usize)->f32 {
-        if matches!(self.fields[i].kind,Kind::Number{..}){44.}else{104.}
+        if matches!(self.fields[i].kind,Kind::Spatial{..}){104.}else{44.}
     }
     fn settings_height(&self)->f32 {
         let spatial=self.spatial_count();
@@ -2151,7 +2155,7 @@ impl Panel {
             x: vp.0 - Self::right(vp) + 16.0 + column as f32*(w+12.),
             y: r.y + 164.0 + offset - self.scroll,
             w,
-            h: if matches!(self.fields[i].kind,Kind::Number{..}){36.}else{96.},
+            h: if matches!(self.fields[i].kind,Kind::Spatial{..}){96.}else{36.},
         }
     }
     pub fn scroll(&mut self, dy: f32, cursor: (f32, f32), vp: (f32, f32)) -> bool {
@@ -2836,8 +2840,8 @@ impl Panel {
             interface: true,
             align: Align::Right,
             wrap: Some(wrap),
-            bg: Some(TextBg { radius: 5.0, pad_x: 10.0, pad_y: 8.0, ..TextBg::new(hex_color(0x26282b)) }),
-            ..TextItem::new(right - 18.0, row.y + 8.0, 11.0, hex_color(SOURCE_INK), tip)
+            bg: Some(TextBg { radius: 5.0, pad_x: 10.0, pad_y: 8.0, shadow:[0.,0.,0.,0.65],shadow_dy:3., ..TextBg::new(hex_color(0xf4f0dd)) }),
+            ..TextItem::new(right - 18.0, row.y + 8.0, 11.0, hex_color(0x161a1d), tip)
         }));
     }
 }
@@ -3685,7 +3689,7 @@ mod tests {
         panel.shortcut('a');panel.text_input("0.25");panel.key(Key::Enter);
         assert_eq!(panel.settings["strength"],json!(0.25));
         assert_eq!(row.h,36.);
-        assert_eq!(panel.settings_height(),252.,"two regular rows plus the numeric row use their own pitches");
+        assert_eq!(panel.settings_height(),132.,"all regular settings share the compact pitch");
         let i = panel.fields.iter().position(|f| f.key == "mode").unwrap();
         let row = panel.row(i, vp);
         panel.click(row.x + 20.0, row.y + 25.0, vp);

@@ -1,5 +1,13 @@
 # abner — history
 
+## 2026-11-11 — Compact choice controls and contrasting tooltips
+
+Processor enum and text fields now use a 20px input below the label, sharing
+the sliders’ 36px height and 44px row pitch. Booleans use an inline switch beside
+the label. Descriptions remain available in tooltips. Processor tooltips use an
+opaque warm-light background, dark text and a shadow to separate them from both
+bright footage and the dark canvas.
+
 ## 2026-11-11 — Compact processor value sliders
 
 Implemented the approved 278×36 Figma slider with a 44px row pitch. Labels and
