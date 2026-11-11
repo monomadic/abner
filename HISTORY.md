@@ -1,5 +1,11 @@
 # abner — history
 
+## 2026-11-11 — Active spatial editor border
+
+The processor's Mask or Search Area thumbnail uses an orange border while its
+matching canvas editor is open. The highlight follows the editor's exact input
+and tool, and clears on Apply, Cancel or leaving the editor.
+
 ## 2026-11-11 — Compact choice controls and contrasting tooltips
 
 Processor enum and text fields now use a 20px input below the label, sharing

@@ -3013,6 +3013,10 @@ impl App {
             &mut uploads,
             n,
         );
+        self.processors.active_editor = self.editor.as_ref().and_then(|editor| match &editor.owner {
+            crate::spatial::Owner::Plugin {id,key} => Some((id.clone(),key.clone(),self.crop.is_some())),
+            _ => None,
+        });
         self.processors.draw(&mut items, vp, n, self.view(), self.show_ui);
         if self.processors.open && self.mask_mode && self.show_ui {
             let canvas = self.canvas();

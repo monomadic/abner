@@ -967,6 +967,7 @@ pub struct Panel {
     input_owner:usize,
     source_bindings: BTreeMap<usize,abner_processor_api::ChainBindings>,
     pub editor_request: Option<(String,String,bool)>,
+    pub active_editor: Option<(String,String,bool)>,
     preset_dir: Option<std::path::PathBuf>,
     user_presets: BTreeMap<String,std::path::PathBuf>,
     preset_name: Option<String>,
@@ -1053,7 +1054,7 @@ pub struct Panel {
 impl Default for Panel {
     fn default() -> Self {
         Self {
-            input_owner:usize::MAX, declarations: BTreeMap::new(), inputs: Default::default(), source_bindings: BTreeMap::new(), editor_request: None,
+            input_owner:usize::MAX, declarations: BTreeMap::new(), inputs: Default::default(), source_bindings: BTreeMap::new(), editor_request: None, active_editor:None,
             preset_dir: None,
             user_presets: BTreeMap::new(),
             preset_name: None,
@@ -2098,9 +2099,10 @@ impl Panel {
             } else if let Kind::Spatial { key, crop } = &f.kind {
                 let r = spatial_button(row);
                 let hovered=hit(r,self.cursor.0,self.cursor.1);
+                let active=self.active_editor.as_ref().is_some_and(|(id,input,is_crop)|id==&d.id && input==key && is_crop==crop);
                 let binding = self.binding(&d.id,key);
                 let configured = binding.as_ref().is_some_and(|b| if *crop { b.crop.is_some() } else { b.mask.is_some() });
-                items.push(Item::Rect(RectItem { radius:6.,border_w:1.,border_color:hex_color(0x303234),..RectItem::new(r,hex_color(if hovered {0x1a1a1a}else{0x0a0a0a})) }));
+                items.push(Item::Rect(RectItem { radius:6.,border_w:1.,border_color:hex_color(if active{0xff8800}else{0x303234}),..RectItem::new(r,hex_color(if hovered {0x1a1a1a}else{0x0a0a0a})) }));
                 let thumb=RectPx{x:r.x+4.,y:r.y+4.,w:r.w-8.,h:54.};
                 if configured {
                     let uv = if *crop {
