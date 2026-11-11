@@ -152,6 +152,11 @@ fn frame_icon_pixels(index: usize) -> Vec<u8> {
     rgba
 }
 
+fn paint_order(items:&[Item])->impl Iterator<Item=&Item> {
+    let tooltip=|item:&&Item|matches!(item,Item::Text(t) if t.tooltip);
+    items.iter().filter(move |item|!tooltip(item)).chain(items.iter().filter(tooltip))
+}
+
 /// sRGB → linear for values headed to an `*UnormSrgb` render target that
 /// re-encodes on write (the shader's `ui_color`, CPU side).
 fn srgb_to_linear(c: f32) -> f64 {
@@ -326,6 +331,8 @@ pub struct TextItem {
     /// Extra advance per glyph, logical px (CSS letter-spacing).
     pub tracking: f32,
     pub bg: Option<TextBg>,
+    /// Floating help is painted last, without inheriting canvas/panel scissors.
+    pub tooltip: bool,
     /// Draw an insertion caret after the measured text run.
     pub caret: bool,
     /// Maximum logical width, ellipsized using the renderer's font metrics.
@@ -349,6 +356,7 @@ impl TextItem {
             valign: VAlign::Top,
             tracking: 0.0,
             bg: None,
+            tooltip:false,
             caret: false,
             max_width: None,
             wrap: None,
@@ -1213,7 +1221,7 @@ impl Gpu {
         };
         let mut clip = None;
         let mut plate_rect = [0.0, 0.0, 1.0, 1.0];
-        for item in &desc.items {
+        for item in paint_order(&desc.items) {
             if let Item::Plate { r, .. } = item {
                 plate_rect = [r.x, r.y, r.w, r.h];
             }
@@ -1395,6 +1403,7 @@ impl Gpu {
                     })
                 }
                 Item::Text(t) => {
+                    let clip=if t.tooltip {None}else{clip};
                     self.text.set_interface(t.interface);
                     self.text.set_header(t.header);
                     self.text.set_regular(t.regular);
@@ -1430,7 +1439,13 @@ impl Gpu {
                             w: tw + bg.pad_x * 2.0,
                             h: th + bg.pad_y * 2.0,
                         };
-                        if bg.shadow[3] > 0.0 {
+                        if t.tooltip {
+                            let blur=8.;let spread=blur*1.5;
+                            push(&mut data,&mut batches,clip,None,Instance {
+                                pos:[chip.x-spread,chip.y+3.-spread],size:[chip.w+2.*spread,chip.h+2.*spread],
+                                uv:[0.;4],color:[0.,0.,0.,0.55],mode:16.,p0:spread,p1:blur,pad:0.,
+                            });
+                        } else if bg.shadow[3] > 0.0 {
                             let mut sh = chip;
                             sh.y += bg.shadow_dy;
                             push(&mut data, &mut batches, clip, None, rect_inst(&RectItem {
@@ -1616,6 +1631,15 @@ mod workspace_tests {
 mod frame_icon_tests {
     use super::*;
 
+    #[test]
+    fn tooltip_paint_order_is_above_later_canvas_and_transport_items() {
+        let mut tip=TextItem::new(0.,0.,10.,[1.;4],"help");tip.tooltip=true;
+        let items=vec![Item::Text(tip),Item::Clip(Some(RectPx{x:0.,y:0.,w:1.,h:1.})),Item::Rect(RectItem::default()),Item::Text(TextItem::new(0.,0.,10.,[1.;4],"transport"))];
+        let ordered:Vec<_>=paint_order(&items).collect();
+        assert!(matches!(ordered.last(),Some(Item::Text(t)) if t.tooltip&&t.text=="help"));
+        assert!(matches!(ordered[0],Item::Clip(_)));
+        assert!(matches!(ordered[2],Item::Text(t) if t.text=="transport"));
+    }
     #[test]
     fn spatial_icons_fit_the_atlas_and_preserve_the_figma_viewbox() {
         for i in [4,5] {

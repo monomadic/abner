@@ -1,5 +1,13 @@
 # abner — history
 
+## 2026-11-11 — Foreground tooltips with soft shadows
+
+Tooltips have an explicit renderer overlay flag. They paint after all ordinary
+UI, including mask-editor canvas overlays, detection ranges and transport, and
+ignore underlying panel/canvas scissors. Their measured text backgrounds cast a
+soft shadow using the existing shadow shader. Processor help and timeline tool
+and chapter/caption tooltips use the shared overlay path.
+
 ## 2026-11-11 — Mask autodetection time selection
 
 Mask mode adds a highlighted detection range above the seekbar, draggable in/out

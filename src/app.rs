@@ -5961,7 +5961,7 @@ impl App {
             && contains(c.r, self.cursor.0, self.cursor.1) && self.cursor_inside) {
             let text = if c.hint.is_empty() { c.label.clone() } else { format!("{}  ·  {}", c.label, c.hint) };
             let right = c.r.x + c.r.w / 2.0 > vp.0 - 140.0;
-            items.push(Item::Text(TextItem { align: if right { Align::Right } else { Align::Left }, valign: VAlign::Middle,
+            items.push(Item::Text(TextItem { tooltip:true, align: if right { Align::Right } else { Align::Left }, valign: VAlign::Middle,
                 bg: Some(TextBg { radius: 5.0, pad_x: 8.0, pad_y: 5.0, ..TextBg::new(hex_color(0x26282b)) }),
                 ..TextItem::new(if right { c.r.x + c.r.w - 8.0 } else { c.r.x + 8.0 }, c.r.y - 16.0, 10.5, hex_color(CUT_INK), text) }));
         }
@@ -6656,7 +6656,7 @@ impl App {
         } else { None };
         if let Some(text) = told {
             let right = mx > v.x + v.w * 0.6;
-            items.push(Item::Text(TextItem { align: if right { Align::Right } else { Align::Left }, valign: VAlign::Middle,
+            items.push(Item::Text(TextItem { tooltip:true, align: if right { Align::Right } else { Align::Left }, valign: VAlign::Middle,
                 bg: Some(TextBg { radius: 5.0, pad_x: 8.0, pad_y: 5.0, ..TextBg::new(hex_color(0x26282b)) }),
                 max_width: Some(v.w * 0.5),
                 ..TextItem::new(if right { mx - 10.0 } else { mx + 10.0 }, my - 20.0, 10.5, hex_color(CUT_INK), text) }));

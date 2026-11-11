@@ -2839,7 +2839,7 @@ impl Panel {
         let wrap = (right - Self::left(vp) - 40.0).clamp(120.0, 300.0);
         let row = self.row(i, vp);
         items.push(Item::Text(TextItem {
-            interface: true,
+            interface: true, tooltip:true,
             align: Align::Right,
             wrap: Some(wrap),
             bg: Some(TextBg { radius: 5.0, pad_x: 10.0, pad_y: 8.0, shadow:[0.,0.,0.,0.65],shadow_dy:3., ..TextBg::new(hex_color(0xf4f0dd)) }),
