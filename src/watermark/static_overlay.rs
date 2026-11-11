@@ -117,6 +117,19 @@ pub(super) fn detect_checked(
                 let ay = py.saturating_sub(dy).max(y0);
                 let bx = (px + dx).min(x1 - 1);
                 let by = (py + dy).min(y1 - 1);
+                // A gray overlay reverses contrast over light versus dark scenery.
+                // Require strong temporal attenuation as well as an edge present in
+                // at least three quarters of the observations; sign alone is not evidence.
+                if maps.opacity[p] >= 0.55 {
+                    let mut magnitudes: Vec<f32> = frames.iter().map(|f| {
+                        let a = f.pixel(ax, ay);
+                        let b = f.pixel(bx, by);
+                        (0..3).map(|c| (b[c] - a[c]).powi(2)).sum::<f32>().sqrt()
+                    }).collect();
+                    magnitudes.sort_by(f32::total_cmp);
+                    let persistent = magnitudes[magnitudes.len() / 4];
+                    coherence = coherence.max((persistent / 0.08).clamp(0., 1.));
+                }
                 let a = medians[(ay - y0) * cw + ax - x0];
                 let b = medians[(by - y0) * cw + bx - x0];
                 let direction: [f32; 3] = std::array::from_fn(|c| b[c] - a[c]);
@@ -377,6 +390,32 @@ mod tests {
         for y in 7..9 {
             for x in 7..9 {
                 assert_eq!(maps.opacity[y * 72 + x], 0.);
+            }
+        }
+    }
+
+    #[test]
+    fn gray_strokes_survive_contrast_reversals_without_selecting_background() {
+        let frames: Vec<_> = (0..16).map(|t| {
+            let bg = if t % 2 == 0 { 32. } else { 224. };
+            let mut rgb = Vec::new();
+            for y in 0..48 {
+                for x in 0..64 {
+                    let stroke = (22..26).contains(&x) && (8..40).contains(&y);
+                    let value = if stroke { bg * 0.3 + 128. * 0.7 } else { bg };
+                    rgb.extend_from_slice(&[value as u8; 3]);
+                }
+            }
+            Frame::new(64, 48, rgb).unwrap()
+        }).collect();
+        let maps = detect(&frames, [0, 0, 64, 48], 12);
+        for y in 0..48 {
+            for x in 0..64 {
+                if (22..26).contains(&x) && (8..40).contains(&y) {
+                    assert!(maps.confidence[y*64+x] >= 0.5, "missed stroke at {x},{y}");
+                } else {
+                    assert_eq!(maps.confidence[y*64+x], 0., "background at {x},{y}");
+                }
             }
         }
     }
