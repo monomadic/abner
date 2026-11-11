@@ -118,9 +118,7 @@ keys:
   Z            reset zoom
   F            fullscreen (borderless, same Space)
   Tab          toggle workspace controls
-  Cmd-D        duplicate checked sources (or the viewed source)
-  X            toggle the viewed source in the batch selection
-  Cmd-A        select / clear all sources
+  Cmd-D        duplicate the focused source
   Cmd-O        add files
   Cmd-W        close the focused clip (on the empty window: quit)
   Cmd-Delete   close the focused clip
@@ -386,7 +384,7 @@ fn load_video(path: &Path, cache_bytes: usize) -> anyhow::Result<Video> {
         cache_bytes,
     )
     .ok_or_else(|| anyhow::anyhow!("failed to start decoder for {}", path.display()))?;
-    Ok(Video { spatial_id:crate::spatial::next_source_id(), input_crop: None, selected: false, linked_copy: false, info, player, shown_pts: 0.0, delivered: false, pending: false, seeking: false, stale: false, seek_sent: std::time::Instant::now(), last_frame: None })
+    Ok(Video { spatial_id:crate::spatial::next_source_id(), input_crop: None, linked_copy: false, info, player, shown_pts: 0.0, delivered: false, pending: false, seeking: false, stale: false, seek_sent: std::time::Instant::now(), last_frame: None })
 }
 
 /// The launch window's floor video: `Contents/Resources/background.mp4`
@@ -872,7 +870,6 @@ impl ApplicationHandler for Runner {
                 }
                 let key = match &event.logical_key {
                     WinitKey::Character(s) if self.mods.super_key() && s.eq_ignore_ascii_case("d") => Some(Key::DuplicateSources),
-                    WinitKey::Character(s) if self.mods.super_key() && s.eq_ignore_ascii_case("a") => Some(Key::SelectSources),
                     WinitKey::Character(s) if self.mods.super_key() && s.eq_ignore_ascii_case("o") => Some(Key::OpenFiles),
                     // ⌘W closes the focused clip, like a document window.
                     // Other ⌘-chords still fall through as their bare key.
@@ -927,7 +924,7 @@ impl ApplicationHandler for Runner {
                     WinitKey::Character(s) => s.chars().next().map(Key::Char),
                     _ => None,
                 };
-                if event.repeat && matches!(key, Some(Key::Char('m' | 'M' | 's' | 'S') | Key::SaveProject | Key::DuplicateSources | Key::OpenFiles | Key::SelectSources)) {
+                if event.repeat && matches!(key, Some(Key::Char('m' | 'M' | 's' | 'S') | Key::SaveProject | Key::DuplicateSources | Key::OpenFiles)) {
                     return;
                 }
                 if let Some(key) = key {

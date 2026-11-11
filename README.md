@@ -36,8 +36,9 @@ loading one does not turn a bypassed processor on.
 ## Export
 
 Open the **Export** tab to write the enabled processor pipeline, or launch with
-`abner --export INPUT`. Choose HEVC or ProRes and MP4 or MKV, then Export to pick
-a destination. ProRes selects MKV automatically. The large output viewer follows
+`abner --export INPUT`. Choose a codec and MP4, MOV, or MKV, then Export to pick
+a destination. ProRes is available in MOV and MKV. Selecting ProRes while MP4
+is active switches the container to MOV. The large output viewer follows
 new rendered frames; scrubbing or arrow keys holds a recent frame for inspection,
 TAB compares its original, and Follow render returns to the latest frame. Progress
 shows encoded frames, FPS, elapsed time and estimated remaining time. The footer

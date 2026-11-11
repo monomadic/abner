@@ -209,7 +209,7 @@ from one to the other, keeping its number.
   orange ring (`SOURCE_RING`) on the focused clip and a navy surface on the rest, then
   the 216px focused inspector. Under `SOURCE_OVERLAY_W` (260px panel) a card drops its text
   block and lays name + `codec · height / fps` on a dark strip over the preview's foot
-  (`source_overlay`, `SOURCE_LABEL_H`); the checkbox moves to the top-right corner. The
+  (`source_overlay`, `SOURCE_LABEL_H`). The
   edge drags down to `RAIL_MIN_W` (110) through two more stages (`SourceStage`): under
   `SOURCE_COMPACT_W` (180) the label, heading title, inspector and Duplicate go, the toggle
   moves to the panel's left and the other clips get a big centred keycap; under
@@ -249,7 +249,7 @@ from one to the other, keeping its number.
   title row on a #0f0f0f ground, five mono rows between two dashed hairlines, and the
   directory in `INSPECTOR_PATH` blue. The Duplicate / Add files row and the footer line are the
   app's own and take their own strips (`RAIL_ACTIONS_H`, `RAIL_FOOTER_H`) so nothing
-  overlaps the inspector; checkboxes and Clear are Sources-only (`batch_ui`).
+  overlaps the inspector.
   **The header strip never reaches AppKit as a titlebar**: `ab_pin_content_view`
   (open_shim.m) grafts `mouseDownCanMoveWindow = NO` onto winit's view class, because
   with `FullSizeContentView` a movable content view hands the strip's gestures to

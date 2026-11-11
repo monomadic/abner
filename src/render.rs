@@ -368,6 +368,7 @@ pub enum Item {
     /// Scissor subsequent items to this logical rectangle; None restores the surface.
     Clip(Option<RectPx>),
     Rect(RectItem),
+    TagRow { x: f32, y: f32, width: f32, labels: Vec<String> },
     /// Soft rectangular shadow. Inner shades the canvas edge; outer sits
     /// behind a fitted video rectangle. Both use logical pixel widths.
     Shadow { r: RectPx, inner: bool, blur: f32, alpha: f32 },
@@ -1401,6 +1402,55 @@ impl Gpu {
                         p1: if *clip_poster { 1.0 } else { 0.0 },
                         pad: 0.0,
                     })
+                }
+                Item::TagRow { x, y, width, labels } => {
+                    self.text.set_interface(false);
+                    self.text.set_header(true);
+                    self.text.set_regular(false);
+                    self.text.set_inspector(0);
+                    let gap = 4.0;
+                    let padding = 3.0;
+                    let chrome = 2.0 * padding * labels.len() as f32
+                        + gap * labels.len().saturating_sub(1) as f32;
+                    let natural: f32 = labels.iter()
+                        .map(|label| self.text.layout(label, 10.0 * scale, 0.0).w / scale)
+                        .sum();
+                    let px = (10.0 * (width - chrome) / natural.max(1.0)).clamp(8.0, 10.0);
+                    let mut left = *x;
+                    for label in labels {
+                        let available = x + width - left - 2.0 * padding;
+                        if available <= 0.0 {
+                            break;
+                        }
+                        let fitted = self.text.fit(label, px * scale, 0.0, available * scale);
+                        if fitted.is_empty() {
+                            break;
+                        }
+                        let line = self.text.layout(&fitted, px * scale, 0.0);
+                        let w = line.w / scale + 2.0 * padding;
+                        let rect = RectPx { x: left, y: y - 8.0, w, h: 16.0 };
+                        push(&mut data, &mut batches, clip, None, rect_inst(&RectItem {
+                            radius: 3.0,
+                            border_w: 1.0,
+                            border_color: crate::app::hex_color(0xd8d8d8),
+                            ..RectItem::new(rect, crate::app::hex_color(0x090909))
+                        }));
+                        let top = y - line.h / scale / 2.0;
+                        for q in &line.quads {
+                            push(&mut data, &mut batches, clip, None, Instance {
+                                pos: [((left + padding) * scale + q.x).round() / scale,
+                                      (top * scale + q.y).round() / scale],
+                                size: [q.w / scale, q.h / scale],
+                                uv: q.uv,
+                                color: [1.0; 4],
+                                mode: 6.0,
+                                p0: 0.0,
+                                p1: 0.0,
+                                pad: 0.0,
+                            });
+                        }
+                        left += w + gap;
+                    }
                 }
                 Item::Text(t) => {
                     let clip=if t.tooltip {None}else{clip};

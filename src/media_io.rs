@@ -3339,23 +3339,20 @@ pub(crate) fn pipeline_export_with_inputs(
         !dest.exists(),
         "Output already exists; choose another filename"
     );
-    let mkv = dest
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("mkv"));
+    let extension = dest.extension().and_then(|ext| ext.to_str()).unwrap_or_default();
+    let extension = extension.to_ascii_lowercase();
     ensure!(
-        mkv || dest
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("mp4")),
-        "Choose MP4 or MKV for pipeline export"
+        matches!(extension.as_str(), "mp4" | "mov" | "mkv"),
+        "Choose MP4, MOV or MKV for pipeline export"
     );
-    ensure!(!prores || mkv, "ProRes requires MKV");
+    ensure!(!prores || extension != "mp4", "ProRes requires MOV or MKV");
     cancel.check().map_err(anyhow::Error::msg)?;
     if chain.is_empty() && crop.is_none() && inputs.crops.is_empty() && !prores {
         // Keep the packet path available through the Export workspace. Repair
         // only boundary GOPs, and never pass untouched HDR through the SDR host.
         // Publish after checking cancellation; RAII removes unpublished work.
         let reservation = pending(dest)?;
-        let work_path = reservation.0.with_extension(if mkv { "mkv" } else { "mp4" });
+        let work_path = reservation.0.with_extension(&extension);
         ensure!(!work_path.exists(), "Export working file already exists");
         let work = Pending(work_path);
         export(&info.path, &work.0, keeps, false, &[], None)?;
@@ -3382,7 +3379,7 @@ pub(crate) fn pipeline_export_with_inputs(
         .write(true)
         .truncate(true)
         .open(&temp.0)?;
-    let mut options = mp4::WriterOptions::new(if prores {
+    let mut options = mp4::WriterOptions::new(if prores || extension == "mov" {
         mp4::Brand::Mov
     } else {
         mp4::Brand::Mp4
@@ -3618,7 +3615,7 @@ pub(crate) fn pipeline_export_with_inputs(
         )?;
     }
     let source = crate::fc::open(&info.path).map_err(anyhow::Error::msg)?;
-    // The existing audio path preserves kept-range timing and encodes AAC for MP4/MKV.
+    // The existing audio path preserves kept-range timing and encodes AAC for all output containers.
     audio_encode_checked(&source, &mut mux, keeps, false, || {
         cancel.check().map_err(anyhow::Error::msg)
     })?;

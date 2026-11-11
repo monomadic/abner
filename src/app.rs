@@ -56,7 +56,6 @@ pub enum Key {
     /// ⌘W: close the focused clip.
     Close,
     DuplicateSources,
-    SelectSources,
     OpenFiles,
     /// ⌘ plus a digit: on the launch window, open that recent file; with
     /// clips up it is the bare digit (pick that clip), as it always was.
@@ -152,8 +151,6 @@ const SEEK_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
 pub struct Video {
     pub input_crop: Option<Crop>,
     pub spatial_id: usize,
-    /// Batch scope is independent of the source currently shown in the viewer.
-    pub selected: bool,
     /// An independent item referring to existing media; never a filesystem copy.
     pub linked_copy: bool,
     pub info: VideoInfo,
@@ -1642,43 +1639,32 @@ impl App {
         self.settle_cut_default();
     }
 
-    /// Duplicate selected source items (or the viewed source when none are checked).
-    /// Media stays at its existing path; each item gets independent playback/mask state.
-    /// Do not use add_videos: duplication preserves the master time and playback state.
+    /// Duplicate the viewed item with independent playback and mask state.
     pub fn duplicate_sources(&mut self) {
         if !self.ready() || self.cut_mode || self.mask_mode { return; }
-        let mut indices: Vec<usize> = self.videos.iter().enumerate()
-            .filter_map(|(i, v)| v.selected.then_some(i)).collect();
-        if indices.is_empty() { indices.push(self.active); }
-        self.duplicate_source_indices(&indices, None);
+        self.duplicate_source(self.active, self.active + 1);
     }
 
-    fn duplicate_source_indices(&mut self, indices: &[usize], destination: Option<usize>) {
+    fn duplicate_source(&mut self, source: usize, destination: usize) {
         self.finish_editor(false);
-        let mut copies = Vec::new();
-        for &i in indices {
-            let info = self.videos[i].info.clone();
-            let Some(player) = Player::spawn(&info.path, info.width, info.height,
-                crate::probe::vt_accel(&info.codec), info.rotation, self.cache_bytes) else {
-                self.source_status = "Could not duplicate source: decoder unavailable".into();
-                return;
-            };
-            copies.push((i, self.masks[i].clone(), Video { spatial_id: crate::spatial::next_source_id(), input_crop: self.videos[i].input_crop, selected: true, linked_copy: true, info, player,
-                shown_pts: 0.0, delivered: false, pending: false, seeking: false, stale: false, seek_sent: std::time::Instant::now(), last_frame: None }));
-        }
-        for v in &mut self.videos { v.selected = false; }
-        let focus = destination.unwrap_or(indices[0] + 1);
-        for (i, mask, v) in copies.into_iter().rev() {
-            let at = destination.unwrap_or(i + 1);
-            self.videos.insert(at, v);
-            self.masks.insert(at, mask);
-        }
+        let info = self.videos[source].info.clone();
+        let Some(player) = Player::spawn(&info.path, info.width, info.height,
+            crate::probe::vt_accel(&info.codec), info.rotation, self.cache_bytes) else {
+            self.source_status = "Could not duplicate source: decoder unavailable".into();
+            return;
+        };
+        let mask = self.masks[source].clone();
+        let copy = Video { spatial_id: crate::spatial::next_source_id(), input_crop: self.videos[source].input_crop,
+            linked_copy: true, info, player, shown_pts: 0.0, delivered: false, pending: false,
+            seeking: false, stale: false, seek_sent: std::time::Instant::now(), last_frame: None };
+        self.videos.insert(destination, copy);
+        self.masks.insert(destination, mask);
         self.cut = None;
         self.cut_restore = None;
         // Insertion changes texture slots, including for paused survivors.
         for v in &mut self.videos { v.delivered = false; }
         self.seek_all(self.t, true);
-        self.select(focus);
+        self.select(destination);
         self.source_status.clear();
         self.cmds.push(Cmd::VideosChanged);
     }
@@ -1694,22 +1680,13 @@ impl App {
     /// rather than showing its neighbour's last frame. Closing the last
     /// clip returns to the launch window.
     fn close_active(&mut self) {
-        self.close_sources(false);
-    }
-
-    fn close_sources(&mut self, selected: bool) {
         self.finish_editor(false);
         if self.videos.is_empty() {
             return;
         }
-        let mut indices: Vec<usize> = self.videos.iter().enumerate()
-            .filter_map(|(i, v)| (selected && v.selected).then_some(i)).collect();
-        if indices.is_empty() { indices.push(self.active.min(self.videos.len() - 1)); }
-        let idx = self.active - indices.iter().filter(|&&i| i < self.active).count();
-        for &i in indices.iter().rev() {
-            self.videos.remove(i);
-            self.masks.remove(i);
-        }
+        let idx = self.active.min(self.videos.len() - 1);
+        self.videos.remove(idx);
+        self.masks.remove(idx);
         self.cut = None;
         self.cut_restore = None;
         self.cut_mode = false;
@@ -2071,7 +2048,7 @@ impl App {
             return;
         }
         if self.export_page.open && self.ready() && self.export_page.key(k) { return; }
-        if self.export_page.open && matches!(k, Key::Space | Key::Render) { self.start_pipeline_export(); return; }
+        if self.export_page.open && k == Key::Render { self.start_pipeline_export(); return; }
         if !self.mask_mode && self.processors.key(k) {
             self.apply_processor_transport();
             return;
@@ -2092,15 +2069,6 @@ impl App {
         }
         if k == Key::DuplicateSources {
             self.duplicate_sources();
-            return;
-        }
-        if k == Key::SelectSources {
-            if !self.cut_mode && !self.mask_mode {
-                let select = !self.videos.iter().all(|v| v.selected);
-                for v in &mut self.videos {
-                    v.selected = select;
-                }
-            }
             return;
         }
         if let Key::CmdDigit(c) = k {
@@ -2140,7 +2108,7 @@ impl App {
             return;
         }
         if k == Key::Backspace && !self.cut_mode && !self.mask_mode {
-            self.close_sources(true);
+            self.close_active();
             return;
         }
         if k == Key::Close {
@@ -2216,7 +2184,7 @@ impl App {
                 }
             }
             Key::Backspace => self.speed = 1.0,
-            Key::Close | Key::ActualSize | Key::CmdDigit(_) | Key::Undo | Key::Render | Key::SaveProject | Key::KeyLeft | Key::KeyRight | Key::DuplicateSources | Key::SelectSources | Key::OpenFiles | Key::PrevMode | Key::NextMode => {} // handled above
+            Key::Close | Key::ActualSize | Key::CmdDigit(_) | Key::Undo | Key::Render | Key::SaveProject | Key::KeyLeft | Key::KeyRight | Key::DuplicateSources | Key::OpenFiles | Key::PrevMode | Key::NextMode => {} // handled above
             Key::Char('V') => self.mode = self.mode.cycle(-1),
             Key::Char(c @ '1'..='9') => {
                 let idx = c as usize - '1' as usize;
@@ -2241,7 +2209,6 @@ impl App {
                 '-' => self.adjust_param(false),
                 '=' | '+' => self.adjust_param(true),
                 'v' => self.mode = self.mode.cycle(1),
-                'x' if !self.mask_mode && !self.cut_mode => self.videos[self.active].selected ^= true,
                 _ => {}
             },
         }
@@ -2372,7 +2339,7 @@ impl App {
         if alt && self.show_ui && !self.cut_mode && !self.mask_mode && !self.workspace().mini && contains(self.workspace().list, x, y) {
             let first = self.source_first();
             if let Some(idx) = (first..(first + self.source_capacity()).min(self.videos.len()))
-                .find(|&i| contains(self.source_row(i), x, y) && !contains(self.source_checkbox(i), x, y)) {
+                .find(|&i| contains(self.source_row(i), x, y)) {
                 self.mouse_up();
                 self.cursor = (x, y);
                 self.cursor_inside = true;
@@ -2392,7 +2359,7 @@ impl App {
             if self.cursor_inside && self.show_ui && !self.cut_mode && !self.mask_mode
                 && contains(self.workspace().list, self.cursor.0, self.cursor.1) && idx < self.videos.len() {
                 let at = self.source_drop_index(self.cursor.1);
-                self.duplicate_source_indices(&[idx], Some(at));
+                self.duplicate_source(idx, at);
             }
         }
     }
@@ -2457,8 +2424,6 @@ impl App {
                         if self.workspace().mini && idx == self.active {
                             // The mini strip's focused keycap reopens the rail.
                             self.show_sources = true;
-                        } else if self.batch_ui() && contains(self.source_checkbox(idx), x, y) {
-                            self.videos[idx].selected ^= true;
                         } else { self.select(idx); }
                         break;
                     }
@@ -3163,7 +3128,7 @@ impl App {
             draw_status_chip(&mut items, self.status_chip(), lamp, text, WORKSPACE_TEXT);
             }
         }
-        let animating = self.export_page.busy() || self.processors.animating()
+        let animating = self.export_page.busy() || self.export_page.playing() || self.processors.animating()
             || self.playing
             || !self.started
             || self.cut_thumb.play.is_some()
@@ -3357,7 +3322,12 @@ impl App {
         let r = self.source_row(index);
         if self.workspace().mini { return r; }
         let t = self.source_thumb(index);
-        RectPx { x: t.x - 4.0, w: t.w + 8.0, ..r }
+        let w = if self.source_stage() < SourceStage::Thumb {
+            (t.w + 8.0).max(r.w.min(156.0))
+        } else {
+            t.w + 8.0
+        };
+        RectPx { x: r.x + (r.w - w) / 2.0, w, ..r }
     }
 
     fn source_drop_index(&self, y: f32) -> usize {
@@ -3366,23 +3336,6 @@ impl App {
             let r = self.source_row(i);
             y < r.y + r.h / 2.0
         }).unwrap_or(self.videos.len())
-    }
-
-    /// The batch affordances (checkboxes, Clear) belong to Sources: mask
-    /// paints one clip and the timeline cuts one.
-    fn batch_ui(&self) -> bool {
-        !self.mask_mode && !self.cut_mode
-    }
-
-    fn source_checkbox(&self, index: usize) -> RectPx {
-        let r = self.source_card(index);
-        RectPx {
-            x: r.x + r.w - 39.0,
-            // Overlaid, the label owns the preview's foot: the box moves up.
-            y: if self.source_overlay() { r.y + 11.0 } else { r.y + self.source_thumb_height(index) - 19.0 },
-            w: 20.0,
-            h: 20.0,
-        }
     }
 
     fn embedded_editor_controls(&self) -> Vec<Control> {
@@ -3451,19 +3404,6 @@ impl App {
                     label,
                     false,
                     action,
-                ));
-            }
-            if self.videos.iter().any(|v| v.selected) {
-                out.push(Control::new(
-                    RectPx {
-                        x: l.list.x + l.panel - 64.0,
-                        y: l.list.y + l.list.h + 4.0,
-                        w: 52.0,
-                        h: 24.0,
-                    },
-                    "Clear",
-                    false,
-                    Action::ClearSources,
                 ));
             }
         }
@@ -3608,11 +3548,6 @@ impl App {
             Action::LaunchEditor(_) | Action::ResetEdit | Action::ApplyEdit | Action::CancelEdit => unreachable!(),
             Action::Duplicate => self.duplicate_sources(),
             Action::OpenFiles => self.cmds.push(Cmd::OpenFiles),
-            Action::ClearSources => {
-                for v in &mut self.videos {
-                    v.selected = false;
-                }
-            }
             Action::ToggleSources => self.show_sources = !self.show_sources,
             Action::ToggleInspector => self.show_inspector = !self.show_inspector,
             Action::ToggleDetail => self.show_detail = !self.show_detail,
@@ -4006,7 +3941,8 @@ impl App {
             // Overlaid, a dark strip across the preview's foot carries the
             // label: clipped flat on top, the preview's rounding below.
             if overlay {
-                let strip = RectPx { y: thumb.y + thumb.h - SOURCE_LABEL_H, h: SOURCE_LABEL_H, ..thumb };
+                let strip = RectPx { x: r.x + 4.0, y: thumb.y + thumb.h - SOURCE_LABEL_H,
+                    w: r.w - 8.0, h: SOURCE_LABEL_H };
                 items.push(Item::Clip(Some(intersect(strip, visible))));
                 items.push(Item::Rect(RectItem { radius: 6.0,
                     ..RectItem::new(RectPx { y: strip.y - 6.0, h: strip.h + 6.0, ..strip }, [0.0, 0.0, 0.0, 0.8]) }));
@@ -4040,17 +3976,6 @@ impl App {
                 ui_label(items, chip.x + 6.0, chip.y + 11.5, 10.0, secondary,
                     if shared > 1 { format!("Shared · {shared} items") } else { "Linked copy".into() }, Align::Left, chip.w - 12.0);
             }
-            if self.batch_ui() && (hover || v.selected) {
-                let check = self.source_checkbox(i);
-                items.push(Item::Rect(RectItem { radius: 4.0, border_w: 1.0,
-                    border_color: if v.selected { hex_color(CUT_HEADER_BLUE) } else { secondary },
-                    ..RectItem::new(check, if v.selected { hex_color(CUT_HEADER_BLUE) } else { hex_color(0x080d14) }) }));
-                if v.selected {
-                    for (x, y) in [(0., 3.), (2., 5.), (4., 3.), (6., 1.), (8., -1.)] {
-                        items.push(Item::Rect(RectItem::new(RectPx { x: check.x + 4.0 + x, y: check.y + 7.0 + y, w: 3.0, h: 3.0 }, ink)));
-                    }
-                }
-            }
             if v.player.failed() {
                 ui_label(items, thumb.x + 8.0, thumb.y + 52.0, 11.0, ERR, "DECODE FAILED", Align::Left, thumb.w - 16.0);
             }
@@ -4058,39 +3983,53 @@ impl App {
             // Text block: 7px side padding inside the ring, 6px below the
             // preview; the name and the metadata are 18px lines.
             // Overlaid, the same two lines sit inside the strip at 9px in.
-            let (tx, tw) = if overlay { (thumb.x + 9.0, thumb.w - 18.0) } else { (r.x + 11.0, r.w - 22.0) };
+            let (tx, tw) = if overlay { (r.x + 13.0, r.w - 26.0) } else { (r.x + 11.0, r.w - 22.0) };
             let base = if overlay { thumb.y + thumb.h - SOURCE_LABEL_H } else { thumb.y + thumb.h };
             let name = format!("{}{}", name_of(&v.info.path), if v.linked_copy { " · copy" } else { "" });
             items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(tw),
                 ..TextItem::new(tx, base + 15.0, 13.0, ink, name) }));
-            let codec = match v.info.codec.as_str() { "h264" => "H.264".into(), "hevc" => "HEVC".into(), c => c.to_uppercase() };
-            let seconds = v.info.duration.max(0.0) as u64;
-            let meta_y = base + 33.0;
-            let left = format!("{codec} · {}p", v.info.height);
-            let right = format!("{}fps · {}:{:02}", v.info.fps, seconds / 60, seconds % 60);
-            if overlay {
-                items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(tw),
-                    ..TextItem::new(tx, meta_y, 10.0, ink, format!("{left} / {} fps", v.info.fps)) }));
-            } else if r.w >= 256.0 {
-                items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(tw - 112.0),
-                    ..TextItem::new(tx, meta_y, 11.0, secondary, left) }));
-                items.push(Item::Text(TextItem { regular: true, align: Align::Right, valign: VAlign::Middle, max_width: Some(108.0),
-                    ..TextItem::new(tx + tw, meta_y, 11.0, secondary, right) }));
-            } else {
-                items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(tw),
-                    ..TextItem::new(tx, meta_y, 10.0, secondary, format!("{left} · {right}")) }));
+            let short_edge = v.info.width.min(v.info.height);
+            let resolution = match short_edge {
+                4320.. => "8K".into(),
+                2160.. => "4K".into(),
+                1440.. => "2K".into(),
+                _ => {
+                    let tier = [1080, 720, 576, 480, 360, 240]
+                        .into_iter().find(|&tier| short_edge >= tier).unwrap_or(short_edge);
+                    format!("{tier}P")
+                }
+            };
+            let fps = format!("{:.2}", v.info.fps);
+            let rate = format!("{}FPS", fps.trim_end_matches('0').trim_end_matches('.'));
+            let codec = match v.info.codec.as_str() {
+                "hevc" | "h265" => "H265".into(),
+                "h264" | "avc" | "avc1" => "H264".into(),
+                "av1" => "AV01".into(),
+                codec => codec.to_ascii_uppercase(),
+            };
+            let meta_y = base + 34.0;
+            let mut labels = vec![resolution, rate, codec];
+            if let Some(ext) = v.info.path.extension().and_then(|ext| ext.to_str()) {
+                labels.push(ext.to_ascii_uppercase());
+            }
+            let duration_width = if !overlay && tw >= 200.0 { 36.0 } else { 0.0 };
+            items.push(Item::TagRow {
+                x: tx, y: meta_y, width: tw - duration_width, labels,
+            });
+            if duration_width > 0.0 {
+                let seconds = v.info.duration.max(0.0) as u64;
+                ui_label(items, tx + tw, meta_y, 10.0, secondary,
+                    format!("{}:{:02}", seconds / 60, seconds % 60), Align::Right, duration_width - 4.0);
             }
         }
         items.push(Item::Clip(None));
-        let n = self.videos.iter().filter(|v| v.selected).count();
-        let footer = if n > 0 { format!("{n} checked · X toggles") }
-            else if !self.source_status.is_empty() { self.source_status.clone() }
+        let footer = if !self.source_status.is_empty() { self.source_status.clone() }
             else if self.videos.len() > self.source_capacity() { format!("{}–{} / {} · scroll", first+1, (first+self.source_capacity()).min(self.videos.len()), self.videos.len()) }
             else if self.source_file_count() < self.videos.len() { format!("{} files", self.source_file_count()) }
             else { String::new() };
         if !footer.is_empty() && l.list.y + l.list.h + RAIL_FOOTER_H <= end {
             ui_label(items, l.list.x + 12.0, l.list.y + l.list.h + 16.0, 11.0, hex_color(SOURCE_SUBTLE),
-                footer, Align::Left, l.panel - if n > 0 { 82.0 } else { 24.0 });
+                footer, Align::Left, l.panel - 24.0);
         }
     }
 
@@ -7204,7 +7143,7 @@ impl Workspace {
 }
 
 #[derive(Clone, Copy)]
-enum Action { LaunchEditor(bool), ResetEdit, ApplyEdit, CancelEdit, Duplicate, OpenFiles, ClearSources, ToggleSources, ToggleInspector, ToggleDetail, Tool(usize), View(Mode), DetectionArea, DetectWatermark, UndoWatermark, Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
+enum Action { LaunchEditor(bool), ResetEdit, ApplyEdit, CancelEdit, Duplicate, OpenFiles, ToggleSources, ToggleInspector, ToggleDetail, Tool(usize), View(Mode), DetectionArea, DetectWatermark, UndoWatermark, Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
 #[derive(Clone, Copy, PartialEq)]
 enum CutAction { TogglePosters, FrameChanges(bool), TimeDisplay(bool),
     // Set in / out: no key or button reaches these while the feature is disabled.
@@ -7938,64 +7877,31 @@ mod tests {
     }
 
     #[test]
-    fn source_checkboxes_do_not_change_view_and_clear_keeps_focus() {
-        let Some(clip) = test_clip() else { return };
-        let mut app = mk_app(&clip, 3);
-        app.vp = (1280.0, 1200.0);
-        let r = app.source_checkbox(1);
-        app.mouse_down(r.x + 10.0, r.y + 10.0);
-        assert_eq!(app.active, 0);
-        assert!(app.videos[1].selected);
-        app.key(Key::Char('3'));
-        assert_eq!(app.active, 2);
-        assert!(app.videos[1].selected);
-        assert!(!app.videos[2].selected);
-        app.key(Key::Char('x'));
-        assert!(app.videos[2].selected);
-        app.activate(Action::ClearSources);
-        assert_eq!(app.active, 2);
-        assert!(app.videos.iter().all(|v| !v.selected));
-        app.key(Key::SelectSources);
-        assert!(app.videos.iter().all(|v| v.selected));
-        app.key(Key::SelectSources);
-        assert!(app.videos.iter().all(|v| !v.selected));
-        let desc = app.tick(0.0, (720.0, 480.0), 2.0);
-        drop(desc);
-        let first = app.source_first();
-        assert!(first <= 2 && 2 < first + app.source_capacity(), "resize keeps the viewed source visible");
-    }
-
-    #[test]
-    fn duplicate_sources_preserve_time_media_and_independent_selection() {
+    fn duplicate_sources_preserve_time_and_media() {
         let Some(clip) = test_clip() else { return };
         let mut app = mk_app(&clip, 2);
         assert!(tick_until(&mut app, Duration::from_secs(3), |a| a.started && a.t > 0.1));
         app.playing = false;
         let t = app.t;
         let size = std::fs::metadata(&clip).unwrap().len();
-        app.videos[0].selected = true;
-        app.videos[1].selected = true;
         app.key(Key::DuplicateSources);
         assert_eq!(app.t, t);
         assert!(!app.playing);
-        assert_eq!(app.videos.len(), 4);
+        assert_eq!(app.videos.len(), 3);
         assert_eq!(app.active, 1);
         assert_eq!(app.source_file_count(), 1);
-        assert_eq!(app.videos.iter().map(|v| v.selected).collect::<Vec<_>>(), [false, true, false, true]);
-        assert_eq!(app.videos.iter().map(|v| v.linked_copy).collect::<Vec<_>>(), [false, true, false, true]);
+        assert_eq!(app.videos.iter().map(|v| v.linked_copy).collect::<Vec<_>>(), [false, true, false]);
         assert!(app.videos.iter().all(|v| v.info.path == clip));
         assert_eq!(std::fs::metadata(&clip).unwrap().len(), size);
         assert!(app.take_cmds().iter().any(|c| matches!(c, Cmd::VideosChanged)));
         assert!(tick_until(&mut app, Duration::from_secs(3), |a| a.videos.iter().all(|v| v.delivered && !v.pending)));
         for v in &app.videos { assert!((v.shown_pts - app.videos[0].shown_pts).abs() < 1.0 / app.fps); }
         app.key(Key::Close);
-        assert_eq!(app.videos.len(), 3);
+        assert_eq!(app.videos.len(), 2);
         assert!(clip.exists());
-        assert!(!app.videos[1].selected);
-        assert!(app.videos[2].selected);
         app.add_videos(vec![mk_video(&clip)], true);
         assert_eq!(app.videos.len(), 1);
-        assert!(!app.videos[0].selected && !app.videos[0].linked_copy);
+        assert!(!app.videos[0].linked_copy);
     }
 
     #[test]
@@ -8606,7 +8512,7 @@ mod tests {
             crate::config::Config::default().frame_cache_bytes(),
         )
         .expect("spawn");
-        Video { spatial_id: crate::spatial::next_source_id(), input_crop: None, selected: false, linked_copy: false, info, player, shown_pts: 0.0, delivered: false, pending: false, seeking: false, stale: false, seek_sent: std::time::Instant::now(), last_frame: None }
+        Video { spatial_id: crate::spatial::next_source_id(), input_crop: None, linked_copy: false, info, player, shown_pts: 0.0, delivered: false, pending: false, seeking: false, stale: false, seek_sent: std::time::Instant::now(), last_frame: None }
     }
 
     /// A playing app: most tests drive the clock, so they opt out of the
@@ -10074,28 +9980,6 @@ mod tests {
     }
 
     #[test]
-    fn backspace_removes_checked_sources_and_preserves_unselected_focus() {
-        let Some(clip) = test_clip() else { return };
-        let mut app = mk_app(&clip, 4);
-        app.playing = false;
-        app.t = 0.5;
-        app.active = 2;
-        app.videos[0].selected = true;
-        app.videos[3].selected = true;
-        app.videos[2].linked_copy = true;
-        app.key(Key::Backspace);
-        assert_eq!(app.videos.len(), 2);
-        assert_eq!(app.masks.len(), 2);
-        assert_eq!(app.active, 1);
-        assert!(app.videos[app.active].linked_copy);
-        assert_eq!(app.t, 0.5);
-        assert!(app.videos.iter().all(|v| v.pending));
-        for v in &mut app.videos { v.selected = true; }
-        app.key(Key::Backspace);
-        assert!(!app.ready());
-    }
-
-    #[test]
     fn option_drag_inserts_at_drop_boundary_including_blank_space() {
         let Some(clip) = test_clip() else { return };
         for destination in [0, 1, 3] {
@@ -10124,7 +10008,6 @@ mod tests {
         let mut app = mk_app(&clip, 2);
         app.playing = false;
         app.tick(0.0, (1280.0, 800.0), 2.0);
-        app.videos[1].selected = true;
         let row = app.source_row(0);
         let (x, y) = (row.x + row.w / 2.0, row.y + 40.0);
         app.mouse_down_with_alt(x, y, true);
@@ -10137,8 +10020,7 @@ mod tests {
         app.mouse_released();
         assert_eq!(app.videos.len(), 3);
         assert_eq!(app.active, 0);
-        assert!(app.videos[app.active].linked_copy && app.videos[app.active].selected);
-        assert!(!app.videos[2].selected);
+        assert!(app.videos[app.active].linked_copy);
         assert_eq!(app.t, t);
         assert!(!app.playing);
         app.mouse_released();

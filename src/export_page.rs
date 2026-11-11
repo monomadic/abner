@@ -22,11 +22,28 @@ pub(crate) struct Rendered {
     pub count: u64,
     pub frame_duration: f64,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Container {
+    Mp4,
+    Mov,
+    Mkv,
+}
+
+impl Container {
+    fn extension(self) -> &'static str {
+        match self {
+            Self::Mp4 => "mp4",
+            Self::Mov => "mov",
+            Self::Mkv => "mkv",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Action {
     Preset(bool),
     Lossless,
-    Container(bool),
+    Container(Container),
     Export,
     EditFilename,
     Destination,
@@ -34,6 +51,8 @@ pub(crate) enum Action {
     Cancel,
     Compare,
     Follow,
+    Play,
+    Step(bool),
     Seek(f64),
     Reveal,
 }
@@ -55,12 +74,13 @@ pub(crate) struct Page {
     pub prores: bool,
     pub lossless: bool,
     pub copy_unavailable: Option<&'static str>,
-    pub mkv: bool,
+    container: Container,
     pub following: bool,
     pub original: bool,
     job: Option<Job>,
     frames: VecDeque<Rendered>,
     selected: usize,
+    playback: Option<(Instant, f64)>,
     held: Option<Rendered>,
     started: Instant,
     elapsed: f64,
@@ -86,12 +106,13 @@ impl Default for Page {
             prores: false,
             lossless: false,
             copy_unavailable: None,
-            mkv: false,
+            container: Container::Mp4,
             following: true,
             original: false,
             job: None,
             frames: VecDeque::new(),
             selected: 0,
+            playback: None,
             held: None,
             started: Instant::now(),
             elapsed: 0.,
@@ -120,7 +141,6 @@ pub(crate) struct Layout {
     pub video: RectPx,
     pub context: RectPx,
     pub transport: RectPx,
-    pub progress: RectPx,
     pub footer: RectPx,
     pub seek: RectPx,
 }
@@ -134,16 +154,14 @@ impl Layout {
         let transport = RectPx { x: side, y: footer_y - 60., w: vp.0 - side, h: 60. };
         let video = RectPx { x: side, y: context.y + context.h,
             w: context.w, h: transport.y - context.y - context.h };
-        let seek = RectPx { x: transport.x + 20., y: transport.y + 29.,
+        let seek = RectPx { x: transport.x + 20., y: transport.y + 15.,
             w: (transport.w - 212.).max(80.), h: 4. };
-        let progress = RectPx { x: side + 20., y: footer_y - 8., w: vp.0 - side - 40., h: 4. };
 
         Self {
             sidebar,
             video,
             context,
             transport,
-            progress,
             seek,
             footer: RectPx {
                 x: 0.,
@@ -169,8 +187,10 @@ impl Page {
             return false;
         }
         let Some(dir) = self.directory() else { return false; };
-        let stem = name.strip_suffix(".mp4").or_else(|| name.strip_suffix(".mkv")).unwrap_or(name);
-        let ext = if self.mkv { "mkv" } else { "mp4" };
+        let stem = name.rsplit_once('.')
+            .filter(|(_, ext)| ["mp4", "mov", "mkv"].iter().any(|known| ext.eq_ignore_ascii_case(known)))
+            .map_or(name.as_str(), |(stem, _)| stem);
+        let ext = self.container.extension();
         self.destination = Some(dir.join(format!("{stem}.{ext}")));
         self.filename_edit = None;
         self.filename_selected = false;
@@ -197,7 +217,7 @@ impl Page {
             .and_then(|p| p.parent()).map(|p| p.to_path_buf())
     }
     fn destination_name(&self) -> String {
-        let ext = if self.mkv { "mkv" } else { "mp4" };
+        let ext = self.container.extension();
         let mut path = self.destination.clone().unwrap_or_else(|| {
             let stem = self.source.as_ref().and_then(|p| p.file_stem()).unwrap_or_default().to_string_lossy();
             PathBuf::from(format!("{stem}.export.{ext}"))
@@ -229,6 +249,7 @@ impl Page {
             self.held = None;
             self.crop = None;
             self.selected = 0;
+            self.playback = None;
             self.path = None;
             self.count = 0;
             self.rendered_time = 0.;
@@ -254,13 +275,12 @@ impl Page {
             self.status = "Lossless copy is unavailable: these edits require rendering.".into();
             return;
         }
-        // ProRes in MP4 is not interoperable. MKV is the supported ProRes container here.
-        if !self.lossless && self.prores && !self.mkv {
-            self.status = "ProRes requires MKV. Select MKV to export.".into();
+        if !self.lossless && self.prores && self.container == Container::Mp4 {
+            self.status = "ProRes requires MOV or MKV.".into();
             return;
         }
         if !self.finish_filename() { return; }
-        let ext = if self.mkv { "mkv" } else { "mp4" };
+        let ext = self.container.extension();
         let Some(mut dest) = self.destination.clone().or_else(||
             crate::open::export_destination(&self.destination_name())) else { return; };
         dest.set_extension(ext);
@@ -272,6 +292,7 @@ impl Page {
         self.frames.clear();
         self.held = None;
         self.selected = 0;
+        self.playback = None;
         self.count = 0;
         self.rendered_time = 0.;
         self.path = None;
@@ -404,6 +425,20 @@ impl Page {
                 Err(e) => self.status = format!("Export stopped: {e}"),
             }
         }
+        if !self.open {
+            self.playback = None;
+        }
+        if let Some((started, position)) = self.playback {
+            let time = position + started.elapsed().as_secs_f64();
+            if let Some(last) = self.frames.back() {
+                let finished = time >= last.output_time;
+                let index = self.frame_at(time);
+                if self.current().is_none_or(|f| f.count != self.frames[index].count) {
+                    self.show_frame(index);
+                }
+                if finished { self.playback = None; }
+            }
+        }
         if self.dirty && self.open {
             if let Some(f) = self.current() {
                 uploads.push(Upload {
@@ -425,6 +460,54 @@ impl Page {
                 .or_else(|| self.frames.get(self.selected))
         }
     }
+    pub fn playing(&self) -> bool {
+        self.open && self.playback.is_some()
+    }
+
+    fn frame_time(frame: &Rendered) -> f64 {
+        (frame.output_time - frame.frame_duration).max(0.)
+    }
+
+    fn frame_at(&self, time: f64) -> usize {
+        self.frames.partition_point(|frame| Self::frame_time(frame) <= time)
+            .saturating_sub(1)
+    }
+
+    fn show_frame(&mut self, index: usize) {
+        self.selected = index;
+        if let Some(frame) = self.frames.get(index) {
+            self.held = Some(frame.clone());
+            self.seek = Some(frame.source_pts);
+            self.dirty = true;
+        }
+    }
+
+    fn toggle_playback(&mut self) {
+        if self.playback.take().is_some() || self.frames.is_empty() { return; }
+        let last = self.frames.back().unwrap();
+        let index = match self.current() {
+            Some(frame) if frame.count < last.count => self.frame_at(Self::frame_time(frame)),
+            _ => 0,
+        };
+        self.following = false;
+        self.show_frame(index);
+        self.playback = Some((Instant::now(), Self::frame_time(&self.frames[index])));
+    }
+
+    fn step_preview(&mut self, forward: bool) {
+        let Some(frame) = self.current() else { return; };
+        let index = self.frames.partition_point(|f| f.count < frame.count);
+        let cached = self.frames.get(index).is_some_and(|f| f.count == frame.count);
+        let index = if forward {
+            (index + usize::from(cached)).min(self.frames.len() - 1)
+        } else {
+            index.saturating_sub(1)
+        };
+        self.following = false;
+        self.playback = None;
+        self.show_frame(index);
+    }
+
     pub fn enter(&mut self) {
         self.open = true;
         self.dirty = true;
@@ -453,20 +536,8 @@ impl Page {
                 self.original = !self.original;
                 true
             }
-            Key::Left | Key::Right => {
-                self.following = false;
-                self.selected = if k == Key::Left {
-                    self.selected.saturating_sub(1)
-                } else {
-                    (self.selected + 1).min(self.frames.len().saturating_sub(1))
-                };
-                if let Some(f) = self.frames.get(self.selected) {
-                    self.held = Some(f.clone());
-                    self.seek = Some(f.source_pts);
-                    self.dirty = true;
-                }
-                true
-            }
+            Key::Space => { self.toggle_playback(); true }
+            Key::Left | Key::Right => { self.step_preview(k == Key::Right); true }
             _ => false,
         }
     }
@@ -474,25 +545,31 @@ impl Page {
         let l = Layout::new(vp);
         let (x, w, y, _) = Self::settings_geometry(l);
         let third = (w - 8.) / 3.;
-        let half = (w - 4.) / 2.;
         let r = |x, y, w| RectPx { x, y, w, h: 26. };
         let mut actions = vec![
             (r(x, y + 16., third), "Copy", self.lossless, Action::Lossless),
             (r(x + third + 4., y + 16., third), "HEVC", !self.prores && !self.lossless, Action::Preset(false)),
             (r(x + 2. * (third + 4.), y + 16., third), "ProRes", self.prores && !self.lossless, Action::Preset(true)),
-            (r(x, y + 76., half), "MKV", self.mkv, Action::Container(true)),
-            (r(x + half + 4., y + 76., half), "MP4", !self.mkv, Action::Container(false)),
+            (r(x, y + 76., third), "MP4", self.container == Container::Mp4, Action::Container(Container::Mp4)),
+            (r(x + third + 4., y + 76., third), "MOV", self.container == Container::Mov, Action::Container(Container::Mov)),
+            (r(x + 2. * (third + 4.), y + 76., third), "MKV", self.container == Container::Mkv, Action::Container(Container::Mkv)),
             (r(x, y + 136., w - 32.), "", self.filename_edit.is_some(), Action::EditFilename),
             (r(x + w - 26., y + 136., 26.), "Save as", false, Action::Destination),
             (r(x + w - 24., y + 196., 24.), "", false, Action::RevealDirectory),
             (r(l.context.x + 12., l.context.y + 7., 124.), "Original / Output", self.original, Action::Compare),
-            (r(l.context.x + 144., l.context.y + 7., 112.), "Follow render", self.following, Action::Follow),
-            (r(vp.0 - 124., l.footer.y + 6., 108.), "Export", false, Action::Export),
+            (r(l.transport.x + 20., l.transport.y + 30., 26.), "‹", false, Action::Step(false)),
+            (r(l.transport.x + 50., l.transport.y + 30., 56.), if self.playing() { "Pause" } else { "Play" }, false, Action::Play),
+            (r(l.transport.x + 110., l.transport.y + 30., 26.), "›", false, Action::Step(true)),
+            (r(l.transport.x + l.transport.w - 134., l.transport.y + 30., 114.), "Follow render", self.following, Action::Follow),
         ];
+        let primary = RectPx { x: vp.0 - 164., y: l.context.y + 4., w: 148., h: 32. };
         if self.busy() {
-            actions.push((r(x, l.footer.y - 36., w), "Cancel export", false, Action::Cancel));
+            actions.push((primary, "Cancel export", false, Action::Cancel));
         } else if self.path.is_some() {
-            actions.push((r(x, l.footer.y - 36., w), "Reveal output", false, Action::Reveal));
+            actions.push((r(primary.x - 94., l.context.y + 7., 86.), "Export", false, Action::Export));
+            actions.push((primary, "Reveal output", false, Action::Reveal));
+        } else {
+            actions.push((primary, "Export", false, Action::Export));
         }
         actions
     }
@@ -502,7 +579,7 @@ impl Page {
         if hit(
             RectPx {
                 y: l.seek.y - 12.,
-                h: 30.,
+                h: 26.,
                 ..l.seek
             },
             x,
@@ -529,45 +606,40 @@ impl Page {
             Action::Preset(p) if !self.busy() => {
                 self.lossless = false;
                 self.prores = p;
-                if p {
-                    self.mkv = true;
+                if p && self.container == Container::Mp4 {
+                    self.container = Container::Mov;
                 }
             }
             Action::Lossless if !self.busy() && self.copy_unavailable.is_none() => {
                 self.lossless = true;
                 self.prores = false;
             }
-            Action::Container(m) if !self.busy() => {
-                if !m && self.prores && !self.lossless {
-                    self.status = "ProRes requires MKV.".into();
+            Action::Container(container) if !self.busy() => {
+                if container == Container::Mp4 && self.prores && !self.lossless {
+                    self.status = "ProRes requires MOV or MKV.".into();
                 } else {
-                    self.mkv = m;
+                    self.container = container;
                 }
             }
             Action::Destination if !self.busy() => {
                 if let Some(mut path) = crate::open::export_destination(&self.destination_name()) {
-                    path.set_extension(if self.mkv { "mkv" } else { "mp4" });
+                    path.set_extension(self.container.extension());
                     self.destination = Some(path);
                 }
             }
             Action::Cancel => self.cancel(),
             Action::Compare => self.original = !self.original,
+            Action::Play => self.toggle_playback(),
+            Action::Step(forward) => self.step_preview(forward),
             Action::Follow => {
-                self.following = true;
-                self.held = None;
-                self.selected = self.frames.len().saturating_sub(1);
-                if let Some(f) = self.frames.back() {
-                    self.seek = Some(f.source_pts);
-                    self.dirty = true;
-                }
+                self.playback = None;
+                self.following = !self.following;
+                self.show_frame(self.frames.len().saturating_sub(1));
             }
-            Action::Seek(f) => {
+            Action::Seek(fraction) if !self.frames.is_empty() => {
                 self.following = false;
-                if !self.frames.is_empty() {
-                    self.selected = (f * (self.frames.len() - 1) as f64).round() as usize;
-                    self.seek = Some(self.frames[self.selected].source_pts);
-                    self.dirty = true;
-                }
+                self.playback = None;
+                self.show_frame(self.frame_at(fraction * self.duration));
             }
             Action::RevealDirectory => return self.directory(),
             Action::Reveal => return self.path.clone(),
@@ -678,25 +750,38 @@ impl Page {
             mono(items, x, yy, 11., dim, key.into(), Align::Left, 78.);
             mono(items, x + w, yy, 11., ink, value, Align::Right, w - 82.);
         }
-        // One transport row, with the same height, track and type as Sources.
-        let time = current.map_or(0., |f| (f.output_time - f.frame_duration).max(0.));
-        let fraction = if self.frames.len() > 1 { self.selected as f32 / (self.frames.len() - 1) as f32 } else { 0. };
+        let time = current.map_or(0., Self::frame_time);
+        let fraction = |time: f64| (time / self.duration.max(0.001)).clamp(0., 1.) as f32;
+        let position = fraction(time);
         items.push(Item::Rect(RectItem { radius: 2., ..RectItem::new(l.seek, hex_color(0x454545)) }));
-        if fraction > 0. {
-            items.push(Item::Rect(RectItem { radius: 2., ..RectItem::new(RectPx { w: l.seek.w * fraction, ..l.seek }, ACCENT) }));
+        if let (Some(first), Some(last)) = (self.frames.front(), self.frames.back()) {
+            let start = fraction(Self::frame_time(first));
+            let end = fraction(last.output_time);
+            items.push(Item::Rect(RectItem::new(RectPx {
+                x: l.seek.x + l.seek.w * start, w: l.seek.w * (end - start), ..l.seek
+            }, hex_color(0x265473))));
+            items.push(Item::Rect(RectItem { radius: 6., ..RectItem::new(RectPx {
+                x: l.seek.x + l.seek.w * position - 6., y: l.seek.y - 4., w: 12., h: 12.
+            }, ACCENT) }));
         }
-        items.push(Item::Rect(RectItem { radius: 6., ..RectItem::new(RectPx {
-            x: l.seek.x + l.seek.w * fraction - 6., y: l.seek.y - 4., w: 12., h: 12. }, ACCENT) }));
-        ui_label(items, l.seek.x + l.seek.w + 18., l.transport.y + 30., 11., ink,
+        ui_label(items, l.seek.x + l.seek.w + 18., l.seek.y + 2., 11., ink,
             format!("{:02}:{:06.3} / {:02}:{:06.3}", time as u64 / 60, time % 60., self.duration as u64 / 60, self.duration % 60.), Align::Left, 166.);
-        if self.busy() {
-            let done = (self.rendered_time / self.duration.max(0.001)).clamp(0., 1.);
-            items.push(Item::Rect(RectItem::new(l.progress, hex_color(0x292929))));
-            items.push(Item::Rect(RectItem::new(RectPx { w: l.progress.w * done as f32, ..l.progress }, ACCENT)));
-
+        let amber = hex_color(0xffb653);
+        ui_label(items, 16., l.footer.y + if self.busy() { 12. } else { 19. }, 10.,
+            if self.busy() { amber } else { dim }, "EXPORT", Align::Left, 60.);
+        if self.busy() && !self.lossless {
+            let done = fraction(self.rendered_time);
+            for i in 0..10 {
+                let cell = RectPx { x: 16. + i as f32 * 7., y: l.footer.y + 23., w: 5., h: 8. };
+                items.push(Item::Rect(RectItem::new(cell, hex_color(0x372c1e))));
+                let filled = (done * 10. - i as f32).clamp(0., 1.);
+                if filled > 0. {
+                    items.push(Item::Rect(RectItem::new(RectPx { h: cell.h * filled,
+                        y: cell.y + cell.h * (1. - filled), ..cell }, amber)));
+                }
+            }
         }
-        ui_label(items, 16., l.footer.y + 19., 10., ACCENT, "EXPORT", Align::Left, 60.);
-        let render_status = if self.busy() {
+        let render_status = if self.busy() && !self.lossless {
             let elapsed = self.started.elapsed().as_secs_f64().max(0.001);
             let done = (self.rendered_time / self.duration.max(0.001)).clamp(0., 1.);
             let eta = if done > 0. { format!(" · ~{:.0}s left", elapsed * (1. - done) / done) } else { String::new() };
@@ -706,16 +791,17 @@ impl Page {
             self.copy_unavailable.unwrap_or(&self.status)
         } else { &render_status };
         ui_label(items, 98., l.footer.y + 19., 10., dim,
-            status, Align::Left, (vp.0 - 238.).max(0.));
+            status, Align::Left, (vp.0 - 114.).max(0.));
         for (r, t, selected, a) in self.actions(vp) {
             let hovered = hit(r, cursor.0, cursor.1);
             let disabled = match a {
                 Action::Export => self.busy(),
                 Action::Cancel => !self.busy(),
                 Action::Reveal => self.path.is_none(),
+                Action::Play | Action::Step(_) => self.frames.is_empty(),
                 Action::Lossless => self.busy() || self.copy_unavailable.is_some(),
-                Action::Container(false) => self.busy() || (self.prores && !self.lossless),
-                Action::Preset(_) | Action::Container(true) | Action::Destination | Action::EditFilename => self.busy(),
+                Action::Container(Container::Mp4) => self.busy() || (self.prores && !self.lossless),
+                Action::Preset(_) | Action::Container(_) | Action::Destination | Action::EditFilename => self.busy(),
                 _ => false,
             };
             if a == Action::Destination {
@@ -738,11 +824,25 @@ impl Page {
                     RectPx { x: folder.x, y: folder.y - 2.5, w: 6., h: 2.5 }, color) }));
                 continue;
             }
-            if r.y >= l.footer.y {
-                crate::app::draw_cut_footer_button(items, r, t, "", false, hovered, disabled);
+            if a == Action::Reveal || (a == Action::Export && self.path.is_none()) {
+                let blue = hex_color(if hovered { 0x237ce5 } else { 0x0967cc });
+                items.push(Item::Rect(RectItem { radius: 7., ..RectItem::new(r, blue) }));
+                ui_label(items, r.x + r.w / 2., r.y + r.h / 2., 13.,
+                    [1.; 4], t, Align::Center, r.w - 16.);
                 continue;
             }
-            let toolbar = matches!(a, Action::Compare | Action::Follow);
+            if a == Action::Follow {
+                let track = RectPx { x: r.x, y: r.y + 6., w: 28., h: 14. };
+                items.push(Item::Rect(RectItem { radius: 7., ..RectItem::new(track,
+                    if selected { ACCENT } else { hex_color(0x414141) }) }));
+                items.push(Item::Rect(RectItem { radius: 5., ..RectItem::new(RectPx {
+                    x: track.x + if selected { 16. } else { 2. }, y: track.y + 2., w: 10., h: 10.
+                }, ink) }));
+                ui_label(items, r.x + 34., r.y + 13., 11., if hovered || selected { ink } else { dim },
+                    t, Align::Left, r.w - 34.);
+                continue;
+            }
+            let toolbar = matches!(a, Action::Compare);
             items.push(Item::Rect(RectItem { radius: 6.,
                 border_w: if toolbar { 0. } else { 1. },
                 border_color: hex_color(if disabled { 0x252525 } else if selected { 0x315576 } else if hovered { 0x555555 } else { 0x2d2d2d }),
@@ -876,15 +976,20 @@ mod tests {
         page.apply(Action::Preset(true));
         assert!(!page.lossless);
         assert!(page.prores);
+        assert_eq!(page.container, Container::Mov);
+        page.apply(Action::Container(Container::Mkv));
+        page.apply(Action::Preset(true));
+        assert_eq!(page.container, Container::Mkv);
         page.apply(Action::Lossless);
-        page.apply(Action::Container(false));
-        assert!(!page.mkv, "the render preset must not restrict stream copy");
+        page.apply(Action::Container(Container::Mp4));
+        assert_eq!(page.container, Container::Mp4, "the render preset must not restrict stream copy");
     }
 
     #[test]
     fn manual_review_stays_put_while_latest_progress_advances() {
         let mut p = Page::default();
         p.open = true;
+        p.duration = 10.;
         p.source = Some(PathBuf::from("source"));
         let frame = |n| Rendered {
             pixels: Arc::new(vec![0; 16]),
@@ -920,11 +1025,22 @@ mod tests {
         p.apply(Action::Follow);
         assert_eq!(p.seek, Some(2.));
         assert!(p.following);
+        p.apply(Action::Follow);
+        assert!(!p.following);
+        assert_eq!(p.current().unwrap().count, 2);
+        p.apply(Action::Seek(0.05));
+        assert_eq!(p.current().unwrap().count, 1, "seek uses output time");
+        p.apply(Action::Play);
+        assert!(p.playing());
+        p.playback = Some((Instant::now(), 2.));
+        p.poll(&mut uploads, 3);
+        assert_eq!(p.current().unwrap().count, 2);
+        assert!(!p.playing(), "playback stops at the cached frontier");
         p.key(Key::Tab);
         assert!(p.original);
     }
     #[test]
-    fn minimal_controls_fit_and_footer_only_has_export_actions() {
+    fn minimal_controls_fit_and_footer_is_status_only() {
         let p = Page::default();
         assert!(!p.actions((720., 480.)).iter().any(|(.., a)| matches!(a, Action::Cancel | Action::Reveal)));
         for vp in [(720., 480.), (900., 600.), (1280., 800.), (1440., 900.)] {
@@ -935,25 +1051,27 @@ mod tests {
             assert_eq!(l.video.w + l.sidebar.w, vp.0);
             assert_eq!(l.sidebar.y, crate::app::HEADER_H);
             assert_eq!(p.actions(vp).iter().filter(|(.., a)| *a == Action::Export).count(), 1);
-            assert!(l.progress.y + 7. < l.footer.y);
             for (r, _, _, a) in p.actions(vp) {
                 assert!(r.x >= 0. && r.x + r.w <= vp.0 + 0.1);
                 assert!(r.y >= crate::app::HEADER_H && r.y + r.h <= vp.1);
                 assert!(!hit(l.video, r.x, r.y));
-                if matches!(a, Action::Compare | Action::Follow) {
+                if a == Action::Compare {
                     assert!(r.y >= l.context.y && r.y + r.h <= l.context.y + l.context.h);
                 }
-                if r.y >= l.footer.y {
-                    assert!(matches!(
-                        a,
-                        Action::Export
-                    ));
+                if matches!(a, Action::Follow | Action::Play | Action::Step(_)) {
+                    assert!(r.y >= l.seek.y + 14. && r.y + r.h <= l.footer.y);
+                    assert_eq!(p.click(vp, r.x + 2., r.y + 2.), Some(a));
+                }
+                assert!(r.y + r.h <= l.footer.y);
+                if a == Action::Export {
+                    assert!(r.y >= l.context.y && r.y + r.h <= l.context.y + l.context.h);
+                    assert_eq!(r.x + r.w, vp.0 - 16.);
                 }
             }
         }
     }
     #[test]
-    fn directory_reveal_uses_destination_parent_and_completion_reveal_stays_in_panel() {
+    fn directory_reveal_uses_destination_parent_and_output_reveal_is_top_right() {
         let mut p = Page::default();
         p.source = Some(PathBuf::from("/clips/source.mp4"));
         assert_eq!(p.apply(Action::RevealDirectory), Some(PathBuf::from("/clips")));
@@ -962,7 +1080,12 @@ mod tests {
         p.path = p.destination.clone();
         let actions = p.actions((720., 480.));
         let reveal = actions.iter().find(|(.., a)| *a == Action::Reveal).unwrap();
-        assert!(reveal.0.y < Layout::new((720., 480.)).footer.y);
+        let l = Layout::new((720., 480.));
+        assert!(reveal.0.y >= l.context.y && reveal.0.y + reveal.0.h <= l.video.y);
+        assert_eq!(reveal.0.x + reveal.0.w, 704.);
+        let export = actions.iter().find(|(.., a)| *a == Action::Export).unwrap();
+        assert!(export.0.x + export.0.w < reveal.0.x);
+        assert_eq!(p.click((720., 480.), reveal.0.x + 1., reveal.0.y + 1.), Some(Action::Reveal));
         assert_eq!(p.apply(Action::Reveal), p.destination);
     }
     #[test]
@@ -997,10 +1120,19 @@ mod tests {
     }
     #[test]
     fn native_pipeline_writes_selected_codecs_containers_audio_and_processed_pixels() {
+        check_native_pipeline(false);
+    }
+
+    #[test]
+    fn native_pipeline_writes_prores_and_copies_packets() {
+        check_native_pipeline(true);
+    }
+
+    fn check_native_pipeline(prores_only: bool) {
         let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
             .is_test(true)
             .try_init();
-        let dir = std::env::temp_dir().join(format!("abner-pipeline-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("abner-pipeline-test-{}-{prores_only}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let input = dir.join("input.mp4");
         let srt = dir.join("input.srt");
@@ -1050,8 +1182,10 @@ mod tests {
         for (prores, ext, codec) in [
             (false, "mp4", "hevc"),
             (false, "mkv", "hevc"),
+            (false, "mov", "hevc"),
+            (true, "mov", "prores"),
             (true, "mkv", "prores"),
-        ] {
+        ].into_iter().filter(|(prores, _, _)| *prores == prores_only) {
             let dest = dir.join(format!("{}.{}", codec, ext));
             let _ = std::fs::remove_file(&dest);
             let mut previews = 0;
@@ -1075,6 +1209,10 @@ mod tests {
             )
             .unwrap();
             assert_eq!(previews, 12);
+            if ext == "mov" {
+                let bytes = std::fs::read(&dest).unwrap();
+                assert_eq!(&bytes[4..12], b"ftypqt  ");
+            }
             // Rendered exports carry chapters like the copy path does.
             let chapters = crate::media_metadata::timeline(&dest).unwrap().unwrap().chapters;
             assert_eq!(chapters.iter().map(|c| (c.start, c.title.as_str())).collect::<Vec<_>>(), [(0., "One"), (0.25, "Two")], "{ext}");
@@ -1119,7 +1257,7 @@ mod tests {
         // including a container change, rather than silently encoding HEVC.
         let original = crate::media_io::Input::open(&input).unwrap();
         let vi = original.video().unwrap();
-        for ext in ["mp4", "mkv"] {
+        for ext in ["mp4", "mov", "mkv"] {
             let dest = dir.join(format!("copied.{ext}"));
             crate::media_io::pipeline_export(
                 &info, &dest, &[(0., 0.5)], &registry, &[], false, None,
@@ -1133,7 +1271,7 @@ mod tests {
             }
             std::fs::remove_file(dest).unwrap();
         }
-        for double in [false, true] {
+        for double in [false, true].into_iter().filter(|_| !prores_only) {
             let dest = dir.join(if double { "double.mp4" } else { "cropped.mkv" });
             let keeps = if double {
                 vec![(0., 0.5)]
