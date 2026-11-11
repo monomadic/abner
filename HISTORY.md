@@ -1,5 +1,14 @@
 # abner — history
 
+## 2026-11-11 — Compact processor value sliders
+
+Implemented the approved 278×36 Figma slider with a 44px row pitch. Labels and
+editable numeric values share the top line; the 4px track and 12px thumb sit
+immediately below. Hover/focus highlight the value chip and thumb; descriptions
+and numeric bounds are available on hover instead of occupying permanent rows.
+Settings scrolling and hit testing use the variable row heights; spatial inputs
+and non-slider fields retain their layouts.
+
 ## 2026-11-11 — External processor ownership
 
 Removed a duplicated built-in processor implementation and its root dependency.

@@ -170,6 +170,7 @@ impl Field {
     }
 }
 // Small coverage cells keep previews independent of the editor's full-size mask texture.
+fn slider_value(row:RectPx)->RectPx {RectPx{x:row.x+row.w-40.,y:row.y,w:40.,h:20.}}
 fn spatial_button(row:RectPx)->RectPx { RectPx{x:row.x,y:row.y+if row.w<122. {33.}else{21.},w:row.w.min(97.),h:62.} }
 fn draw_mask_preview(items: &mut Vec<Item>, r: RectPx, dims: [usize;2], pixels: &[u8]) {
     let [w,h] = dims;
@@ -2069,7 +2070,7 @@ impl Panel {
                 let (label,kind)=f.title.rsplit_once(" (").unwrap_or((&f.title,""));
                 text(items,row.x,row.y,11.,label,ink,row.w);
                 text(items,row.x,row.y+12.,11.,&format!("({kind}"),ink,row.w);
-            } else { text(items, row.x, row.y, 11.0, &f.title, ink, row.w); }
+            } else if !matches!(f.kind,Kind::Number{..}) { text(items, row.x, row.y, 11.0, &f.title, ink, row.w); }
             let value = &self.settings[&f.key];
             let editing = self.editing.as_ref().filter(|(n, _)| *n == i);
             let shown = if let Kind::Spatial{key,crop}=&f.kind {
@@ -2077,16 +2078,23 @@ impl Panel {
                 if configured {"Edit…".into()} else {"Choose…".into()}
             } else { editing.map_or_else(|| if value.is_null() { "Automatic".into() } else { f.shown(value) }, |(_, s)| s.clone()) };
             if let Kind::Number { min, max, .. } = f.kind {
-                text(items, row.x, row.y + 15.0, 9.0, f.description.as_deref().unwrap_or(""), muted, row.w);
-                let amount = ((value.as_f64().unwrap_or(min) - min) / (max - min)).clamp(0.0, 1.0) as f32;
-                let track = RectPx { x: row.x, y: row.y + 43.0, w: row.w, h: 4.0 };
-                items.push(Item::Rect(RectItem { radius: 2.0, ..RectItem::new(track, hex_color(0x303234)) }));
-                items.push(Item::Rect(RectItem { radius: 2.0, ..RectItem::new(RectPx { w: track.w * amount, ..track }, blue) }));
-                items.push(Item::Rect(RectItem { radius: 8.0, ..RectItem::new(RectPx { x: track.x + track.w * amount - 8.0, y: track.y - 6.0, w: 16.0, h: 16.0 }, ink) }));
-                for (at, label, align) in [(row.x, display_value(&json!(min)), Align::Left), (row.x + row.w / 2.0, shown, Align::Center), (row.x + row.w, display_value(&json!(max)), Align::Right)] {
-                    ui_label(items, at, row.y + 72.0, 9.0, muted, &label, align, row.w / 3.0);
-                    if matches!(align, Align::Center) && editing.is_some() { set_caret(items, caret); }
+                let value_rect=slider_value(row);
+                let hovered=hit(row,self.cursor.0,self.cursor.1);
+                let focused=editing.is_some();
+                items.push(Item::Text(TextItem{valign:VAlign::Middle,max_width:Some((row.w-48.).max(1.)),..TextItem::new(row.x,row.y+10.,11.,ink,&f.title)}));
+                items.push(Item::Rect(RectItem{radius:4.,border_w:if focused||!hovered{1.}else{0.},border_color:if focused{blue}else{hex_color(0x4e4e4e)},
+                    ..RectItem::new(value_rect,hex_color(if focused||hovered{0x1a1a1a}else{0x0a0a0a}))}));
+                ui_label(items,value_rect.x+value_rect.w/2.,row.y+10.,10.,ink,&shown,Align::Center,value_rect.w-4.);
+                if focused {set_caret(items,caret);}
+                let amount=((value.as_f64().unwrap_or(min)-min)/(max-min)).clamp(0.,1.) as f32;
+                let track=RectPx{x:row.x,y:row.y+26.,w:row.w,h:4.};
+                items.push(Item::Rect(RectItem{radius:2.,..RectItem::new(track,hex_color(0x303234))}));
+                let cx=track.x+track.w*amount;
+                if hovered||focused||self.dragging==Some(i) {
+                    items.push(Item::Rect(RectItem{radius:10.,..RectItem::new(RectPx{x:cx-10.,y:row.y+18.,w:20.,h:20.},blue)}));
                 }
+                items.push(Item::Rect(RectItem{radius:2.,..RectItem::new(RectPx{w:track.w*amount,..track},blue)}));
+                items.push(Item::Rect(RectItem{radius:6.,..RectItem::new(RectPx{x:cx-6.,y:row.y+22.,w:12.,h:12.},ink)}));
             } else if let Kind::Spatial { key, crop } = &f.kind {
                 let r = spatial_button(row);
                 let hovered=hit(r,self.cursor.0,self.cursor.1);
@@ -2119,9 +2127,17 @@ impl Panel {
     fn spatial_count(&self) -> usize {
         self.fields.iter().take_while(|f|matches!(f.kind,Kind::Spatial{..})).count()
     }
+    #[cfg(test)]
     fn settings_rows(&self) -> usize {
         let spatial=self.spatial_count();
         spatial.div_ceil(2)+self.fields.len()-spatial
+    }
+    fn field_pitch(&self,i:usize)->f32 {
+        if matches!(self.fields[i].kind,Kind::Number{..}){44.}else{104.}
+    }
+    fn settings_height(&self)->f32 {
+        let spatial=self.spatial_count();
+        spatial.div_ceil(2) as f32*104.+(spatial..self.fields.len()).map(|i|self.field_pitch(i)).sum::<f32>()
     }
     fn row(&self, i: usize, vp: (f32, f32)) -> RectPx {
         let r = Self::bounds(vp);
@@ -2129,13 +2145,13 @@ impl Panel {
         let width=Self::right(vp)-32.;
         let paired=i<spatial;
         let column=if paired {i%2}else{0};
-        let row=if paired {i/2}else{spatial.div_ceil(2)+i-spatial};
+        let offset=if paired {(i/2) as f32*104.}else{spatial.div_ceil(2) as f32*104.+(spatial..i).map(|j|self.field_pitch(j)).sum::<f32>()};
         let w=if paired {(width-12.)/2.}else{width};
         RectPx {
             x: vp.0 - Self::right(vp) + 16.0 + column as f32*(w+12.),
-            y: r.y + 164.0 + row as f32 * 104.0 - self.scroll,
+            y: r.y + 164.0 + offset - self.scroll,
             w,
-            h: 96.0,
+            h: if matches!(self.fields[i].kind,Kind::Number{..}){36.}else{96.},
         }
     }
     pub fn scroll(&mut self, dy: f32, cursor: (f32, f32), vp: (f32, f32)) -> bool {
@@ -2156,7 +2172,7 @@ impl Panel {
             }
             self.scroll = (self.scroll - dy).clamp(
                 0.0,
-                (self.settings_rows() as f32 * 104.0 - (Self::bottom(vp) - 210.0)).max(0.0),
+                (self.settings_height() - (Self::bottom(vp) - 210.0)).max(0.0),
             );
             return true;
         }
@@ -2251,13 +2267,14 @@ impl Panel {
                     continue;
                 }
                 let f = &self.fields[i];
-                if matches!(f.kind, Kind::Number { .. }) && y < row.y + 17.0 {
+                if matches!(f.kind, Kind::Number { .. }) && hit(slider_value(row),x,y) {
                     self.text_selected = false;
                     self.editing = Some((i, self.settings[&f.key].to_string()));
                     return true;
                 }
                 match &f.kind {
                     Kind::Number { min, max, integer } => {
+                        if y<row.y+20. {return true;}
                         self.dragging = Some(i);
                         self.settings[&f.key] =
                             numeric(*min, *max, *integer, ((x - row.x) / row.w) as f64)
@@ -2806,9 +2823,12 @@ impl Panel {
         if self.editing.as_ref().is_some_and(|(n, _)| *n == i) {
             return;
         }
-        let Some(tip) = f.tooltip(&self.settings[&f.key]) else {
-            return;
-        };
+        let tip=f.tooltip(&self.settings[&f.key]);
+        let tip=if let Kind::Number{min,max,..}=f.kind {
+            let bounds=format!("Range {}–{} · drag to adjust, click value to type",display_value(&json!(min)),display_value(&json!(max)));
+            Some(tip.map_or_else(||bounds.clone(),|tip|format!("{tip}\n\n{bounds}")))
+        }else{tip};
+        let Some(tip)=tip else{return;};
         let right = vp.0 - Self::right(vp);
         let wrap = (right - Self::left(vp) - 40.0).clamp(120.0, 300.0);
         let row = self.row(i, vp);
@@ -3658,6 +3678,14 @@ mod tests {
         assert!(panel.pointer(row.x + row.w, row.y + 25.0, vp));
         assert_eq!(panel.settings["strength"], json!(1.0));
         assert!(panel.release());
+        // The compact value chip edits without starting a track drag.
+        let value=slider_value(row);
+        panel.click(value.x+value.w/2.,value.y+10.,vp);
+        assert!(panel.editing.is_some() && panel.dragging.is_none());
+        panel.shortcut('a');panel.text_input("0.25");panel.key(Key::Enter);
+        assert_eq!(panel.settings["strength"],json!(0.25));
+        assert_eq!(row.h,36.);
+        assert_eq!(panel.settings_height(),252.,"two regular rows plus the numeric row use their own pitches");
         let i = panel.fields.iter().position(|f| f.key == "mode").unwrap();
         let row = panel.row(i, vp);
         panel.click(row.x + 20.0, row.y + 25.0, vp);
