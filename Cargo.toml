@@ -27,6 +27,10 @@ toml = "1.1"
 # renderer uploads as a texture — unlike the Dock icon (decoded by AppKit, see
 # main.rs) it needs an RGBA buffer in-process, and nothing else can produce one.
 png = "0.18"
+# Figma-flavoured shapes (rounded rectangles, strokes, shadows, clips) drawn
+# inside the main pass from the values Figma reports; see `Item::Shape`.
+# A sister checkout at ../figleaf. Adds no crates beyond wgpu.
+figleaf = { path = "../figleaf", features = ["wgpu"] }
 # Matroska tags and display rotation, edited after the remux without touching clusters.
 fastmkv = { git = "https://github.com/monomadic/fastmkv", rev = "dbcd85c93e14ad5f4ff679473e5f5efb065f44fc" }
 # FilmCraft's pure-Rust demuxers and decoders with its VideoToolbox path (H.264, HEVC, VP9,

@@ -2867,16 +2867,23 @@ fn draw_processor_switch(items: &mut Vec<Item>, r: RectPx, on: bool, position: f
     items.push(Item::Text(TextItem { header: true, align: Align::Center, valign: VAlign::Middle,
         max_width: Some(28.0), ..TextItem::new(thumb.x + 14.0, thumb.y + 10.5, 12.0, ink, if on { "ON" } else { "OFF" }) }));
 }
-/// The rail's pill switch (Figma rail): a 14px round thumb on a 16px
-/// travel, grey off, the focus orange on, outlined white in both states.
+/// The rail's pill switch, Figma "Processor card · toggle" Switch (143:5040),
+/// drawn by figleaf from Figma's own values: a 32x16 pill, fill FF9D00, a 1px
+/// white stroke outside; a 12px white thumb 2px in, with a drop shadow (Y 4,
+/// blur 4, black 25%) that the pill clips. Figma only draws the on state;
+/// off keeps the grey track and outline the rail had, and the thumb slides.
 fn draw_rail_switch(items: &mut Vec<Item>, r: RectPx, position: f32) {
-    items.push(Item::Rect(RectItem { radius: r.h / 2.0, border_w: 1.5,
-        border_color: mix(0xdcdcdc, 0xffffff, position),
-        ..RectItem::new(r, mix(0x34373b, SOURCE_RING, position)) }));
-    // 2.5px in, so a sliver of track shows between the knob and the outline.
-    let d = r.h - 5.0;
-    let thumb = RectPx { x: r.x + 2.5 + (r.w - d - 5.0) * position, y: r.y + 2.5, w: d, h: d };
-    items.push(Item::Rect(RectItem { radius: d / 2.0, ..RectItem::new(thumb, hex_color(0xf7f7f7)) }));
+    use figleaf::{Rect, Shadow, Shape, StrokeAlign};
+    let frame = Rect::new(r.x, r.y, r.w, r.h);
+    items.push(Item::Shape(Shape::rect(frame).radius(17.0)
+        .fill(mix(0x34373b, SOURCE_RING, position))
+        .stroke(1.0, mix(0xdcdcdc, 0xffffff, position), StrokeAlign::Outside)));
+    let d = r.h - 4.0;
+    let thumb = Rect::new(r.x + 2.0 + (r.w - d - 4.0) * position, r.y + 2.0, d, d);
+    items.push(Item::Shape(Shape::rect(thumb).radius(d / 2.0)
+        .fill(hex_color(0xffffff))
+        .shadow(Shadow::drop([0.0, 0.0, 0.0, 0.25], [0.0, 4.0], 4.0))
+        .clip_rounded(frame, 17.0)));
 }
 fn display_value(v: &Value) -> String {
     if let Some(n) = v.as_f64() {

@@ -31,6 +31,7 @@ dependencies = [
  "cc",
  "env_logger",
  "fastmkv",
+ "figleaf",
  "filmcraft-aac",
  "filmcraft-av1",
  "filmcraft-avi",
@@ -758,6 +759,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
 dependencies = [
  "simd-adler32",
+]
+
+[[package]]
+name = "figleaf"
+version = "0.0.1"
+dependencies = [
+ "wgpu",
 ]
 
 [[package]]

@@ -152,6 +152,10 @@ fn frame_icon_pixels(index: usize) -> Vec<u8> {
     rgba
 }
 
+/// Batch key marking a figleaf shape's place in the paint order; the second
+/// half of the key is the shape's index in the frame's canvas.
+const FIGLEAF: usize = usize::MAX;
+
 fn paint_order(items:&[Item])->impl Iterator<Item=&Item> {
     let tooltip=|item:&&Item|matches!(item,Item::Text(t) if t.tooltip);
     items.iter().filter(move |item|!tooltip(item)).chain(items.iter().filter(tooltip))
@@ -368,6 +372,9 @@ pub enum Item {
     /// Scissor subsequent items to this logical rectangle; None restores the surface.
     Clip(Option<RectPx>),
     Rect(RectItem),
+    /// A shape drawn by figleaf with Figma's meaning for strokes, shadows
+    /// and clips. Logical px like everything else, painted in list order.
+    Shape(figleaf::Shape),
     TagRow { x: f32, y: f32, width: f32, labels: Vec<String> },
     /// Soft rectangular shadow. Inner shades the canvas edge; outer sits
     /// behind a fitted video rectangle. Both use logical pixel widths.
@@ -483,6 +490,10 @@ pub struct Gpu {
     uniforms: wgpu::Buffer,
     instances: wgpu::Buffer,
     instance_capacity: usize,
+    /// Draws `Item::Shape`s inside the main pass.
+    figleaf: figleaf::render::Renderer,
+    /// This frame's shapes, kept between frames for its allocation.
+    shapes: figleaf::Canvas,
     sampler: wgpu::Sampler,
     bgl: wgpu::BindGroupLayout,
     /// Kept so `set_video_dims` can build mip bind groups for textures
@@ -798,6 +809,7 @@ impl Gpu {
 
         let instance_capacity = 1024;
         let instances = Self::make_instance_buffer(&device, instance_capacity);
+        let figleaf = figleaf::render::Renderer::new(&device, config.format);
 
         let mut gpu = Self {
             surface,
@@ -809,6 +821,8 @@ impl Gpu {
             uniforms,
             instances,
             instance_capacity,
+            figleaf,
+            shapes: figleaf::Canvas::new(),
             sampler,
             bgl,
             blit_bgl,
@@ -1193,7 +1207,10 @@ impl Gpu {
                         inst: Instance| {
             let idx = data.len() as u32;
             data.push(inst);
-            let key = key.unwrap_or_else(|| batches.last().map(|b| b.0).unwrap_or((0, 0)));
+            // A figleaf marker (see `FIGLEAF`) has no bind group to inherit.
+            let key = key.unwrap_or_else(|| {
+                batches.iter().rev().find(|b| b.0.0 != FIGLEAF).map(|b| b.0).unwrap_or((0, 0))
+            });
             match batches.last_mut() {
                 Some((k, c, range)) if *k == key && *c == clip => range.end = idx + 1,
                 _ => batches.push((key, clip, idx..idx + 1)),
@@ -1221,6 +1238,8 @@ impl Gpu {
             },
         };
         let mut clip = None;
+        let mut shapes = std::mem::take(&mut self.shapes);
+        shapes.clear();
         let mut plate_rect = [0.0, 0.0, 1.0, 1.0];
         for item in paint_order(&desc.items) {
             if let Item::Plate { r, .. } = item {
@@ -1231,6 +1250,12 @@ impl Gpu {
                     clip = rect.map(|r| scissor(r, scale, self.config.width, self.config.height));
                 }
                 Item::Rect(ri) => push(&mut data, &mut batches, clip, None, rect_inst(ri)),
+                // An empty batch holds the shape's place in the paint order;
+                // its key says which canvas item to draw there.
+                Item::Shape(shape) => {
+                    batches.push(((FIGLEAF, shapes.items().len()), clip, 0..0));
+                    shapes.shape(shape.clone());
+                }
                 Item::Shadow { r, inner, blur, alpha } => {
                     let spread = if *inner { 0.0 } else { blur * 1.5 };
                     push(&mut data, &mut batches, clip, None, Instance {
@@ -1543,6 +1568,15 @@ impl Gpu {
             self.upload_glyph_rect(u.x, u.y, u.w, u.h);
         }
 
+        let target = [self.config.width, self.config.height];
+        if let Err(e) = self.figleaf.prepare(&self.device, &self.queue, &shapes, target, scale, &mut figleaf::text::NoText) {
+            log::warn!("figleaf: {e}");
+        }
+        for p in self.figleaf.problems() {
+            log::warn!("figleaf left out shape {}: {}", p.item, p.reason);
+        }
+        self.shapes = shapes;
+
         if data.len() > self.instance_capacity {
             self.instance_capacity = data.len().next_power_of_two();
             self.instances = Self::make_instance_buffer(&self.device, self.instance_capacity);
@@ -1649,6 +1683,12 @@ impl Gpu {
                 let [x, y, w, h] = clip.unwrap_or([0, 0, self.config.width, self.config.height]);
                 if w == 0 || h == 0 { continue; }
                 pass.set_scissor_rect(x, y, w, h);
+                if key.0 == FIGLEAF {
+                    self.figleaf.draw_items(&mut pass, key.1..key.1 + 1);
+                    pass.set_pipeline(&self.pipeline);
+                    pass.set_vertex_buffer(0, self.instances.slice(..));
+                    continue;
+                }
                 pass.set_bind_group(0, &self.pair_bgs[key], &[]);
                 pass.draw(0..6, range.clone());
             }

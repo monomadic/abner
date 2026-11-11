@@ -1,5 +1,17 @@
 # abner — history
 
+## 2026-11-12 — Rail switch drawn by figleaf
+
+The Process rail's pill switch is drawn by figleaf, a sister checkout at
+`../figleaf`, from the values Figma reports for "Processor card · toggle"
+Switch (143:5040): a 32x16 pill with a 1px white stroke outside and a 12px
+white thumb whose drop shadow the pill clips. `Item::Shape` carries a figleaf
+shape through the item list; the renderer draws it inside the main pass at its
+place in the paint order, under the item's scissor, so tooltips and overlays
+still cover it. Figma only draws the on state: off keeps the rail's grey track
+and outline. Only this switch moved; every other control is drawn as before.
+The surface is sRGB, so figleaf blends in linear light like the rest of the UI.
+
 ## 2026-11-11 — Mask detection search rectangle
 
 Mask mode has a Search area toggle with the existing movable, resizable crop
