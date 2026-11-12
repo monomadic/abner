@@ -235,12 +235,16 @@ fn analyze(
         static_overlay::detect_checked(&frames, region, 32, &mut check)?;
     check()?;
     let mut pixels = region_mask(w as usize, h as usize, region, &maps.opacity, &maps.confidence);
-    // A box drawn tightly around an overlay is the user's claim that one is there.
-    // Appearance alone then suffices, including over scenery that never changes.
+    // A box drawn tightly around an overlay is the user's claim that one is there,
+    // which licenses weaker evidence, including over scenery that never changes.
     if drawn && region[2] * region[3] * 4 <= w as usize * h as usize {
         let strokes = stroke_lift::detect_checked(&frames, region, &mut check)?;
-        for (i, _) in strokes.iter().enumerate().filter(|(_, s)| **s) {
-            pixels[(region[1] + i / region[2]) * w as usize + region[0] + i % region[2]] = 255;
+        // It is the cleaner of the two here; keep the temporal proposal only as a fallback.
+        if strokes.iter().any(|s| *s) {
+            pixels.fill(0);
+            for (i, _) in strokes.iter().enumerate().filter(|(_, s)| **s) {
+                pixels[(region[1] + i / region[2]) * w as usize + region[0] + i % region[2]] = 255;
+            }
         }
     }
     Ok(Proposal {
