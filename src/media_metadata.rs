@@ -31,6 +31,23 @@ pub(crate) struct Metadata {
     declared: Declared,
 }
 impl Metadata {
+    /// Sources a processor chain accepts: SDR Rec.709 as is, and BT.2020 / Display P3 SDR or
+    /// PQ / HLG HDR, which `abner_processing::media::rgb16` tone- and gamut-maps to SDR
+    /// Rec.709. Packet-preserving paths keep [`Self::check_sdr`]: they cannot mix converted
+    /// frames with untouched source packets.
+    pub(crate) fn check_processable(&self) -> Result<(), String> {
+        let [primaries, transfer, matrix] = self.declared.codes;
+        let hdr = matches!(transfer, 16 | 18);
+        if !self.declared.icc
+            && (hdr || !self.declared.hdr)
+            && matches!(primaries, 1 | 2 | 9 | 12)
+            && matches!(transfer, 1 | 2 | 16 | 18)
+            && matches!(matrix, 1 | 2 | 9)
+        {
+            return Ok(());
+        }
+        self.check_sdr()
+    }
     pub(crate) fn check_sdr(&self) -> Result<(), String> {
         if self.declared.hdr || self.declared.icc {
             return Err(
@@ -594,6 +611,28 @@ pub(crate) fn read(path: &Path) -> Result<Metadata, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_real_interval_changes_count_as_variable_rate() {
+        let at = |steps: &[f64]| -> Vec<f64> {
+            steps
+                .iter()
+                .scan(0., |t, d| {
+                    let start = *t;
+                    *t += d;
+                    Some(start)
+                })
+                .collect()
+        };
+        assert!(!intervals_vary(&at(&[1001. / 30000.; 40])));
+        // 60 fps on Matroska's millisecond clock: 16 and 17 ms steps.
+        let ms: Vec<f64> = (0..40).map(|k| (k as f64 * 1000. / 60.).round() / 1000.).collect();
+        assert!(!intervals_vary(&ms));
+        // A phone clip mixing 30 and 24 fps intervals.
+        let mut mixed = vec![1. / 30.; 40];
+        mixed[17] = 1. / 24.;
+        assert!(intervals_vary(&at(&mixed)));
+        assert!(!intervals_vary(&[]) && !intervals_vary(&[0., 0.04]));
+    }
     use std::process::Command;
     fn fixture(name: &str, extra: &[&str]) -> Option<std::path::PathBuf> {
         if !Command::new("ffmpeg")
@@ -684,6 +723,8 @@ mod tests {
                 "{name}: {:?}",
                 meta.declared
             );
+            // Processor chains also take HDR through the SDR conversion; BT.601 stays out.
+            assert_eq!(meta.check_processable().is_ok(), name != "601", "{name}");
             std::fs::remove_file(path).unwrap();
         }
     }
@@ -986,6 +1027,33 @@ fn mp4_chapters(
     Ok(out)
 }
 /// Native packet, chapter and stream metadata. Other containers use Filmcraft packet adapters.
+/// Fail for a source whose real frame intervals vary. The decoder steps every source on a
+/// constant grid, repeating or dropping pictures of a variable-rate file; a processor that
+/// changes the frame rate would interpolate across those repeats as if they were motion.
+/// Containers without a readable sample index pass: nothing is known about them.
+pub(crate) fn require_constant_rate(path: &Path) -> Result<(), String> {
+    let Ok(Some(timeline)) = timeline(path) else {
+        return Ok(());
+    };
+    let mut pts: Vec<f64> = timeline.packets.iter().map(|p| p.pts).collect();
+    pts.sort_by(f64::total_cmp);
+    if intervals_vary(&pts) {
+        return Err("Frame-rate conversion needs constant-rate video, but this file's frame timing varies and frames would repeat; convert it to a constant frame rate first".into());
+    }
+    Ok(())
+}
+/// Any interval between sorted presentation times further from the median than a tenth of it
+/// (at least 1.1 ms, which millisecond container timestamps stay within).
+fn intervals_vary(pts: &[f64]) -> bool {
+    let mut steps: Vec<f64> = pts.windows(2).map(|w| w[1] - w[0]).collect();
+    if steps.len() < 2 {
+        return false;
+    }
+    let middle = steps.len() / 2;
+    let median = *steps.select_nth_unstable_by(middle, f64::total_cmp).1;
+    let tolerance = (median * 0.1).max(0.0011);
+    steps.iter().any(|d| (d - median).abs() > tolerance)
+}
 pub(crate) fn timeline(path: &Path) -> Result<Option<Timeline>, String> {
     let ext = path
         .extension()

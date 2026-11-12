@@ -1950,8 +1950,11 @@ impl App {
     fn sync_jumps(&self) {
         let end = if self.wrap.is_finite() { self.wrap - 0.05 } else { f64::MAX };
         let wrap: Vec<(f64, f64)> = if self.wrap.is_finite() { vec![(end, 0.0)] } else { Vec::new() };
+        let preview_loop = self.processors.loop_range()
+            .map(|(from, to)| (to.min(end), self.processors.source_seek(from)));
         for (i, v) in self.videos.iter().enumerate() {
             let mut jumps = wrap.clone();
+            jumps.extend(preview_loop);
             if self.cut_mode && i == self.active && let Some(cut) = &self.cut {
                 jumps.extend(cut.cuts().iter().map(|&(a, b)| (a - 1e-3, if b >= end { 0.0 } else { b })));
             }
@@ -2042,9 +2045,28 @@ impl App {
         if self.editor.as_ref().is_some_and(|e| matches!(&e.owner, crate::spatial::Owner::Plugin { id, .. } if self.processors.focused_id() != Some(id.as_str()))) {
             self.finish_editor(false);
         }
-        if let Some((id,key,crop))=self.processors.editor_request.take() {self.begin_editor(crop,Some((id,key)));return}
+        if let Some((id, key, crop)) = self.processors.editor_request.take() {
+            let same_component = self.editor.as_ref().is_some_and(|editor| {
+                matches!(&editor.owner, crate::spatial::Owner::Plugin { id: active_id, key: active_key }
+                    if *active_id == id && *active_key == key && self.crop.is_some() == crop)
+            });
+            if same_component {
+                self.finish_editor(false);
+            } else {
+                self.begin_editor(crop, Some((id, key)));
+            }
+            return;
+        }
         if std::mem::take(&mut self.processors.toggle_play) {
             self.playing = !self.playing;
+        }
+        // A reopened render from another source: focus that source first;
+        // the panel's next tick brings the render's frames back with it.
+        if let Some(owner) = self.processors.source_request.take()
+            && let Some(i) = self.videos.iter().position(|v| v.spatial_id == owner)
+            && i != self.active
+        {
+            self.select(i);
         }
         if let Some(t) = self.processors.take_seek() {
             self.playing = false;
@@ -2066,8 +2088,11 @@ impl App {
             self.adopt_seek = false;
         }
     }
-    pub fn processor_shortcut(&mut self, c: char) -> bool {
-        if self.export_page.open { self.export_page.shortcut(c) } else { self.processors.shortcut(c) }
+    pub(crate) fn editing_text(&self) -> bool {
+        if self.export_page.open { self.export_page.editing_filename() } else { self.processors.editing_text() }
+    }
+    pub(crate) fn edit_text(&mut self, edit: crate::text_edit::Edit) -> bool {
+        if self.export_page.open { self.export_page.edit_text(edit) } else { self.processors.edit_text(edit) }
     }
     pub fn processor_text(&mut self, text: &str) -> bool {
         if self.export_page.open { self.export_page.text_input(text) } else { self.processors.text_input(text) }
@@ -2874,8 +2899,29 @@ impl App {
         let n = self.videos.len();
         let full_uv = [0.0, 0.0, 1.0, 1.0];
 
+        // A multi-frame render that just finished (or was reopened while
+        // playing) with Loop on: go to its first frame and play.
+        if let Some(at) = self.processors.take_autoplay() {
+            let source = self.processors.source_seek(at);
+            self.seek_all(source, true);
+            self.t = at;
+            self.adopt_seek = false;
+            self.playing = true;
+        }
         if self.playing && self.started {
+            let before = self.t;
             self.t += dt as f64 * self.speed;
+            // The Process page loops the render on screen: crossing its end
+            // returns to its first frame (`sync_jumps` warns the players).
+            if let Some((from, to)) = self.processors.loop_range() {
+                let to = if self.wrap.is_finite() { to.min(self.wrap - 0.05) } else { to };
+                if before < to && self.t >= to {
+                    let source = self.processors.source_seek(from);
+                    self.seek_all(source, true);
+                    self.t = from;
+                    self.adopt_seek = false;
+                }
+            }
             if self.wrap.is_finite() && self.t >= self.wrap - 0.05 {
                 self.seek_all(0.0, true);
             }
@@ -3192,7 +3238,11 @@ impl App {
             clear: FRAME_BG,
             uploads,
             plate: None,
-            thumbs: std::mem::take(&mut self.cut_thumb.uploads),
+            thumbs: {
+                let mut thumbs = std::mem::take(&mut self.cut_thumb.uploads);
+                thumbs.append(&mut self.processors.thumb_uploads);
+                thumbs
+            },
             items,
             animating,
             redraw_at: if animating {
@@ -7512,6 +7562,45 @@ mod tests {
         app.mouse_down(apply.r.x + apply.r.w/2.,apply.r.y + apply.r.h/2.);
         assert!(app.processors.open && !app.mask_mode);
         assert!(app.processors.binding("test.processor","mask").unwrap().mask.is_some());
+    }
+
+    #[test]
+    fn repeated_processor_component_click_closes_its_editor() {
+        use abner_processor_api::{Descriptor, Factory, Registry, Session};
+        use serde_json::Value;
+
+        struct TestProcessor;
+        impl Factory for TestProcessor {
+            fn descriptor(&self) -> Descriptor {
+                Descriptor {
+                    id: "test.processor".into(),
+                    name: "Test processor".into(),
+                    settings_schema: serde_json::json!({}),
+                    presets: vec![],
+                }
+            }
+            fn create(&self, _: usize, _: usize, _: &Value) -> Result<Box<dyn Session>, String> {
+                unreachable!("editing a spatial input does not render")
+            }
+        }
+
+        let clip = test_clip().expect("video test fixture");
+        let mut app = mk_app(&clip, 1);
+        let mut registry = Registry::default();
+        registry.register(Box::new(TestProcessor)).unwrap();
+        app.set_processors(registry);
+        app.activate(Action::Tool(4));
+        let id = app.processors.focused_id().unwrap().to_owned();
+        for crop in [false, true] {
+            for open in [true, false] {
+                app.processors.editor_request = Some((id.clone(), "input".into(), crop));
+                app.apply_processor_transport();
+                assert_eq!(app.editor.is_some(), open);
+                assert_eq!(app.mask_mode, open);
+                assert_eq!(app.crop.is_some(), open && crop);
+                assert!(app.processors.open);
+            }
+        }
     }
 
     #[test]

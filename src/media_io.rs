@@ -3365,8 +3365,11 @@ pub(crate) fn pipeline_export_with_inputs(
     }
     crate::media_metadata::read(&info.path)
         .map_err(anyhow::Error::msg)?
-        .check_sdr()
+        .check_processable()
         .map_err(anyhow::Error::msg)?;
+    if crate::processor_gui::retimes(registry, chain, info.fps).map_err(anyhow::Error::msg)? {
+        crate::media_metadata::require_constant_rate(&info.path).map_err(anyhow::Error::msg)?;
+    }
     // Subtitles and tags from the source, when it is a container the
     // packet reader knows; other sources export without them.
     let (subs, meta) = match Input::open(&info.path) {

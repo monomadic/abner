@@ -130,7 +130,7 @@ fn ui_color(c: vec4<f32>) -> vec4<f32> {
 // 13 launch overlays: p0 0 radial vignette in color, 1 scanlines in color
 // 14 recent-file thumbnail (tex_t * color.a), clipped to a p0-radius rounded box
 // 15 diagonal hatch in a p0-radius rounded box: color / uv slot alternate every p1/2 px along 135°
-// 16 rectangular shadow: p0 quad spread, p1 softness, pad 1 inner / 0 outer
+// 16 shadow: p0 quad spread, p1 softness, pad 1 inner / 0 outer / -(1 + radius) tooltip
 
 @fragment
 fn fs_main(in: Out) -> @location(0) vec4<f32> {
@@ -150,6 +150,11 @@ fn fs_main(in: Out) -> @location(0) vec4<f32> {
             if in.pad > 0.5 {
                 // Only the inside edge of the document canvas is shaded.
                 alpha = 1.0 - smoothstep(0.0, softness, edge);
+            } else if in.pad < 0.0 {
+                let half = in.size * 0.5 - vec2<f32>(in.p0);
+                let radius = clamp(-in.pad - 1.0, 0.0, min(half.x, half.y));
+                let d = sd_round_box(in.local - in.size * 0.5, half, radius);
+                alpha = 1.0 - smoothstep(-softness, softness, d);
             } else {
                 let half = in.size * 0.5 - vec2<f32>(in.p0);
                 let d = sd_round_box(in.local - in.size * 0.5, half, 0.0);

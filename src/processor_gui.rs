@@ -13,7 +13,10 @@ use crate::{
     },
     player::{Player, Rgba},
     probe::VideoInfo,
-    render::{Align, Item, RectItem, RectPx, TextBg, TextItem, Upload, VAlign, VideoMode},
+    render::{
+        Align, Item, RENDER_THUMB_SLOT, RENDER_THUMBS, RectItem, RectPx, TextBg, TextItem,
+        ThumbUpload, Upload, VAlign, VideoMode,
+    },
 };
 use abner_processor_api::{
     Cancellation, Capabilities, Category, Descriptor, Frame, InputRequirement, Progress, Rate,
@@ -95,9 +98,6 @@ fn downsize_field(scales: &[ScaleOption]) -> Option<Field> {
 const FOOTER_H: f32 = CUT_STATUS_H;
 /// A frame being rendered: the source palette's amber, pulsed while busy.
 const RENDERING: u32 = 0xe6ac69;
-/// Transport buttons: five icon squares on a 6px gap, centred under the viewer.
-const TRANSPORT_W: f32 = 40.0;
-const TRANSPORT_GAP: f32 = 6.0;
 /// Figma Switch: a 27px thumb travel, settling in 180ms with ease-out.
 const SWITCH_SLIDE_S: f32 = 0.18;
 #[derive(Clone, Copy)]
@@ -111,6 +111,70 @@ impl SwitchSlide {
         let eased = 1.0 - (1.0 - t).powi(3);
         self.from + (f32::from(on) - self.from) * eased
     }
+}
+
+/// What one Render press covers from the playhead: the button's label, its
+/// name in sentences, and the length as source frames or whole seconds.
+const LENGTHS: [(&str, &str, u32, u32); 4] = [
+    ("1f", "frame", 1, 0),
+    ("5f", "5 frames", 5, 0),
+    ("1s", "1 second", 0, 1),
+    ("5s", "5 seconds", 0, 5),
+];
+/// The renders pane: a heading strip, then 44px rows on a 48px pitch.
+const RENDER_HEAD: f32 = 34.0;
+const RENDER_ROW: f32 = 44.0;
+const RENDER_PITCH: f32 = 48.0;
+/// One Render press, kept in the renders pane: where it was made and the
+/// whole chain as it stood, so a click puts the page back there. Its frames
+/// stay in the preview cache, tagged with `id`; a render whose frames have
+/// all been evicted or replaced leaves the list.
+struct Render {
+    id: u64,
+    /// The first rendered frame's time (the playhead until one arrives).
+    time: f64,
+    /// Every processor in chain order: id, enabled, settings.
+    stages: Vec<(String, bool, Value)>,
+    focus: String,
+    /// The source it was rendered from (`Panel::input_owner`).
+    owner: usize,
+    /// The enabled stages' names, and what was asked for ("5 frames").
+    chain: String,
+    what: &'static str,
+    /// Its cell among the atlas's `RENDER_THUMBS`, and whether it is filled.
+    slot: usize,
+    thumbed: bool,
+    frames: usize,
+}
+/// A rendered frame as an atlas cell: cover-cropped to 16:9 and box-sampled.
+fn thumbnail(rgba: &[u8], dims: [u32; 2]) -> Vec<u8> {
+    let (tw, th) = (crate::recent::THUMB_W as usize, crate::recent::THUMB_H as usize);
+    let (w, h) = (dims[0] as usize, dims[1] as usize);
+    let mut out = vec![0u8; tw * th * 4];
+    if w == 0 || h == 0 || rgba.len() < w * h * 4 {
+        return out;
+    }
+    let (cw, ch) = if w * th > h * tw { ((h * tw / th).max(1), h) } else { (w, (w * th / tw).max(1)) };
+    let (ox, oy) = ((w - cw) / 2, (h - ch) / 2);
+    for y in 0..th {
+        for x in 0..tw {
+            let mut sum = [0u32; 4];
+            for sy in 0..3 {
+                for sx in 0..3 {
+                    let px = ox + ((x * 3 + sx) * cw / (tw * 3)).min(cw - 1);
+                    let py = oy + ((y * 3 + sy) * ch / (th * 3)).min(ch - 1);
+                    let at = (py * w + px) * 4;
+                    for c in 0..4 {
+                        sum[c] += rgba[at + c] as u32;
+                    }
+                }
+            }
+            for c in 0..4 {
+                out[(y * tw + x) * 4 + c] = (sum[c] / 9) as u8;
+            }
+        }
+    }
+    out
 }
 
 /// One choice of a selector: `enum` gives bare values, `oneOf` of
@@ -277,6 +341,14 @@ fn rate_fps(r: Rate) -> f64 {
 }
 fn same_rate(a: Rate, b: Rate) -> bool {
     u64::from(a[0]) * u64::from(b[1]) == u64::from(b[0]) * u64::from(a[1])
+}
+/// Whether any stage declares an output rate different from its input's.
+pub(crate) fn retimes(
+    registry: &Registry,
+    chain: &[(String, Value)],
+    fps: f64,
+) -> Result<bool, String> {
+    Ok(!same_rate(chain_rate(registry, chain, fps)?, rational(fps)))
 }
 /// The rate the chain delivers for a source at `fps`, each stage declaring
 /// its output for the one before it.
@@ -547,6 +619,8 @@ struct Preview {
     /// `pts` (the same frame unless the chain retimes).
     source_pts: f64,
     elapsed: f64,
+    /// The `Render` it belongs to; the panel stamps it on arrival.
+    render: u64,
 }
 impl Worker {
     fn new(registry: Arc<Mutex<Registry>>) -> Self {
@@ -627,9 +701,9 @@ fn render(
     // Plugins see the source at its NATIVE size (display dimensions, rotation
     // applied, the same the Sources decoder uses) — pixels are the product here,
     // and a proxy made every setting read as a loss. The display decoder emits
-    // RGBA8, so the preview is still 8-bit in and out, not a color-managed
-    // HDR conversion or a full-precision export.
-    check_sdr(&r.info.path)?;
+    // RGBA8, so the preview is still 8-bit in and out, not a full-precision
+    // export. Wide-gamut and HDR sources are tone-mapped to SDR Rec.709 first.
+    check_processable(&r.info.path)?;
     let [w, h] = [r.info.width, r.info.height];
     r.inputs.validate_geometry(w,h)?;
     let mut sessions = Vec::new();
@@ -750,7 +824,10 @@ fn render(
     }
     // A retimed chain emits frames on its own grid; each is paired with the
     // latest original at or before it instead of the original it replaces.
-    let retimed = !same_rate(chain_rate(registry, &r.chain, fps)?, rational(fps));
+    let retimed = retimes(registry, &r.chain, fps)?;
+    if retimed {
+        crate::media_metadata::require_constant_rate(&r.info.path)?;
+    }
     let mut last_out: Option<i64> = None;
     let player = Player::spawn_native(&r.info.path, w, h, 8 * 1024 * 1024)
     .ok_or("Could not open preview decoder")?;
@@ -826,6 +903,7 @@ fn render(
                     duration: frame.duration as f64 / 1e6,
                     source_pts,
                     elapsed: started.elapsed().as_secs_f64(),
+                    render: 0,
                 },
             ))
             .map_err(|_| "Preview closed")?;
@@ -954,10 +1032,10 @@ impl Session for Downsized {
 #[cfg(test)]
 pub(crate) use abner_processing::process_chain;
 
-fn check_sdr(path: &std::path::Path) -> Result<(), String> {
+fn check_processable(path: &std::path::Path) -> Result<(), String> {
     crate::probe::metadata(path, Duration::from_secs(5))
         .map_err(|e| e.to_string())?
-        .check_sdr()
+        .check_processable()
 }
 
 
@@ -1049,7 +1127,28 @@ pub struct Panel {
     scroll: f32,
     dragging: Option<usize>,
     preset: usize,
-    text_selected: bool,
+    text_cursor: crate::text_edit::Cursor,
+    /// Every Render press still holding frames, oldest first (the pane
+    /// lists them newest first); `rendering` is the one in flight and
+    /// `current` the one on screen, ringed in the pane.
+    renders: Vec<Render>,
+    next_render: u64,
+    rendering: u64,
+    current: Option<u64>,
+    renders_scroll: f32,
+    /// The picked `LENGTHS` entry, and whether a multi-frame render plays
+    /// in a loop (switched on by rendering one).
+    length: usize,
+    loop_preview: bool,
+    /// Output frames the running render should deliver: 1 for a frame, 0
+    /// when unknown (a segment runs to its end or the cache limit).
+    expected: usize,
+    /// A finished or reopened multi-frame render: the app seeks here and plays.
+    autoplay: Option<f64>,
+    /// A reopened render from another source: the app focuses that source.
+    pub(crate) source_request: Option<usize>,
+    /// Snapshot thumbnails for the renderer's atlas, drained by the app.
+    pub(crate) thumb_uploads: Vec<ThumbUpload>,
 }
 impl Default for Panel {
     fn default() -> Self {
@@ -1118,7 +1217,18 @@ impl Default for Panel {
             scroll: 0.0,
             dragging: None,
             preset: usize::MAX,
-            text_selected: false,
+            text_cursor: Default::default(),
+            renders: vec![],
+            next_render: 1,
+            rendering: 0,
+            current: None,
+            renders_scroll: 0.0,
+            length: 0,
+            loop_preview: false,
+            expected: 1,
+            autoplay: None,
+            source_request: None,
+            thumb_uploads: vec![],
         }
     }
 }
@@ -1326,39 +1436,31 @@ impl Panel {
         self.changed();
         Ok(())
     }
-    pub fn shortcut(&mut self, c: char) -> bool {
-        if !self.open || (self.editing.is_none() && self.preset_name.is_none()) {
-            return false;
-        }
-        match c.to_ascii_lowercase() {
-            'a' => self.text_selected = true,
-            'v' => {
-                if let Some(text) = crate::open::paste_text() {
-                    self.text_input(text.trim_end_matches(['\n', '\r']));
-                }
-            }
-            _ => {}
+    pub(crate) fn editing_text(&self) -> bool {
+        self.open && (self.preset_name.is_some() || self.editing.is_some())
+    }
+    pub(crate) fn edit_text(&mut self, edit: crate::text_edit::Edit) -> bool {
+        if !self.editing_text() { return false; }
+        self.caret_at = Instant::now();
+        if matches!(edit, crate::text_edit::Edit::Paste) {
+            if let Some(text) = crate::open::paste_text() { self.text_input(&text); }
+        } else {
+            let value = self.preset_name.as_mut().or_else(|| self.editing.as_mut().map(|(_, value)| value)).unwrap();
+            self.text_cursor.apply(value, edit);
         }
         true
     }
     pub fn text_input(&mut self, text: &str) -> bool {
+        if !self.editing_text() { return false; }
         self.caret_at = Instant::now();
-        if self.open && let Some(value)=&mut self.preset_name {
-            if self.text_selected {value.clear();self.text_selected=false;}
-            if value.len()+text.len()<=160 {value.push_str(text);}
-            return true;
-        }
-        if self.open
-            && let Some((_, value)) = &mut self.editing
-        {
-            if self.text_selected {
-                value.clear();
-                self.text_selected = false;
-            }
-            value.push_str(text);
-            return true;
-        }
-        false
+        let (value, max_bytes) = if let Some(value) = &mut self.preset_name {
+            (value, 160)
+        } else {
+            (&mut self.editing.as_mut().unwrap().1, usize::MAX)
+        };
+        let filtered: String = text.chars().filter(|c| !c.is_control()).collect();
+        self.text_cursor.insert(value, &filtered, max_bytes);
+        true
     }
     fn pointer_time(&self, x: f32, timeline: RectPx) -> f64 {
         let t = ((x - timeline.x) / timeline.w).clamp(0.0, 1.0) as f64 * self.duration;
@@ -1410,7 +1512,7 @@ impl Panel {
     }
     /// Keep redraws hot only while work or a visible UI transition is running.
     pub fn animating(&self) -> bool {
-        self.open && (self.busy
+        self.open && (self.busy || self.autoplay.is_some()
             || self.switch_slides.iter().flatten().any(|s| s.at.elapsed().as_secs_f32() < SWITCH_SLIDE_S)
             || self.detail_at
                 .is_some_and(|t| t.elapsed().as_secs_f32() < DETAIL_SLIDE_S))
@@ -1486,6 +1588,9 @@ impl Panel {
     }
     fn request_preview(&mut self) {
         self.render_segment = false;
+        if self.span_frames() > 1 {
+            self.loop_preview = true;
+        }
         self.cancel.cancel();
         if let Some(w) = &self.worker {
             w.cancel();
@@ -1546,15 +1651,201 @@ impl Panel {
     }
     fn jump(&mut self, next: bool) {
         let tolerance = 0.5 / self.rate.max(1.0);
+        let spans = self.spans();
         self.seek = if next {
-            self.frames.iter().find(|f| f.pts > self.time + tolerance)
+            spans.iter().find(|s| s.1 > self.time + tolerance)
         } else {
-            self.frames
-                .iter()
-                .rev()
-                .find(|f| f.pts < self.time - tolerance)
+            spans.iter().rev().find(|s| s.1 < self.time - tolerance)
         }
-        .map(|f| f.pts);
+        .map(|s| s.1);
+    }
+    /// The rendered stretches on the seekbar, one per render: its id, first
+    /// frame's time and last frame's end.
+    fn spans(&self) -> Vec<(u64, f64, f64)> {
+        let mut out: Vec<(u64, f64, f64)> = Vec::new();
+        for f in &self.frames {
+            match out.last_mut() {
+                Some((id, _, end)) if *id == f.render => *end = f.pts + f.duration,
+                _ => out.push((f.render, f.pts, f.pts + f.duration)),
+            }
+        }
+        out
+    }
+    /// Source frames one Render press covers at the picked length.
+    fn span_frames(&self) -> usize {
+        let (_, _, frames, seconds) = LENGTHS[self.length];
+        if seconds > 0 { (seconds as f64 * self.fps).round().max(1.0) as usize } else { frames as usize }
+    }
+    /// Where playback wraps while Loop is on: the render on screen, when it
+    /// has more than one frame. The end stops a tenth of a frame short, as
+    /// `shown` does, so the wrap never shows the source for a tick.
+    pub(crate) fn loop_range(&self) -> Option<(f64, f64)> {
+        if !self.open || !self.loop_preview {
+            return None;
+        }
+        let id = self.current?;
+        if self.frames.iter().filter(|f| f.render == id).count() < 2 {
+            return None;
+        }
+        let (_, a, b) = self.spans().into_iter().find(|s| s.0 == id)?;
+        Some((a, b - 0.1 / self.rate))
+    }
+    pub(crate) fn take_autoplay(&mut self) -> Option<f64> {
+        self.autoplay.take()
+    }
+    /// Record the render about to be submitted: the chain as it stands, at
+    /// the playhead. The oldest render makes room once every cell is taken.
+    fn begin_render(&mut self, time: f64, what: &'static str) {
+        while self.renders.len() >= RENDER_THUMBS {
+            let old = self.renders.remove(0).id;
+            self.drop_frames(old);
+        }
+        let slot = (0..RENDER_THUMBS).find(|s| !self.renders.iter().any(|r| r.slot == *s)).unwrap_or(0);
+        let id = self.next_render;
+        self.next_render += 1;
+        let names: Vec<&str> = self.descriptors.iter().enumerate().take(self.selected + 1)
+            .filter(|(i, _)| self.enabled[*i]).map(|(_, d)| d.name.as_str()).collect();
+        self.renders.push(Render {
+            id,
+            time,
+            stages: self.descriptors.iter().enumerate()
+                .map(|(i, d)| (d.id.clone(), self.enabled[i], self.saved[i].clone())).collect(),
+            focus: self.descriptors.get(self.selected).map_or_else(String::new, |d| d.id.clone()),
+            owner: self.input_owner,
+            chain: names.join(" → "),
+            what,
+            slot,
+            thumbed: false,
+            frames: 0,
+        });
+        self.rendering = id;
+        self.current = Some(id);
+        self.renders_scroll = 0.0;
+    }
+    fn drop_frames(&mut self, id: u64) {
+        self.frames.retain(|f| f.render != id);
+        for (_, frames) in &mut self.stash {
+            frames.retain(|f| f.render != id);
+        }
+        self.stash.retain(|(_, frames)| !frames.is_empty());
+    }
+    /// Count each render's surviving frames; one with none left (evicted
+    /// from the cache, or rendered over) leaves the list.
+    fn prune_renders(&mut self) {
+        let mut counts: BTreeMap<u64, usize> = BTreeMap::new();
+        for f in self.frames.iter().chain(self.stash.iter().flat_map(|(_, f)| f)) {
+            *counts.entry(f.render).or_default() += 1;
+        }
+        let live = self.busy.then_some(self.rendering);
+        self.renders.retain_mut(|r| {
+            r.frames = counts.get(&r.id).copied().unwrap_or(0);
+            r.frames > 0 || live == Some(r.id)
+        });
+        if let Some(id) = self.current
+            && live != Some(id)
+            && !self.frames.iter().any(|f| f.render == id)
+        {
+            self.current = None;
+        }
+    }
+    fn delete_render(&mut self, id: u64) {
+        if self.busy && self.rendering == id {
+            self.cancel_preview();
+        }
+        self.drop_frames(id);
+        self.renders.retain(|r| r.id != id);
+        if self.current == Some(id) {
+            self.current = None;
+        }
+        self.status = "Render deleted".into();
+    }
+    /// Put the page back where a render was made: the chain's order, which
+    /// stages were on, every setting, the focused processor, the source and
+    /// the playhead. Its frames come back with the chain.
+    fn open_render(&mut self, id: u64) {
+        let Some(r) = self.renders.iter().find(|r| r.id == id) else { return };
+        if self.busy && self.rendering == id {
+            return;
+        }
+        let (stages, focus, time, owner, many) =
+            (r.stages.clone(), r.focus.clone(), r.time, r.owner, r.frames > 1);
+        self.reorder(&stages.iter().map(|s| s.0.clone()).collect::<Vec<_>>());
+        let now = Instant::now();
+        for (stage, on, settings) in stages {
+            let Some(i) = self.descriptors.iter().position(|d| d.id == stage) else { continue };
+            if self.enabled[i] != on {
+                self.switch_slides[i] = Some(SwitchSlide { from: self.switch_position(i, now), at: now });
+                self.enabled[i] = on;
+            }
+            self.saved[i] = settings;
+        }
+        let at = self.descriptors.iter().position(|d| d.id == focus).unwrap_or(self.selected);
+        if !self.visible().contains(&at) {
+            self.filter = None;
+            self.list_scroll = 0.0;
+        }
+        self.select(at);
+        self.current = Some(id);
+        self.show_rendered = true;
+        let here = owner == self.input_owner;
+        if !here {
+            self.source_request = Some(owner);
+        }
+        if many && self.loop_preview && self.playback {
+            self.autoplay = Some(time);
+        } else {
+            self.seek = Some(time);
+        }
+        self.status = if here && !self.frames.iter().any(|f| f.render == id) {
+            "Settings restored · the inputs changed since this render, so render again to see it".into()
+        } else {
+            format!("Render at {} restored", fmt_time(time))
+        };
+    }
+    /// ` walks the renders pane downwards (older), ~ upwards; both wrap.
+    fn cycle_render(&mut self, dir: isize) {
+        if self.renders.is_empty() {
+            self.status = "No renders yet · R renders at the playhead".into();
+            return;
+        }
+        let n = self.renders.len() as isize;
+        let at = self.current.and_then(|id| self.renders.iter().position(|r| r.id == id));
+        let next = match at {
+            Some(i) => (i as isize - dir).rem_euclid(n),
+            None if dir > 0 => n - 1,
+            None => 0,
+        } as usize;
+        let id = self.renders[next].id;
+        self.open_render(id);
+        let row = (self.renders.len() - 1 - next) as f32 * RENDER_PITCH;
+        let view = RAIL_INSPECTOR_H - RENDER_HEAD;
+        self.renders_scroll = self.renders_scroll.clamp((row + RENDER_ROW - view).max(0.0), row);
+    }
+    /// Put the listed processors first, in that order; the rest keep theirs.
+    fn reorder(&mut self, order: &[String]) {
+        let mut to: Vec<usize> = Vec::new();
+        for id in order {
+            if let Some(i) = self.descriptors.iter().position(|d| d.id == *id) && !to.contains(&i) {
+                to.push(i);
+            }
+        }
+        for i in 0..self.descriptors.len() {
+            if !to.contains(&i) {
+                to.push(i);
+            }
+        }
+        fn permute<T>(v: &mut Vec<T>, to: &[usize]) {
+            let mut old: Vec<Option<T>> = v.drain(..).map(Some).collect();
+            *v = to.iter().map(|&i| old[i].take().unwrap()).collect();
+        }
+        permute(&mut self.descriptors, &to);
+        permute(&mut self.saved, &to);
+        permute(&mut self.enabled, &to);
+        permute(&mut self.switch_slides, &to);
+        permute(&mut self.supported, &to);
+        permute(&mut self.capabilities, &to);
+        permute(&mut self.categories, &to);
+        permute(&mut self.scales, &to);
     }
     /// Export includes every enabled stage, regardless of preview selection.
     pub fn modifies_video(&self) -> bool {
@@ -1603,6 +1894,7 @@ impl Panel {
         shift(&mut self.supported, from, to);
         shift(&mut self.capabilities, from, to);
         shift(&mut self.categories, from, to);
+        shift(&mut self.scales, from, to);
         self.select(to);
     }
     /// Descriptor indices the category filter shows, in chain order.
@@ -1653,11 +1945,18 @@ impl Panel {
     }
     pub fn key(&mut self, key: Key) -> bool {
         self.caret_at = Instant::now();
+        use crate::text_edit::Edit;
+        let edit = match key {
+            Key::Left => Some(Edit::Left),
+            Key::Right => Some(Edit::Right),
+            Key::Backspace => Some(Edit::Backspace),
+            _ => None,
+        };
+        if edit.is_some_and(|edit| self.edit_text(edit)) { return true; }
         if self.open && self.preset_name.is_some() {
             match key {
                 Key::Escape=>self.preset_name=None,
                 Key::Enter=>self.save_preset(),
-                Key::Backspace=>{let value=self.preset_name.as_mut().unwrap();if self.text_selected{value.clear();self.text_selected=false;}else{value.pop();}},
                 Key::Char(c)=>{self.text_input(&c.to_string());},
                 Key::Space=>{self.text_input(" ");},
                 _=>{}
@@ -1667,14 +1966,6 @@ impl Panel {
         if self.open && self.editing.is_some() {
             match key {
                 Key::Escape => self.editing = None,
-                Key::Backspace => {
-                    if self.text_selected {
-                        self.editing.as_mut().unwrap().1.clear();
-                        self.text_selected = false;
-                    } else {
-                        self.editing.as_mut().unwrap().1.pop();
-                    }
-                }
                 Key::Enter => {
                     let (i, text) = self.editing.clone().unwrap();
                     match text_value(
@@ -1738,6 +2029,14 @@ impl Panel {
             }
             Key::Char('r') => {
                 self.request_preview();
+                true
+            }
+            Key::Char('`') => {
+                self.cycle_render(1);
+                true
+            }
+            Key::Char('~') => {
+                self.cycle_render(-1);
                 true
             }
             Key::Left => {
@@ -1876,6 +2175,35 @@ impl Panel {
         let r = Self::progress_panel(vp);
         RectPx { x: r.x + r.w - 103.0, y: r.y + 8.0, w: 91.0, h: 26.0 }
     }
+    fn length_button(vp: (f32, f32), i: usize) -> RectPx {
+        let b = Self::progress_button(vp);
+        RectPx { x: b.x - 10.0 - (LENGTHS.len() - i) as f32 * 34.0, w: 34.0, ..b }
+    }
+    fn loop_button(vp: (f32, f32)) -> RectPx {
+        let first = Self::length_button(vp, 0);
+        RectPx { x: first.x - 58.0, w: 50.0, ..first }
+    }
+    /// The focused processor's facts, pinned under its settings; dropped
+    /// when the column is too short to keep a few settings above it.
+    fn info(vp: (f32, f32)) -> RectPx {
+        let w = Self::right(vp);
+        let bottom = Self::bottom(vp);
+        let h = if bottom - HEADER_H - 158.0 - RAIL_INSPECTOR_H < 96.0 { 0.0 } else { RAIL_INSPECTOR_H };
+        RectPx { x: vp.0 - w, y: bottom - h, w, h }
+    }
+    /// The renders pane's rows, under its heading strip.
+    fn renders_list(&self, vp: (f32, f32)) -> RectPx {
+        let (_, pane) = self.detail(vp);
+        RectPx { y: pane.y + RENDER_HEAD, h: (pane.h - RENDER_HEAD).max(0.0), ..pane }
+    }
+    /// Row `n` of the pane, newest render first.
+    fn render_row(&self, n: usize, vp: (f32, f32)) -> RectPx {
+        let list = self.renders_list(vp);
+        RectPx { x: 10.0, y: list.y + n as f32 * RENDER_PITCH - self.renders_scroll, w: list.w - 20.0, h: RENDER_ROW }
+    }
+    fn render_delete(row: RectPx) -> RectPx {
+        RectPx { x: row.x + row.w - 28.0, y: row.y + (row.h - 22.0) / 2.0, w: 22.0, h: 22.0 }
+    }
     pub(crate) fn timeline(vp: (f32, f32)) -> RectPx {
         let last = Self::transport(vp, 4);
         let x = last.x + last.w + 16.0;
@@ -1885,13 +2213,11 @@ impl Panel {
     fn transport_y(vp: (f32, f32)) -> f32 {
         Self::bottom(vp) - 145.0
     }
+    /// The Timeline's transport spacing: 24px glyph buttons on a 31px
+    /// pitch, 36px either side of the 34px play disc.
     fn transport(vp: (f32, f32), i: usize) -> RectPx {
-        let l = Self::left(vp);
-        let span = vp.0 - l - Self::right(vp) - 32.0;
-        // Keep room for the seekbar even at the minimum window width.
-        let w = ((span * 0.40 - 4.0 * TRANSPORT_GAP) / 5.0).clamp(20.0, TRANSPORT_W);
-        RectPx { x: l + 16.0 + i as f32 * (w + TRANSPORT_GAP),
-            y: Self::transport_y(vp), w, h: 30.0 }
+        let (x, w) = [(0.0, 24.0), (31.0, 24.0), (62.0, 34.0), (103.0, 24.0), (134.0, 24.0)][i];
+        RectPx { x: Self::left(vp) + 16.0 + x, y: Self::transport_y(vp), w, h: 30.0 }
     }
     fn settings_switch(vp: (f32, f32)) -> RectPx {
         RectPx { x: vp.0 - 78.0, y: HEADER_H + 20.0, w: 61.0, h: 27.0 }
@@ -1954,7 +2280,7 @@ impl Panel {
                     }
                 }),
         );
-        self.text_selected = false;
+        self.text_cursor = Default::default();
         self.status = "Name the preset, then press Enter or Save. Escape cancels.".into();
     }
     fn save_preset(&mut self) {
@@ -2052,10 +2378,10 @@ impl Panel {
         for (index,(r, label)) in Self::preset_buttons(vp).into_iter().zip([preset, "‹", "›", "Save", "Delete"]).enumerate() {
             items.push(Item::Rect(RectItem { radius: 6.0, border_w: 1.0, border_color: hex_color(0x303234), ..RectItem::new(r, hex_color(0x0a0a0a)) }));
             ui_label(items, r.x + r.w / 2.0, r.y + r.h / 2.0, 10.0, if index==4&&!custom {dim} else {muted}, label, Align::Center, r.w - 4.0);
-            if index == 0 && name.is_some() { set_caret(items, caret); }
+            if index == 0 && name.is_some() { set_caret(items, &self.text_cursor, caret); }
         }
         items.push(Item::Rect(RectItem::new(RectPx { x, y: top + 136.0, w, h: 1.0 }, hex_color(0x303234))));
-        let clip = RectPx { x: x - 16.0, y: top + 158.0, w: Self::right(vp), h: (Self::bottom(vp) - top - 158.0).max(1.0) };
+        let clip = RectPx { x: x - 16.0, y: top + 158.0, w: Self::right(vp), h: (Self::info(vp).y - top - 158.0).max(1.0) };
         items.push(Item::Clip(Some(clip)));
         for (i, f) in self.fields.iter().enumerate() {
             let row = self.row(i, vp);
@@ -2079,7 +2405,7 @@ impl Panel {
                 items.push(Item::Rect(RectItem{radius:4.,border_w:if focused||!hovered{1.}else{0.},border_color:if focused{blue}else{hex_color(0x4e4e4e)},
                     ..RectItem::new(value_rect,hex_color(if focused||hovered{0x1a1a1a}else{0x0a0a0a}))}));
                 ui_label(items,value_rect.x+value_rect.w/2.,row.y+10.,10.,ink,&shown,Align::Center,value_rect.w-4.);
-                if focused {set_caret(items,caret);}
+                if focused {set_caret(items, &self.text_cursor, caret);}
                 let amount=((value.as_f64().unwrap_or(min)-min)/(max-min)).clamp(0.,1.) as f32;
                 let track=RectPx{x:row.x,y:row.y+26.,w:row.w,h:4.};
                 items.push(Item::Rect(RectItem{radius:2.,..RectItem::new(track,hex_color(0x303234))}));
@@ -2117,10 +2443,11 @@ impl Panel {
                 let hovered=hit(r,self.cursor.0,self.cursor.1);
                 items.push(Item::Rect(RectItem { radius: 4.0, border_w: 1.0, border_color: if editing.is_some(){blue}else{hex_color(0x303234)}, ..RectItem::new(r, hex_color(if hovered||editing.is_some(){0x1a1a1a}else{0x0a0a0a})) }));
                 ui_label(items, r.x + r.w / 2.0, r.y + r.h / 2.0, 10.0, ink, &shown, Align::Center, r.w - 12.0);
-                if editing.is_some() { set_caret(items, caret); }
+                if editing.is_some() { set_caret(items, &self.text_cursor, caret); }
             }
         }
         items.push(Item::Clip(None));
+        self.draw_info(items, vp);
         self.draw_tooltip(items, vp, clip);
     }
     fn spatial_count(&self) -> usize {
@@ -2157,6 +2484,14 @@ impl Panel {
         let r = Self::bounds(vp);
         if self.open && hit(r, cursor.0, cursor.1) {
             if cursor.0 < Self::left(vp) {
+                let renders = self.renders_list(vp);
+                if hit(renders, cursor.0, cursor.1) {
+                    self.renders_scroll = (self.renders_scroll - dy).clamp(
+                        0.0,
+                        (self.renders.len() as f32 * RENDER_PITCH - 4.0 - renders.h).max(0.0),
+                    );
+                    return true;
+                }
                 let list = self.list(vp);
                 self.list_scroll = (self.list_scroll - dy).clamp(
                     0.0,
@@ -2171,7 +2506,7 @@ impl Panel {
             }
             self.scroll = (self.scroll - dy).clamp(
                 0.0,
-                (self.settings_height() - (Self::bottom(vp) - 210.0)).max(0.0),
+                (self.settings_height() - (Self::info(vp).y - 210.0)).max(0.0),
             );
             return true;
         }
@@ -2194,6 +2529,14 @@ impl Panel {
             }
             return true;
         }
+        if let Some(i) = (0..LENGTHS.len()).find(|i| hit(Self::length_button(vp, *i), x, y)) {
+            self.length = i;
+            return true;
+        }
+        if hit(Self::loop_button(vp), x, y) {
+            self.loop_preview = !self.loop_preview;
+            return true;
+        }
         if hit(Self::progress_button(vp), x, y) {
             if self.busy { self.cancel_preview(); } else { self.request_preview(); }
             return true;
@@ -2204,8 +2547,20 @@ impl Panel {
         }
         if x < Self::left(vp) {
             let (grip, _) = self.detail(vp);
+            let renders = self.renders_list(vp);
             if grip.h > 0.0 && hit(grip, x, y) {
                 self.toggle_detail();
+            } else if hit(renders, x, y) {
+                let n = ((y - renders.y + self.renders_scroll) / RENDER_PITCH) as usize;
+                let row = self.render_row(n, vp);
+                if n < self.renders.len() && hit(row, x, y) {
+                    let id = self.renders[self.renders.len() - 1 - n].id;
+                    if hit(Self::render_delete(row), x, y) {
+                        self.delete_render(id);
+                    } else {
+                        self.open_render(id);
+                    }
+                }
             } else if hit(Self::move_button(vp, false), x, y) {
                 self.move_selected(-1);
             } else if hit(Self::move_button(vp, true), x, y) {
@@ -2252,13 +2607,13 @@ impl Panel {
             match button {
                 3=>self.save_preset(),
                 4=>self.delete_preset(),
-                0 if self.preset_name.is_some()=>self.text_selected=false,
+                0 if self.preset_name.is_some()=>self.text_cursor=Default::default(),
                 1|2=>{let count=self.descriptors[self.selected].presets.len()+1;let at=if self.preset<count-1{self.preset+1}else{0};let next=if button==1{(at+count-1)%count}else{(at+1)%count};self.preset=if next==0{usize::MAX}else{next-1};self.apply_preset();},
                 _=>{}
             }
             return true;
         }
-        if y < Self::bottom(vp) && y >= HEADER_H + 158.0 {
+        if y < Self::info(vp).y && y >= HEADER_H + 158.0 {
             self.preset_name=None;
             for i in 0..self.fields.len() {
                 let row = self.row(i, vp);
@@ -2267,7 +2622,7 @@ impl Panel {
                 }
                 let f = &self.fields[i];
                 if matches!(f.kind, Kind::Number { .. }) && hit(slider_value(row),x,y) {
-                    self.text_selected = false;
+                    self.text_cursor = Default::default();
                     self.editing = Some((i, self.settings[&f.key].to_string()));
                     return true;
                 }
@@ -2290,7 +2645,7 @@ impl Panel {
                             json!(!self.settings[&f.key].as_bool().unwrap_or(false))
                     }
                     Kind::Text => {
-                        self.text_selected = false;
+                        self.text_cursor = Default::default();
                         self.editing = Some((
                             i,
                             self.settings[&f.key]
@@ -2402,25 +2757,38 @@ impl Panel {
                 .any(|(i, _)| self.enabled[i] && !self.supported[i])
             {
                 self.status = "An enabled processor does not support frame previews.".into();
-            } else if let Some(worker) = &self.worker {
+            } else if self.worker.is_some() {
                 self.cancel = Cancellation::default();
                 self.busy = true;
-                self.status = if self.render_segment {
-                    "Rendering segment · stops at the preview cache limit…"
-                } else { "Rendering current frame through the enabled chain…" }.into();
+                // 0 is the whole segment; 1 an isolated frame; more, that
+                // many source frames from the playhead as one stream.
+                let span = if self.render_segment { 0 } else { self.span_frames() };
+                let what = if self.render_segment { "segment" } else { LENGTHS[self.length].1 };
+                self.status = match span {
+                    0 => "Rendering segment · stops at the preview cache limit…".into(),
+                    1 => "Rendering current frame through the enabled chain…".into(),
+                    _ => format!("Rendering {what} through the enabled chain · stops at the preview cache limit…"),
+                };
                 self.pending = Some(start);
                 self.progress = None;
                 self.busy_since = Instant::now();
-                worker.submit(Request {
+                self.begin_render(start, what);
+                self.expected = if span > 1 {
+                    (span as f64 * self.rate / self.fps).round().max(1.0) as usize
+                } else { span };
+                let frame = self.source_frame(start);
+                let stop = frame + (span as f64 - 0.5) / self.fps;
+                self.worker.as_ref().unwrap().submit(Request {
                     inputs:self.inputs.clone(),
                     generation: self.generation,
                     chain,
                     // The source frame under the playhead: a retimed chain
                     // returns every output frame paired with it.
-                    target: (!self.render_segment).then(|| self.source_frame(start)),
+                    target: (span == 1).then_some(frame),
                     info: info.clone(),
-                    start: self.segment_start,
-                    end,
+                    // Half a frame early, so the exact seek lands on `frame`.
+                    start: if span > 1 { (frame - 0.5 / self.fps).max(0.0) } else { self.segment_start },
+                    end: if span > 1 { Some(end.map_or(stop, |e| e.min(stop))) } else { end },
                     cancel: self.cancel.clone(),
                     budget: self.budget,
                 });
@@ -2431,7 +2799,16 @@ impl Panel {
         if let Some(worker) = &self.worker {
             while let Ok(event) = worker.rx.try_recv() {
                 match event {
-                    Event::Frame(g, f) if g == self.generation => {
+                    Event::Frame(g, mut f) if g == self.generation => {
+                        f.render = self.rendering;
+                        if let Some(r) = self.renders.iter_mut().find(|r| r.id == f.render && !r.thumbed) {
+                            r.thumbed = true;
+                            r.time = f.pts;
+                            self.thumb_uploads.push(ThumbUpload {
+                                slot: RENDER_THUMB_SLOT + r.slot,
+                                buf: thumbnail(&f.after, f.output),
+                            });
+                        }
                         self.preview_count += 1;
                         if f.input != f.output || f.before != f.after { self.changed_count += 1; }
                         self.frames
@@ -2480,6 +2857,13 @@ impl Panel {
                             if let Some((g, feedback)) = latest && g == self.generation {
                                 self.feedback = Some(feedback);
                             }
+                            // More than one frame, with Loop on: play it.
+                            let id = self.rendering;
+                            let mut mine = self.frames.iter().filter(|f| f.render == id);
+                            if self.loop_preview && let (Some(first), Some(_)) = (mine.next(), mine.next()) {
+                                self.autoplay = Some(first.pts);
+                                self.show_rendered = true;
+                            }
                         }
                     }
                     _ => {}
@@ -2491,6 +2875,7 @@ impl Panel {
                 self.feedback = Some(feedback);
             }
         }
+        self.prune_renders();
         if let Some(f) = self.shown() {
             uploads.push(Upload {
                 idx: slot + 1,
@@ -2577,7 +2962,7 @@ impl Panel {
         let footer = if self.descriptors.is_empty() { "No processors in this build" } else { "" };
         items.push(Item::Text(TextItem { interface: true, valign: VAlign::Middle, max_width: Some(l - 24.0),
             ..TextItem::new(12.0, list.y + list.h + 16.0, 11.0, subtle, footer) }));
-        self.draw_detail(items, vp);
+        self.draw_renders(items, vp);
         for down in [false, true] {
             let b = Self::move_button(vp, down);
             let hover = over(b) && !self.descriptors.is_empty();
@@ -2588,53 +2973,121 @@ impl Panel {
                     if down { "Move down" } else { "Move up" }) }));
         }
     }
-    /// Focused inspector (278:609), for the focused processor: the name as
-    /// the title row (the position keycap went 2026-10-29), five mono rows between solid hairlines
-    /// (categories first) and the registry ID where Sources puts the path.
-    fn draw_detail(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
-        let (grip, inspector) = self.detail(vp);
+    /// The renders pane, where the Sources rail keeps its focused inspector:
+    /// every Render press still holding frames, newest first — a snapshot,
+    /// where and how much, and the chain. A click reopens it (`open_render`),
+    /// the bin deletes it; the grip folds the pane.
+    fn draw_renders(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
+        let (grip, pane) = self.detail(vp);
         if grip.h <= 0.0 {
             return;
         }
         let l = Self::left(vp);
-        if inspector.h > 0.0 {
-            let i = self.selected;
-            let d = &self.descriptors[i];
-            let c = self.capabilities[i];
-            let (y, x0, x1) = (inspector.y, 16.0, l - 16.0);
+        if pane.h > 0.0 {
+            let over = |r: RectPx| hit(r, self.cursor.0, self.cursor.1);
             // Full layout anchored at the top, clipped while it folds.
-            items.push(Item::Clip(Some(inspector)));
-            items.push(Item::Rect(RectItem::new(RectPx { h: RAIL_INSPECTOR_H, ..inspector }, hex_color(INSPECTOR_BG))));
-            // The chain position as a round badge, the Sources keycap's place.
-            let badge = RectPx { x: x0, y: y + 16.0, w: 24.0, h: 24.0 };
-            items.push(Item::Rect(RectItem { radius: 12.0, ..RectItem::new(badge, hex_color(0xb4b4b8)) }));
-            items.push(Item::Text(TextItem { inspector: 2, align: Align::Center, valign: VAlign::Middle, max_width: Some(22.0),
-                ..TextItem::new(badge.x + 12.0, badge.y + 12.0, 14.0, hex_color(0x161616), (i + 1).to_string()) }));
-            items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(l - 80.0),
-                ..TextItem::new(x0 + 32.0, y + 28.0, 13.0, hex_color(SOURCE_INK), d.name.as_str()) }));
-            for ry in [y + 49.0, y + 178.0] {
-                items.push(Item::Rect(RectItem::new(
-                    RectPx { x: x0, y: ry, w: x1 - x0, h: 1.0 }, hex_color(0x303234))));
+            items.push(Item::Clip(Some(pane)));
+            items.push(Item::Rect(RectItem::new(RectPx { h: RAIL_INSPECTOR_H, ..pane }, hex_color(INSPECTOR_BG))));
+            let hy = pane.y + RENDER_HEAD / 2.0 + 2.0;
+            items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(l - 110.0),
+                ..TextItem::new(16.0, hy, 13.0, hex_color(SOURCE_INK), "Renders") }));
+            items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(40.0),
+                ..TextItem::new(16.0 + 8.0 * 13.0 * MONO_ADV, hy, 13.0, hex_color(0xa3a5a8), self.renders.len().to_string()) }));
+            items.push(Item::Text(TextItem { regular: true, align: Align::Right, valign: VAlign::Middle, max_width: Some(70.0),
+                ..TextItem::new(l - 16.0, hy, 10.0, WORKSPACE_DIM, "` cycles") }));
+            let list = self.renders_list(vp);
+            items.push(Item::Clip(Some(list)));
+            if self.renders.is_empty() {
+                items.push(Item::Text(TextItem { regular: true, wrap: Some(l - 32.0),
+                    ..TextItem::new(16.0, list.y + 6.0, 11.0, WORKSPACE_DIM,
+                        "Nothing rendered yet. Every render is kept here: click one to return to its frame, chain and settings.") }));
             }
-            let settings = format!("{} fields · {} presets", self.fields.len(), d.presets.len());
-            for (k, (key, value)) in [
-                ("Category", category_label(&self.categories[i])),
-                ("Role", role_label(c).to_string()),
-                ("Input", input_label(c)),
-                ("Preview", if self.supported[i] { "Frame preview".into() } else { "Not supported".into() }),
-                ("Settings", settings),
-            ].into_iter().enumerate() {
-                let ry = y + 68.5 + k as f32 * 23.0;
-                items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(78.0),
-                    ..TextItem::new(x0, ry, 11.0, WORKSPACE_DIM, key) }));
-                items.push(Item::Text(TextItem { regular: true, align: Align::Right, valign: VAlign::Middle, max_width: Some(l - 110.0),
-                    ..TextItem::new(x1, ry, 11.0, hex_color(0xa3a5a8), value) }));
+            for (n, r) in self.renders.iter().rev().enumerate() {
+                let row = self.render_row(n, vp);
+                if row.y + row.h < list.y || row.y > list.y + list.h {
+                    continue;
+                }
+                let current = self.current == Some(r.id);
+                let hover = over(row) && over(list);
+                let live = self.busy && self.rendering == r.id;
+                items.push(Item::Rect(RectItem { radius: 8.0, border_w: if current { 2.0 } else { 0.0 },
+                    border_color: hex_color(SOURCE_RING),
+                    ..RectItem::new(row, hex_color(if hover && !current { 0x0c0c0c } else { 0x030303 })) }));
+                let thumb = RectPx { x: row.x + 5.0, y: row.y + 5.0, w: 60.0, h: 34.0 };
+                if r.thumbed {
+                    items.push(Item::Thumb { r: thumb, slot: RENDER_THUMB_SLOT + r.slot, radius: 4.0,
+                        alpha: 1.0, cover: true, clip_poster: false });
+                } else {
+                    let amber = hex_color(RENDERING);
+                    let pulse = 0.25 + 0.3 * (0.5 + 0.5 * (self.busy_since.elapsed().as_secs_f32() * 4.5).sin());
+                    items.push(Item::Rect(RectItem { radius: 4.0, ..RectItem::new(thumb,
+                        if live { [amber[0], amber[1], amber[2], pulse] } else { hex_color(0x232323) }) }));
+                }
+                let bin = Self::render_delete(row);
+                let tx = thumb.x + thumb.w + 10.0;
+                let width = (bin.x - tx - 4.0).max(1.0);
+                let amount = match r.frames {
+                    0 => r.what.to_string(),
+                    1 => "1 frame".into(),
+                    n => format!("{n} frames"),
+                };
+                items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(width),
+                    ..TextItem::new(tx, row.y + 14.0, 11.0, hex_color(if current || hover { 0xe6e6e6 } else { 0xc0c0c0 }),
+                        format!("{} · {amount}", fmt_time(r.time))) }));
+                items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(width),
+                    ..TextItem::new(tx, row.y + 30.0, 10.0, if live { hex_color(RENDERING) } else { WORKSPACE_DIM },
+                        if live { "Rendering…" } else { r.chain.as_str() }) }));
+                draw_icon(items, Icon::Trash, bin.x + bin.w / 2.0, bin.y + bin.h / 2.0,
+                    if over(bin) && over(list) { hex_color(0xffffff) } else { WORKSPACE_DIM });
             }
-            items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(l - 32.0),
-                ..TextItem::new(x0, y + 195.0, 10.0, hex_color(INSPECTOR_PATH), d.id.as_str()) }));
             items.push(Item::Clip(None));
         }
         draw_rail_grip(items, grip, l, hit(grip, self.cursor.0, self.cursor.1));
+    }
+    /// Focused inspector (278:609), for the focused processor, under its
+    /// settings in the right column: the name as the title row, five mono
+    /// rows between solid hairlines (categories first) and the registry ID
+    /// where Sources puts the path.
+    fn draw_info(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
+        let pane = Self::info(vp);
+        if pane.h <= 0.0 || self.descriptors.is_empty() {
+            return;
+        }
+        let i = self.selected;
+        let d = &self.descriptors[i];
+        let c = self.capabilities[i];
+        let (y, x0, x1) = (pane.y, pane.x + 16.0, pane.x + pane.w - 16.0);
+        items.push(Item::Clip(Some(pane)));
+        items.push(Item::Rect(RectItem::new(pane, hex_color(INSPECTOR_BG))));
+        items.push(Item::Rect(RectItem::new(RectPx { h: 1.0, ..pane }, hex_color(0x303234))));
+        // The chain position as a round badge, the Sources keycap's place.
+        let badge = RectPx { x: x0, y: y + 16.0, w: 24.0, h: 24.0 };
+        items.push(Item::Rect(RectItem { radius: 12.0, ..RectItem::new(badge, hex_color(0xb4b4b8)) }));
+        items.push(Item::Text(TextItem { inspector: 2, align: Align::Center, valign: VAlign::Middle, max_width: Some(22.0),
+            ..TextItem::new(badge.x + 12.0, badge.y + 12.0, 14.0, hex_color(0x161616), (i + 1).to_string()) }));
+        items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(pane.w - 80.0),
+            ..TextItem::new(x0 + 32.0, y + 28.0, 13.0, hex_color(SOURCE_INK), d.name.as_str()) }));
+        for ry in [y + 49.0, y + 178.0] {
+            items.push(Item::Rect(RectItem::new(
+                RectPx { x: x0, y: ry, w: x1 - x0, h: 1.0 }, hex_color(0x303234))));
+        }
+        let settings = format!("{} fields · {} presets", self.fields.len(), d.presets.len());
+        for (k, (key, value)) in [
+            ("Category", category_label(&self.categories[i])),
+            ("Role", role_label(c).to_string()),
+            ("Input", input_label(c)),
+            ("Preview", if self.supported[i] { "Frame preview".into() } else { "Not supported".into() }),
+            ("Settings", settings),
+        ].into_iter().enumerate() {
+            let ry = y + 68.5 + k as f32 * 23.0;
+            items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(78.0),
+                ..TextItem::new(x0, ry, 11.0, WORKSPACE_DIM, key) }));
+            items.push(Item::Text(TextItem { regular: true, align: Align::Right, valign: VAlign::Middle, max_width: Some(pane.w - 110.0),
+                ..TextItem::new(x1, ry, 11.0, hex_color(0xa3a5a8), value) }));
+        }
+        items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(pane.w - 32.0),
+            ..TextItem::new(x0, y + 195.0, 10.0, hex_color(INSPECTOR_PATH), d.id.as_str()) }));
+        items.push(Item::Clip(None));
     }
     /// Use the dimensions and fit of the image actually displayed, including
     /// A/B source selection and the fullscreen viewer's different fit geometry.
@@ -2761,17 +3214,19 @@ impl Panel {
         items.push(Item::Rect(RectItem { radius: 2.0,
             ..RectItem::new(RectPx { w: track.w * fraction, ..track }, ACCENT) }));
         let at = |pts: f64| t.x + t.w * (pts / self.duration.max(0.001)).clamp(0.0, 1.0) as f32;
-        for f in &self.frames {
-            let x = at(f.pts);
-            items.push(Item::Rect(RectItem::new(
-                RectPx {
-                    x: x - 2.0,
-                    y: t.y + 6.0,
-                    w: 4.0,
-                    h: 16.0,
-                },
-                BLUE,
-            )));
+        // One mark per render: a tick for a frame, a block for a stretch.
+        let spans = self.spans();
+        for &(id, from, to) in &spans {
+            let (x, end) = (at(from), at(to));
+            let colour = if self.current == Some(id) { hex_color(0x2b8cf0) } else { BLUE };
+            let single = self.frames.iter().filter(|f| f.render == id).take(2).count() < 2;
+            let mark = if single || end - x < 4.0 {
+                RectPx { x: x - 2.0, y: t.y + 6.0, w: 4.0, h: 16.0 }
+            } else {
+                RectPx { x, y: t.y + 6.0, w: end - x, h: 16.0 }
+            };
+            items.push(Item::Rect(RectItem { radius: 1.0, ..RectItem::new(mark,
+                if single { colour } else { [colour[0], colour[1], colour[2], 0.6] }) }));
         }
         // The frame being rendered: amber, breathing while the worker runs,
         // with the temporal context it is decoding sweeping in from the
@@ -2799,7 +3254,7 @@ impl Panel {
         ui_label(items, t.x, t.y + 37.0, 11.0, WORKSPACE_TEXT,
             format!("{} / {}", fmt_time(self.time), fmt_time(self.duration)), Align::Left, t.w * 0.55);
         ui_label(items, t.x + t.w, t.y + 37.0, 10.0, WORKSPACE_DIM,
-            format!("frame {} · {} rendered", (self.time * self.rate).round() as i64, self.frames.len()),
+            format!("frame {} · {} rendered", (self.time * self.rate).round() as i64, spans.len()),
             Align::Right, t.w * 0.45);
         self.draw_footer(items, vp);
         self.draw_settings(items, vp);
@@ -2920,8 +3375,14 @@ impl Panel {
                 None => "Frame preview",
             }
         };
-        let fraction = if self.busy {
-            self.feedback.as_ref().and_then(StageFeedback::fraction)
+        // A stretch counts its frames: the stage's own progress restarts on
+        // every frame, so the bar shows the whole render instead.
+        let many = self.busy && self.expected != 1;
+        let stage = self.feedback.as_ref().and_then(StageFeedback::fraction);
+        let fraction = if self.busy && self.expected > 1 {
+            Some(((self.preview_count as f32 + stage.unwrap_or(0.0)) / self.expected as f32).min(1.0))
+        } else if self.busy {
+            stage
         } else {
             self.render_result.filter(|ok| *ok).map(|_| 1.0)
         };
@@ -2936,7 +3397,7 @@ impl Panel {
             self.feedback.as_ref().filter(|f| !f.progress.phase.trim().is_empty())
                 .map_or_else(|| self.status.clone(), |f| format!("{} · {}", self.status, f.progress.phase))
         } else {
-            "Render frame to preview the enabled chain".into()
+            format!("Render {} to preview the enabled chain", LENGTHS[self.length].1)
         };
         items.push(Item::Rect(RectItem { radius: 7.0, border_w: 1.0,
             border_color: hex_color(0x303235),
@@ -2944,7 +3405,20 @@ impl Panel {
         let heading = if self.busy || self.render_result.is_some() {
             format!("{title} · {:.1}s", elapsed.as_secs_f64())
         } else { title.into() };
-        ui_label(items, r.x + 12.0, r.y + 16.0, 11.0, ink, &heading, Align::Left, (r.w - 128.0).max(1.0));
+        ui_label(items, r.x + 12.0, r.y + 16.0, 11.0, ink, &heading, Align::Left,
+            (Self::loop_button(vp).x - r.x - 24.0).max(1.0));
+        // How much one press renders from the playhead, and whether a
+        // stretch then plays in a loop.
+        let over = |b: RectPx| hit(b, self.cursor.0, self.cursor.1);
+        let inset = |b: RectPx| RectPx { x: b.x + 1.0, w: b.w - 2.0, ..b };
+        let looped = Self::loop_button(vp);
+        if looped.x > r.x + 8.0 {
+            crate::app::draw_canvas_button(items, inset(looped), "Loop", self.loop_preview, over(looped), false);
+            for (i, (label, ..)) in LENGTHS.iter().enumerate() {
+                let b = Self::length_button(vp, i);
+                crate::app::draw_canvas_button(items, inset(b), label, self.length == i, over(b), false);
+            }
+        }
         // The panel's primary action: a filled blue button that lifts under
         // the pointer; while rendering it turns into an amber-outlined Cancel.
         let control = Self::progress_button(vp);
@@ -2960,9 +3434,16 @@ impl Panel {
         ui_label(items, control.x + control.w / 2.0, control.y + control.h / 2.0, 11.0,
             control_ink, if self.busy { "Cancel" } else { "Render" }, Align::Center, control.w - 12.0);
         let mut line = phase;
+        if many {
+            let at = self.preview_count as usize + 1;
+            line = if self.expected > 1 {
+                format!("Frame {} of {} · {line}", at.min(self.expected), self.expected)
+            } else { format!("Frame {at} · {line}") };
+        }
         if let Some(fraction) = fraction {
-            line = format!("{line} · {}", if self.busy {
-                format!("{:.0}% of stage", (fraction * 100.0).floor()) } else { "100%".into() });
+            line = format!("{line} · {}", if !self.busy { "100%".into() }
+                else if self.expected > 1 { format!("{:.0}% overall", (fraction * 100.0).floor()) }
+                else { format!("{:.0}% of stage", (fraction * 100.0).floor()) });
         }
         let metrics = if self.busy {
             let now = Instant::now();
@@ -3048,7 +3529,7 @@ impl Panel {
         draw_cut_footer_button(
             items,
             b,
-            if self.busy { "Rendering…" } else { "Render frame" },
+            if self.busy { "Rendering…" } else { ["Render frame", "Render 5 frames", "Render 1 sec", "Render 5 sec"][self.length] },
             "R",
             false,
             hit(b, self.cursor.0, self.cursor.1),
@@ -3059,7 +3540,7 @@ impl Panel {
         draw_cut_footer_button(items, span, "Render segment", "⇧R", false,
             hit(span, self.cursor.0, self.cursor.1), false);
         let export = footer_export_rect(vp, span.x + span.w + 8.0);
-        let hint = "[ ] source   + duplicate   ← → frame   native 8-bit SDR";
+        let hint = "[ ] source   + duplicate   ← → frame   ` renders   native 8-bit SDR";
         let hint_w = if vp.0 >= 1220.0 + status_build_width() { 400.0 } else { 0.0 };
         let x = span.x + span.w + 14.0;
         let status_w = export.x - 12.0 - x - hint_w;
@@ -3135,6 +3616,70 @@ mod tests {
         p.changed();
         assert!(p.frames.is_empty(), "evicted chains render afresh");
         assert_eq!(p.stash.len(), 1);
+    }
+    #[test]
+    fn renders_restore_their_chain_cycle_loop_and_delete() {
+        let mut r = Registry::default();
+        r.register(Box::new(Named("example.a"))).unwrap();
+        r.register(Box::new(Named("example.b"))).unwrap();
+        let mut p = Panel::new(r);
+        p.enter();
+        // What the worker's frames do on arrival: stamped with the render.
+        let deliver = |p: &mut Panel, from: f64, n: usize| {
+            for k in 0..n {
+                let mut f = mark(from + k as f64 / 24.0);
+                f.render = p.rendering;
+                p.frames.push(f);
+            }
+            p.prune_renders();
+        };
+        p.toggle_enabled(0);
+        p.settings["strength"] = json!(0.8);
+        p.changed();
+        p.begin_render(1.0, "frame");
+        deliver(&mut p, 1.0, 1);
+        let first = p.rendering;
+        // A second render through another chain: b on, focused and moved first.
+        p.select(1);
+        p.toggle_enabled(1);
+        p.move_selected(-1);
+        p.length = 1;
+        assert!(!p.loop_preview);
+        p.request_preview();
+        assert!(p.loop_preview, "rendering more than one frame switches Loop on");
+        p.begin_render(2.0, "5 frames");
+        deliver(&mut p, 2.0, 5);
+        let second = p.rendering;
+        assert_eq!(p.renders.iter().map(|r| r.frames).collect::<Vec<_>>(), [1, 5]);
+        assert_eq!(p.spans().len(), 1, "five frames are one mark on the seekbar");
+        let (from, to) = p.loop_range().unwrap();
+        assert!(from == 2.0 && to > 2.0 + 4.0 / 24.0 && to < 2.0 + 5.0 / 24.0);
+        // Reopening the first puts the order, switches, settings, focus and
+        // playhead back, and its frame returns with the chain.
+        p.seek = None;
+        p.open_render(first);
+        assert_eq!(p.descriptors[0].id, "example.a");
+        assert_eq!(p.enabled, [true, false]);
+        assert_eq!(p.selected, 0);
+        assert_eq!(p.settings["strength"], json!(0.8));
+        assert_eq!(p.seek, Some(1.0));
+        assert_eq!((p.frames.len(), p.current), (1, Some(first)));
+        assert!(p.loop_range().is_none(), "one frame has nothing to loop");
+        // ` wraps from the oldest to the newest; a looping stretch plays.
+        assert!(p.key(Key::Char('`')));
+        assert_eq!(p.current, Some(second));
+        assert_eq!(p.descriptors[0].id, "example.b");
+        assert_eq!(p.enabled, [true, true]);
+        assert_eq!(p.frames.len(), 5);
+        assert_eq!(p.take_autoplay(), Some(2.0));
+        p.delete_render(second);
+        assert!(p.frames.is_empty() && p.current.is_none());
+        assert_eq!(p.renders.len(), 1);
+        // A render whose frames are gone leaves the list.
+        p.open_render(first);
+        p.frames.clear();
+        p.prune_renders();
+        assert!(p.renders.is_empty());
     }
     #[test]
     fn actual_zoom_matches_displayed_upscaled_pixels() {
@@ -3697,7 +4242,7 @@ mod tests {
         let value=slider_value(row);
         panel.click(value.x+value.w/2.,value.y+10.,vp);
         assert!(panel.editing.is_some() && panel.dragging.is_none());
-        panel.shortcut('a');panel.text_input("0.25");panel.key(Key::Enter);
+        panel.edit_text(crate::text_edit::Edit::SelectAll);panel.text_input("0.25");panel.key(Key::Enter);
         assert_eq!(panel.settings["strength"],json!(0.25));
         assert_eq!(row.h,36.);
         assert_eq!(panel.settings_height(),132.,"all regular settings share the compact pitch");
@@ -3715,7 +4260,7 @@ mod tests {
         panel.text_input("/child");panel.key(Key::Enter);
         assert_eq!(panel.settings["path"], json!("/tmp/example/child"));
         panel.click(row.x + 20.0, row.y + 25.0, vp);
-        panel.shortcut('a');panel.text_input("replacement");panel.key(Key::Enter);
+        panel.edit_text(crate::text_edit::Edit::SelectAll);panel.text_input("replacement");panel.key(Key::Enter);
         assert_eq!(panel.settings["path"], json!("replacement"));
         panel.close();
         assert!(panel.cancel.check().is_err());
@@ -4142,6 +4687,7 @@ mod tests {
             duration: 1.0 / 24.0,
             source_pts: pts,
             elapsed: 1.0,
+            render: pts.to_bits(),
         }
     }
     #[test]
@@ -4336,6 +4882,14 @@ mod tests {
         let frames: Vec<_> = rx.try_iter().filter_map(|e| match e { Event::Frame(_, f) => Some(f), _ => None }).collect();
         assert_eq!(frames.len(), 15);
         assert!(frames.iter().all(|f| f.pts >= 0.5 && f.pts < 1.0));
+        // A length picked beside Render: five frames from frame 10, asked
+        // for the way `tick` does, half a frame around the span.
+        request.start = 9.5 / 30.0;
+        request.end = Some(14.5 / 30.0);
+        render(&Registry::default(), &request, &tx, None, None).unwrap();
+        let frames: Vec<_> = rx.try_iter().filter_map(|e| match e { Event::Frame(_, f) => Some(f), _ => None }).collect();
+        assert_eq!(frames.len(), 5);
+        assert!((frames[0].pts - 10.0 / 30.0).abs() < 1e-4);
         let mut panel = Panel::default();
         panel.open = true;
         panel.segment_start = 0.5;
@@ -4498,10 +5052,10 @@ mod tests {
         panel.settings["strength"]=json!(0.75);
         click(&mut panel,3);assert_eq!(panel.preset_name.as_deref(),Some("Custom 1"));
         panel.text_input(" extended");assert_eq!(panel.preset_name.as_deref(),Some("Custom 1 extended"));
-        panel.shortcut('a');click(&mut panel,0);panel.text_input(" again");
+        panel.edit_text(crate::text_edit::Edit::SelectAll);click(&mut panel,0);panel.text_input(" again");
         assert_eq!(panel.preset_name.as_deref(),Some("Custom 1 extended again"));
         panel.key(Key::Backspace);assert_eq!(panel.preset_name.as_deref(),Some("Custom 1 extended agai"));
-        panel.shortcut('a');panel.text_input("Soft restoration");panel.key(Key::Enter);
+        panel.edit_text(crate::text_edit::Edit::SelectAll);panel.text_input("Soft restoration");panel.key(Key::Enter);
         assert!(panel.preset_name.is_none());assert_eq!(panel.user_presets.len(),1);
         let file=panel.user_presets.values().next().unwrap().clone();assert!(file.is_file());
         let mut reloaded=Panel::with_presets(registry(),Some(root.clone()));reloaded.open=true;
@@ -4519,6 +5073,9 @@ mod tests {
 }
 
 /// Attach to the label so placement uses the renderer's font metrics.
-fn set_caret(items: &mut [Item], visible: bool) {
-    if let Some(Item::Text(text)) = items.last_mut() { text.caret = visible; }
+fn set_caret(items: &mut [Item], cursor: &crate::text_edit::Cursor, visible: bool) {
+    if let Some(Item::Text(text)) = items.last_mut() {
+        text.caret = Some(cursor.position(&text.text));
+        text.caret_visible = visible && !cursor.selected();
+    }
 }

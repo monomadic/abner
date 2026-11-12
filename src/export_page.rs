@@ -5,6 +5,7 @@ use crate::{
     probe::VideoInfo,
     render::{Align, Item, RectItem, RectPx, Upload, VideoMode},
 };
+use crate::text_edit::{Cursor, Edit};
 use abner_processor_api::{Cancellation, Registry};
 use std::{
     collections::VecDeque,
@@ -122,7 +123,7 @@ pub(crate) struct Page {
     pub status: String,
     destination: Option<PathBuf>,
     filename_edit: Option<String>,
-    filename_selected: bool,
+    filename_cursor: Cursor,
     path: Option<PathBuf>,
     pub duration: f64,
     count: u64,
@@ -154,7 +155,7 @@ impl Default for Page {
             status: "Choose a preset and export the enabled pipeline.".into(),
             destination: None,
             filename_edit: None,
-            filename_selected: false,
+            filename_cursor: Cursor::default(),
             path: None,
             duration: 0.,
             count: 0,
@@ -228,22 +229,22 @@ impl Page {
         let ext = self.container.extension();
         self.destination = Some(dir.join(format!("{stem}.{ext}")));
         self.filename_edit = None;
-        self.filename_selected = false;
+        self.filename_cursor = Cursor::default();
         true
     }
     pub fn text_input(&mut self, text: &str) -> bool {
         if !self.editing_filename() { return false; }
         let value = self.filename_edit.as_mut().unwrap();
-        if self.filename_selected { value.clear(); self.filename_selected = false; }
-        value.extend(text.chars().filter(|c| !c.is_control() && !matches!(c, '/' | ':')));
+        let filtered: String = text.chars().filter(|c| !c.is_control() && !matches!(c, '/' | ':')).collect();
+        self.filename_cursor.insert(value, &filtered, usize::MAX);
         true
     }
-    pub fn shortcut(&mut self, c: char) -> bool {
+    pub(crate) fn edit_text(&mut self, edit: Edit) -> bool {
         if !self.editing_filename() { return false; }
-        match c.to_ascii_lowercase() {
-            'a' => self.filename_selected = true,
-            'v' => { if let Some(text) = crate::open::paste_text() { self.text_input(&text); } }
-            _ => {}
+        if matches!(edit, Edit::Paste) {
+            if let Some(text) = crate::open::paste_text() { self.text_input(&text); }
+        } else {
+            self.filename_cursor.apply(self.filename_edit.as_mut().unwrap(), edit);
         }
         true
     }
@@ -557,12 +558,11 @@ impl Page {
     pub fn key(&mut self, k: Key) -> bool {
         if self.editing_filename() {
             match k {
-                Key::Escape => { self.filename_edit = None; self.filename_selected = false; }
+                Key::Escape => { self.filename_edit = None; self.filename_cursor = Cursor::default(); }
                 Key::Enter | Key::Tab => { self.finish_filename(); }
-                Key::Backspace => {
-                    let value = self.filename_edit.as_mut().unwrap();
-                    if self.filename_selected { value.clear(); self.filename_selected = false; } else { value.pop(); }
-                }
+                Key::Backspace => { self.edit_text(Edit::Backspace); }
+                Key::Left => { self.edit_text(Edit::Left); }
+                Key::Right => { self.edit_text(Edit::Right); }
                 Key::Char(c) => { self.text_input(&c.to_string()); }
                 Key::Space => { self.text_input(" "); }
                 _ => {}
@@ -642,7 +642,7 @@ impl Page {
             Action::EditFilename if !self.busy() => {
                 if self.filename_edit.is_none() {
                     self.filename_edit = Some(self.destination_name());
-                    self.filename_selected = false;
+                    self.filename_cursor = Cursor::default();
                 }
             }
             Action::Preset(p) if !self.busy() => {
@@ -894,9 +894,10 @@ impl Page {
             } else { t.to_string() };
             if a == Action::EditFilename {
                 items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle,
-                    caret: self.filename_edit.is_some() && !self.filename_selected,
+                    caret: self.filename_edit.as_ref().map(|name| self.filename_cursor.position(name)),
+                    caret_visible: !self.filename_cursor.selected(),
                     max_width: Some(r.w - 16.),
-                    color: if self.filename_selected { ACCENT } else { ink },
+                    color: if self.filename_cursor.selected() { ACCENT } else { ink },
                     ..TextItem::new(r.x + 8., r.y + r.h / 2., 10., if disabled { dim } else { ink }, title) }));
             } else {
                 ui_label(items, r.x + r.w / 2., r.y + r.h / 2., 11.,
@@ -1165,17 +1166,17 @@ mod tests {
         p.apply(Action::EditFilename);
         p.text_input(" extra");
         assert_eq!(p.filename_edit.as_deref(), Some("source.export.mp4 extra"));
-        p.shortcut('a');
+        p.edit_text(Edit::SelectAll);
         p.text_input("My render.mp4");
         p.key(Key::Enter);
         assert_eq!(p.destination, Some(PathBuf::from("/clips/My render.mp4")));
         p.apply(Action::EditFilename);
-        p.shortcut('a');
+        p.edit_text(Edit::SelectAll);
         p.text_input("discard");
         p.key(Key::Escape);
         assert_eq!(p.destination_name(), "My render.mp4");
         p.apply(Action::EditFilename);
-        p.shortcut('a');
+        p.edit_text(Edit::SelectAll);
         p.key(Key::Backspace);
         assert!(!p.finish_filename());
         p.text_input("final");

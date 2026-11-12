@@ -32,6 +32,67 @@ fn ten_bit_decode_keeps_precision_below_eight_bit() {
     );
     assert!(rgb.iter().any(|v| v % 257 != 0));
 }
+fn flat_10bit(code: [u16; 3], color: filmcraft_color::ColorInfo) -> VideoFrame {
+    VideoFrame {
+        width: 2,
+        height: 2,
+        data: PixelData::Yuv16 {
+            planes: [
+                Arc::new(vec![code[0]; 4]),
+                Arc::new(vec![code[1]]),
+                Arc::new(vec![code[2]]),
+            ],
+            chroma: filmcraft_frame::Chroma::C420,
+            bits: 10,
+            alpha: None,
+        },
+        color,
+        par: (1, 1),
+        pts: Tick::ZERO,
+    }
+}
+#[test]
+fn hlg_and_wide_gamut_sources_convert_to_sdr_rec709() {
+    use filmcraft_color::{ColorInfo, Matrix, Primaries, Range, Transfer};
+    let hlg = ColorInfo {
+        matrix: Matrix::Bt2020Ncl,
+        transfer: Transfer::Hlg,
+        primaries: Primaries::Bt2020,
+        range: Range::Limited,
+    };
+    assert!(processable(&hlg) && processable(&ColorInfo::REC709));
+    // Neutral HLG stays neutral, rises monotonically, and peak white maps to SDR white.
+    let grey = |y| rgb16(&flat_10bit([y, 512, 512], hlg)).unwrap();
+    let (black, mid, white) = (grey(64), grey(502), grey(940));
+    for px in [&black, &mid, &white] {
+        assert!(px[0].abs_diff(px[1]) <= 2 && px[1].abs_diff(px[2]) <= 2, "{px:?}");
+    }
+    assert!(black[0] < 64 && white[0] > 65000, "{} {}", black[0], white[0]);
+    // HLG 75% signal is HDR reference white (203 cd/m2): bright, but below the SDR peak so
+    // highlights above it keep separation.
+    let reference = grey(64 + (0.75f32 * 876.) as u16)[0];
+    assert!(mid[0] < reference && reference < white[0]);
+    assert!((45000..64000).contains(&reference), "{reference}");
+    // BT.2020 SDR: neutrals are unchanged against the Rec.709 path apart from the matrix.
+    let sdr2020 = ColorInfo {
+        transfer: Transfer::Bt709,
+        ..hlg
+    };
+    let a = rgb16(&flat_10bit([502, 512, 512], sdr2020)).unwrap();
+    let b = rgb16(&flat_10bit([502, 512, 512], ColorInfo::REC709)).unwrap();
+    assert!(a[0].abs_diff(b[0]) <= 16, "{} {}", a[0], b[0]);
+    // A saturated BT.2020 colour lands inside Rec.709 without wrapping.
+    let red = rgb16(&flat_10bit([300, 400, 900], sdr2020)).unwrap();
+    assert!(red[0] > red[1] && red[0] > red[2]);
+    // Spaces without a defined conversion still fail explicitly.
+    let linear = ColorInfo {
+        transfer: Transfer::Linear,
+        ..ColorInfo::REC709
+    };
+    assert!(!processable(&linear) && rgb16(&flat_10bit([502, 512, 512], linear)).is_err());
+    let planes = crate::color::from_decoded(&flat_10bit([502, 512, 512], hlg), 0, 1, [1, 30]).unwrap();
+    assert_eq!(planes.format, abner_processor_api::PixelFormat::Rgb16);
+}
 #[test]
 fn exact_timebase_conversion_rejects_rounding() {
     assert_eq!(exact_ticks(1001, [1, 30000], 60000).unwrap(), 2002);

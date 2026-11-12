@@ -2,7 +2,10 @@
 //! and packet-preserving audio; no external media programs or display buffers.
 use crate::{Chain, Stage};
 use abner_processor_api::{Cancellation, Registry, Result};
-use filmcraft_color::{Matrix, Transfer, normalize_c, normalize_y, rgb_to_ycbcr, ycbcr_to_rgb};
+use filmcraft_color::{
+    Matrix, Transfer, normalize_c, normalize_y, rgb_to_ycbcr, transform::InputTransform,
+    ycbcr_to_rgb,
+};
 use filmcraft_frame::{PixelData, VideoFrame};
 use filmcraft_isobmff::{
     self as mp4, Brand, FourCc, Mp4Writer, SampleEntry, TrackConfig, TrackKind, WriteSample,
@@ -81,33 +84,60 @@ impl Drop for Work {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
-/// Convert encoded SDR planes to encoded RGB16, without a display transfer/linear-light round trip.
+/// Whether processors can receive this source: SDR Rec.709 directly, or BT.2020 / Display P3
+/// SDR and PQ / HLG HDR through [`sdr_transform`].
+pub fn processable(color: &filmcraft_color::ColorInfo) -> bool {
+    is_rec709(color) || sdr_transform(color).is_some()
+}
+fn is_rec709(color: &filmcraft_color::ColorInfo) -> bool {
+    color.transfer == Transfer::Bt709 && color.primaries == filmcraft_color::Primaries::Bt709
+}
+/// Wide-gamut and HDR sources enter the SDR Rec.709 processor contract through Filmcraft's
+/// input transform: BT.2100 HLG OOTF or PQ at a nominal 1000 cd/m² peak, BT.2390 tone mapping
+/// to SDR white, and desaturation of out-of-gamut colours. `None` for Rec.709 (no transform)
+/// and for spaces without a defined conversion here.
+fn sdr_transform(color: &filmcraft_color::ColorInfo) -> Option<InputTransform> {
+    use filmcraft_color::{ColorPipeline, ColorSpace};
+    if is_rec709(color) || !matches!(color.transfer, Transfer::Bt709 | Transfer::Pq | Transfer::Hlg)
+    {
+        return None;
+    }
+    let space = ColorSpace::from_info(color);
+    matches!(
+        space,
+        ColorSpace::Rec2020 | ColorSpace::P3D65 | ColorSpace::Rec2100Pq | ColorSpace::Rec2100Hlg
+    )
+    .then(|| InputTransform::new(space, color.range, &ColorPipeline::REC709, None))
+}
+/// Convert encoded planes to encoded SDR Rec.709 RGB16. Rec.709 sources skip the display
+/// transfer/linear-light round trip; wide-gamut and HDR sources go through [`sdr_transform`].
 pub fn rgb16(frame: &VideoFrame) -> Result<Vec<u16>> {
     let (w, h) = (frame.width as usize, frame.height as usize);
-    if w == 0
-        || h == 0
-        || w > 8192
-        || h > 8192
-        || frame.color.transfer != Transfer::Bt709
-        || frame.color.primaries != filmcraft_color::Primaries::Bt709
+    let transform = sdr_transform(&frame.color);
+    if w == 0 || h == 0 || w > 8192 || h > 8192 || !(is_rec709(&frame.color) || transform.is_some())
     {
-        return Err("requires SDR Rec.709 dimensions 1..8192".into());
+        return Err("requires Rec.709, BT.2020, Display P3, PQ or HLG video, dimensions 1..8192".into());
     }
     let mut out = vec![0; w * h * 3];
     let mut pixel = |p: usize, y: u32, u: u32, v: u32, bits: u32| {
-        let rgb = ycbcr_to_rgb(
+        let mut rgb = ycbcr_to_rgb(
             normalize_y(y, bits, frame.color.range),
             normalize_c(u, bits, frame.color.range),
             normalize_c(v, bits, frame.color.range),
             frame.color.matrix,
         );
+        if let Some(t) = &transform {
+            rgb = t
+                .convert(rgb.map(|v| v.clamp(0., 1.)))
+                .map(|v| filmcraft_color::linear_to_srgb(v.clamp(0., 1.)));
+        }
         for c in 0..3 {
             out[p * 3 + c] = (rgb[c].clamp(0., 1.) * 65535.).round_ties_even() as u16;
         }
     };
     match &frame.data {
         PixelData::Rgba8(data) => {
-            if data.len() != w * h * 4 {
+            if data.len() != w * h * 4 || transform.is_some() {
                 return Err("invalid RGBA frame".into());
             }
             for (p, rgba) in data.as_chunks::<4>().0.iter().enumerate() {
@@ -461,12 +491,11 @@ pub fn run(
         .video
         .as_ref()
         .ok_or("missing decoded video")?;
-    if info.color.primaries != filmcraft_color::Primaries::Bt709
-        || info.color.transfer != Transfer::Bt709
-        || info.has_alpha
-        || info.hdr.is_some()
-    {
-        return Err("native processor input requires SDR Rec.709 without alpha".into());
+    if !processable(&info.color) || info.has_alpha {
+        return Err(
+            "native processor input requires Rec.709, BT.2020, Display P3, PQ or HLG video without alpha"
+                .into(),
+        );
     }
     let parent = job
         .output

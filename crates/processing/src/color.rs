@@ -3,7 +3,8 @@ use abner_processor_api::{FramePixels, PixelFormat, Result, VideoFrame};
 use filmcraft_frame::{Chroma, PixelData};
 use std::sync::Arc;
 
-/// Preserve supported decoder planes; other SDR layouts take the explicit RGB16 fallback.
+/// Preserve supported Rec.709 decoder planes; other layouts, wide gamut and HDR take the
+/// explicit SDR Rec.709 RGB16 conversion.
 pub fn from_decoded(
     frame: &filmcraft_frame::VideoFrame,
     pts: i64,
@@ -12,15 +13,13 @@ pub fn from_decoded(
 ) -> Result<VideoFrame> {
     use PixelFormat::*;
     let color = frame.color;
-    if color.primaries != filmcraft_color::Primaries::Bt709
-        || color.transfer != filmcraft_color::Transfer::Bt709
-    {
-        return Err("requires SDR Rec.709".into());
-    }
-    let planar = color.matrix == filmcraft_color::Matrix::Bt709
+    let rec709 = color.primaries == filmcraft_color::Primaries::Bt709
+        && color.transfer == filmcraft_color::Transfer::Bt709;
+    let planar = rec709
+        && color.matrix == filmcraft_color::Matrix::Bt709
         && color.range == filmcraft_color::Range::Limited;
     let (format, pixels) = match &frame.data {
-        PixelData::Rgba8(p) => (Rgba8, FramePixels::Rgba8(p.clone())),
+        PixelData::Rgba8(p) if rec709 => (Rgba8, FramePixels::Rgba8(p.clone())),
         PixelData::Yuv8 {
             planes,
             chroma: Chroma::C420,

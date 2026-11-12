@@ -63,6 +63,7 @@ dependencies = [
  "serde",
  "serde_json",
  "toml",
+ "unicode-segmentation",
  "wgpu",
  "winit",
 ]

@@ -132,7 +132,11 @@ const FRAME_ICON_SVGS: [&[u8]; 6] = [
     include_bytes!("../assets/frame-icons/p.svg"), include_bytes!("../assets/frame-icons/b.svg"),
     include_bytes!("../assets/spatial-icons/mask.svg"), include_bytes!("../assets/spatial-icons/crop.svg"),
 ];
-const THUMB_ROWS: usize = (recent::ATLAS + FRAME_ICON_SVGS.len()).div_ceil(recent::ATLAS_COLS);
+/// The Process page's render snapshots: `RENDER_THUMBS` atlas cells after the
+/// frame icons, so the recent row and the timeline strip never share them.
+pub const RENDER_THUMBS: usize = 24;
+pub const RENDER_THUMB_SLOT: usize = recent::ATLAS + FRAME_ICON_SVGS.len();
+const THUMB_ROWS: usize = (RENDER_THUMB_SLOT + RENDER_THUMBS).div_ceil(recent::ATLAS_COLS);
 const ICON_SCALE: f32 = 4.0;
 
 fn frame_icon_tree(index: usize) -> resvg::usvg::Tree {
@@ -337,8 +341,9 @@ pub struct TextItem {
     pub bg: Option<TextBg>,
     /// Floating help is painted last, without inheriting canvas/panel scissors.
     pub tooltip: bool,
-    /// Draw an insertion caret after the measured text run.
-    pub caret: bool,
+    /// UTF-8 byte offset of the caret in a focused single-line field.
+    pub caret: Option<usize>,
+    pub caret_visible: bool,
     /// Maximum logical width, ellipsized using the renderer's font metrics.
     pub max_width: Option<f32>,
     /// Word-wrap into lines no wider than this (logical px), measured by the
@@ -361,7 +366,8 @@ impl TextItem {
             tracking: 0.0,
             bg: None,
             tooltip:false,
-            caret: false,
+            caret: None,
+            caret_visible: false,
             max_width: None,
             wrap: None,
         }
@@ -1123,7 +1129,7 @@ impl Gpu {
 
     /// A finished thumbnail into its cell of the recent row's atlas.
     fn upload_thumb(&mut self, up: &ThumbUpload) {
-        if up.slot >= recent::ATLAS + FRAME_ICON_SVGS.len() || up.buf.len() != (THUMB_W * THUMB_H * 4) as usize {
+        if up.slot >= RENDER_THUMB_SLOT + RENDER_THUMBS || up.buf.len() != (THUMB_W * THUMB_H * 4) as usize {
             log::warn!("bad thumbnail upload: slot {} {}B", up.slot, up.buf.len());
             return;
         }
@@ -1499,9 +1505,10 @@ impl Gpu {
                     self.text.set_header(t.header);
                     self.text.set_regular(t.regular);
                     self.text.set_inspector(t.inspector);
-                    let lines: Vec<String> = match t.wrap {
-                        Some(w) => self.text.wrap(&t.text, t.px * scale, t.tracking * scale, w * scale),
-                        None => vec![t.max_width.map_or_else(
+                    let lines: Vec<String> = match (t.caret, t.wrap) {
+                        (Some(_), _) => vec![t.text.clone()],
+                        (None, Some(w)) => self.text.wrap(&t.text, t.px * scale, t.tracking * scale, w * scale),
+                        (None, None) => vec![t.max_width.map_or_else(
                             || t.text.clone(),
                             |w| self.text.fit(&t.text, t.px * scale, t.tracking * scale, w * scale),
                         )],
@@ -1513,7 +1520,7 @@ impl Gpu {
                     let lead = (line_h * 1.3).round();
                     let tw = laid.iter().map(|l| l.w).fold(0.0, f32::max) / scale;
                     let th = line_h + lead * laid.len().saturating_sub(1) as f32;
-                    let x0 = match t.align {
+                    let mut x0 = match t.align {
                         Align::Left => t.x,
                         Align::Center => t.x - tw / 2.0,
                         Align::Right => t.x - tw,
@@ -1523,6 +1530,26 @@ impl Gpu {
                         VAlign::Middle => t.y - th / 2.0,
                         VAlign::Bottom => t.y - th,
                     };
+                    let caret_width = t.caret.and_then(|at| t.text.get(..at)).map_or(tw, |prefix| {
+                        self.text.layout(prefix, t.px * scale, t.tracking * scale).w / scale
+                    });
+                    let mut clip = clip;
+                    if let Some(width) = t.max_width.filter(|_| t.caret.is_some()) {
+                        let left = match t.align {
+                            Align::Left => t.x,
+                            Align::Center => t.x - width / 2.0,
+                            Align::Right => t.x - width,
+                        };
+                        if tw + 2.0 > width {
+                            let scroll = (caret_width + 2.0 - width).clamp(0.0, tw + 2.0 - width);
+                            x0 = left - scroll;
+                        }
+                        let [x, _, w, _] = scissor(RectPx { x: left, y: 0., w: width, h: 0. },
+                            scale, self.config.width, self.config.height);
+                        let [cx, cy, cw, ch] = clip.unwrap_or([0, 0, self.config.width, self.config.height]);
+                        let start = x.max(cx);
+                        clip = Some([start, cy, (x + w).min(cx + cw).saturating_sub(start), ch]);
+                    }
                     if let Some(bg) = &t.bg {
                         let chip = RectPx {
                             x: x0 - bg.pad_x,
@@ -1531,10 +1558,11 @@ impl Gpu {
                             h: th + bg.pad_y * 2.0,
                         };
                         if t.tooltip {
-                            let blur=8.;let spread=blur*1.5;
+                            let blur = 8.;
+                            let spread = blur * 1.5;
                             push(&mut data,&mut batches,clip,None,Instance {
                                 pos:[chip.x-spread,chip.y+3.-spread],size:[chip.w+2.*spread,chip.h+2.*spread],
-                                uv:[0.;4],color:[0.,0.,0.,0.55],mode:16.,p0:spread,p1:blur,pad:0.,
+                                uv:[0.;4],color:[0.,0.,0.,0.55],mode:16.,p0:spread,p1:blur,pad:-1. - bg.radius,
                             });
                         } else if bg.shadow[3] > 0.0 {
                             let mut sh = chip;
@@ -1553,9 +1581,9 @@ impl Gpu {
                             ..Default::default()
                         }));
                     }
-                    if t.caret {
+                    if t.caret.is_some() && t.caret_visible {
                         push(&mut data, &mut batches, clip, None, rect_inst(&RectItem::new(
-                            RectPx { x: ((x0 + tw + 1.0) * scale).round() / scale,
+                            RectPx { x: ((x0 + caret_width + 1.0) * scale).round() / scale,
                                 y: y0, w: 1.0 / scale, h: th.max(t.px) }, t.color,
                         )));
                     }

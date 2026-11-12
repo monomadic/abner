@@ -12,6 +12,7 @@ mod processor_gui;
 mod resample;
 mod processor_presets;
 mod export_page;
+mod text_edit;
 mod app;
 mod config;
 mod cut;
@@ -43,6 +44,7 @@ use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey};
+use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::{CursorIcon, Window, WindowId};
 
 use app::{App, Cmd, Key, Video};
@@ -845,6 +847,36 @@ impl ApplicationHandler for Runner {
                 if event.state != ElementState::Pressed {
                     return;
                 }
+                use text_edit::Edit;
+                let command = self.mods.super_key();
+                let control = self.mods.control_key();
+                let line_edge = command || self.mods.alt_key();
+                let edit = match event.key_without_modifiers() {
+                    WinitKey::Named(NamedKey::ArrowLeft) => Some(if line_edge { Edit::Start } else { Edit::Left }),
+                    WinitKey::Named(NamedKey::ArrowRight) => Some(if line_edge { Edit::End } else { Edit::Right }),
+                    WinitKey::Named(NamedKey::Backspace) => Some(if command { Edit::DeleteToStart } else { Edit::Backspace }),
+                    WinitKey::Named(NamedKey::Delete) => Some(Edit::Delete),
+                    WinitKey::Character(s) if command => match s.to_ascii_lowercase().as_str() {
+                        "a" => Some(Edit::SelectAll),
+                        "v" => Some(Edit::Paste),
+                        _ => None,
+                    },
+                    WinitKey::Character(s) if control => match s.to_ascii_lowercase().as_str() {
+                        "a" => Some(Edit::Start),
+                        "e" => Some(Edit::End),
+                        "b" => Some(Edit::Left),
+                        "f" => Some(Edit::Right),
+                        "u" => Some(Edit::Clear),
+                        "d" => Some(Edit::Delete),
+                        "v" => Some(Edit::Paste),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if edit.is_some_and(|edit| self.app.edit_text(edit)) {
+                    if let Some(w) = &self.window { w.request_redraw(); }
+                    return;
+                }
                 // ⌘⇧[ / ⌘⇧] (or ⌃⇧): back / forward a page through the header
                 // tabs. Shift turns the bracket into a brace on most layouts,
                 // so both spellings count.
@@ -856,10 +888,8 @@ impl ApplicationHandler for Runner {
                     if let Some(w) = &self.window { w.request_redraw(); }
                     return;
                 }
-                if (self.mods.super_key() || self.mods.control_key())
-                    && let WinitKey::Character(s)=&event.logical_key
-                    && s.chars().next().is_some_and(|c|self.app.processor_shortcut(c)) {
-                    if let Some(w)=&self.window {w.request_redraw();}
+                if (command || control) && matches!(&event.logical_key, WinitKey::Character(_))
+                    && self.app.editing_text() {
                     return;
                 }
                 if !self.mods.super_key() && !self.mods.control_key()

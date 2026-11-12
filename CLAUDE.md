@@ -542,6 +542,16 @@ verified against ffmpeg's own scale to within an LSB or two; its parity test
 needs `full_chroma_inp`, since swscale otherwise halves RGB chroma on the way
 in. The before stays the untouched source; the caption says "input downsized".
 Refused with spatial inputs.
+**Renders pane** (2026-11-13): the Process rail's folding pane lists every Render
+press (`Render`, newest first) with an atlas thumbnail (`RENDER_THUMB_SLOT`, cells
+after the frame icons); the processor inspector moved under the settings
+(`draw_info`). Frames stay in the preview cache stamped with `Preview::render`, so
+a render whose frames were evicted or rendered over leaves the list
+(`prune_renders`). A click (`open_render`) restores chain order, switches, settings,
+focus, source and playhead; the bin deletes; `` ` `` / `~` cycle. The 1f · 5f · 1s ·
+5s buttons beside Render pick the length: more than one frame is ONE render and
+one seekbar block (`spans`), requested as a start/end stream, and switches Loop on
+— the app plays `loop_range` (`take_autoplay`, the wrap in `tick`, `sync_jumps`).
 The generic API lives in `crates/processor-api`; processor implementations are
 maintained independently. **`cargo build-with-plugins`** (alias → the committed,
 generic helper `tools/build-with-plugins`) is the sanctioned way to compose them
