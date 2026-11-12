@@ -55,6 +55,56 @@ pub(super) fn detect_checked(
             ranges[(y - y0) * cw + x - x0] = s;
         }
     }
+    // Letterbox / pillarbox bars: constant rows or columns contiguous with the frame edge.
+    let mut bar = vec![false; cw * ch];
+    let quiet_row = |y: usize| (0..cw).filter(|&x| ranges[y * cw + x] < 0.012).count() * 50 >= cw * 49;
+    let quiet_col = |x: usize| (0..ch).filter(|&y| ranges[y * cw + x] < 0.012).count() * 50 >= ch * 49;
+    if y0 == 0 { for y in 0..ch { if !quiet_row(y) { break; } for x in 0..cw { bar[y * cw + x] = true; } } }
+    if y1 == fh { for y in (0..ch).rev() { if !quiet_row(y) { break; } for x in 0..cw { bar[y * cw + x] = true; } } }
+    if x0 == 0 { for x in 0..cw { if !quiet_col(x) { break; } for y in 0..ch { bar[y * cw + x] = true; } } }
+    if x1 == fw { for x in (0..cw).rev() { if !quiet_col(x) { break; } for y in 0..ch { bar[y * cw + x] = true; } } }
+    // Context references vary slowly: evaluate on a 4px lattice and interpolate.
+    const G: usize = 4;
+    let (gw, gh) = ((cw - 1) / G + 2, (ch - 1) / G + 2);
+    let mut local_grid = vec![0f32; gw * gh];
+    let mut outer_grid = vec![0f32; gw * gh];
+    let mut context = Vec::new();
+    let mut ring = Vec::new();
+    for gy in 0..gh {
+        checkpoint()?;
+        for gx in 0..gw {
+            let (cx, cy) = ((gx * G).min(cw - 1), (gy * G).min(ch - 1));
+            context.clear();
+            for yy in (cy.saturating_sub(radius)..=(cy + radius).min(ch - 1)).step_by(4) {
+                for xx in (cx.saturating_sub(radius)..=(cx + radius).min(cw - 1)).step_by(4) {
+                    if !bar[yy * cw + xx] { context.push(ranges[yy * cw + xx]); }
+                }
+            }
+            ring.clear();
+            for yy in (cy.saturating_sub(halo)..=(cy + halo).min(ch - 1)).step_by(8) {
+                for xx in (cx.saturating_sub(halo)..=(cx + halo).min(cw - 1)).step_by(8) {
+                    if (xx.abs_diff(cx) > radius || yy.abs_diff(cy) > radius) && !bar[yy * cw + xx] {
+                        ring.push(ranges[yy * cw + xx]);
+                    }
+                }
+            }
+            if !context.is_empty() {
+                let k = context.len() * 3 / 4;
+                local_grid[gy * gw + gx] = *context.select_nth_unstable_by(k, f32::total_cmp).1;
+            }
+            if !ring.is_empty() {
+                let k = ring.len() / 2;
+                outer_grid[gy * gw + gx] = *ring.select_nth_unstable_by(k, f32::total_cmp).1;
+            }
+        }
+    }
+    let lerp = |grid: &[f32], cx: usize, cy: usize| {
+        let (gx, gy) = (cx / G, cy / G);
+        let (tx, ty) = ((cx % G) as f32 / G as f32, (cy % G) as f32 / G as f32);
+        let at = |x: usize, y: usize| grid[y * gw + x];
+        (at(gx, gy) * (1. - tx) + at(gx + 1, gy) * tx) * (1. - ty)
+            + (at(gx, gy + 1) * (1. - tx) + at(gx + 1, gy + 1) * tx) * ty
+    };
     let mut maps = Maps {
         opacity: vec![0.; w * h],
         confidence: vec![0.; w * h],
@@ -70,31 +120,9 @@ pub(super) fn detect_checked(
             let py = oy + y;
             let cx = px - x0;
             let cy = py - y0;
-            // Spatially subsample context only; output and temporal measurements are native resolution.
-            let mut context = Vec::new();
-            for yy in (cy.saturating_sub(radius)..=(cy + radius).min(ch - 1)).step_by(4) {
-                for xx in (cx.saturating_sub(radius)..=(cx + radius).min(cw - 1)).step_by(4) {
-                    context.push(ranges[yy * cw + xx]);
-                }
-            }
-            context.sort_by(f32::total_cmp);
-            let local_reference = context[context.len() * 3 / 4];
-            // A broad solid emblem can fill the local window. Estimate background
-            // variation in a wider annulus as well, excluding its stable interior.
-            let mut ring = Vec::new();
-            for yy in (cy.saturating_sub(halo)..=(cy + halo).min(ch - 1)).step_by(8) {
-                for xx in (cx.saturating_sub(halo)..=(cx + halo).min(cw - 1)).step_by(8) {
-                    if xx.abs_diff(cx) > radius || yy.abs_diff(cy) > radius {
-                        ring.push(ranges[yy * cw + xx]);
-                    }
-                }
-            }
-            ring.sort_by(f32::total_cmp);
-            let outer_reference = if ring.is_empty() {
-                0.
-            } else {
-                ring[ring.len() / 2]
-            };
+            if bar[cy * cw + cx] { continue; }
+            let local_reference = lerp(&local_grid, cx, cy);
+            let outer_reference = lerp(&outer_grid, cx, cy);
             let reference = local_reference.max(outer_reference);
             let spread = ranges[cy * cw + cx];
             let p = y * w + x;
@@ -216,6 +244,8 @@ pub(super) fn detect_checked(
     }
     // Retain spatially connected stable interiors only if supported by persistent
     // boundaries. This fills strokes rather than returning just their outlines.
+    let mut stamp = vec![0u32; cw * ch];
+    let mut stamp_id = 0u32;
     let mut visited = vec![false; w * h];
     for start in 0..w * h {
         if start % 4096 == 0 {
@@ -254,7 +284,39 @@ pub(super) fn detect_checked(
             }
         }
         let edge_evidence = (seeds as f32 / 6.).min(1.);
-        if component.len() < (radius * radius / 32).max(12) || seeds < 3 {
+        // An overlay is an island: the band around it must be mostly changing scenery.
+        // Stationary scenery beside motion, and anything hugging a bar, is not.
+        let reach = (radius / 3).max(4) as u32;
+        stamp_id += 1;
+        let mut frontier: Vec<(usize, u32)> = component
+            .iter()
+            .map(|&p| ((oy + p / w - y0) * cw + ox + p % w - x0, 0))
+            .collect();
+        for &(q, _) in &frontier { stamp[q] = stamp_id; }
+        let (mut band, mut moving, mut at) = (0usize, 0usize, 0);
+        while at < frontier.len() {
+            let (q, d) = frontier[at];
+            at += 1;
+            if d == reach { continue; }
+            let (qx, qy) = (q % cw, q / cw);
+            for n in [
+                if qx > 0 { Some(q - 1) } else { None },
+                if qx + 1 < cw { Some(q + 1) } else { None },
+                if qy > 0 { Some(q - cw) } else { None },
+                if qy + 1 < ch { Some(q + cw) } else { None },
+            ].into_iter().flatten() {
+                if stamp[n] == stamp_id { continue; }
+                stamp[n] = stamp_id;
+                let (nx, ny) = (n % cw + x0, n / cw + y0);
+                let inside = nx >= ox && nx < ox + w && ny >= oy && ny < oy + h;
+                if inside && maps.opacity[(ny - oy) * w + nx - ox] >= 0.35 { continue; }
+                band += 1;
+                moving += usize::from(!bar[n] && ranges[n] >= 0.04);
+                frontier.push((n, d + 1));
+            }
+        }
+        let surrounded = band > 0 && moving as f32 >= band as f32 * 0.7;
+        if component.len() < (radius * radius / 32).max(12) || seeds < 3 || !surrounded {
             for p in component {
                 maps.opacity[p] = 0.;
             }
@@ -425,5 +487,56 @@ mod tests {
         let f = Frame::new(32, 32, vec![120; 32 * 32 * 3]).unwrap();
         let maps = detect(&vec![f; 16], [4, 4, 24, 24], 8);
         assert!(maps.confidence.iter().all(|&v| v == 0.));
+    }
+
+    fn noisy(width: usize, height: usize, count: usize, fixed: impl Fn(usize, usize) -> Option<u8>) -> Vec<Frame> {
+        let mut state = 91u32;
+        (0..count)
+            .map(|_| {
+                let mut rgb = Vec::with_capacity(width * height * 3);
+                for y in 0..height {
+                    for x in 0..width {
+                        for _ in 0..3 {
+                            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+                            rgb.push(fixed(x, y).unwrap_or((state >> 24) as u8));
+                        }
+                    }
+                }
+                Frame::new(width, height, rgb).unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn letterbox_bars_are_not_proposed_but_a_logo_beside_them_is() {
+        let logo = |x: usize, y: usize| (60..70).contains(&x) && (40..62).contains(&y);
+        let frames = noisy(96, 80, 24, |x, y| {
+            if y < 12 || y >= 68 { Some(0) } else if logo(x, y) { Some(235) } else { None }
+        });
+        let maps = detect(&frames, [0, 0, 96, 80], 16);
+        let mut stray = 0;
+        for y in 0..80 {
+            for x in 0..96 {
+                let c = maps.confidence[y * 96 + x];
+                if y < 12 || y >= 68 {
+                    assert_eq!(c, 0., "bar proposed at {x},{y}");
+                } else if !logo(x, y) && c > 0. {
+                    stray += 1;
+                }
+            }
+        }
+        assert!(stray < 20, "{stray} stray pixels");
+        assert!(maps.confidence[50 * 96 + 65] > 0.5);
+    }
+
+    #[test]
+    fn stationary_scenery_beside_motion_is_unknown() {
+        // Left half never changes; only the right half is moving footage.
+        let frames = noisy(96, 64, 24, |x, y| {
+            (x < 48).then(|| if (x / 6 + y / 6) % 2 == 0 { 40 } else { 200 })
+        });
+        let maps = detect(&frames, [0, 0, 96, 64], 16);
+        let proposed = maps.confidence.iter().filter(|&&c| c > 0.).count();
+        assert!(proposed < 20, "{proposed} pixels proposed");
     }
 }
