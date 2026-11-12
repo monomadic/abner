@@ -1201,7 +1201,7 @@ impl App {
         if !self.ready() || !self.mask_mode || self.crop.is_some() {return;}
         self.playing=false;self.mouse_up();self.ensure_mask();
         let v=&self.videos[self.active];let mask=self.masks[self.active].as_ref().unwrap();
-        match crate::watermark::Task::spawn(v.info.clone(),v.spatial_id,mask.id,mask.revision,self.detection_search_region(),self.detection_range.unwrap_or_else(||crate::watermark::Range{start:0.,end:v.info.duration})) {
+        match crate::watermark::Task::spawn(v.info.clone(),v.spatial_id,mask.id,mask.revision,self.detection_search_region(),self.detection_range.unwrap_or_else(||crate::watermark::Range{start:0.,end:v.info.duration}),self.detection_area.is_some()) {
             Ok(task)=>{self.mask_status=task.status();self.watermark_task=Some(task);}
             Err(e)=>self.mask_status=e,
         }
