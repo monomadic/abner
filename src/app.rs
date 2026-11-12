@@ -62,6 +62,7 @@ pub enum Key {
     CmdDigit(char),
     /// ⌘Z: cut mode's undo.
     Undo,
+    Redo,
     /// ⌘R: render pending split GOPs in the timeline.
     Render,
     /// ⌘S: save timeline edits beside the source clip.
@@ -205,7 +206,12 @@ pub struct App {
     mask_status: String,
     watermark_task: Option<crate::watermark::Task>,
     // One explicit undo restores the draft before the most recent detection.
-    watermark_undo: Option<(usize, u64, u64, std::sync::Arc<Vec<u8>>)>,
+    /// Mask edits (strokes, detections) of the mask `mask_history_id`, oldest first.
+    mask_undo: Vec<std::sync::Arc<Vec<u8>>>,
+    mask_redo: Vec<std::sync::Arc<Vec<u8>>>,
+    mask_history_id: u64,
+    /// The mask (id, revision, pixels) as the stroke in progress found it.
+    stroke_before: Option<(u64, u64, std::sync::Arc<Vec<u8>>)>,
     mask_save: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     /// The ProRes crop export (`E`), a Filmcraft render on a worker. Separate
     /// from `mask_save` because it runs for as long as the clip takes to
@@ -725,7 +731,7 @@ impl App {
             cursor_inside: false,
             mask_status: String::new(),
             watermark_task: None,
-            watermark_undo: None,
+            mask_undo: Vec::new(), mask_redo: Vec::new(), mask_history_id: 0, stroke_before: None,
             mask_save: None,
             crop_export: None,
             frame_copy: None,
@@ -852,7 +858,7 @@ impl App {
     }
     fn finish_editor(&mut self, apply:bool) {
         self.watermark_task = None;
-        self.watermark_undo = None;
+        self.clear_mask_history();
         self.detection_range=None;self.detection_drag=None;
         self.detection_area=None;self.detection_area_visible=false;
         let Some(e)=self.editor.take() else{return};
@@ -1241,18 +1247,45 @@ impl App {
         let pixels=std::sync::Arc::make_mut(&mut mask.pixels);
         for (dst,src) in pixels.iter_mut().zip(proposal.pixels) {if src!=0 {*dst=255;}}
         mask.revision+=1;
-        self.watermark_undo=Some((self.videos[self.active].spatial_id,mask.id,mask.revision,previous));
+        self.record_mask(previous);
         self.mask_status=format!("Added {added} pixels from {} nearby frames · inspect mask, ⌘Z to undo",proposal.samples);
     }
-    fn can_undo_watermark(&self)->bool {
-        self.watermark_undo.as_ref().is_some_and(|(source,id,revision,_)|self.watermark_matches(*source,*id,*revision))
+    fn clear_mask_history(&mut self) {
+        self.mask_undo.clear();self.mask_redo.clear();self.stroke_before=None;
     }
-    fn undo_watermark(&mut self) {
-        if !self.can_undo_watermark() {return;}
-        self.watermark_task=None;
-        let (_,_,_,pixels)=self.watermark_undo.take().unwrap();
-        let mask=self.masks[self.active].as_mut().unwrap();mask.pixels=pixels;mask.revision+=1;
-        self.mask_status="Watermark detection undone".into();
+    /// `previous` is the active mask before the edit that just landed.
+    fn record_mask(&mut self,previous:std::sync::Arc<Vec<u8>>) {
+        let Some(id)=self.masks.get(self.active).and_then(|m|m.as_ref()).map(|m|m.id) else{return;};
+        if self.mask_history_id!=id {self.mask_undo.clear();self.mask_history_id=id;}
+        self.mask_redo.clear();
+        self.mask_undo.push(previous);
+        if self.mask_undo.len()>MASK_HISTORY {self.mask_undo.remove(0);}
+    }
+    fn mask_history_live(&self)->bool {
+        self.mask_mode && self.crop.is_none()
+            && self.masks.get(self.active).and_then(|m|m.as_ref()).is_some_and(|m|m.id==self.mask_history_id)
+    }
+    fn can_undo_mask(&self)->bool {self.mask_history_live()&&!self.mask_undo.is_empty()}
+    fn can_redo_mask(&self)->bool {self.mask_history_live()&&!self.mask_redo.is_empty()}
+    fn step_mask_history(&mut self,redo:bool) {
+        self.commit_stroke();
+        if !(if redo {self.can_redo_mask()}else{self.can_undo_mask()}) {return;}
+        self.watermark_task=None;self.painting=false;self.stroke_last=None;
+        let pixels=if redo {self.mask_redo.pop()}else{self.mask_undo.pop()}.unwrap();
+        let mask=self.masks[self.active].as_mut().unwrap();
+        let current=std::mem::replace(&mut mask.pixels,pixels);mask.revision+=1;
+        if redo {self.mask_undo.push(current);}else{self.mask_redo.push(current);}
+        self.mask_status=if redo {"Mask edit redone"}else{"Mask edit undone"}.into();
+    }
+    /// A finished stroke becomes one undo step, if it painted anything.
+    fn control_dead(&self,action:&Action)->bool {
+        matches!(action,Action::UndoMask)&&!self.can_undo_mask()||matches!(action,Action::RedoMask)&&!self.can_redo_mask()
+    }
+    fn commit_stroke(&mut self) {
+        let Some((id,revision,previous))=self.stroke_before.take() else{return;};
+        if self.masks.get(self.active).and_then(|m|m.as_ref()).is_some_and(|m|m.id==id&&m.revision!=revision) {
+            self.record_mask(previous);
+        }
     }
 
     /// Export the mask — and, with the marquee up, the crop of it plus the
@@ -1327,7 +1360,15 @@ impl App {
         // Crop mode shows the footage itself: no red/blue mask tint, just
         // the dimming outside the marquee. The mask is still there (and
         // still exported with `S`), only not drawn.
-        if let Some(c) = self.active_marquee() {
+        // While detection runs over a drawn search area the area stays at
+        // full strength inside a dashed outline and the rest is dimmed: what
+        // is being analysed is the only thing lit.
+        let analysing = self.detection_area.filter(|_| self.watermark_task.is_some() && self.crop.is_none());
+        if let Some(c) = analysing {
+            items.push(Item::Mask { r, id: mask.id, revision: mask.revision,
+                width: mask.width, height: mask.height, pixels: mask.pixels.clone() });
+            self.build_marquee(items, c, SEARCH_DIM, false);
+        } else if let Some(c) = self.active_marquee() {
             self.build_crop_layer(items, c);
         } else {
             items.push(Item::Mask { r, id: mask.id, revision: mask.revision,
@@ -1354,6 +1395,11 @@ impl App {
     /// dark underlay then white, so the box holds against bright footage
     /// the way the brush cursor does.
     fn build_crop_layer(&self, items: &mut Vec<Item>, c: Crop) {
+        self.build_marquee(items, c, CROP_DIM, true);
+    }
+
+    /// `edit` adds what a draggable marquee needs: guides, readouts, handles.
+    fn build_marquee(&self, items: &mut Vec<Item>, c: Crop, dim_color: [f32; 4], edit: bool) {
         let r = self.crop_rect(c);
         let (vw, vh) = self.vp;
         // Whole pixels, so the four dim rects butt exactly: fractional edges
@@ -1367,19 +1413,19 @@ impl App {
             RectPx { x: x1, y: y0, w: vw - x1, h: y1 - y0 },
         ] {
             if dim.w > 0.0 && dim.h > 0.0 {
-                items.push(Item::Rect(RectItem::new(dim, CROP_DIM)));
+                items.push(Item::Rect(RectItem::new(dim, dim_color)));
             }
         }
         // Guides: each side's line carries on across the canvas.
         let cv = self.canvas();
         for y in [r.y, r.y + r.h] {
-            if y >= cv.y && y <= cv.y + cv.h {
+            if edit && y >= cv.y && y <= cv.y + cv.h {
                 items.push(Item::Rect(RectItem::new(
                     RectPx { x: cv.x, y: y - 0.5, w: cv.w, h: 1.0 }, CROP_GUIDE)));
             }
         }
         for x in [r.x, r.x + r.w] {
-            if x >= cv.x && x <= cv.x + cv.w {
+            if edit && x >= cv.x && x <= cv.x + cv.w {
                 items.push(Item::Rect(RectItem::new(
                     RectPx { x: x - 0.5, y: cv.y, w: 1.0, h: cv.h }, CROP_GUIDE)));
             }
@@ -1412,6 +1458,7 @@ impl App {
         edge(r.x, r.y + r.h - half, r.w, true);
         edge(r.x - half, r.y, r.h, false);
         edge(r.x + r.w - half, r.y, r.h, false);
+        if !edit { return; }
         self.build_crop_labels(items, c, r);
         let (mx, my) = (r.x + r.w * 0.5, r.y + r.h * 0.5);
         for (hx, hy) in [
@@ -2160,7 +2207,8 @@ impl App {
                 Key::Char('c' | 'C') => { self.toggle_crop(); return; }
                 Key::Char('s' | 'S') => { self.save_mask(); return; }
                 Key::Char('d' | 'D') if self.crop.is_none() => { self.detect_watermark(); return; }
-                Key::Undo if self.crop.is_none() => { self.undo_watermark(); return; }
+                Key::Undo if self.crop.is_none() => { self.step_mask_history(false); return; }
+                Key::Redo if self.crop.is_none() => { self.step_mask_history(true); return; }
                 Key::Char('e' | 'E') if self.crop.is_some() => { self.export_crop(); return; }
                 Key::Char('a') if self.crop.is_some() => { self.cycle_aspect(1); return; }
                 Key::Char('A') if self.crop.is_some() => { self.cycle_aspect(-1); return; }
@@ -2184,7 +2232,7 @@ impl App {
                 }
             }
             Key::Backspace => self.speed = 1.0,
-            Key::Close | Key::ActualSize | Key::CmdDigit(_) | Key::Undo | Key::Render | Key::SaveProject | Key::KeyLeft | Key::KeyRight | Key::DuplicateSources | Key::OpenFiles | Key::PrevMode | Key::NextMode => {} // handled above
+            Key::Close | Key::ActualSize | Key::CmdDigit(_) | Key::Undo | Key::Redo | Key::Render | Key::SaveProject | Key::KeyLeft | Key::KeyRight | Key::DuplicateSources | Key::OpenFiles | Key::PrevMode | Key::NextMode => {} // handled above
             Key::Char('V') => self.mode = self.mode.cycle(-1),
             Key::Char(c @ '1'..='9') => {
                 let idx = c as usize - '1' as usize;
@@ -2466,7 +2514,11 @@ impl App {
                 return;
             }
             self.painting = self.brush_cursor_visible();
-            if self.painting { self.paint_at_cursor(); }
+            if self.painting {
+                self.commit_stroke();
+                self.stroke_before = self.masks[self.active].as_ref().map(|m| (m.id, m.revision, m.pixels.clone()));
+                self.paint_at_cursor();
+            }
         } else {
             self.drag = Some((x, y));
         }
@@ -2510,6 +2562,7 @@ impl App {
             self.playing = true;
         }
         self.scrub_resume = false;
+        self.commit_stroke();
         self.painting = false;
         self.stroke_last = None;
         self.drag = None;
@@ -2524,7 +2577,7 @@ impl App {
         self.detection_range=None;self.detection_drag=None;
         self.detection_area=None;self.detection_area_visible=false;
         self.watermark_task = None;
-        self.watermark_undo = None;
+        self.clear_mask_history();
         self.mouse_up();
         self.crop = None;
         for v in &mut self.videos {
@@ -3107,7 +3160,7 @@ impl App {
             draw_canvas_bar(&mut items, header);
             for c in self.embedded_editor_controls() {
                 let hovered = self.cursor_inside && contains(c.r, self.cursor.0, self.cursor.1);
-                draw_canvas_button(&mut items, c.r, &c.label, c.selected, hovered, false);
+                draw_canvas_button(&mut items, c.r, &c.label, c.selected, hovered, self.control_dead(&c.action));
             }
             items.push(Item::Clip(None));
         }
@@ -3344,7 +3397,7 @@ impl App {
         let mut buttons = if self.crop.is_some() { vec![("Save still",Action::Save)] } else {
             vec![("Detect",Action::DetectWatermark),("Search area",Action::DetectionArea),("−",Action::Brush(false)),("+",Action::Brush(true)),("Save mask",Action::Save)]
         };
-        if self.can_undo_watermark() { buttons.push(("Undo",Action::UndoWatermark)); }
+        if self.crop.is_none() { buttons.extend([("Undo",Action::UndoMask),("Redo",Action::RedoMask)]); }
         buttons.extend([("Reset",Action::ResetEdit),("Cancel",Action::CancelEdit),("Apply",Action::ApplyEdit)]);
         let gap = 4.0;
         let inset = 12.0;
@@ -3472,12 +3525,12 @@ impl App {
             for (label, w, action) in [
                 (if detecting {"Stop detection"}else{"Detect watermark"}, 140.0, Action::DetectWatermark),
                 ("Search area", 88.0, Action::DetectionArea),
-                ("Undo", 48.0, Action::UndoWatermark),
+                ("Undo", 48.0, Action::UndoMask),
+                ("Redo", 48.0, Action::RedoMask),
                 ("−", 28.0, Action::Brush(false)),
                 ("+", 28.0, Action::Brush(true)),
                 ("Save mask", 100.0, Action::Save),
             ] {
-                if matches!(action,Action::UndoWatermark)&&!self.can_undo_watermark() {continue;}
                 if self.editor.is_some() && x+w>self.vp.0-260. {break}
                 out.push(Control::new(
                     RectPx { x, y, w, h: 27.0 },
@@ -3501,7 +3554,7 @@ impl App {
         self.mouse_up();
         match action {
             Action::LaunchEditor(crop)=>{self.begin_editor(crop,None);return}
-            Action::ResetEdit=>{self.watermark_task=None;self.watermark_undo=None;if self.crop.is_some(){self.crop=Some(self.full_crop())}else{let v=&self.videos[self.active];self.masks[self.active]=Some(Mask::new(v.info.width,v.info.height));}return}
+            Action::ResetEdit=>{self.watermark_task=None;self.clear_mask_history();if self.crop.is_some(){self.crop=Some(self.full_crop())}else{let v=&self.videos[self.active];self.masks[self.active]=Some(Mask::new(v.info.width,v.info.height));}return}
             Action::ApplyEdit=>{self.finish_editor(true);return}
             Action::CancelEdit=>{self.finish_editor(false);return}
             Action::Tool(1|2)=>{if self.workspace_mode()!=if matches!(action,Action::Tool(2)){2}else{1}{self.begin_editor(matches!(action,Action::Tool(2)),None);}return}
@@ -3560,7 +3613,8 @@ impl App {
             },
             Action::DetectionArea => self.toggle_detection_area(),
             Action::DetectWatermark => self.detect_watermark(),
-            Action::UndoWatermark => self.undo_watermark(),
+            Action::UndoMask => self.step_mask_history(false),
+            Action::RedoMask => self.step_mask_history(true),
             Action::Brush(up) => self.resize_brush(if up { 1.25 } else { 0.8 }),
             Action::Save => self.save_mask(),
             Action::Export => self.export(),
@@ -3764,7 +3818,8 @@ impl App {
                 || control.r.y >= vp.1 - STATUS_H {
                 continue;
             }
-            let disabled = matches!(control.action, Action::Save) && self.mask_save.is_some()
+            let disabled = self.control_dead(&control.action)
+                || matches!(control.action, Action::Save) && self.mask_save.is_some()
                 || matches!(control.action, Action::Export) && self.crop_export.is_some();
             if (HEADER_H..HEADER_H + CONTEXT_H).contains(&control.r.y) {
                 draw_canvas_button(items, control.r, &control.label, control.selected, hovered, disabled);
@@ -7151,7 +7206,7 @@ impl Workspace {
 }
 
 #[derive(Clone, Copy)]
-enum Action { LaunchEditor(bool), ResetEdit, ApplyEdit, CancelEdit, Duplicate, OpenFiles, ToggleSources, ToggleInspector, ToggleDetail, Tool(usize), View(Mode), DetectionArea, DetectWatermark, UndoWatermark, Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
+enum Action { LaunchEditor(bool), ResetEdit, ApplyEdit, CancelEdit, Duplicate, OpenFiles, ToggleSources, ToggleInspector, ToggleDetail, Tool(usize), View(Mode), DetectionArea, DetectWatermark, UndoMask, RedoMask, Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
 #[derive(Clone, Copy, PartialEq)]
 enum CutAction { TogglePosters, FrameChanges(bool), TimeDisplay(bool),
     // Set in / out: no key or button reaches these while the feature is disabled.
@@ -7525,6 +7580,48 @@ mod tests {
     }
 
     #[test]
+    fn mask_strokes_and_detections_undo_and_redo_from_the_button_bar() {
+        let clip=test_clip().expect("video test fixture");
+        let mut app=mk_app(&clip,1);app.begin_editor(false,None);
+        assert!(app.controls().iter().any(|c|matches!(c.action,Action::RedoMask)));
+        assert!(!app.can_undo_mask()&&!app.can_redo_mask());
+        let empty=app.masks[0].as_ref().unwrap().pixels.clone();
+        let r=app.content_rect(0);
+        app.cursor_inside=true;app.cursor_moved(r.x+r.w*0.5,r.y+r.h*0.5);
+        app.mouse_down(r.x+r.w*0.5,r.y+r.h*0.5);app.cursor_moved(r.x+r.w*0.6,r.y+r.h*0.5);app.mouse_up();
+        let stroke=app.masks[0].as_ref().unwrap().pixels.clone();
+        assert_ne!(*stroke,*empty);assert_eq!(app.mask_undo.len(),1,"one step per stroke");
+        let mut proposal=vec![0;stroke.len()];proposal[0]=255;
+        app.apply_watermark(crate::watermark::Proposal{pixels:proposal,samples:16});
+        let detected=app.masks[0].as_ref().unwrap().pixels.clone();
+        app.activate(Action::UndoMask);assert_eq!(*app.masks[0].as_ref().unwrap().pixels,*stroke);
+        app.activate(Action::UndoMask);assert_eq!(*app.masks[0].as_ref().unwrap().pixels,*empty);
+        assert!(!app.can_undo_mask());
+        app.activate(Action::RedoMask);app.key(Key::Redo);
+        assert_eq!(*app.masks[0].as_ref().unwrap().pixels,*detected);
+        app.activate(Action::UndoMask);
+        app.mouse_down(r.x+r.w*0.2,r.y+r.h*0.2);app.mouse_up();
+        assert!(!app.can_redo_mask(),"a new edit drops the redo steps");
+    }
+
+    #[test]
+    fn search_area_is_outlined_and_the_rest_dimmed_only_while_detecting() {
+        let clip=test_clip().expect("video test fixture");
+        let mut app=mk_app(&clip,1);app.begin_editor(false,None);
+        app.activate(Action::DetectionArea);app.activate(Action::DetectionArea);
+        let dims=|app:&App|{let mut items=Vec::new();app.build_mask_layer(&mut items);
+            items.iter().filter(|i|matches!(i,Item::Rect(r) if r.color==SEARCH_DIM)).count()};
+        assert_eq!(dims(&app),0);
+        let mask=app.masks[0].as_ref().unwrap();
+        let (task,_sender,_)=crate::watermark::Task::test_pending(app.videos[0].spatial_id,mask.id,mask.revision);
+        app.watermark_task=Some(task);
+        let mut items=Vec::new();app.build_mask_layer(&mut items);
+        assert!(items.iter().any(|i|matches!(i,Item::Mask{..})),"the mask stays drawn");
+        assert!(items.iter().any(|i|matches!(i,Item::Rect(r) if r.color==CROP_LINE)),"dashed outline");
+        app.detection_area=None;assert_eq!(dims(&app),0,"no area, nothing to outline");
+    }
+
+    #[test]
     fn watermark_stale_results_cannot_overwrite_paint_reset_or_closed_sessions() {
         let clip=test_clip().expect("video test fixture");
         let mut app=mk_app(&clip,1);app.begin_editor(false,None);
@@ -7569,7 +7666,7 @@ mod tests {
         app.mouse_down(r.x+r.w/2.,r.y+r.h/2.);app.mouse_up();
         assert!(app.watermark_task.is_some());
         assert!(tick_until(&mut app,Duration::from_secs(30),|a|a.watermark_task.is_none()),"detection did not finish");
-        assert!(app.can_undo_watermark(),"{}",app.mask_status);
+        assert!(app.can_undo_mask(),"{}",app.mask_status);
         assert_eq!(app.t,before,"background sampling must not move the playhead");
         let mask=app.masks[0].as_ref().unwrap();
         assert_eq!(mask.pixels[70*160+120],255);
@@ -10419,6 +10516,10 @@ pub(crate) fn status_build_width() -> f32 {
 // (see shader.wgsl): linear-space blending means a modest alpha barely
 // touches bright footage, and this one has to read as "not exported".
 const CROP_DIM: [f32; 4] = [0.0, 0.0, 0.0, 0.95];
+/// Outside the search area while detection runs: dimmed, still readable
+/// (blending is linear, so this alpha leaves roughly a third of the picture).
+const SEARCH_DIM: [f32; 4] = [0.0, 0.0, 0.0, 0.88];
+const MASK_HISTORY: usize = 24;
 const CROP_LINE: [f32; 4] = [1.0, 1.0, 1.0, 0.95];
 const CROP_INK: [f32; 4] = [0.0, 0.0, 0.0, 0.75];
 const CROP_LINE_W: f32 = 1.5;

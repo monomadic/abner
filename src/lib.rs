@@ -899,7 +899,7 @@ impl ApplicationHandler for Runner {
                     WinitKey::Character(s)
                         if self.mods.super_key() && s.eq_ignore_ascii_case("z") =>
                     {
-                        Some(Key::Undo)
+                        Some(if self.mods.shift_key() { Key::Redo } else { Key::Undo })
                     }
                     WinitKey::Character(s)
                         if self.mods.super_key() && s.eq_ignore_ascii_case("r") =>
