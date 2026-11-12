@@ -7284,14 +7284,19 @@ impl Canvas {
     }
 }
 /// Signal's recessed canvas toolbar and outlined controls.
+/// Figma "Button Bar" (463:6046 in the Signal design system), drawn by
+/// figleaf from Figma's own values: top corners 4, a 1px stroke of 585454 on
+/// the bottom edge, and an inner shadow (black 29%, Y 2, blur 2.9). Figma's
+/// fill is 6B6B6A at 53%; it is written here as the opaque colour that makes
+/// on the workspace panel, so footage never shows through the shell. The
+/// buttons in Figma's bar are placeholders: Abner keeps its own.
 pub(crate) fn draw_canvas_bar(items: &mut Vec<Item>, r: RectPx) {
-    items.push(Item::Rect(RectItem {
-        radius: 3.0,
-        border_w: 1.0,
-        border_color: hex_color(0x393737),
-        ..RectItem::new(r, hex_color(0x484646))
-    }));
-    items.push(Item::Shadow { r, inner: true, blur: 4.0, alpha: 0.32 });
+    use figleaf::{Rect, Shadow, Shape};
+    let frame = Shape::rect(Rect::new(r.x, r.y, r.w, r.h)).radii([4.0, 4.0, 0.0, 0.0]);
+    items.push(Item::Shape(frame.clone().fill(hex_color(0x3b3b3a))));
+    items.push(Item::Shape(Shape::rect(Rect::new(r.x, r.y + r.h - 1.0, r.w, 1.0)).fill(hex_color(0x585454))));
+    // The shadow falls over the stroke, as Figma paints it.
+    items.push(Item::Shape(frame.shadow(Shadow::inner([0.0, 0.0, 0.0, 0.29], [0.0, 2.0], 2.9))));
 }
 
 pub(crate) fn draw_canvas_button(
