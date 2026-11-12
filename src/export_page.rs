@@ -56,8 +56,43 @@ pub(crate) enum Action {
     Seek(f64),
     Reveal,
 }
+/// A stage's in-flight report during an export, with the stage's name.
+pub(crate) type StageReport = Arc<dyn Fn(&str, abner_processor_api::Progress) + Send + Sync>;
+/// `90` → `1m 30s`; under a minute, whole seconds.
+fn remaining(seconds: f64) -> String {
+    let s = seconds.ceil().max(0.) as u64;
+    if s >= 3600 { format!("{}h {:02}m", s / 3600, s / 60 % 60) }
+    else if s >= 60 { format!("{}m {:02}s", s / 60, s % 60) }
+    else { format!("{s}s") }
+}
+/// The footer line of a running render: the whole clip first (share done,
+/// frames out of the total once a frame has given the output rate, pace, time
+/// left at that pace), then what the working stage says it is doing. Before
+/// the first frame only the stage has anything to report.
+fn render_line(done: f64, count: u64, frame_duration: Option<f64>, duration: f64, elapsed: f64,
+    stage: Option<&(String, abner_processor_api::Progress)>) -> String {
+    let frames = match frame_duration.filter(|d| *d > 0.) {
+        Some(d) => format!("{count} of {:.0} frames", (duration / d).round().max(count as f64)),
+        None => format!("{count} frames"),
+    };
+    let pace = count as f64 / elapsed.max(0.001);
+    // A model that takes minutes a frame reads as "0.0 fps".
+    let pace = if count == 0 { String::new() }
+        else if pace >= 1. { format!(" · {pace:.1} fps") }
+        else { format!(" · {} per frame", remaining(1. / pace)) };
+    let eta = if done > 0. && done < 1. { format!(" · ~{} left", remaining(elapsed * (1. - done) / done)) } else { String::new() };
+    let stage = stage.map_or_else(String::new, |(name, p)| {
+        let phase = if p.phase.trim().is_empty() { "Processing" } else { &p.phase };
+        match p.total.filter(|t| *t > 0) {
+            Some(t) => format!(" · {name} · {phase} {:.0}%", (p.completed.min(t) as f64 / t as f64 * 100.).floor()),
+            None => format!(" · {name} · {phase}"),
+        }
+    });
+    format!("{:.0}% · {frames}{pace}{eta}{stage}", (done * 100.).floor())
+}
 struct Job {
     latest: Arc<Mutex<Option<Rendered>>>,
+    stage: Arc<Mutex<Option<(String, abner_processor_api::Progress)>>>,
     done: mpsc::Receiver<Result<PathBuf, String>>,
     cancel: Cancellation,
     active: Arc<Mutex<Vec<Cancellation>>>,
@@ -306,6 +341,11 @@ impl Page {
         let latest = Arc::new(Mutex::new(None));
         let (tx, done) = mpsc::sync_channel(1);
         let shared = latest.clone();
+        let stage = Arc::new(Mutex::new(None));
+        let report: StageReport = {
+            let stage = stage.clone();
+            Arc::new(move |name, p| *stage.lock().unwrap() = Some((name.to_owned(), p)))
+        };
         let stop = cancel.clone();
         let inputs = self.inputs.clone();
         let chapters = self.chapters.clone();
@@ -347,6 +387,7 @@ impl Page {
                     crop,
                     &stop,
                     &worker_active,
+                    Some(&report),
                     |frame| {
                         stop.check()?;
                         *shared.lock().unwrap() = Some(frame);
@@ -361,6 +402,7 @@ impl Page {
         });
         self.job = Some(Job {
             latest,
+            stage,
             done,
             cancel,
             active,
@@ -782,10 +824,10 @@ impl Page {
             }
         }
         let render_status = if self.busy() && !self.lossless {
-            let elapsed = self.started.elapsed().as_secs_f64().max(0.001);
             let done = (self.rendered_time / self.duration.max(0.001)).clamp(0., 1.);
-            let eta = if done > 0. { format!(" · ~{:.0}s left", elapsed * (1. - done) / done) } else { String::new() };
-            format!("{:.0}% · {} frames · {:.1} fps{eta}", done * 100., self.count, self.count as f64 / elapsed)
+            let stage = self.job.as_ref().and_then(|j| j.stage.lock().unwrap().clone());
+            render_line(done, self.count, self.frames.back().map(|f| f.frame_duration), self.duration,
+                self.started.elapsed().as_secs_f64(), stage.as_ref())
         } else { self.status.clone() };
         let status = if self.actions(vp).iter().any(|(r, _, _, a)| *a == Action::Lossless && hit(*r, cursor.0, cursor.1)) {
             self.copy_unavailable.unwrap_or(&self.status)
@@ -876,6 +918,7 @@ mod tests {
         double: bool,
         dims: [usize; 2],
         cancel: Cancellation,
+        reporter: Option<abner_processor_api::ProgressReporter>,
     }
     impl Factory for Red {
         fn descriptor(&self) -> Descriptor {
@@ -897,6 +940,7 @@ mod tests {
                 double: settings["double"].as_bool().unwrap_or(false),
                 dims: [w, h],
                 cancel: Cancellation::default(),
+                reporter: None,
             }))
         }
     }
@@ -917,7 +961,13 @@ mod tests {
         }
     }
     impl Session for RedSession {
+        fn set_progress_reporter(&mut self, reporter: abner_processor_api::ProgressReporter) {
+            self.reporter = Some(reporter);
+        }
         fn process(&mut self, mut f: Frame) -> Result<Vec<Frame>, String> {
+            if let Some(report) = &self.reporter {
+                report(Progress { phase: "painting".into(), completed: 1, total: Some(2) });
+            }
             if self
                 .next_time
                 .is_some_and(|next| next != (f.pts, f.time_base))
@@ -1003,6 +1053,7 @@ mod tests {
         let (_tx, done) = mpsc::channel();
         p.job = Some(Job {
             latest: latest.clone(),
+            stage: Arc::default(),
             done,
             cancel: Cancellation::default(),
             active: Arc::default(),
@@ -1038,6 +1089,24 @@ mod tests {
         assert!(!p.playing(), "playback stops at the cached frontier");
         p.key(Key::Tab);
         assert!(p.original);
+    }
+    #[test]
+    fn render_line_leads_with_the_whole_clip_then_the_working_stage() {
+        let stage = |phase: &str, completed, total| {
+            ("Example".to_string(), Progress { phase: phase.into(), completed, total })
+        };
+        // Before the first frame only the stage has anything to say.
+        assert_eq!(render_line(0., 0, None, 20., 90., Some(&stage("Window 1 · encoding", 9, Some(18)))),
+            "0% · 0 frames · Example · Window 1 · encoding 50%");
+        // 120 of 480 frames in ten minutes: five seconds a frame, thirty minutes to go.
+        assert_eq!(render_line(0.25, 120, Some(1. / 24.), 20., 600., Some(&stage("Window 25 · restoring", 16, Some(32)))),
+            "25% · 120 of 480 frames · 5s per frame · ~30m 00s left · Example · Window 25 · restoring 50%");
+        assert_eq!(render_line(0.5, 240, Some(1. / 24.), 20., 10., None),
+            "50% · 240 of 480 frames · 24.0 fps · ~10s left");
+        assert_eq!(render_line(0.5, 1, Some(0.5), 1., 4000., Some(&stage(" ", 3, None))),
+            "50% · 1 of 2 frames · 1h 06m per frame · ~1h 06m left · Example · Processing");
+        // A rounded total never reads below the frames already written.
+        assert_eq!(render_line(1., 481, Some(1. / 24.), 20., 10., None), "100% · 481 of 481 frames · 48.1 fps");
     }
     #[test]
     fn minimal_controls_fit_and_footer_is_status_only() {
@@ -1189,6 +1258,11 @@ mod tests {
             let dest = dir.join(format!("{}.{}", codec, ext));
             let _ = std::fs::remove_file(&dest);
             let mut previews = 0;
+            let stages = Arc::new(Mutex::new(Vec::new()));
+            let report: StageReport = {
+                let stages = stages.clone();
+                Arc::new(move |name, p| stages.lock().unwrap().push((name.to_owned(), p.phase, p.total)))
+            };
             crate::media_io::pipeline_export_with_inputs(
                 &Default::default(),
                 &info,
@@ -1201,6 +1275,7 @@ mod tests {
                 None,
                 &Cancellation::default(),
                 &Mutex::default(),
+                Some(&report),
                 |f| {
                     previews += 1;
                     assert_eq!(&f.pixels[..4], &[255, 0, 0, 255]);
@@ -1209,6 +1284,10 @@ mod tests {
             )
             .unwrap();
             assert_eq!(previews, 12);
+            // The stage's own reports reach the page under the stage's name, one per input frame.
+            let seen = stages.lock().unwrap();
+            assert_eq!(seen.len(), 12);
+            assert!(seen.iter().all(|(name, phase, total)| !name.is_empty() && phase == "painting" && *total == Some(2)));
             if ext == "mov" {
                 let bytes = std::fs::read(&dest).unwrap();
                 assert_eq!(&bytes[4..12], b"ftypqt  ");

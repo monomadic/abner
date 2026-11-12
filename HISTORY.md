@@ -1,5 +1,26 @@
 # abner — history
 
+## 2026-11-12 — Whole-clip progress during a processed export
+
+A render's footer now leads with the whole clip and then says what the working
+stage is doing: `25% · 120 of 480 frames · 5s per frame · ~30m 00s left · <stage>
+· <its phase> 50%`. The export never passed a progress reporter to its sessions,
+so a stage that buffers frames before returning any (a batch model taking minutes
+a window) left the footer frozen, and before the first frame there was nothing to
+show at all. `pipeline_export_with_inputs` takes an optional `StageReport` and
+hands each session a reporter tagged with the stage's name; the page keeps the
+latest and `render_line` composes the line. The frame total is the output
+duration over the first delivered frame's duration, so a retiming chain counts
+its own frames. Pace under one frame a second reads as time per frame, and time
+left is in minutes and hours rather than raw seconds.
+
+The headless runner's job report (`media::JOB_PHASE`) now carries the expected
+output frame count, and the CLI prints every report with a total as
+`done/total`, adding the clip's percentage and time left to the job line only: a
+stage's fraction is about its own phase, so it gets no clip estimate. Frames
+that arrive in bursts make the estimate pessimistic at the start of each burst
+and right at its end.
+
 ## 2026-11-12 — Processor ON/OFF switch drawn by figleaf
 
 The settings panel's ON/OFF switch is drawn by figleaf from Figma's values for

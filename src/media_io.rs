@@ -3315,7 +3315,7 @@ pub(crate) fn pipeline_export(
     chain:&[(String,serde_json::Value)],prores:bool,crop:Option<(u32,u32,u32,u32)>,
     cancel:&abner_processor_api::Cancellation,active:&Mutex<Vec<abner_processor_api::Cancellation>>,
     emit:impl FnMut(crate::export_page::Rendered)->Result<(),String>,
-)->Result<()> {pipeline_export_with_inputs(&Default::default(),info,dest,keeps,&[],registry,chain,prores,crop,cancel,active,emit)}
+)->Result<()> {pipeline_export_with_inputs(&Default::default(),info,dest,keeps,&[],registry,chain,prores,crop,cancel,active,None,emit)}
 
 pub(crate) fn pipeline_export_with_inputs(
     inputs:&crate::spatial::JobInputs,
@@ -3329,6 +3329,9 @@ pub(crate) fn pipeline_export_with_inputs(
     crop: Option<(u32, u32, u32, u32)>,
     cancel: &abner_processor_api::Cancellation,
     active: &Mutex<Vec<abner_processor_api::Cancellation>>,
+    // Each stage's own in-flight reports, by the stage's name: what the chain is
+    // doing between the frames `emit` delivers.
+    stage_report: Option<&crate::export_page::StageReport>,
     mut emit: impl FnMut(crate::export_page::Rendered) -> Result<(), String>,
 ) -> Result<()> {
     use abner_processor_api::{VideoFrame, PixelFormat, InputRequirement, Role};
@@ -3415,8 +3418,12 @@ pub(crate) fn pipeline_export_with_inputs(
                 "{}: generator/post-processor execution is not supported by export", f.descriptor().name);
             ensure!(!matches!(f.capabilities().input, InputRequirement::WholeClip),
                 "{}: whole-clip execution is not supported by export", f.descriptor().name);
-            let session = abner_processor_api::create_bound(f,dims[0],dims[1],settings,inputs.bindings.get(id).cloned().unwrap_or_default())
+            let mut session = abner_processor_api::create_bound(f,dims[0],dims[1],settings,inputs.bindings.get(id).cloned().unwrap_or_default())
                 .map_err(anyhow::Error::msg)?;
+            if let Some(report) = stage_report {
+                let (report, name) = (report.clone(), f.descriptor().name);
+                session.set_progress_reporter(std::sync::Arc::new(move |p| report(&name, p)));
+            }
             active.lock().unwrap().push(session.cancellation());
             dims = session.output_dimensions();
             ensure!(

@@ -307,6 +307,9 @@ fn packet_hash(
     }
     Ok(hash.finalize().into())
 }
+/// The phase of the job-level report: frames written out of the whole clip's.
+/// Every other report is a stage's own, about the work in front of it.
+pub const JOB_PHASE: &str = "Encoded frames";
 
 /// Run a complete, ordered job. Currently accepts zero-start CFR MP4/MOV SDR
 /// sources and writes ProRes HQ MOV. Rejects unsupported formats before inference.
@@ -427,6 +430,13 @@ pub fn run(
     let end = i128::try_from(pts.len()).map_err(err)? * i128::from(delta) * i128::from(timescale)
         / i128::from(vt.timescale);
     let expected_end = i64::try_from(end).map_err(err)?;
+    // Output frames at the chain's rate over the source's duration.
+    let expected_frames = u64::try_from(
+        (pts.len() as u128 * u128::from(rate[0]) * u128::from(delta)
+            + u128::from(rate[1]) * u128::from(vt.timescale) / 2)
+            / (u128::from(rate[1]) * u128::from(vt.timescale)),
+    )
+    .map_err(err)?;
     #[cfg(target_os = "macos")]
     {
         static REGISTER: std::sync::Once = std::sync::Once::new();
@@ -552,9 +562,9 @@ pub fn run(
                 .map_err(err)?;
                 frames += 1;
                 progress(abner_processor_api::Progress {
-                    phase: "Encoded frames".into(),
+                    phase: JOB_PHASE.into(),
                     completed: frames as u64,
-                    total: None,
+                    total: Some(expected_frames.max(frames as u64)),
                 });
             }
             Ok(())
