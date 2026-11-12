@@ -2173,7 +2173,7 @@ impl Panel {
     }
     fn progress_button(vp: (f32, f32)) -> RectPx {
         let r = Self::progress_panel(vp);
-        RectPx { x: r.x + r.w - 103.0, y: r.y + 8.0, w: 91.0, h: 26.0 }
+        RectPx { x: r.x + r.w - 103.0, y: r.y + 5.0, w: 91.0, h: 22.0 }
     }
     fn length_button(vp: (f32, f32), i: usize) -> RectPx {
         let b = Self::progress_button(vp);
@@ -3140,28 +3140,6 @@ impl Panel {
         self.draw_rail(items, vp);
         let v = Self::viewer(vp);
         let cached = self.shown().filter(|_| self.show_rendered);
-        if let Some(f) = cached {
-            text(
-                items,
-                v.x + 16.0,
-                v.y + v.h + 10.0,
-                10.0,
-                &if self.retimed {
-                    format!(
-                        "{}×{} → {}×{} · frame at {:.3}s · original holds {:.3}s",
-                        f.input[0], f.input[1], f.output[0], f.output[1], f.pts, f.source_pts
-                    )
-                } else {
-                    format!(
-                        "{}×{} → {}×{} · through focused processor{}",
-                        f.input[0], f.input[1], f.output[0], f.output[1],
-                        if f.downsized { " · input downsized" } else { "" }
-                    )
-                },
-                DIM,
-                v.w,
-            );
-        }
         let dims = cached.map_or(self.source_dims, |f| f.output);
         let source = if cached.is_some() {
             slot + 1
@@ -3200,8 +3178,20 @@ impl Panel {
             let size = resolution(f.output);
             if self.retimed { format!("{size} {}fps", fps_label(self.rate)) } else { size }
         });
+        // What the rendered picture on screen is, beside the sizes: a
+        // retimed frame's own time and the original it is paired with, or
+        // that its input went in downsized.
+        let note = cached.map_or_else(String::new, |f| {
+            if self.retimed {
+                format!(" · frame at {:.3}s · original holds {:.3}s", f.pts, f.source_pts)
+            } else if f.downsized {
+                " · input downsized".into()
+            } else {
+                String::new()
+            }
+        });
         ui_label(items, v.x + 12.0, header.y + header.h / 2.0, 10.0,
-            hex_color(0xa3a5a8), &format!("{} → {output}", describe(self.source_dims)),
+            hex_color(0xa3a5a8), &format!("{} → {output}{note}", describe(self.source_dims)),
             Align::Left, (Self::compare_switch(vp).x - v.x - 24.0).max(1.0));
         self.draw_compare_switch(items, vp);
         items.push(Item::Clip(Some(r)));
@@ -3464,8 +3454,9 @@ impl Panel {
         if !metrics.is_empty() {
             line = format!("{line} · {metrics}");
         }
-        ui_label(items, r.x + 12.0, r.y + 35.0, 10.0, secondary, &line, Align::Left, (r.w - 24.0).max(1.0));
-        let track = RectPx { x: r.x + 12.0, y: r.y + 51.0, w: (r.w - 24.0).max(1.0), h: 6.0 };
+        // Its own row under the controls, so a long line never runs into them.
+        ui_label(items, r.x + 12.0, r.y + 39.0, 10.0, secondary, &line, Align::Left, (r.w - 24.0).max(1.0));
+        let track = RectPx { x: r.x + 12.0, y: r.y + 53.0, w: (r.w - 24.0).max(1.0), h: 6.0 };
         items.push(Item::Rect(RectItem { radius: 3.0, ..RectItem::new(track, hex_color(0x303235)) }));
         let fill = if let Some(fraction) = fraction {
             Some(RectPx { w: track.w * fraction, ..track })
@@ -3512,7 +3503,11 @@ impl Panel {
             }
             if hover {
                 let name = if i == 2 && self.playback { "Pause" } else { NAMES[i] };
-                ui_label(items, cx, b.y + b.h + 9.0, 10.0, WORKSPACE_DIM, name, Align::Center, 120.0);
+                // Under the row from its left edge: the buttons sit too close
+                // to the time readout for a label centred on each.
+                let x = Self::transport(vp, 0).x;
+                ui_label(items, x, b.y + b.h + 9.0, 10.0, WORKSPACE_DIM, name, Align::Left,
+                    (Self::timeline(vp).x - x - 10.0).max(1.0));
             }
         }
     }
