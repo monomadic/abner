@@ -548,7 +548,12 @@ after the frame icons); the processor inspector moved under the settings
 (`draw_info`). Frames stay in the preview cache stamped with `Preview::render`, so
 a render whose frames were evicted or rendered over leaves the list
 (`prune_renders`). A click (`open_render`) restores chain order, switches, settings,
-focus, source and playhead; the bin deletes; `` ` `` / `~` cycle. The 1f · 5f · 1s ·
+focus, source and playhead; the bin deletes; `` ` `` / `~` cycle. A render in
+flight is never cancelled by a change to the chain, the source or the page: its
+frames land under the chain key it was pressed with (`render_key`). A Render press
+while one runs takes the worker (`preempt`); the interrupted `Job` waits in
+`Panel::queue`, newest first, and is submitted again from its start. Only Cancel,
+the bin or closing the last clip removes one. The 1f · 5f · 1s ·
 5s buttons beside Render pick the length: more than one frame is ONE render and
 one seekbar block (`spans`), requested as a start/end stream, and switches Loop on
 — the app plays `loop_range` (`take_autoplay`, the wrap in `tick`, `sync_jumps`).

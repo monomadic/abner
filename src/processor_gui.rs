@@ -128,7 +128,8 @@ const RENDER_PITCH: f32 = 48.0;
 /// One Render press, kept in the renders pane: where it was made and the
 /// whole chain as it stood, so a click puts the page back there. Its frames
 /// stay in the preview cache, tagged with `id`; a render whose frames have
-/// all been evicted or replaced leaves the list.
+/// all been evicted or replaced leaves the list, unless it is running or
+/// waiting in the queue.
 struct Render {
     id: u64,
     /// The first rendered frame's time (the playhead until one arrives).
@@ -412,6 +413,24 @@ struct Request {
     /// Bytes allowed for the section's paired before/after frames
     /// (`processors.preview_cache_mb`); the frame count follows from it.
     budget: usize,
+}
+/// A Render press the worker has not finished: everything it was asked for,
+/// kept so it can be submitted when its turn comes, or again after a newer
+/// press took the worker from it.
+struct Job {
+    id: u64,
+    /// `frames_key` when it was pressed: where its frames belong.
+    key: String,
+    inputs: crate::spatial::JobInputs,
+    chain: Vec<(String, Value)>,
+    target: Option<f64>,
+    info: VideoInfo,
+    start: f64,
+    end: Option<f64>,
+    /// The playhead it was pressed at, and the output frames it should deliver.
+    at: f64,
+    expected: usize,
+    status: String,
 }
 struct Mailbox {
     pending: Option<Request>,
@@ -1137,6 +1156,11 @@ pub struct Panel {
     /// `frames_key` as it stood when that render was submitted: where its
     /// frames belong, whatever the page shows by the time they arrive.
     render_key: String,
+    /// The job the worker has, and the ones waiting, next one LAST: a new
+    /// press runs at once and the render it interrupts waits here, so the
+    /// newest always goes first.
+    running: Option<Job>,
+    queue: Vec<Job>,
     current: Option<u64>,
     renders_scroll: f32,
     /// The picked `LENGTHS` entry, and whether a multi-frame render plays
@@ -1225,6 +1249,8 @@ impl Default for Panel {
             next_render: 1,
             rendering: 0,
             render_key: String::new(),
+            running: None,
+            queue: Vec::new(),
             current: None,
             renders_scroll: 0.0,
             length: 0,
@@ -1386,6 +1412,7 @@ impl Panel {
     }
     /// Stop the render in flight and leave the page: the clips are gone.
     pub(crate) fn abandon(&mut self) {
+        self.queue.clear();
         if self.busy {
             self.cancel_preview();
         }
@@ -1601,19 +1628,61 @@ impl Panel {
         if self.span_frames() > 1 {
             self.loop_preview = true;
         }
+        self.dirty = Some(Instant::now());
+        self.toggle_play = self.playback;
+        self.show_rendered = true;
+        if !self.busy {
+            self.feedback = None;
+            self.render_result = None;
+            self.preview_count = 0;
+            self.changed_count = 0;
+            self.status = "Preparing render…".into();
+        }
+    }
+    /// Take the worker from the render in flight, which goes back on the
+    /// queue to run again from its start once the newer ones are done.
+    fn preempt(&mut self) {
+        if !self.busy {
+            return;
+        }
         self.cancel.cancel();
         if let Some(w) = &self.worker {
             w.cancel();
         }
         self.generation += 1;
-        self.dirty = Some(Instant::now());
-        self.toggle_play = self.playback;
+        self.busy = false;
+        self.queue.extend(self.running.take());
+    }
+    fn start_job(&mut self, job: Job) {
+        let Some(worker) = &self.worker else { return };
+        self.cancel = Cancellation::default();
+        // A fresh generation per submission: what an interrupted or
+        // cancelled run still sends is never taken for this one.
+        self.generation += 1;
+        worker.submit(Request {
+            inputs: job.inputs.clone(),
+            generation: self.generation,
+            chain: job.chain.clone(),
+            target: job.target,
+            info: job.info.clone(),
+            start: job.start,
+            end: job.end,
+            cancel: self.cancel.clone(),
+            budget: self.budget,
+        });
+        self.busy = true;
+        self.busy_since = Instant::now();
+        self.rendering = job.id;
+        self.render_key = job.key.clone();
+        self.pending = Some(job.at);
+        self.expected = job.expected;
+        self.progress = None;
         self.feedback = None;
         self.render_result = None;
-        self.show_rendered = true;
         self.preview_count = 0;
         self.changed_count = 0;
-        self.status = "Preparing render…".into();
+        self.status = job.status.clone();
+        self.running = Some(job);
     }
     fn cancel_preview(&mut self) {
         self.cancel.cancel();
@@ -1624,6 +1693,7 @@ impl Panel {
         self.generation += 1;
         self.dirty = None;
         self.busy = false;
+        self.running = None;
         self.pending = None;
         self.progress = None;
         self.feedback = None;
@@ -1707,7 +1777,11 @@ impl Panel {
     /// the playhead. The oldest render makes room once every cell is taken.
     fn begin_render(&mut self, time: f64, what: &'static str) {
         while self.renders.len() >= RENDER_THUMBS {
-            let old = self.renders.remove(0).id;
+            // The oldest finished one; a waiting one only when all are waiting.
+            let at = self.renders.iter()
+                .position(|r| !self.queue.iter().any(|j| j.id == r.id)).unwrap_or(0);
+            let old = self.renders.remove(at).id;
+            self.queue.retain(|j| j.id != old);
             self.drop_frames(old);
         }
         let slot = (0..RENDER_THUMBS).find(|s| !self.renders.iter().any(|r| r.slot == *s)).unwrap_or(0);
@@ -1748,9 +1822,10 @@ impl Panel {
             *counts.entry(f.render).or_default() += 1;
         }
         let live = self.busy.then_some(self.rendering);
+        let queue = &self.queue;
         self.renders.retain_mut(|r| {
             r.frames = counts.get(&r.id).copied().unwrap_or(0);
-            r.frames > 0 || live == Some(r.id)
+            r.frames > 0 || live == Some(r.id) || queue.iter().any(|j| j.id == r.id)
         });
         if let Some(id) = self.current
             && live != Some(id)
@@ -1763,6 +1838,7 @@ impl Panel {
         if self.busy && self.rendering == id {
             self.cancel_preview();
         }
+        self.queue.retain(|j| j.id != id);
         self.drop_frames(id);
         self.renders.retain(|r| r.id != id);
         if self.current == Some(id) {
@@ -2725,6 +2801,9 @@ impl Panel {
         let Some(worker) = self.worker.take() else { return };
         self.collect_from(&worker);
         self.worker = Some(worker);
+        if !self.busy && let Some(job) = self.queue.pop() {
+            self.start_job(job);
+        }
     }
     fn collect_from(&mut self, worker: &Worker) {
         {
@@ -2792,6 +2871,7 @@ impl Panel {
                     }
                     Event::Done(g, result) if g == self.generation => {
                         self.busy = false;
+                        self.running = None;
                         self.render_result = Some(result.is_ok());
                         self.render_elapsed = self.busy_since.elapsed();
                         self.pending = None;
@@ -2879,29 +2959,24 @@ impl Panel {
             {
                 self.status = "An enabled processor does not support frame previews.".into();
             } else if self.worker.is_some() {
-                self.cancel = Cancellation::default();
-                self.busy = true;
                 // 0 is the whole segment; 1 an isolated frame; more, that
                 // many source frames from the playhead as one stream.
                 let span = if self.render_segment { 0 } else { self.span_frames() };
                 let what = if self.render_segment { "segment" } else { LENGTHS[self.length].1 };
-                self.status = match span {
+                let status = match span {
                     0 => "Rendering segment · stops at the preview cache limit…".into(),
                     1 => "Rendering current frame through the enabled chain…".into(),
                     _ => format!("Rendering {what} through the enabled chain · stops at the preview cache limit…"),
                 };
-                self.pending = Some(start);
-                self.progress = None;
-                self.busy_since = Instant::now();
+                // The newest press runs now; one in flight waits its turn.
+                self.preempt();
                 self.begin_render(start, what);
-                self.expected = if span > 1 {
-                    (span as f64 * self.rate / self.fps).round().max(1.0) as usize
-                } else { span };
                 let frame = self.source_frame(start);
                 let stop = frame + (span as f64 - 0.5) / self.fps;
-                self.worker.as_ref().unwrap().submit(Request {
-                    inputs:self.inputs.clone(),
-                    generation: self.generation,
+                self.start_job(Job {
+                    id: self.rendering,
+                    key: self.render_key.clone(),
+                    inputs: self.inputs.clone(),
                     chain,
                     // The source frame under the playhead: a retimed chain
                     // returns every output frame paired with it.
@@ -2910,8 +2985,11 @@ impl Panel {
                     // Half a frame early, so the exact seek lands on `frame`.
                     start: if span > 1 { (frame - 0.5 / self.fps).max(0.0) } else { self.segment_start },
                     end: if span > 1 { Some(end.map_or(stop, |e| e.min(stop))) } else { end },
-                    cancel: self.cancel.clone(),
-                    budget: self.budget,
+                    at: start,
+                    expected: if span > 1 {
+                        (span as f64 * self.rate / self.fps).round().max(1.0) as usize
+                    } else { span },
+                    status,
                 });
             } else {
                 self.status = "No processors installed in this build.".into();
@@ -3053,6 +3131,7 @@ impl Panel {
                 let current = self.current == Some(r.id);
                 let hover = over(row) && over(list);
                 let live = self.busy && self.rendering == r.id;
+                let queued = self.queue.iter().any(|j| j.id == r.id);
                 items.push(Item::Rect(RectItem { radius: 8.0, border_w: if current { 2.0 } else { 0.0 },
                     border_color: hex_color(SOURCE_RING),
                     ..RectItem::new(row, hex_color(if hover && !current { 0x0c0c0c } else { 0x030303 })) }));
@@ -3079,7 +3158,7 @@ impl Panel {
                         format!("{} · {amount}", fmt_time(r.time))) }));
                 items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(width),
                     ..TextItem::new(tx, row.y + 30.0, 10.0, if live { hex_color(RENDERING) } else { WORKSPACE_DIM },
-                        if live { "Rendering…" } else { r.chain.as_str() }) }));
+                        if live { "Rendering…" } else if queued { "Queued" } else { r.chain.as_str() }) }));
                 draw_icon(items, Icon::Trash, bin.x + bin.w / 2.0, bin.y + bin.h / 2.0,
                     if over(bin) && over(list) { hex_color(0xffffff) } else { WORKSPACE_DIM });
             }
@@ -3567,7 +3646,7 @@ impl Panel {
         draw_cut_footer_button(
             items,
             b,
-            if self.busy { "Rendering…" } else { ["Render frame", "Render 5 frames", "Render 1 sec", "Render 5 sec"][self.length] },
+            ["Render frame", "Render 5 frames", "Render 1 sec", "Render 5 sec"][self.length],
             "R",
             false,
             hit(b, self.cursor.0, self.cursor.1),
@@ -3821,6 +3900,53 @@ mod tests {
         assert!(p.shown().is_none());
         p.release();
         assert_eq!(p.pointer_time(track.x + track.w, track), 60.0 - 1.0 / 60.0);
+    }
+    #[test]
+    fn a_new_render_runs_first_and_the_interrupted_one_waits_in_the_queue() {
+        let fixture = crate::native_decode_tests::Fixture::new();
+        let info = crate::probe::probe(&fixture.path).unwrap();
+        let (tx, rx) = mpsc::sync_channel(8);
+        let mut p = Panel::default();
+        p.open = true;
+        p.worker = Some(Worker {
+            active: Arc::new(Mutex::new(Vec::new())),
+            mailbox: Arc::new((Mutex::new(Mailbox { pending: None, stop: false }), Condvar::new())),
+            rx,
+            live: LiveProgress::default(),
+        });
+        let mut uploads = vec![];
+        p.tick(&info, 0.0, None, &mut uploads, 1);
+        p.request_preview();
+        p.tick(&info, 0.0, None, &mut uploads, 1);
+        let (first, token) = (p.rendering, p.cancel.clone());
+        assert!(p.busy && p.queue.is_empty());
+        // A second press takes the worker; the first waits.
+        p.request_preview();
+        p.tick(&info, 0.1, None, &mut uploads, 1);
+        let second = p.rendering;
+        assert!(token.check().is_err(), "the interrupted run stops");
+        assert!(p.busy && second != first);
+        assert_eq!(p.queue.iter().map(|j| j.id).collect::<Vec<_>>(), [first]);
+        assert_eq!(p.renders.len(), 2, "both stay in the pane");
+        // A third: the newest runs, the others keep their order behind it.
+        p.request_preview();
+        p.tick(&info, 0.2, None, &mut uploads, 1);
+        let third = p.rendering;
+        assert_eq!(p.queue.iter().map(|j| j.id).collect::<Vec<_>>(), [first, second]);
+        // Each finish hands the worker to the most recent one waiting.
+        tx.send(Event::Frame(p.generation, mark(0.2))).unwrap();
+        tx.send(Event::Done(p.generation, Ok(()))).unwrap();
+        p.tick(&info, 0.2, None, &mut uploads, 1);
+        assert!(p.busy && p.rendering == second);
+        assert_eq!(p.renders.len(), 3);
+        // Cancel stops the running one only; the bin takes one off the queue.
+        p.cancel_preview();
+        p.tick(&info, 0.2, None, &mut uploads, 1);
+        assert!(p.busy && p.rendering == first && p.queue.is_empty());
+        assert_eq!(p.renders.iter().map(|r| r.id).collect::<Vec<_>>(), [first, third]);
+        let request = p.worker.as_ref().unwrap().mailbox.0.lock().unwrap().pending.take().unwrap();
+        assert_eq!((request.generation, request.target), (p.generation, Some(0.0)),
+            "it is submitted again as it was first asked for");
     }
     #[test]
     fn a_render_in_flight_survives_changes_and_leaving_the_page() {
@@ -4686,7 +4812,8 @@ mod tests {
         assert!(!panel.busy);
         panel.request_preview();
         assert!(panel.feedback.is_none() && panel.render_result.is_none());
-        panel.busy = true;
+        panel.tick(&info, 0.2, None, &mut uploads, 1);
+        assert!(panel.busy);
         let generation = panel.generation;
         let mut unchanged = mark(0.0);
         unchanged.after = unchanged.before.clone();
