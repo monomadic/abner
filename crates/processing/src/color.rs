@@ -19,6 +19,16 @@ pub fn from_decoded(
         && color.matrix == filmcraft_color::Matrix::Bt709
         && color.range == filmcraft_color::Range::Limited;
     let (format, pixels) = match &frame.data {
+        PixelData::RgbaF32(p) if rec709 => (
+            RgbF32,
+            FramePixels::RgbF32(Arc::new(
+                p.as_chunks::<4>()
+                    .0
+                    .iter()
+                    .flat_map(|p| p[..3].iter().copied())
+                    .collect(),
+            )),
+        ),
         PixelData::Rgba8(p) if rec709 => (Rgba8, FramePixels::Rgba8(p.clone())),
         PixelData::Yuv8 {
             planes,
@@ -137,7 +147,106 @@ pub fn convert(mut frame: VideoFrame, target: PixelFormat) -> Result<VideoFrame>
         frame.format = target;
         return Ok(frame);
     }
+    if target == PixelFormat::RgbF32 {
+        let samples = match &frame.pixels {
+            FramePixels::Rgb16(p) => p.iter().map(|&v| v as f32 / 65535.0).collect(),
+            FramePixels::Rgba8(p) => p
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .flat_map(|p| p[..3].iter().map(|&v| v as f32 / 255.0))
+                .collect(),
+            FramePixels::Yuv8(_) | FramePixels::Yuv16(_) => {
+                let (sx, sy) = frame.format.subsampling().unwrap();
+                let cw = frame.width.div_ceil(sx);
+                let scale = if frame.format.depth() == 8 { 1.0 } else { 4.0 };
+                let sample = |c: usize, i: usize| match &frame.pixels {
+                    FramePixels::Yuv8(p) => p[c][i] as f32,
+                    FramePixels::Yuv16(p) => p[c][i] as f32,
+                    _ => unreachable!(),
+                };
+                let mut rgb = Vec::with_capacity(frame.width * frame.height * 3);
+                for y in 0..frame.height {
+                    for x in 0..frame.width {
+                        let l = (sample(0, y * frame.width + x) / scale - 16.0) / 219.0;
+                        let u = (sample(1, (y / sy) * cw + x / sx) / scale - 128.0) / 224.0;
+                        let v = (sample(2, (y / sy) * cw + x / sx) / scale - 128.0) / 224.0;
+                        rgb.extend_from_slice(&[
+                            l + 1.5748 * v,
+                            l - 0.187324 * u - 0.468124 * v,
+                            l + 1.8556 * u,
+                        ]);
+                    }
+                }
+                rgb
+            }
+            FramePixels::RgbF32(_) => unreachable!(),
+        };
+        frame.format = target;
+        frame.pixels = FramePixels::RgbF32(Arc::new(samples));
+        return Ok(frame);
+    }
+    if let FramePixels::RgbF32(rgb) = &frame.pixels {
+        if target == PixelFormat::Rgba8 {
+            frame.pixels = FramePixels::Rgba8(Arc::new(
+                rgb.as_chunks::<3>()
+                    .0
+                    .iter()
+                    .flat_map(|p| {
+                        [
+                            (p[0].clamp(0.0, 1.0) * 255.0).round_ties_even() as u8,
+                            (p[1].clamp(0.0, 1.0) * 255.0).round_ties_even() as u8,
+                            (p[2].clamp(0.0, 1.0) * 255.0).round_ties_even() as u8,
+                            255,
+                        ]
+                    })
+                    .collect(),
+            ));
+            frame.format = target;
+            return Ok(frame);
+        }
+    }
+    // Quantize float samples only at the requested sink, never via RGB16.
+    if let (FramePixels::RgbF32(rgb), Some((sx, sy))) = (&frame.pixels, target.subsampling()) {
+        let (w, h) = (frame.width, frame.height);
+        let (cw, ch) = (w.div_ceil(sx), h.div_ceil(sy));
+        let scale = if target.depth() == 8 { 1.0 } else { 4.0 };
+        let max = ((1u32 << target.depth()) - 1) as f32;
+        let q = |v: f32| v.round_ties_even().clamp(0.0, max) as u16;
+        let mut planes = [vec![0u16; w * h], vec![0; cw * ch], vec![0; cw * ch]];
+        for cy in 0..ch {
+            for cx in 0..cw {
+                let mut uv = [0.0f32; 2];
+                let mut count = 0;
+                for y in cy * sy..((cy + 1) * sy).min(h) {
+                    for x in cx * sx..((cx + 1) * sx).min(w) {
+                        let i = (y * w + x) * 3;
+                        let [r, g, b] = [rgb[i], rgb[i + 1], rgb[i + 2]];
+                        let l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                        planes[0][y * w + x] = q((16.0 + 219.0 * l) * scale);
+                        uv[0] += (b - l) / 1.8556;
+                        uv[1] += (r - l) / 1.5748;
+                        count += 1;
+                    }
+                }
+                for c in 0..2 {
+                    planes[c + 1][cy * cw + cx] = q((128.0 + 224.0 * uv[c] / count as f32) * scale);
+                }
+            }
+        }
+        frame.pixels = if target.depth() == 8 {
+            FramePixels::Yuv8(planes.map(|p| Arc::new(p.into_iter().map(|v| v as u8).collect())))
+        } else {
+            FramePixels::Yuv16(planes.map(Arc::new))
+        };
+        frame.format = target;
+        return Ok(frame);
+    }
     let rgb = match &frame.pixels {
+        FramePixels::RgbF32(p) => p
+            .iter()
+            .map(|v| (v.clamp(0.0, 1.0) * 65535.0).round_ties_even() as u16)
+            .collect(),
         FramePixels::Rgb16(_) => {
             match std::mem::replace(&mut frame.pixels, FramePixels::Rgb16(vec![])) {
                 FramePixels::Rgb16(p) => p,

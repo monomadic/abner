@@ -11,7 +11,7 @@ use crate::{
         draw_icon, draw_rail_grip, footer_export_rect, hex_color, mix, rail_full_width,
         status_build_width, ui_label, fmt_time, TRACK, FRAME_INK,
     },
-    player::{Player, Rgba},
+    player::Rgba,
     probe::VideoInfo,
     render::{
         Align, Item, RENDER_THUMB_SLOT, RENDER_THUMBS, RectItem, RectPx, TextBg, TextItem,
@@ -717,11 +717,10 @@ fn render(
     live: Option<&LiveProgress>,
 ) -> Result<(), String> {
     r.cancel.check()?;
-    // Plugins see the source at its NATIVE size (display dimensions, rotation
-    // applied, the same the Sources decoder uses) — pixels are the product here,
-    // and a proxy made every setting read as a loss. The display decoder emits
-    // RGBA8, so the preview is still 8-bit in and out, not a full-precision
-    // export. Wide-gamut and HDR sources are tone-mapped to SDR Rec.709 first.
+    // Process at native display dimensions. The first processor may provide an
+    // exact source decoder; otherwise preserve the host decoder's native layout.
+    // Negotiate precision through the chain and quantize only for display/export.
+    // Unsupported wide-gamut/HDR source paths retain the host's SDR conversion.
     check_processable(&r.info.path)?;
     let [w, h] = [r.info.width, r.info.height];
     r.inputs.validate_geometry(w,h)?;
@@ -848,13 +847,12 @@ fn render(
         crate::media_metadata::require_constant_rate(&r.info.path)?;
     }
     let mut last_out: Option<i64> = None;
-    let player = Player::spawn_native(&r.info.path, w, h, 8 * 1024 * 1024)
-    .ok_or("Could not open preview decoder")?;
+    let mut source = crate::processing_source::Source::open(registry,r.chain.first().map(|s|s.0.as_str()),&r.info.path,w,h,fps)?;
     // A frame preview is an isolated input, including for recurrent/batch models.
     // finish() lets implementations pad their own short input without replaying
     // the segment. Segment rendering retains the normal streaming contract.
     let decode_start = r.target.unwrap_or(r.start);
-    player.seek(decode_start, true);
+    source.seek(decode_start)?;
     let started = Instant::now();
     let mut originals = BTreeMap::new();
     let received = std::cell::Cell::new(0usize);
@@ -866,7 +864,7 @@ fn render(
             r.cancel.check()?;
             if r.target.is_none() && received.get() >= count { break; }
             frame.validate()?;
-            if frame.width != ow || frame.height != oh || (!retimed && frame.time_base != [1, 1_000_000]) {
+            if frame.width != ow || frame.height != oh {
                 return Err("Preview processor changed its declared geometry or time base".into());
             }
             // A retimer may count in its own time base (1/rate is natural);
@@ -929,50 +927,24 @@ fn render(
         }
         Ok(delivered)
     };
-    let read_frame = || -> Result<Option<(f64, crate::player::NativeFrame)>, String> {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            r.cancel.check()?;
-            if let Some(frame) = player.take_next_native() {
-                return Ok(Some(frame));
-            }
-            if player.failed() {
-                return Err("Preview decoder failed".into());
-            }
-            if player.exhausted() {
-                return Ok(None);
-            }
-            if Instant::now() > deadline {
-                return Err("Preview decoder timed out".into());
-            }
-            std::thread::sleep(Duration::from_millis(4));
-        }
-    };
+    let mut read_frame = || source.read(&r.cancel);
     let mut next = read_frame()?;
     let decode_count = if r.target.is_some() { 1 } else { count };
     for decoded in 0..decode_count {
         if r.target.is_some() {
             let _ = tx.try_send(Event::Progress(r.generation, decoded, decode_count));
         }
-        let Some((source_pts, decoded_frame)) = next.take() else {
+        let Some(decoded_frame) = next.take() else {
             break;
         };
+        let source_pts=decoded_frame.pts as f64*decoded_frame.time_base[0] as f64/decoded_frame.time_base[1] as f64;
         if r.end.is_some_and(|end| source_pts >= end - 1e-6) {
             break;
         }
         next = read_frame()?;
         let pts = (source_pts * 1e6).round() as i64;
-        let nominal = (1e6 / fps).round().max(1.0) as i64;
-        // One-frame lookahead preserves real source timestamps and rounding,
-        // including fractional frame rates, while keeping sessions contiguous.
-        let duration = next
-            .as_ref()
-            .map_or(nominal, |(t, _)| (*t * 1e6).round() as i64 - pts);
-        if duration <= 0 || (duration - nominal).abs() > 2000 {
-            return Err("This preview currently requires constant-rate video".into());
-        }
         if originals.len() >= count { return Err("Processor buffered too many frames for preview".into()); }
-        let mut input = abner_processing::color::from_decoded(&decoded_frame, pts, duration, [1,1_000_000])?;
+        let mut input = decoded_frame;
         // Before/after presentation is a separate display branch of the native frame.
         let before = abner_processing::color::rgba8(&input)?;
         originals.insert(pts, (before, source_pts));

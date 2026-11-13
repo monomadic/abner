@@ -1,5 +1,19 @@
 # abner — history
 
+## 2026-11-13 — Float interpolation sources and reusable VT sessions
+
+Added RGB f32 negotiation and optional processor-owned source decoding for preview
+and export. The external VT adapter can preserve native ProRes decode values and
+rational timestamps through processing; display and encoder conversion avoid an
+intermediate RGB16 round trip. Source frames are validated before use. Legacy
+processors retain their existing formats. Native VT session caching lives in the
+independent interpolate-engine crate, with per-job temporal histories.
+
+Validated float headroom, format negotiation, source selection and preview tests,
+plus a real HD ProRes host export. Float reference comparisons and timing evidence
+are recorded in interpolate-resolve/docs/float-plugin-parity.md; original frames
+match exactly while sparse synthesized differences follow VT repeatability.
+
 ## 2026-11-13 — Drag processors into chain order
 
 Processor cards can be dragged to a new position in the Process rail. A 4px

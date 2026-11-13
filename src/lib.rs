@@ -9,6 +9,7 @@
 
 mod processor_cli;
 mod processor_gui;
+mod processing_source;
 mod resample;
 mod processor_presets;
 mod export_page;

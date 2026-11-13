@@ -331,3 +331,25 @@ fn display_branch_bypasses_encoder_subsampling() {
     let encoded = color::into_prores(f).unwrap();
     assert_eq!(encoded.cb.len(), 2);
 }
+
+#[test]
+fn float_chain_preserves_headroom_and_original_allocation() {
+    let p=Arc::new([-0.125,0.12345679,1.25].repeat(4));
+    let f=VideoFrame{width:2,height:2,format:RgbF32,pixels:FramePixels::RgbF32(p.clone()),pts:0,duration:1,time_base:[1,24]};
+    let out=color::convert(f.clone(),RgbF32).unwrap();
+    let FramePixels::RgbF32(q)=out.pixels else {panic!()};assert!(Arc::ptr_eq(&p,&q));
+    let plan=FormatPlan::select(RgbF32,Rgba8,&[vec![FormatPair::RGB16,FormatPair::same(RgbF32)]]).unwrap();
+    assert_eq!(plan.stages[0],FormatPair::same(RgbF32));
+    let display=color::rgba8(&f).unwrap();assert_eq!(display[0],0);assert_eq!(display[2],255);
+    assert_eq!(p[0],-0.125);assert_eq!(p[2],1.25);
+    let mut bad=f;bad.pixels=FramePixels::RgbF32(Arc::new(vec![f32::NAN;12]));assert!(bad.validate().is_err());
+}
+
+#[test]
+fn float_encoder_boundary_keeps_yuv_headroom() {
+    let f=VideoFrame{width:2,height:2,format:RgbF32,pixels:FramePixels::RgbF32(Arc::new(vec![-0.05;12])),pts:0,duration:1,time_base:[1,24]};
+    let yuv=color::convert(f.clone(),Yuv422p10).unwrap();
+    let FramePixels::Yuv16(p)=yuv.pixels else{panic!()};assert!(p[0].iter().all(|v|*v<64));assert_eq!(p[1][0],512);
+    let f=VideoFrame{pixels:FramePixels::RgbF32(Arc::new(vec![1.05;12])),..f};
+    let yuv=color::convert(f,Yuv422p10).unwrap();let FramePixels::Yuv16(p)=yuv.pixels else{panic!()};assert!(p[0].iter().all(|v|*v>940 && *v<=1023));
+}

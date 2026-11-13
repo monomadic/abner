@@ -598,8 +598,10 @@ pub fn run(
             }
             Ok(())
         };
+        let mut exact_source=match job.stages.first() {Some(stage)=>registry.get(&stage.processor)?.open_source(&job.input,w,h)?,None=>None};
         for p in pts {
             cancel.check()?;
+            let frame=if let Some(source)=&mut exact_source {source.read()?.ok_or("Exact source ended early")?} else {
             let request = Tick::from_units(p, i64::from(vt.timescale));
             let request = Tick(
                 request
@@ -613,8 +615,8 @@ pub fn run(
             if [decoded.width as usize, decoded.height as usize] != [w, h] {
                 return Err("decoded dimensions changed".into());
             }
-            let frame =
-                crate::color::from_decoded(&decoded, p, i64::from(delta), [1, vt.timescale])?;
+                crate::color::from_decoded(&decoded, p, i64::from(delta), [1, vt.timescale])?
+            };
             if chain.format_plan().is_none() {
                 chain.negotiate(frame.format, abner_processor_api::PixelFormat::Yuv422p10)?;
             }

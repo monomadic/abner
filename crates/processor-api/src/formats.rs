@@ -7,6 +7,8 @@ use std::sync::Arc;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum PixelFormat {
     Rgb16,
+    /// Packed encoded SDR RGB float32, unclipped; finite values only.
+    RgbF32,
     Rgba8,
     Yuv420p8,
     Yuv420p10,
@@ -17,6 +19,7 @@ impl PixelFormat {
     pub fn depth(self) -> u32 {
         match self {
             Self::Rgb16 => 16,
+            Self::RgbF32 => 32,
             Self::Rgba8 | Self::Yuv420p8 => 8,
             _ => 10,
         }
@@ -49,6 +52,7 @@ impl FormatPair {
 #[derive(Clone)]
 pub enum FramePixels {
     Rgb16(Vec<u16>),
+    RgbF32(Arc<Vec<f32>>),
     Rgba8(Arc<Vec<u8>>),
     Yuv8([Arc<Vec<u8>>; 3]),
     Yuv16([Arc<Vec<u16>>; 3]),
@@ -94,6 +98,7 @@ impl VideoFrame {
     pub fn byte_len(&self) -> usize {
         match &self.pixels {
             FramePixels::Rgb16(p) => p.len() * 2,
+            FramePixels::RgbF32(p) => p.len() * 4,
             FramePixels::Rgba8(p) => p.len(),
             FramePixels::Yuv8(p) => p.iter().map(|p| p.len()).sum(),
             FramePixels::Yuv16(p) => p.iter().map(|p| p.len() * 2).sum(),
@@ -117,6 +122,7 @@ impl VideoFrame {
             .map(|(x, y)| self.width.div_ceil(x) * self.height.div_ceil(y));
         let valid = match (&self.pixels, self.format) {
             (FramePixels::Rgb16(p), Rgb16) => p.len() == n * 3,
+            (FramePixels::RgbF32(p), RgbF32) => p.len() == n * 3 && p.iter().all(|v| v.is_finite()),
             (FramePixels::Rgba8(p), Rgba8) => {
                 p.len() == n * 4 && p.as_chunks::<4>().0.iter().all(|p| p[3] == 255)
             }

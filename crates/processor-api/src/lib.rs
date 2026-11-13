@@ -225,7 +225,23 @@ pub struct ScaleOption {
     pub settings: serde_json::Value,
 }
 /// Factories can move to a preview worker; sessions stay on their creating thread.
+/// Optional exact source decoder supplied by a processor. Thread-confined;
+/// frames retain native timestamps, finite unclipped samples and source dimensions.
+pub trait FrameSource {
+    fn seek(&mut self, seconds: f64) -> Result<()>;
+    fn read(&mut self) -> Result<Option<VideoFrame>>;
+}
 pub trait Factory: Send {
+    /// None means use the host decoder. Errors must not silently fall back.
+    fn open_source(
+        &self,
+        _path: &std::path::Path,
+        _width: usize,
+        _height: usize,
+    ) -> Result<Option<Box<dyn FrameSource>>> {
+        Ok(None)
+    }
+
     /// The integer upscales this processor can produce, each with the
     /// settings that select it (`{"scale": "2x"}`, say). Empty by default,
     /// which hides the host's Downsize input row. Cheap and side-effect free:

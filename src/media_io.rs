@@ -3437,9 +3437,8 @@ pub(crate) fn pipeline_export_with_inputs(
         }
         let sink_format = if prores { PixelFormat::Yuv422p10 } else { PixelFormat::Rgba8 };
         let mut format_plan: Option<abner_processing::negotiation::FormatPlan> = None;
-        let player = crate::player::Player::spawn_native(&info.path, info.width, info.height, 16 * 1024 * 1024)
-        .context("Could not open export decoder")?;
-        player.seek(start, true);
+        let mut source=crate::processing_source::Source::open(registry,chain.first().map(|s|s.0.as_str()),&info.path,info.width,info.height,info.fps).map_err(anyhow::Error::msg)?;
+        source.seek(start).map_err(anyhow::Error::msg)?;
         let mut previous_end: Option<f64> = None;
         let mut accept = |frames: Vec<VideoFrame>| -> Result<()> {
             for f in frames {
@@ -3527,42 +3526,16 @@ pub(crate) fn pipeline_export_with_inputs(
         // A rounded nominal duration cannot join independently rounded PTS values:
         // 24 fps alternates between 41,666 and 41,667 microseconds. Look ahead
         // once, as the Process preview does, so every input ends at the next PTS.
-        let read_next = || -> Result<Option<(f64, crate::player::NativeFrame)>> {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-            loop {
-                cancel.check().map_err(anyhow::Error::msg)?;
-                if let Some(frame) = player.take_next_native() {
-                    return Ok(Some(frame));
-                }
-                ensure!(!player.failed(), "Export decoder failed");
-                if player.exhausted() {
-                    return Ok(None);
-                }
-                ensure!(
-                    std::time::Instant::now() < deadline,
-                    "Export decoder timed out"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(2));
-            }
-        };
-        let nominal = (1e6 / info.fps).round().max(1.) as i64;
+        let mut read_next = || source.read(cancel).map_err(anyhow::Error::msg);
         let mut next = read_next()?;
-        while let Some((pts, decoded_frame)) = next.take() {
+        while let Some(decoded_frame) = next.take() {
+            let pts=decoded_frame.pts as f64*decoded_frame.time_base[0] as f64/decoded_frame.time_base[1] as f64;
             cancel.check().map_err(anyhow::Error::msg)?;
             if pts >= end - 1e-6 {
                 break;
             }
             next = read_next()?;
-            let timestamp = (pts * 1e6).round() as i64;
-            let duration = next.as_ref().map_or(nominal, |(next_pts, _)| {
-                (next_pts * 1e6).round() as i64 - timestamp
-            });
-            ensure!(
-                duration > 0 && (duration - nominal).abs() < 2000,
-                "Export currently requires constant-rate input"
-            );
-            let mut f = abner_processing::color::from_decoded(&decoded_frame, timestamp, duration, [1,1_000_000])
-                .map_err(anyhow::Error::msg)?;
+            let mut f=decoded_frame;
             if cx != 0 || cy != 0 || cw != info.width || ch != info.height {
                 // Arbitrary crop origins can split a chroma sample. Crop in RGB16
                 // rather than inventing chroma phase or reducing to display depth.
