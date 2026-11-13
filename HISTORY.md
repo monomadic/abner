@@ -1,5 +1,18 @@
 # abner — history
 
+## 2026-11-13 — Animated processor dragging
+
+Dragging lifts the processor card under the cursor, preserving the grab point and
+painting it above the panels with a raised background and shadow. Neighboring
+rows ease into their proposed positions over 160 ms, leaving a full row gap in
+place of the insertion line. Reversing direction starts from each row’s current
+position. Drop and Escape animate from the current screen positions into the
+committed or original order; redraws stop when those transitions settle.
+
+Tests cover cursor anchoring, drawing above panel clips, intermediate row
+positions, reversal continuity, drop/cancel settling and idle redraw behavior,
+alongside the existing reorder/settings/filter tests.
+
 ## 2026-11-13 — Float interpolation sources and reusable VT sessions
 
 Added RGB f32 negotiation and optional processor-owned source decoding for preview

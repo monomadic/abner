@@ -113,6 +113,31 @@ impl SwitchSlide {
     }
 }
 
+/// Rows ease into the insertion gap, then settle on drop or cancellation.
+const CARD_SLIDE_S: f32 = 0.16;
+#[derive(Clone, Copy)]
+struct CardSlide {
+    from: (f32, f32),
+    to: (f32, f32),
+    at: Instant,
+}
+impl CardSlide {
+    fn offset(self, now: Instant) -> (f32, f32) {
+        let t = (now.duration_since(self.at).as_secs_f32() / CARD_SLIDE_S).clamp(0.0, 1.0);
+        let ease = 1.0 - (1.0 - t).powi(3);
+        (self.from.0 + (self.to.0 - self.from.0) * ease,
+            self.from.1 + (self.to.1 - self.from.1) * ease)
+    }
+}
+#[derive(Clone, Copy)]
+struct CardDrag {
+    origin: (f32, f32),
+    rect: RectPx,
+    viewport: (f32, f32),
+    active: bool,
+    target: Option<usize>,
+}
+
 /// What one Render press covers from the playhead: the button's label, its
 /// name in sentences, and the length as source frames or whole seconds.
 const LENGTHS: [(&str, &str, u32, u32); 4] = [
@@ -1117,8 +1142,8 @@ pub struct Panel {
     editing: Option<(usize, String)>,
     scroll: f32,
     dragging: Option<usize>,
-    /// Row press origin, threshold state, and proposed (destination, marker y).
-    card_drag: Option<((f32, f32), bool, Option<(usize, f32)>)>,
+    card_drag: Option<CardDrag>,
+    card_slides: BTreeMap<String, CardSlide>,
     preset: usize,
     text_cursor: crate::text_edit::Cursor,
     /// Every Render press still holding frames, oldest first (the pane
@@ -1218,6 +1243,7 @@ impl Default for Panel {
             scroll: 0.0,
             dragging: None,
             card_drag: None,
+            card_slides: BTreeMap::new(),
             preset: usize::MAX,
             text_cursor: Default::default(),
             renders: vec![],
@@ -1306,6 +1332,7 @@ impl Panel {
             return;
         }
         self.card_drag = None;
+        self.card_slides.clear();
         self.dragging = None;
         self.selected = index;
         self.preset = usize::MAX;
@@ -1419,6 +1446,7 @@ impl Panel {
     }
     fn toggle(&mut self) {
         self.card_drag = None;
+        self.card_slides.clear();
         self.dragging = None;
         self.open = !self.open;
         if self.open {
@@ -1495,10 +1523,11 @@ impl Panel {
             return false;
         }
         self.cursor = (x, y);
-        if let Some((origin, active, _)) = self.card_drag {
-            let active = active || (x - origin.0).hypot(y - origin.1) >= 4.0;
+        if let Some(mut drag) = self.card_drag {
+            drag.active |= (x - drag.origin.0).hypot(y - drag.origin.1) >= 4.0;
+            drag.viewport = vp;
             let list = self.list(vp);
-            let target = if active && hit(list, x, y) {
+            let target = if drag.active && hit(list, x, y) {
                 let visible = self.visible();
                 let slot = visible.iter().position(|&i| {
                     let card = self.card(i, vp);
@@ -1507,12 +1536,12 @@ impl Panel {
                 let boundary = visible.get(slot).copied()
                     .unwrap_or_else(|| visible.last().map_or(0, |i| i + 1));
                 let to = boundary - usize::from(boundary > self.selected);
-                let marker = visible.get(slot).map_or_else(
-                    || visible.last().map_or(list.y, |&i| { let c = self.card(i, vp); c.y + c.h }),
-                    |&i| self.card(i, vp).y);
-                Some((to, marker))
+                Some(to)
             } else { None };
-            self.card_drag = Some((origin, active, target));
+            let changed = drag.target != target;
+            drag.target = target;
+            self.card_drag = Some(drag);
+            if changed { self.animate_card_gap(Instant::now()); }
             return true;
         }
         if self.scrubbing {
@@ -1536,8 +1565,8 @@ impl Panel {
     }
     pub(crate) fn scrubbing(&self) -> bool { self.open && self.scrubbing }
     pub fn release(&mut self) -> bool {
-        if let Some((_, _, target)) = self.card_drag.take() {
-            if let Some((to, _)) = target { self.move_selected_to(to); }
+        if self.card_drag.is_some() {
+            self.finish_card_drag(true);
             return true;
         }
         let scrub = std::mem::take(&mut self.scrubbing);
@@ -1551,6 +1580,7 @@ impl Panel {
     /// Keep redraws hot only while work or a visible UI transition is running.
     pub fn animating(&self) -> bool {
         self.open && (self.busy || self.autoplay.is_some()
+            || self.card_slides.values().any(|s| s.at.elapsed().as_secs_f32() < CARD_SLIDE_S)
             || self.switch_slides.iter().flatten().any(|s| s.at.elapsed().as_secs_f32() < SWITCH_SLIDE_S)
             || self.detail_at
                 .is_some_and(|t| t.elapsed().as_secs_f32() < DETAIL_SLIDE_S))
@@ -2036,7 +2066,8 @@ impl Panel {
     }
     pub fn key(&mut self, key: Key) -> bool {
         self.caret_at = Instant::now();
-        if matches!(key, Key::Escape) && self.card_drag.take().is_some() {
+        if matches!(key, Key::Escape) && self.card_drag.is_some() {
+            self.finish_card_drag(false);
             return true;
         }
         use crate::text_edit::Edit;
@@ -2217,6 +2248,76 @@ impl Panel {
             w: Self::left(vp) - 2.0 * (13.0 + GROUP_PAD),
             h: ROW_H,
         }
+    }
+    fn card_offset(&self, i: usize, now: Instant) -> (f32, f32) {
+        self.card_slides.get(&self.descriptors[i].id).map_or((0.0, 0.0), |s| s.offset(now))
+    }
+    fn animated_card(&self, i: usize, vp: (f32, f32), now: Instant) -> RectPx {
+        if let Some(drag) = self.card_drag && drag.active && i == self.selected {
+            return RectPx { x: drag.rect.x + self.cursor.0 - drag.origin.0,
+                y: drag.rect.y + self.cursor.1 - drag.origin.1, ..drag.rect };
+        }
+        let r = self.card(i, vp);
+        let offset = self.card_offset(i, now);
+        RectPx { x: r.x + offset.0, y: r.y + offset.1, ..r }
+    }
+    fn animate_card_gap(&mut self, now: Instant) {
+        let visible = self.visible();
+        let mut order = visible.clone();
+        if let Some(to) = self.card_drag.and_then(|d| d.target) {
+            order.retain(|&i| i != self.selected);
+            let slot = order.iter().filter(|&&i| i - usize::from(i > self.selected) < to).count();
+            order.insert(slot, self.selected);
+        }
+        for (old, &i) in visible.iter().enumerate() {
+            let new = order.iter().position(|&j| j == i).unwrap();
+            let to = (0.0, (new as f32 - old as f32) * CARD_PITCH);
+            let from = self.card_offset(i, now);
+            self.card_slides.insert(self.descriptors[i].id.clone(), CardSlide { from, to, at: now });
+        }
+    }
+    fn finish_card_drag(&mut self, commit: bool) {
+        let Some(drag) = self.card_drag else { return };
+        let now = Instant::now();
+        // Capture screen positions before changing the model, including the
+        // floating row, so dropping or cancelling never snaps a row sideways.
+        let positions: Vec<_> = self.visible().into_iter().map(|i|
+            (self.descriptors[i].id.clone(), self.animated_card(i, drag.viewport, now))).collect();
+        self.card_drag = None;
+        if commit && let Some(to) = drag.target { self.move_selected_to(to); }
+        self.card_slides.clear();
+        if !drag.active { return; }
+        for (id, old) in positions {
+            let i = self.descriptors.iter().position(|d| d.id == id).unwrap();
+            let new = self.card(i, drag.viewport);
+            self.card_slides.insert(id, CardSlide {
+                from: (old.x - new.x, old.y - new.y), to: (0.0, 0.0), at: now,
+            });
+        }
+    }
+    fn floating_card(&self) -> bool {
+        self.card_drag.is_some_and(|d| d.active)
+            || (self.card_drag.is_none() && self.descriptors.get(self.selected)
+                .and_then(|d| self.card_slides.get(&d.id))
+                .is_some_and(|s| s.from != (0.0, 0.0) && s.at.elapsed().as_secs_f32() < CARD_SLIDE_S))
+    }
+    fn draw_processor_card(&self, items: &mut Vec<Item>, i: usize, c: RectPx, floating: bool) {
+        let active = i == self.selected;
+        let hover = self.card_drag.is_none() && hit(c, self.cursor.0, self.cursor.1);
+        if floating {
+            items.push(Item::Rect(RectItem { radius: 10.0,
+                ..RectItem::new(RectPx { x: c.x - 3.0, y: c.y + 4.0, w: c.w + 6.0, h: c.h + 4.0 },
+                    [0.0, 0.0, 0.0, 0.45]) }));
+        }
+        items.push(Item::Rect(RectItem { radius: 8.0, border_w: if active { 2.0 } else { 0.0 },
+            border_color: hex_color(SOURCE_RING),
+            ..RectItem::new(c, hex_color(if floating { 0x232323 } else if hover && !active { 0x0c0c0c } else { 0x030303 })) }));
+        let switch = RectPx { x: c.x + c.w - 46.0, y: c.y + (c.h - 18.0) / 2.0, w: 34.0, h: 18.0 };
+        let tx = c.x + 13.0;
+        items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(switch.x - tx - 10.0),
+            ..TextItem::new(tx, c.y + c.h / 2.0, 12.0,
+                hex_color(if self.enabled[i] || active { 0xe6e6e6 } else { 0x8c8c8c }), self.descriptors[i].name.as_str()) }));
+        draw_rail_switch(items, switch, self.switch_position(i, Instant::now()));
     }
     /// The row's pill switch: shared by painting and hit testing.
     fn card_switch(&self, i: usize, vp: (f32, f32)) -> RectPx {
@@ -2670,7 +2771,11 @@ impl Panel {
                         self.toggle_enabled(index);
                     } else {
                         if index != self.selected { self.select(index); }
-                        self.card_drag = Some(((x, y), false, None));
+                        self.cursor = (x, y);
+                        self.card_drag = Some(CardDrag {
+                            origin: (x, y), rect: self.animated_card(index, vp, Instant::now()),
+                            viewport: vp, active: false, target: None,
+                        });
                     }
                 }
             }
@@ -3071,29 +3176,12 @@ impl Panel {
                 ..RectItem::new(RectPx { x: 13.0, y: top, w: l - 26.0, h }, hex_color(0x121212)) }));
         }
         items.push(Item::Clip(Some(list)));
+        let now = Instant::now();
         for &i in &visible {
-            let d = &self.descriptors[i];
-            let c = self.card(i, vp);
-            if c.y + c.h < list.y || c.y > list.y + list.h {
-                continue;
-            }
-            let active = i == self.selected;
-            let hover = over(c) && over(list);
-            items.push(Item::Rect(RectItem { radius: 8.0, border_w: if active { 2.0 } else { 0.0 },
-                border_color: hex_color(SOURCE_RING),
-                ..RectItem::new(c, hex_color(if hover && !active { 0x0c0c0c } else { 0x030303 })) }));
-            let on = self.enabled[i];
-            let switch = self.card_switch(i, vp);
-            let tx = c.x + 13.0;
-            items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(switch.x - tx - 10.0),
-                ..TextItem::new(tx, c.y + c.h / 2.0, 12.0, if on || active { ink } else { hex_color(0x8c8c8c) }, d.name.as_str()) }));
-            draw_rail_switch(items, switch, self.switch_position(i, Instant::now()));
-        }
-        if let Some((_, true, Some((to, y)))) = self.card_drag && to != self.selected {
-            items.push(Item::Rect(RectItem::new(RectPx {
-                x: 13.0 + GROUP_PAD, y: y.clamp(list.y + 1.0, list.y + list.h - 1.0) - 1.0,
-                w: l - 2.0 * (13.0 + GROUP_PAD), h: 2.0,
-            }, hex_color(SOURCE_RING))));
+            if self.floating_card() && i == self.selected { continue; }
+            let c = self.animated_card(i, vp, now);
+            if c.y + c.h < list.y || c.y > list.y + list.h { continue; }
+            self.draw_processor_card(items, i, c, false);
         }
         items.push(Item::Clip(None));
         let footer = if self.descriptors.is_empty() { "No processors in this build" } else { "Drag processors to reorder" };
@@ -3386,12 +3474,17 @@ impl Panel {
             Align::Right, t.w * 0.45);
         self.draw_footer(items, vp);
         self.draw_settings(items, vp);
+        if self.floating_card() {
+            items.push(Item::Clip(None));
+            self.draw_processor_card(items, self.selected,
+                self.animated_card(self.selected, vp, Instant::now()), true);
+        }
     }
     /// The hovered setting explains itself: its schema `description`, then
     /// the current choice's, wrapped by the renderer to the left of the
     /// settings column so it covers the picture, never another setting.
     fn draw_tooltip(&self, items: &mut Vec<Item>, vp: (f32, f32), clip: RectPx) {
-        if self.dragging.is_some() || !hit(clip, self.cursor.0, self.cursor.1) {
+        if self.card_drag.is_some() || self.dragging.is_some() || !hit(clip, self.cursor.0, self.cursor.1) {
             return;
         }
         let Some((i, f)) = self
@@ -4252,7 +4345,7 @@ mod tests {
         p.click(x, y, vp);
         p.pointer(x, last.y + last.h - 1.0, vp);
         assert_eq!(p.export_setup().1, original);
-        assert!(matches!(p.card_drag, Some((_, true, Some((1, _))))));
+        assert!(matches!(p.card_drag, Some(CardDrag { active: true, target: Some(1), .. })));
         p.release();
         assert_eq!(p.selected, 1);
         assert_eq!(p.settings["strength"], json!(0.75));
@@ -4273,6 +4366,66 @@ mod tests {
         p.pointer(x, first.y + 1.0, vp);
         p.release();
         assert_eq!(p.export_setup().1, original);
+    }
+    #[test]
+    fn processor_drag_rows_animate_and_settle_without_jumps() {
+        let mut registry = Registry::default();
+        registry.register(Box::new(BufferedFactory)).unwrap();
+        registry.register(Box::new(ScalingFactory)).unwrap();
+        let mut p = Panel::new(registry);
+        p.enter();
+        let vp = (1280.0, 900.0);
+        let first = p.card(0, vp);
+        let second = p.card(1, vp);
+        p.click(first.x + 20.0, first.y + 10.0, vp);
+        p.pointer(first.x + 35.0, second.y + second.h - 1.0, vp);
+        let lifted = p.animated_card(0, vp, Instant::now());
+        assert_eq!(lifted.x, first.x + 15.0);
+        assert_eq!(lifted.y, second.y + second.h - 11.0);
+        let mut items = Vec::new();
+        p.draw(&mut items, vp, 0, (1.0, (0.5, 0.5)), true);
+        let label = items.iter().rev().find_map(|item| match item {
+            Item::Text(t) if t.text == p.descriptors[0].name => Some(t),
+            _ => None,
+        }).unwrap();
+        assert_eq!((label.x, label.y), (lifted.x + 13.0, lifted.y + lifted.h / 2.0));
+        assert!(matches!(items.iter().rev().find(|item| matches!(item, Item::Clip(_))),
+            Some(Item::Clip(None))), "the floating card is painted above the clipped panels");
+        let displaced_id = p.descriptors[1].id.clone();
+        let slide = p.card_slides[&displaced_id];
+        assert_eq!(slide.offset(slide.at), (0.0, 0.0));
+        let middle = slide.offset(slide.at + Duration::from_secs_f32(CARD_SLIDE_S / 2.0));
+        assert!(middle.1 < 0.0 && middle.1 > -CARD_PITCH);
+        assert_eq!(slide.offset(slide.at + Duration::from_secs(1)), (0.0, -CARD_PITCH));
+        assert!(p.animating());
+        // Reversing the insertion starts exactly at the current interpolated position.
+        let now = Instant::now();
+        let before = p.card_offset(1, now);
+        p.card_drag.as_mut().unwrap().target = Some(0);
+        p.animate_card_gap(now);
+        assert_eq!(p.card_slides[&displaced_id].from, before);
+        assert_eq!(p.card_slides[&displaced_id].to, (0.0, 0.0));
+        p.pointer(first.x + 35.0, second.y + second.h - 1.0, vp);
+        let lifted = p.animated_card(0, vp, Instant::now());
+        p.release();
+        assert_eq!(p.selected, 1);
+        let landing = p.card_slides[&p.descriptors[1].id];
+        let start = p.animated_card(1, vp, landing.at);
+        assert_eq!((start.x, start.y), (lifted.x, lifted.y));
+        assert!(p.floating_card(), "the settling row stays above the rail clip");
+        let end = p.animated_card(1, vp, landing.at + Duration::from_secs(1));
+        assert_eq!((end.x, end.y), (second.x, second.y));
+        // Once transitions end the page can idle again.
+        for slide in p.card_slides.values_mut() { slide.at -= Duration::from_secs(1); }
+        assert!(!p.animating() && !p.floating_card());
+        p.click(second.x + 20.0, second.y + 10.0, vp);
+        p.pointer(first.x + 40.0, first.y + 1.0, vp);
+        let lifted = p.animated_card(1, vp, Instant::now());
+        p.key(Key::Escape);
+        let returning = p.card_slides[&p.descriptors[1].id];
+        let start = p.animated_card(1, vp, returning.at);
+        assert_eq!((start.x, start.y), (lifted.x, lifted.y));
+        assert_eq!(p.selected, 1, "cancel preserves the model order");
     }
     #[test]
     fn paired_spatial_controls_stay_separate_and_leave_room_for_settings() {
