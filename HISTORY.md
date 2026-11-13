@@ -1,5 +1,20 @@
 # abner — history
 
+## 2026-11-13 — Drag processors into chain order
+
+Processor cards can be dragged to a new position in the Process rail. A 4px
+threshold preserves ordinary selection clicks; an orange insertion marker shows
+where release will place the stage. Escape or dropping outside the list cancels.
+The enable switches retain their click behavior, and the list can be scrolled
+while dragging. Category filters use visible insertion positions while keeping
+hidden processors in their relative order.
+
+Drops use the same stage movement as Move up/down: settings, enable flags,
+capabilities and scale choices travel together, selection follows the moved
+processor, and preview/export consume the resulting chain order. Existing renders
+keep their original snapshots. Interaction tests cover both directions, filtered
+rows, cancellation, switch clicks, settings and export/preview order.
+
 ## 2026-11-12 — Whole-clip progress during a processed export
 
 A render's footer now leads with the whole clip and then says what the working

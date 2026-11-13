@@ -1145,6 +1145,8 @@ pub struct Panel {
     editing: Option<(usize, String)>,
     scroll: f32,
     dragging: Option<usize>,
+    /// Row press origin, threshold state, and proposed (destination, marker y).
+    card_drag: Option<((f32, f32), bool, Option<(usize, f32)>)>,
     preset: usize,
     text_cursor: crate::text_edit::Cursor,
     /// Every Render press still holding frames, oldest first (the pane
@@ -1243,6 +1245,7 @@ impl Default for Panel {
             editing: None,
             scroll: 0.0,
             dragging: None,
+            card_drag: None,
             preset: usize::MAX,
             text_cursor: Default::default(),
             renders: vec![],
@@ -1330,6 +1333,7 @@ impl Panel {
         if self.descriptors.is_empty() {
             return;
         }
+        self.card_drag = None;
         self.dragging = None;
         self.selected = index;
         self.preset = usize::MAX;
@@ -1442,6 +1446,7 @@ impl Panel {
         }
     }
     fn toggle(&mut self) {
+        self.card_drag = None;
         self.dragging = None;
         self.open = !self.open;
         if self.open {
@@ -1518,6 +1523,26 @@ impl Panel {
             return false;
         }
         self.cursor = (x, y);
+        if let Some((origin, active, _)) = self.card_drag {
+            let active = active || (x - origin.0).hypot(y - origin.1) >= 4.0;
+            let list = self.list(vp);
+            let target = if active && hit(list, x, y) {
+                let visible = self.visible();
+                let slot = visible.iter().position(|&i| {
+                    let card = self.card(i, vp);
+                    y < card.y + card.h / 2.0
+                }).unwrap_or(visible.len());
+                let boundary = visible.get(slot).copied()
+                    .unwrap_or_else(|| visible.last().map_or(0, |i| i + 1));
+                let to = boundary - usize::from(boundary > self.selected);
+                let marker = visible.get(slot).map_or_else(
+                    || visible.last().map_or(list.y, |&i| { let c = self.card(i, vp); c.y + c.h }),
+                    |&i| self.card(i, vp).y);
+                Some((to, marker))
+            } else { None };
+            self.card_drag = Some((origin, active, target));
+            return true;
+        }
         if self.scrubbing {
             let t = Self::timeline(vp);
             self.seek = Some(self.timeline_time(x, t));
@@ -1539,6 +1564,10 @@ impl Panel {
     }
     pub(crate) fn scrubbing(&self) -> bool { self.open && self.scrubbing }
     pub fn release(&mut self) -> bool {
+        if let Some((_, _, target)) = self.card_drag.take() {
+            if let Some((to, _)) = target { self.move_selected_to(to); }
+            return true;
+        }
         let scrub = std::mem::take(&mut self.scrubbing);
         self.dragging.take().is_some() || scrub
     }
@@ -1965,6 +1994,9 @@ impl Panel {
         let visible = self.visible();
         let Some(at) = visible.iter().position(|i| *i == self.selected) else { return };
         let to = visible[at.saturating_add_signed(delta).min(visible.len() - 1)];
+        self.move_selected_to(to);
+    }
+    fn move_selected_to(&mut self, to: usize) {
         if to == self.selected {
             return;
         }
@@ -2032,6 +2064,9 @@ impl Panel {
     }
     pub fn key(&mut self, key: Key) -> bool {
         self.caret_at = Instant::now();
+        if matches!(key, Key::Escape) && self.card_drag.take().is_some() {
+            return true;
+        }
         use crate::text_edit::Edit;
         let edit = match key {
             Key::Left => Some(Edit::Left),
@@ -2584,6 +2619,7 @@ impl Panel {
                     0.0,
                     (self.visible().len() as f32 * CARD_PITCH - 3.0 - list.h).max(0.0),
                 );
+                if self.card_drag.is_some() { self.pointer(cursor.0, cursor.1, vp); }
                 return true;
             }
             if cursor.0 < vp.0 - Self::right(vp) {
@@ -2604,6 +2640,7 @@ impl Panel {
         if !self.open {
             return false;
         }
+        self.card_drag = None;
         let r = Self::bounds(vp);
         if !hit(r, x, y) {
             return false;
@@ -2659,8 +2696,9 @@ impl Panel {
                 if let Some(&index) = self.visible().get(row) && hit(self.card(index, vp), x, y) {
                     if hit(self.card_switch(index, vp), x, y) {
                         self.toggle_enabled(index);
-                    } else if index != self.selected {
-                        self.select(index);
+                    } else {
+                        if index != self.selected { self.select(index); }
+                        self.card_drag = Some(((x, y), false, None));
                     }
                 }
             }
@@ -3079,8 +3117,14 @@ impl Panel {
                 ..TextItem::new(tx, c.y + c.h / 2.0, 12.0, if on || active { ink } else { hex_color(0x8c8c8c) }, d.name.as_str()) }));
             draw_rail_switch(items, switch, self.switch_position(i, Instant::now()));
         }
+        if let Some((_, true, Some((to, y)))) = self.card_drag && to != self.selected {
+            items.push(Item::Rect(RectItem::new(RectPx {
+                x: 13.0 + GROUP_PAD, y: y.clamp(list.y + 1.0, list.y + list.h - 1.0) - 1.0,
+                w: l - 2.0 * (13.0 + GROUP_PAD), h: 2.0,
+            }, hex_color(SOURCE_RING))));
+        }
         items.push(Item::Clip(None));
-        let footer = if self.descriptors.is_empty() { "No processors in this build" } else { "" };
+        let footer = if self.descriptors.is_empty() { "No processors in this build" } else { "Drag processors to reorder" };
         items.push(Item::Text(TextItem { interface: true, valign: VAlign::Middle, max_width: Some(l - 24.0),
             ..TextItem::new(12.0, list.y + list.h + 16.0, 11.0, subtle, footer) }));
         self.draw_renders(items, vp);
@@ -4196,6 +4240,67 @@ mod tests {
         let (all, ..) = p.chips(vp)[0];
         p.click(all.x + 5.0, all.y + 5.0, vp);
         assert_eq!(p.visible(), [0, 1, 2]);
+        p.set_filter(Some(Category::Denoising));
+        let first = p.card(0, vp);
+        let second = p.card(1, vp);
+        p.click(first.x + 20.0, first.y + 10.0, vp);
+        p.pointer(second.x + 20.0, second.y + second.h - 1.0, vp);
+        p.release();
+        let ids: Vec<_> = p.descriptors.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(ids, ["example.a", "example.c", "example.b"]);
+    }
+    #[test]
+    fn processor_drag_commits_on_drop_and_preserves_stage_state() {
+        let mut registry = Registry::default();
+        registry.register(Box::new(BufferedFactory)).unwrap();
+        registry.register(Box::new(ScalingFactory)).unwrap();
+        let mut p = Panel::new(registry);
+        p.enter();
+        p.toggle_enabled(0);
+        p.toggle_enabled(1);
+        p.select(0);
+        p.settings["strength"] = json!(0.75);
+        p.changed();
+        let original = p.export_setup().1;
+        let vp = (1280.0, 900.0);
+        let first = p.card(0, vp);
+        let last = p.card(1, vp);
+        let x = first.x + 20.0;
+        let y = first.y + 10.0;
+        // Click jitter must not reorder, and the switch is never a drag handle.
+        p.click(x, y, vp);
+        p.pointer(x + 1.0, y + 1.0, vp);
+        p.release();
+        assert_eq!(p.export_setup().1, original);
+        let switch = p.card_switch(0, vp);
+        p.click(switch.x + 2.0, switch.y + 2.0, vp);
+        assert!(p.card_drag.is_none());
+        p.toggle_enabled(0);
+        // Crossing a row previews insertion; only release changes the chain.
+        p.click(x, y, vp);
+        p.pointer(x, last.y + last.h - 1.0, vp);
+        assert_eq!(p.export_setup().1, original);
+        assert!(matches!(p.card_drag, Some((_, true, Some((1, _))))));
+        p.release();
+        assert_eq!(p.selected, 1);
+        assert_eq!(p.settings["strength"], json!(0.75));
+        assert_eq!(p.export_setup().1, vec![original[1].clone(), original[0].clone()]);
+        assert_eq!(p.chain(), p.export_setup().1);
+        assert_eq!(p.scales[0][0].factor, 2);
+        // Escape and dropping outside the list both cancel the proposed move.
+        for escape in [false, true] {
+            let c = p.card(1, vp);
+            p.click(x, c.y + 10.0, vp);
+            p.pointer(x, first.y + 1.0, vp);
+            if escape { assert!(p.key(Key::Escape)); }
+            else { p.pointer(vp.0 / 2.0, first.y, vp); }
+            p.release();
+            assert_eq!(p.selected, 1);
+        }
+        p.click(x, last.y + 10.0, vp);
+        p.pointer(x, first.y + 1.0, vp);
+        p.release();
+        assert_eq!(p.export_setup().1, original);
     }
     #[test]
     fn paired_spatial_controls_stay_separate_and_leave_room_for_settings() {
