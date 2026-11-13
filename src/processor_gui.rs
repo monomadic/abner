@@ -1134,6 +1134,9 @@ pub struct Panel {
     renders: Vec<Render>,
     next_render: u64,
     rendering: u64,
+    /// `frames_key` as it stood when that render was submitted: where its
+    /// frames belong, whatever the page shows by the time they arrive.
+    render_key: String,
     current: Option<u64>,
     renders_scroll: f32,
     /// The picked `LENGTHS` entry, and whether a multi-frame render plays
@@ -1221,6 +1224,7 @@ impl Default for Panel {
             renders: vec![],
             next_render: 1,
             rendering: 0,
+            render_key: String::new(),
             current: None,
             renders_scroll: 0.0,
             length: 0,
@@ -1340,18 +1344,18 @@ impl Panel {
     pub fn set_budget(&mut self, bytes: usize) {
         self.budget = bytes.max(1);
     }
+    /// The chain, its settings, the inputs or the source changed. A render
+    /// in flight is NOT cancelled: it owns a snapshot of what it was asked
+    /// for, and its frames land under that chain's key (`render_key`). Only
+    /// Cancel, deleting it, or another Render press stops it.
     fn changed(&mut self) {
-        self.cancel.cancel();
-        if let Some(worker) = &self.worker {
-            worker.cancel();
+        if !self.busy {
+            self.feedback = None;
+            self.render_result = None;
+            self.preview_count = 0;
+            self.changed_count = 0;
+            self.render_elapsed = Duration::ZERO;
         }
-        self.generation += 1;
-        self.busy = false;
-        self.feedback = None;
-        self.render_result = None;
-        self.preview_count = 0;
-        self.changed_count = 0;
-        self.render_elapsed = Duration::ZERO;
         self.dirty = None;
         if let Some(saved) = self.saved.get_mut(self.selected) {
             *saved = self.settings.clone();
@@ -1371,11 +1375,21 @@ impl Panel {
             self.frames = frames;
         }
         Self::trim_stash(&mut self.stash, Self::frame_bytes(&self.frames), self.budget);
+        if self.busy {
+            return;
+        }
         self.status = if self.frames.is_empty() {
             "Render the current frame to inspect the enabled chain.".into()
         } else {
             format!("{} rendered frames kept for this chain", self.frames.len())
         };
+    }
+    /// Stop the render in flight and leave the page: the clips are gone.
+    pub(crate) fn abandon(&mut self) {
+        if self.busy {
+            self.cancel_preview();
+        }
+        self.close();
     }
     /// Everything a render's pixels depend on: the previewed chain with its
     /// settings, the spatial inputs and crops, and the source and its edits.
@@ -1406,12 +1420,8 @@ impl Panel {
         if self.open {
             self.changed();
         } else {
-            self.cancel.cancel();
-            if let Some(worker) = &self.worker {
-                worker.cancel();
-            }
-            self.generation += 1;
-            self.busy = false;
+            // Leaving the page keeps a render in flight; `tick` goes on
+            // collecting its frames.
             self.editing = None;
             self.preset_name = None;
             self.dirty = None;
@@ -1719,6 +1729,7 @@ impl Panel {
             frames: 0,
         });
         self.rendering = id;
+        self.render_key = self.frames_key.clone();
         self.current = Some(id);
         self.renders_scroll = 0.0;
     }
@@ -2708,6 +2719,117 @@ impl Panel {
             }
         }
     }
+    /// Take what the worker has finished. Runs whether or not the page is
+    /// open, so a render outlives a mode switch.
+    fn collect(&mut self) {
+        let Some(worker) = self.worker.take() else { return };
+        self.collect_from(&worker);
+        self.worker = Some(worker);
+    }
+    fn collect_from(&mut self, worker: &Worker) {
+        {
+            while let Ok(event) = worker.rx.try_recv() {
+                match event {
+                    Event::Frame(g, mut f) if g == self.generation => {
+                        f.render = self.rendering;
+                        if let Some(r) = self.renders.iter_mut().find(|r| r.id == f.render && !r.thumbed) {
+                            r.thumbed = true;
+                            r.time = f.pts;
+                            self.thumb_uploads.push(ThumbUpload {
+                                slot: RENDER_THUMB_SLOT + r.slot,
+                                buf: thumbnail(&f.after, f.output),
+                            });
+                        }
+                        self.preview_count += 1;
+                        if f.input != f.output || f.before != f.after { self.changed_count += 1; }
+                        if self.render_key != self.frames_key {
+                            // The page moved on to another chain or source:
+                            // the frame joins its own chain's stash.
+                            let key = &self.render_key;
+                            let at = self.stash.iter().position(|(k, _)| k == key).unwrap_or_else(|| {
+                                self.stash.push((key.clone(), Vec::new()));
+                                self.stash.len() - 1
+                            });
+                            // Newest last, so the budget takes other chains first.
+                            let mut entry = self.stash.remove(at);
+                            entry.1.retain(|old| (old.pts - f.pts).abs() > 0.5 * f.duration);
+                            let needed = f.before.len() + f.after.len();
+                            while !entry.1.is_empty() && Self::frame_bytes(&entry.1) + needed > self.budget {
+                                entry.1.remove(0);
+                            }
+                            self.status = format!("Rendered {:.3}s · {:.2}s processing", f.pts, f.elapsed);
+                            entry.1.push(f);
+                            entry.1.sort_by(|a, b| a.pts.total_cmp(&b.pts));
+                            let held = Self::frame_bytes(&entry.1);
+                            Self::trim_stash(&mut self.stash, Self::frame_bytes(&self.frames) + held, self.budget);
+                            self.stash.push(entry);
+                            continue;
+                        }
+                        self.frames
+                            .retain(|old| (old.pts - f.pts).abs() > 0.5 * f.duration);
+                        let needed = f.before.len() + f.after.len();
+                        Self::trim_stash(&mut self.stash, Self::frame_bytes(&self.frames) + needed, self.budget);
+                        while !self.frames.is_empty()
+                            && self
+                                .frames
+                                .iter()
+                                .map(|f| f.before.len() + f.after.len())
+                                .sum::<usize>()
+                                + needed
+                                > self.budget
+                        {
+                            self.frames.remove(0);
+                        }
+                        self.status =
+                            format!("Rendered {:.3}s · {:.2}s processing", f.pts, f.elapsed);
+                        self.frames.push(f);
+                        self.frames.sort_by(|a, b| a.pts.total_cmp(&b.pts));
+                    }
+                    Event::Progress(g, done, total) if g == self.generation => {
+                        self.progress = Some((done, total));
+                        self.feedback = None;
+                        self.status = format!("Preparing temporal context · {done}/{total} frames");
+                    }
+                    Event::Done(g, result) if g == self.generation => {
+                        self.busy = false;
+                        self.render_result = Some(result.is_ok());
+                        self.render_elapsed = self.busy_since.elapsed();
+                        self.pending = None;
+                        self.progress = None;
+                        if let Err(e) = result {
+                            self.feedback = None;
+                            self.status = e;
+                        } else {
+                            self.status = if self.changed_count == 0 && self.preview_count > 0 {
+                                "Preview complete · no pixels changed. Check processor settings and inputs.".into()
+                            } else {
+                                format!("Render ready · {} frames · {} with changed pixels", self.preview_count, self.changed_count)
+                            };
+                            // The worker's last report can contain diagnostics about
+                            // unresolved output. Preserve it after completion too.
+                            let latest = worker.live.lock().unwrap().take();
+                            if let Some((g, feedback)) = latest && g == self.generation {
+                                self.feedback = Some(feedback);
+                            }
+                            // More than one frame, with Loop on: play it.
+                            let id = self.rendering;
+                            let mut mine = self.frames.iter().filter(|f| f.render == id);
+                            if self.open && self.loop_preview && let (Some(first), Some(_)) = (mine.next(), mine.next()) {
+                                self.autoplay = Some(first.pts);
+                                self.show_rendered = true;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Some((g, feedback)) = worker.live.lock().unwrap().take()
+                && g == self.generation && self.busy {
+                self.status = stage_status(&feedback.name, &feedback.progress);
+                self.feedback = Some(feedback);
+            }
+        }
+    }
     pub fn tick(
         &mut self,
         info: &VideoInfo,
@@ -2717,9 +2839,8 @@ impl Panel {
         slot: usize,
     ) {
         if !self.open {
-            if let Some(w) = &self.worker {
-                while w.rx.try_recv().is_ok() {}
-            }
+            self.collect();
+            self.prune_renders();
             return;
         }
         self.time = start;
@@ -2796,85 +2917,7 @@ impl Panel {
                 self.status = "No processors installed in this build.".into();
             }
         }
-        if let Some(worker) = &self.worker {
-            while let Ok(event) = worker.rx.try_recv() {
-                match event {
-                    Event::Frame(g, mut f) if g == self.generation => {
-                        f.render = self.rendering;
-                        if let Some(r) = self.renders.iter_mut().find(|r| r.id == f.render && !r.thumbed) {
-                            r.thumbed = true;
-                            r.time = f.pts;
-                            self.thumb_uploads.push(ThumbUpload {
-                                slot: RENDER_THUMB_SLOT + r.slot,
-                                buf: thumbnail(&f.after, f.output),
-                            });
-                        }
-                        self.preview_count += 1;
-                        if f.input != f.output || f.before != f.after { self.changed_count += 1; }
-                        self.frames
-                            .retain(|old| (old.pts - f.pts).abs() > 0.5 * f.duration);
-                        let needed = f.before.len() + f.after.len();
-                        Self::trim_stash(&mut self.stash, Self::frame_bytes(&self.frames) + needed, self.budget);
-                        while !self.frames.is_empty()
-                            && self
-                                .frames
-                                .iter()
-                                .map(|f| f.before.len() + f.after.len())
-                                .sum::<usize>()
-                                + needed
-                                > self.budget
-                        {
-                            self.frames.remove(0);
-                        }
-                        self.status =
-                            format!("Rendered {:.3}s · {:.2}s processing", f.pts, f.elapsed);
-                        self.frames.push(f);
-                        self.frames.sort_by(|a, b| a.pts.total_cmp(&b.pts));
-                    }
-                    Event::Progress(g, done, total) if g == self.generation => {
-                        self.progress = Some((done, total));
-                        self.feedback = None;
-                        self.status = format!("Preparing temporal context · {done}/{total} frames");
-                    }
-                    Event::Done(g, result) if g == self.generation => {
-                        self.busy = false;
-                        self.render_result = Some(result.is_ok());
-                        self.render_elapsed = self.busy_since.elapsed();
-                        self.pending = None;
-                        self.progress = None;
-                        if let Err(e) = result {
-                            self.feedback = None;
-                            self.status = e;
-                        } else {
-                            self.status = if self.changed_count == 0 && self.preview_count > 0 {
-                                "Preview complete · no pixels changed. Check processor settings and inputs.".into()
-                            } else {
-                                format!("Render ready · {} frames · {} with changed pixels", self.preview_count, self.changed_count)
-                            };
-                            // The worker's last report can contain diagnostics about
-                            // unresolved output. Preserve it after completion too.
-                            let latest = worker.live.lock().unwrap().take();
-                            if let Some((g, feedback)) = latest && g == self.generation {
-                                self.feedback = Some(feedback);
-                            }
-                            // More than one frame, with Loop on: play it.
-                            let id = self.rendering;
-                            let mut mine = self.frames.iter().filter(|f| f.render == id);
-                            if self.loop_preview && let (Some(first), Some(_)) = (mine.next(), mine.next()) {
-                                self.autoplay = Some(first.pts);
-                                self.show_rendered = true;
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            if let Some((g, feedback)) = worker.live.lock().unwrap().take()
-                && g == self.generation && self.busy {
-                self.status = stage_status(&feedback.name, &feedback.progress);
-                self.feedback = Some(feedback);
-            }
-        }
+        self.collect();
         self.prune_renders();
         if let Some(f) = self.shown() {
             uploads.push(Upload {
@@ -3780,13 +3823,24 @@ mod tests {
         assert_eq!(p.pointer_time(track.x + track.w, track), 60.0 - 1.0 / 60.0);
     }
     #[test]
-    fn invalidation_cancels_and_discards_old_frames() {
+    fn a_render_in_flight_survives_changes_and_leaving_the_page() {
         let mut p = Panel::default();
-        let c = p.cancel.clone();
+        p.enter();
+        p.begin_render(1.0, "frame");
+        p.busy = true;
+        let (token, generation, id) = (p.cancel.clone(), p.generation, p.rendering);
+        // Another chain, then another page: neither stops it.
+        p.settings["$probe"] = json!(1);
         p.changed();
-        assert!(c.check().is_err());
-        assert_eq!(p.generation, 1);
-        assert!(p.frames.is_empty());
+        p.close();
+        assert!(token.check().is_ok() && p.busy && p.generation == generation);
+        p.prune_renders();
+        assert_eq!(p.renders.len(), 1, "it stays in the renders pane");
+        assert_ne!(p.render_key, p.frames_key);
+        // Only a manual cancel (here: the bin) ends it.
+        p.delete_render(id);
+        assert!(token.check().is_err() && !p.busy && p.generation > generation);
+        assert!(p.renders.is_empty());
     }
     #[test]
     fn preview_controls_cancel_without_losing_cached_frames_and_tab_compares() {
@@ -4216,7 +4270,7 @@ mod tests {
         assert!(plain.get(DOWNSIZE_KEY).is_none(), "the plugin never sees it");
     }
     #[test]
-    fn gui_controls_edit_runtime_settings_and_cancel_on_drag() {
+    fn gui_controls_edit_runtime_settings_without_cancelling() {
         let mut panel = Panel::new(registry());
         panel.open = true;
         let vp = (1280.0, 900.0);
@@ -4229,7 +4283,7 @@ mod tests {
         let old = panel.cancel.clone();
         assert!(panel.click(row.x + row.w * 0.75, row.y + 25.0, vp));
         assert_eq!(panel.settings["strength"], json!(0.75));
-        assert!(old.check().is_err());
+        assert!(old.check().is_ok(), "a setting change leaves a render in flight alone");
         assert!(panel.pointer(row.x + row.w, row.y + 25.0, vp));
         assert_eq!(panel.settings["strength"], json!(1.0));
         assert!(panel.release());
@@ -4258,7 +4312,7 @@ mod tests {
         panel.edit_text(crate::text_edit::Edit::SelectAll);panel.text_input("replacement");panel.key(Key::Enter);
         assert_eq!(panel.settings["path"], json!("replacement"));
         panel.close();
-        assert!(panel.cancel.check().is_err());
+        assert!(panel.cancel.check().is_ok(), "leaving the page keeps the render");
     }
     #[test]
     fn native_preview_preserves_yuv_and_low_rgb16_bits_through_buffered_sessions() {
@@ -4949,7 +5003,7 @@ mod tests {
         p.enabled[1] = true; // a different chain: its pixels can't be the old ones
         p.changed();
         assert!(p.frames.is_empty());
-        assert!(old.check().is_err());
+        assert!(old.check().is_ok());
         assert!(
             p.dirty.is_none(),
             "settings changes must not start expensive inference automatically"

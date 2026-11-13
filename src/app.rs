@@ -2809,7 +2809,7 @@ impl App {
 
     pub fn tick(&mut self, dt: f32, vp: (f32, f32), scale: f32) -> FrameDesc {
         self.scale = scale;
-        if self.videos.is_empty(){self.processors.close();self.export_page.open=false;self.export_page.cancel();}
+        if self.videos.is_empty(){self.processors.abandon();self.export_page.open=false;self.export_page.cancel();}
         if self.vp != vp {
             self.stroke_last = None;
             self.vp = vp;
