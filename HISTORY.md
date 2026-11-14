@@ -1,5 +1,12 @@
 # abner — history
 
+## 2026-11-14 — Figma button bar styling
+
+Shared canvas toolbar buttons now follow the attached Figma reference: opaque
+grey fills, dark 1px outlines, warm light labels, and a darker recessed selected
+state. Hover and disabled states remain distinct; labels, geometry and actions
+are unchanged. The native build and existing toolbar interaction test pass.
+
 ## 2026-11-13 — Autodetect settings and frame sampling
 
 Mask mode now opens a compact Autodetect panel with time-range and frame-count

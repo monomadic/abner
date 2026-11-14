@@ -7403,16 +7403,23 @@ pub(crate) fn draw_canvas_bar(items: &mut Vec<Item>, r: RectPx) {
 pub(crate) fn draw_canvas_button(
     items: &mut Vec<Item>, r: RectPx, label: &str, selected: bool, hovered: bool, disabled: bool,
 ) {
+    use figleaf::{Rect, Shadow, Shape};
     let selected = selected && !disabled;
     let hovered = hovered && !disabled;
-    let fill = if selected { hex_color(0x201f1f) } else if hovered { hex_color(0x535151) } else { [0.0; 4] };
+    // The attached Figma bar: filled grey buttons with dark outlines; the
+    // selected control is a darker, recessed surface. Values are sRGB.
+    let fill = hex_color(if selected { 0x302d2b } else if hovered { 0x5b5959 } else { 0x514f4f });
     items.push(Item::Rect(RectItem {
         radius: 6.0,
-        border_w: if selected { 0.0 } else { 1.0 },
-        border_color: hex_color(if hovered { 0x999798 } else { 0x706e6e }),
+        border_w: 1.0,
+        border_color: hex_color(if selected { 0x211f1e } else { 0x383636 }),
         ..RectItem::new(r, fill)
     }));
-    let ink = if disabled { 0x858587 } else if selected || hovered { 0xf1f1f1 } else { 0xb0b0b3 };
+    if selected {
+        items.push(Item::Shape(Shape::rect(Rect::new(r.x, r.y, r.w, r.h)).radius(6.0)
+            .shadow(Shadow::inner([0.0, 0.0, 0.0, 0.29], [0.0, 2.0], 2.9))));
+    }
+    let ink = if disabled { 0x858587 } else if selected || hovered { 0xf1efed } else { 0xbab8b8 };
     ui_label(items, r.x + 10.0, r.y + r.h / 2.0, 12.0, hex_color(ink), label, Align::Left, (r.w - 18.0).max(1.0));
 }
 
