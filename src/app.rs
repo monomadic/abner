@@ -7403,24 +7403,23 @@ pub(crate) fn draw_canvas_bar(items: &mut Vec<Item>, r: RectPx) {
 pub(crate) fn draw_canvas_button(
     items: &mut Vec<Item>, r: RectPx, label: &str, selected: bool, hovered: bool, disabled: bool,
 ) {
-    use figleaf::{Rect, Shadow, Shape};
+    use figleaf::{Rect, Shadow, Shape, StrokeAlign, Text, paint::Align as Place};
     let selected = selected && !disabled;
     let hovered = hovered && !disabled;
     // The attached Figma bar: filled grey buttons with dark outlines; the
     // selected control is a darker, recessed surface. Values are sRGB.
     let fill = hex_color(if selected { 0x302d2b } else if hovered { 0x5b5959 } else { 0x514f4f });
-    items.push(Item::Rect(RectItem {
-        radius: 6.0,
-        border_w: 1.0,
-        border_color: hex_color(if selected { 0x211f1e } else { 0x383636 }),
-        ..RectItem::new(r, fill)
-    }));
-    if selected {
-        items.push(Item::Shape(Shape::rect(Rect::new(r.x, r.y, r.w, r.h)).radius(6.0)
-            .shadow(Shadow::inner([0.0, 0.0, 0.0, 0.29], [0.0, 2.0], 2.9))));
-    }
+    // Follow figleaf's abner_button_bar example through the host's ordered
+    // figleaf canvas, including CoreText labels (not the legacy quad atlas).
+    let button = Shape::rect(Rect::new(r.x, r.y, r.w, r.h)).radius(6.0).fill(fill)
+        .stroke(1.0, hex_color(if selected { 0x211f1e } else { 0x383636 }), StrokeAlign::Inside);
+    items.push(Item::Shape(if selected {
+        button.shadow(Shadow::inner([0.0, 0.0, 0.0, 0.22], [0.0, 2.0], 2.2))
+    } else { button }));
     let ink = if disabled { 0x858587 } else if selected || hovered { 0xf1efed } else { 0xbab8b8 };
-    ui_label(items, r.x + 10.0, r.y + r.h / 2.0, 12.0, hex_color(ink), label, Align::Left, (r.w - 18.0).max(1.0));
+    let label_rect = Rect::new(r.x + 10.0, r.y, (r.w - 18.0).max(1.0), r.h);
+    items.push(Item::Label(Text::new(label, label_rect).font(1).size(12.0, 16.0)
+        .color(hex_color(ink)).align(Place::Start, Place::Center).clip(label_rect)));
 }
 
 /// The Sources rail's full panel width at window width `w` (the processors

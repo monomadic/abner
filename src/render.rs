@@ -504,7 +504,7 @@ pub struct Gpu {
     figleaf: figleaf::render::Renderer,
     /// This frame's shapes, kept between frames for its allocation.
     shapes: figleaf::Canvas,
-    /// Rasterizes `Item::Label`s from the bundled header face.
+    /// Rasterizes figleaf labels: bundled header face (0), SF Pro Medium (1).
     labels: figleaf::text::coretext::CoreText,
     sampler: wgpu::Sampler,
     bgl: wgpu::BindGroupLayout,
@@ -822,11 +822,17 @@ impl Gpu {
         let instance_capacity = 1024;
         let instances = Self::make_instance_buffer(&device, instance_capacity);
         let figleaf = figleaf::render::Renderer::new(&device, config.format);
+        // The button-bar example in figleaf uses SF Pro Medium at weight 510.
+        // Keep the existing header face in slot 0 for processor switches.
+        let interface_bytes = std::fs::read("/Library/Fonts/SF-Pro.ttf")
+            .or_else(|_| std::fs::read("/System/Library/Fonts/SFNS.ttf"))
+            .unwrap_or_else(|_| include_bytes!("../assets/fonts/JetBrainsMono-Medium.ttf").to_vec());
+        let interface_axes = [figleaf::text::Axis { tag: *b"wght", value: 510. }];
         let labels = figleaf::text::coretext::CoreText::new(&[Some(figleaf::text::FontSource {
             bytes: include_bytes!("../assets/fonts/JetBrainsMono-Medium.ttf"),
             axes: &[],
-        })])
-        .expect("bundled JetBrains Mono Medium must load");
+        }), Some(figleaf::text::FontSource { bytes: &interface_bytes, axes: &interface_axes })])
+        .expect("figleaf header and interface fonts must load");
 
         let mut gpu = Self {
             surface,
