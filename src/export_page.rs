@@ -188,7 +188,7 @@ impl Layout {
         let footer_y = vp.1 - crate::app::CUT_STATUS_H;
         let sidebar = RectPx { x: 0., y: crate::app::HEADER_H,
             w: side, h: footer_y - crate::app::HEADER_H };
-        let canvas = Canvas::layout(RectPx{x:side,y:sidebar.y,w:vp.0-side,h:footer_y-sidebar.y},Some(40.),
+        let canvas = Canvas::layout(RectPx{x:side,y:sidebar.y,w:vp.0-side,h:footer_y-sidebar.y},true,
             Some(TimelineAttachment{x:side,width:vp.0-side,transport_height:60.,lanes_height:0.}));
         let context=canvas.button_bar.unwrap().r;
         let transport=canvas.timeline.unwrap().transport;
@@ -589,6 +589,7 @@ impl Page {
     }
     pub fn actions(&self, vp: (f32, f32)) -> Vec<(RectPx, &'static str, bool, Action)> {
         let l = Layout::new(vp);
+        let bar = l.canvas.button_bar.unwrap();
         let (x, w, y, _) = Self::settings_geometry(l);
         let third = (w - 8.) / 3.;
         let r = |x, y, w| RectPx { x, y, w, h: 26. };
@@ -602,17 +603,17 @@ impl Page {
             (r(x, y + 136., w - 32.), "", self.filename_edit.is_some(), Action::EditFilename),
             (r(x + w - 26., y + 136., 26.), "Save as", false, Action::Destination),
             (r(x + w - 24., y + 196., 24.), "", false, Action::RevealDirectory),
-            (r(l.context.x + 12., l.context.y + 7., 124.), "Original / Output", self.original, Action::Compare),
+            (bar.control(bar.content().x,124.), "Original / Output", self.original, Action::Compare),
             (r(l.transport.x + 20., l.transport.y + 30., 26.), "‹", false, Action::Step(false)),
             (r(l.transport.x + 50., l.transport.y + 30., 56.), if self.playing() { "Pause" } else { "Play" }, false, Action::Play),
             (r(l.transport.x + 110., l.transport.y + 30., 26.), "›", false, Action::Step(true)),
             (r(l.transport.x + l.transport.w - 134., l.transport.y + 30., 114.), "Follow render", self.following, Action::Follow),
         ];
-        let primary = RectPx { x: vp.0 - 164., y: l.context.y + 4., w: 148., h: 32. };
+        let primary = bar.primary_rect(148.);
         if self.busy() {
             actions.push((primary, "Cancel export", false, Action::Cancel));
         } else if self.path.is_some() {
-            actions.push((r(primary.x - 94., l.context.y + 7., 86.), "Export", false, Action::Export));
+            actions.push((bar.control(primary.x-ButtonBar::GROUP_GAP-86.,86.), "Export", false, Action::Export));
             actions.push((primary, "Reveal output", false, Action::Reveal));
         } else {
             actions.push((primary, "Export", false, Action::Export));
@@ -1129,7 +1130,7 @@ mod tests {
             let l = Layout::new(vp);
             assert_eq!(l.sidebar.x, 0.);
             assert_eq!(l.video.x, l.sidebar.w);
-            assert_eq!(l.video.y, crate::app::HEADER_H + 40.);
+            assert_eq!(l.video.y, crate::app::HEADER_H + ButtonBar::HEIGHT);
             assert_eq!(l.video.w + l.sidebar.w, vp.0);
             assert_eq!(l.sidebar.y, crate::app::HEADER_H);
             assert_eq!(p.actions(vp).iter().filter(|(.., a)| *a == Action::Export).count(), 1);
@@ -1147,7 +1148,7 @@ mod tests {
                 assert!(r.y + r.h <= l.footer.y);
                 if a == Action::Export {
                     assert!(r.y >= l.context.y && r.y + r.h <= l.context.y + l.context.h);
-                    assert_eq!(r.x + r.w, vp.0 - 16.);
+                    assert_eq!(r.x + r.w, vp.0 - ButtonBar::PADDING_X);
                 }
             }
         }
@@ -1164,7 +1165,7 @@ mod tests {
         let reveal = actions.iter().find(|(.., a)| *a == Action::Reveal).unwrap();
         let l = Layout::new((720., 480.));
         assert!(reveal.0.y >= l.context.y && reveal.0.y + reveal.0.h <= l.video.y);
-        assert_eq!(reveal.0.x + reveal.0.w, 704.);
+        assert_eq!(reveal.0.x + reveal.0.w, 720. - ButtonBar::PADDING_X);
         let export = actions.iter().find(|(.., a)| *a == Action::Export).unwrap();
         assert!(export.0.x + export.0.w < reveal.0.x);
         assert_eq!(p.click((720., 480.), reveal.0.x + 1., reveal.0.y + 1.), Some(Action::Reveal));

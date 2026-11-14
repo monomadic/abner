@@ -37,12 +37,12 @@ impl Canvas {
         }
     }
     /// Solve once; drawing and pointer handlers consume these same rectangles.
-    pub fn layout(
-        bounds: RectPx,
-        bar_height: Option<f32>,
-        bottom: Option<TimelineAttachment>,
-    ) -> Self {
-        let bar_h = bar_height.unwrap_or(0.).clamp(0., bounds.h.max(0.));
+    pub fn layout(bounds: RectPx, show_bar: bool, bottom: Option<TimelineAttachment>) -> Self {
+        let bar_h = if show_bar {
+            ButtonBar::HEIGHT.min(bounds.h.max(0.))
+        } else {
+            0.
+        };
         let remaining = (bounds.h - bar_h).max(0.);
         let timeline = bottom.map(|b| {
             let lanes_h = b.lanes_height.clamp(0., remaining);
@@ -71,7 +71,7 @@ impl Canvas {
                 w: bounds.w,
                 h: (end - bounds.y - bar_h).max(0.),
             },
-            button_bar: bar_height.map(|_| ButtonBar {
+            button_bar: show_bar.then(|| ButtonBar {
                 r: RectPx { h: bar_h, ..bounds },
             }),
             timeline,
@@ -150,6 +150,54 @@ pub(crate) fn zoomed(base: RectPx, zoom: f32, center: (f32, f32)) -> RectPx {
     }
 }
 impl ButtonBar {
+    pub const HEIGHT: f32 = 40.0;
+    pub const PADDING_X: f32 = 12.0;
+    pub const PADDING_Y: f32 = 6.0;
+    pub const GAP: f32 = 4.0;
+    pub const GROUP_GAP: f32 = 8.0;
+    const PRIMARY_HEIGHT: f32 = 32.0;
+
+    pub fn at(x: f32, y: f32, width: f32) -> Self {
+        Self {
+            r: RectPx {
+                x,
+                y,
+                w: width,
+                h: Self::HEIGHT,
+            },
+        }
+    }
+    pub fn content(&self) -> RectPx {
+        let px = Self::PADDING_X.min(self.r.w.max(0.) / 2.);
+        let py = Self::PADDING_Y.min(self.r.h.max(0.) / 2.);
+        RectPx {
+            x: self.r.x + px,
+            y: self.r.y + py,
+            w: (self.r.w - 2. * px).max(0.),
+            h: (self.r.h - 2. * py).max(0.),
+        }
+    }
+    /// `x` and width express page content; vertical metrics belong to the bar.
+    pub fn control(&self, x: f32, width: f32) -> RectPx {
+        RectPx {
+            x,
+            w: width,
+            ..self.content()
+        }
+    }
+    pub fn trailing(&self, width: f32) -> RectPx {
+        let content = self.content();
+        self.control(content.x + content.w - width, width)
+    }
+    pub fn primary_rect(&self, width: f32) -> RectPx {
+        let height = Self::PRIMARY_HEIGHT.min(self.r.h.max(0.));
+        RectPx {
+            y: self.r.y + (self.r.h - height) / 2.,
+            h: height,
+            ..self.trailing(width)
+        }
+    }
+
     pub fn draw(&self, items: &mut Vec<Item>) {
         let r = self.r;
         use figleaf::{Rect, Shadow, Shape};
@@ -275,15 +323,20 @@ impl ButtonBar {
         if count == 0 {
             return Vec::new();
         }
-        let gap = 4.;
-        let pad = 12f32.min(self.r.w.max(0.) / 2.);
+        let gap = Self::GAP;
+        let pad = Self::PADDING_X.min(self.r.w.max(0.) / 2.);
         let width =
             ((self.r.w - 2. * pad - gap * (count - 1) as f32) / count as f32).clamp(0., max_width);
-        let height = (self.r.h - 12.).max(0.);
+        let height = self.content().h;
         let mut tree = Tree::new(
             Node::row()
                 .size([self.r.w, self.r.h])
-                .paddings([pad, 6., pad, 6.])
+                .paddings([
+                    pad,
+                    self.content().y - self.r.y,
+                    pad,
+                    self.content().y - self.r.y,
+                ])
                 .gap(gap),
         );
         let root = tree.root();
@@ -320,7 +373,7 @@ mod tests {
         };
         let canvas = Canvas::layout(
             bounds,
-            Some(40.),
+            true,
             Some(TimelineAttachment {
                 x: 0.,
                 width: 1280.,
@@ -335,7 +388,7 @@ mod tests {
         assert_eq!(bottom.transport.y + bottom.transport.h, bottom.lanes.y);
         assert_eq!(bottom.lanes.y + bottom.lanes.h, bounds.y + bounds.h);
         assert_eq!(bottom.lanes.w, 1280.);
-        let fullscreen = Canvas::layout(bounds, None, None);
+        let fullscreen = Canvas::layout(bounds, false, None);
         assert_eq!(fullscreen.r.h, bounds.h);
         assert!(fullscreen.button_bar.is_none() && fullscreen.timeline.is_none());
     }
@@ -349,7 +402,7 @@ mod tests {
                     w: 720.,
                     h: height,
                 },
-                Some(40.),
+                true,
                 Some(TimelineAttachment {
                     x: 0.,
                     width: 720.,

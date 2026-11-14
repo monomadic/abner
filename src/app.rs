@@ -3253,9 +3253,9 @@ impl App {
                 ui_label(&mut items,canvas.x+canvas.w/2.,canvas.y+canvas.h-if self.detection_range.is_some(){42.}else{16.},10.,WORKSPACE_TEXT,&self.mask_status,Align::Center,canvas.w-24.);
             }
             board.recess(&mut items);
-            let header = RectPx { x:canvas.x,y:HEADER_H,w:canvas.w,h:canvas.y-HEADER_H };
-            items.push(Item::Clip(Some(header)));
-            ButtonBar { r: header }.draw(&mut items);
+            let bar = ButtonBar::at(canvas.x,HEADER_H,canvas.w);
+            items.push(Item::Clip(Some(bar.r)));
+            bar.draw(&mut items);
             for c in self.embedded_editor_controls() {
                 let hovered = self.cursor_inside && contains(c.r, self.cursor.0, self.cursor.1);
                 c.draw(&mut items, hovered, self.control_dead(&c.action));
@@ -3501,7 +3501,7 @@ impl App {
         };
         if self.crop.is_none() { buttons.extend([("Undo",Action::UndoMask),("Redo",Action::RedoMask)]); }
         buttons.extend([("Reset",Action::ResetEdit),("Cancel",Action::CancelEdit),("Apply",Action::ApplyEdit)]);
-        let bar=ButtonBar { r:RectPx{x:v.x,y:HEADER_H,w:v.w,h:v.y-HEADER_H} };
+        let bar=ButtonBar::at(v.x,HEADER_H,v.w);
         let rects=bar.row(buttons.len(),116.);
         buttons.into_iter().zip(rects).map(|((label,action),r)| Control::new(r,label,matches!(action,Action::Autodetect)&&self.detection_panel,action)).collect()
 
@@ -3509,6 +3509,7 @@ impl App {
 
     fn controls(&self) -> Vec<Control> {
         let l = self.workspace();
+        let bar = ButtonBar::at(l.canvas.x, HEADER_H, l.canvas.w);
         let mut out = self.mode_selector().controls();
         out.push(Control { hint: "⌘E", ..Control::new(self.footer_export(), "Export", false, Action::Export) });
         if self.processors.open || self.export_page.open {
@@ -3531,7 +3532,7 @@ impl App {
             ));
         }
         if self.cut_mode {
-            out.push(Control::new(RectPx{x:self.workspace().canvas.x+12.,y:HEADER_H+6.,w:92.,h:27.},"Crop clip",false,Action::LaunchEditor(true)));
+            out.push(Control::new(bar.control(bar.content().x,92.),"Crop clip",false,Action::LaunchEditor(true)));
             if self.vp.0 >= CUT_COLUMNS_MIN_W {
                 out.push(Control::new(
                     self.inspector_toggle(),
@@ -3565,11 +3566,14 @@ impl App {
                 ));
             }
         }
-        let mut x = l.rail + 12.0;
-        let y = HEADER_H + 6.0;
+        let apply=bar.trailing(76.);
+        let cancel=bar.control(apply.x-ButtonBar::GROUP_GAP-76.,76.);
+        let reset=bar.control(cancel.x-ButtonBar::GROUP_GAP-68.,68.);
+        let content_end=if self.editor.is_some() {reset.x-ButtonBar::GROUP_GAP}else{bar.content().x+bar.content().w};
+        let mut x = bar.content().x;
         if !self.mask_mode {
             for (label,tool) in [("Crop",2),("Mask",1)] {
-                out.push(Control::new(RectPx{x,y,w:58.,h:27.},label,false,Action::LaunchEditor(tool==2)));x+=62.;
+                out.push(Control::new(bar.control(x,58.),label,false,Action::LaunchEditor(tool==2)));x+=58.+ButtonBar::GAP;
             }
             for (mode, label, w) in [
                 (Mode::Overlay, "Single", 62.0),
@@ -3579,31 +3583,26 @@ impl App {
                 (Mode::Checker, "Checker", 74.0),
                 (Mode::Blend, "Blend", 64.0),
             ] {
-                if x+w>self.vp.0-12. {break}
+                if x+w>bar.content().x+bar.content().w {break}
                 out.push(Control::new(
-                    RectPx { x, y, w, h: 27.0 },
+                    bar.control(x,w),
                     label,
                     self.mode == mode,
                     Action::View(mode),
                 ));
-                x += w + 4.0;
+                x += w + ButtonBar::GAP;
             }
             if matches!(self.mode, Mode::Delta | Mode::Checker | Mode::Blend)
                 && x + 144.0 < self.vp.0
             {
                 for (label, up) in [("−", false), ("+", true)] {
                     out.push(Control::new(
-                        RectPx {
-                            x,
-                            y,
-                            w: 28.0,
-                            h: 27.0,
-                        },
+                        bar.control(x,28.),
                         label,
                         false,
                         Action::Param(up),
                     ));
-                    x += 32.0;
+                    x += 28.0 + ButtonBar::GAP;
                 }
             }
         } else if self.crop.is_some() {
@@ -3612,14 +3611,14 @@ impl App {
                 ("Save still + mask", 138.0, Action::Save),
                 ("Export ProRes", 122.0, Action::Export),
             ] {
-                if self.editor.is_some() && x+w>self.vp.0-260. {break}
+                if x+w>content_end {break}
                 out.push(Control::new(
-                    RectPx { x, y, w, h: 27.0 },
+                    bar.control(x,w),
                     label,
                     false,
                     action,
                 ));
-                x += w + 8.0;
+                x += w + ButtonBar::GROUP_GAP;
             }
         } else {
             if self.vp.0-l.rail>740. {x += 118.0;}
@@ -3632,21 +3631,20 @@ impl App {
                 ("+", 28.0, Action::Brush(true)),
                 ("Save mask", 100.0, Action::Save),
             ] {
-                if self.editor.is_some() && x+w>self.vp.0-260. {break}
+                if x+w>content_end {break}
                 out.push(Control::new(
-                    RectPx { x, y, w, h: 27.0 },
+                    bar.control(x,w),
                     label,
                     matches!(action,Action::Autodetect) && self.detection_panel,
                     action,
                 ));
-                x += w + 8.0;
+                x += w + ButtonBar::GROUP_GAP;
             }
         }
         if self.editor.is_some() {
-            let x=self.vp.0-176.;
-            out.push(Control::new(RectPx{x:x-76.,y,w:68.,h:27.},"Reset",false,Action::ResetEdit));
-            out.push(Control::new(RectPx{x,y,w:76.,h:27.},"Cancel",false,Action::CancelEdit));
-            out.push(Control::new(RectPx{x:x+84.,y,w:76.,h:27.},"Apply",false,Action::ApplyEdit));
+            out.push(Control::new(reset,"Reset",false,Action::ResetEdit));
+            out.push(Control::new(cancel,"Cancel",false,Action::CancelEdit));
+            out.push(Control::new(apply,"Apply",false,Action::ApplyEdit));
         }
         out
     }
@@ -3922,7 +3920,7 @@ impl App {
             let disabled = self.control_dead(&control.action)
                 || matches!(control.action, Action::Save) && self.mask_save.is_some()
                 || matches!(control.action, Action::Export) && self.crop_export.is_some();
-            if (HEADER_H..HEADER_H + CONTEXT_H).contains(&control.r.y) {
+            if (HEADER_H..HEADER_H + ButtonBar::HEIGHT).contains(&control.r.y) {
                 control.draw(items, hovered, disabled);
                 continue;
             }
@@ -3946,7 +3944,7 @@ impl App {
                 format!("{context} · {w} × {h}")
             } else { format!("{context} · {:.0} px", self.brush_diameter) };
             if self.crop.is_some() || self.vp.0-l.rail>740. {
-                ui_label(items, l.rail + 20.0, HEADER_H + CONTEXT_H / 2.0, 11.0, WORKSPACE_TEXT, label, Align::Left, 126.0);
+                ui_label(items, l.rail + 20.0, HEADER_H + ButtonBar::HEIGHT / 2.0, 11.0, WORKSPACE_TEXT, label, Align::Left, 126.0);
             }
         } else if vp.0 - l.rail > 760.0 {
             let parameter = match self.mode {
@@ -3955,7 +3953,7 @@ impl App {
                 Mode::Checker => format!("{:.0} px", self.checker_px),
                 _ => String::new(),
             };
-            ui_label(items, vp.0 - 16.0, HEADER_H + CONTEXT_H / 2.0, 11.0, WORKSPACE_DIM, parameter, Align::Right, 90.0);
+            ui_label(items, vp.0 - 16.0, HEADER_H + ButtonBar::HEIGHT / 2.0, 11.0, WORKSPACE_DIM, parameter, Align::Right, 90.0);
         }
 
         self.build_sources(items);
@@ -7260,7 +7258,7 @@ impl Workspace {
             let side_in = (side_w * ease(side_slide)).round();
             let side = if side_in > 0.0 { side_w } else { 0.0 };
             let surface = Canvas::layout(RectPx { x:rail, y:HEADER_H, w:(w-side_in-rail).max(1.), h:(h-CUT_STATUS_H-HEADER_H).max(0.) },
-                Some(CONTEXT_H), Some(TimelineAttachment { x:0.,width:w,transport_height:CUT_TOOLBAR_H,lanes_height:lanes }));
+                true, Some(TimelineAttachment { x:0.,width:w,transport_height:CUT_TOOLBAR_H,lanes_height:lanes }));
             let attached = surface.timeline.unwrap();
             let transport_y = attached.transport.y;
             let top = (transport_y - CUT_HEADER_H).max(1.0);
@@ -7275,7 +7273,7 @@ impl Workspace {
             };
         }
         let surface = Canvas::layout(RectPx { x:rail,y:if visible {HEADER_H}else{0.},w:(w-rail).max(1.),h:if visible {(h-HEADER_H-STATUS_H).max(0.)}else{h} },
-            visible.then_some(CONTEXT_H), visible.then_some(TimelineAttachment { x:rail,width:w-rail,transport_height:TRANSPORT_H,lanes_height:0. }));
+            visible, visible.then_some(TimelineAttachment { x:rail,width:w-rail,transport_height:TRANSPORT_H,lanes_height:0. }));
         let canvas = surface.r;
         // Sources sidebar (278:584): the list starts 14px under the header
         // and the focused inspector is 216px. The app's own rows — the
@@ -7420,7 +7418,6 @@ fn draw_sidebar_toggle(items: &mut Vec<Item>, r: RectPx, right: bool, shown: boo
 const CUT_HEADER_H: f32 = 44.0;
 pub(crate) const CUT_HEADER_BLUE: u32 = 0x0074e1;
 pub(crate) const HEADER_H: f32 = CUT_HEADER_H;
-const CONTEXT_H: f32 = 40.0;
 /// Sources sidebar (278:584): 157px cards on a 12px gap, a 100px preview.
 const SOURCE_H: f32 = 169.0;
 /// A portrait preview's height stops at this fraction of the card's width
@@ -8434,6 +8431,27 @@ mod tests {
         app.cursor_moved(80.0, HEADER_H + 80.0);
         app.pinch(0.5);
         assert_eq!(app.zoom, old, "pinching the source list must not zoom the image");
+    }
+
+    #[test]
+    fn canvas_bar_metrics_match_across_all_pages() {
+        for vp in [(720.,480.),(1280.,800.),(1920.,1080.)] {
+            let sources=Workspace::new(vp,true,false,0.,1.,1.,1.,None);
+            let timeline=Workspace::new(vp,true,true,0.,1.,1.,1.,None);
+            let export=crate::export_page::Layout::new(vp);
+            let process=crate::processor_gui::Panel::viewer(vp);
+            for viewport in [sources.canvas,timeline.canvas,export.video,process] {
+                assert_eq!(viewport.y,HEADER_H+ButtonBar::HEIGHT);
+            }
+            for bar in [sources.surface.button_bar.unwrap(),timeline.surface.button_bar.unwrap(),export.canvas.button_bar.unwrap()] {
+                assert_eq!(bar.r.h,ButtonBar::HEIGHT);
+                let control=bar.control(bar.content().x,60.);
+                assert_eq!(control.y,HEADER_H+ButtonBar::PADDING_Y);
+                assert_eq!(control.h,ButtonBar::HEIGHT-2.*ButtonBar::PADDING_Y);
+                assert_eq!(bar.row(3,100.)[0].y,control.y);
+                assert_eq!(bar.row(3,100.)[0].h,control.h);
+            }
+        }
     }
 
     #[test]

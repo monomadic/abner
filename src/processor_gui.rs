@@ -34,7 +34,6 @@ use std::{
 /// `processors.preview_cache_mb`'s default, for a `Panel` nobody configured.
 pub const DEFAULT_PREVIEW_BYTES: usize = 1024 * 1024 * 1024;
 const FRAMES: usize = 24;
-const CANVAS_HEADER_H: f32 = 36.0;
 const DIM: [f32; 4] = [0.43, 0.43, 0.43, 1.0];
 const BLUE: [f32; 4] = [0.04, 0.33, 0.7, 1.0];
 /// Compact processor rows (Figma rail): 30px rows on a 3px gap, inside a
@@ -2340,7 +2339,7 @@ impl Panel {
     fn canvas_layout(vp:(f32,f32)) -> Canvas {
         let x=Self::left(vp);
         let width=(vp.0-x-Self::right(vp)).max(1.);
-        Canvas::layout(RectPx{x,y:HEADER_H,w:width,h:(Self::bottom(vp)-HEADER_H).max(0.)},Some(CANVAS_HEADER_H),
+        Canvas::layout(RectPx{x,y:HEADER_H,w:width,h:(Self::bottom(vp)-HEADER_H).max(0.)},true,
             Some(TimelineAttachment{x,width,transport_height:165.,lanes_height:0.}))
     }
     pub(crate) fn viewer(vp: (f32, f32)) -> RectPx { Self::canvas_layout(vp).r }
@@ -2348,18 +2347,17 @@ impl Panel {
     /// the format summary. Tab flips the same flag; the zoom is shared, so both sides
     /// show the same region of the picture.
     fn compare_switch(vp: (f32, f32)) -> RectPx {
-        let v = Self::viewer(vp);
-        RectPx { x: v.x + v.w - 12.0 - 168.0, y: HEADER_H + 6.0, w: 168.0, h: 24.0 }
+        Self::canvas_layout(vp).button_bar.unwrap().trailing(168.)
     }
     fn compare_half(vp: (f32, f32), rendered: bool) -> RectPx {
         let s = Self::compare_switch(vp);
-        RectPx { x: s.x + if rendered { s.w / 2.0 } else { 0.0 }, w: s.w / 2.0, ..s }
+        let width=(s.w-ButtonBar::GAP)/2.;
+        RectPx { x:s.x+if rendered {width+ButtonBar::GAP}else{0.},w:width,..s }
     }
     fn draw_compare_switch(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
         let available = self.shown().is_some();
         for (rendered, label) in [(false, "Source"), (true, "Rendered")] {
-            let h = Self::compare_half(vp, rendered);
-            let button = RectPx { x: h.x + 2.0, w: h.w - 4.0, ..h };
+            let button = Self::compare_half(vp, rendered);
             ButtonBar::button(items, button, label,
                 self.show_rendered == rendered, hit(button, self.cursor.0, self.cursor.1), !available);
         }
@@ -5459,7 +5457,14 @@ mod tests {
             let canvas = Panel::viewer(vp);
             assert_eq!(canvas.x, Panel::left(vp));
             assert_eq!(canvas.x + canvas.w, vp.0 - Panel::right(vp));
-            assert_eq!(canvas.y, HEADER_H + CANVAS_HEADER_H);
+            assert_eq!(canvas.y, HEADER_H + ButtonBar::HEIGHT);
+            let bar=Panel::canvas_layout(vp).button_bar.unwrap();
+            for rendered in [false,true] {
+                let button=Panel::compare_half(vp,rendered);
+                assert_eq!(button.y,bar.content().y);
+                assert_eq!(button.h,bar.content().h);
+                assert!(button.x>=bar.content().x && button.x+button.w<=bar.content().x+bar.content().w);
+            }
             assert!(canvas.y + canvas.h < Panel::transport_y(vp));
             let first = Panel::transport(vp, 0);
             let last = Panel::transport(vp, 4);

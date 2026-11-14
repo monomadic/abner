@@ -466,3 +466,13 @@ same pointer-anchored zoom, scroll-pan and actual-size path as other pages.
 The shared ground is currently #1d1b1b. Existing inset versus document-style
 fit policies remain explicit; full Figma canvas-style reconciliation is deferred.
 Change shared styling here rather than introducing a page-local drawing path.
+
+### Button bar metrics (2026-11-14)
+
+`ButtonBar` owns the 40px default height, 12px horizontal / 6px vertical
+padding, 4px button gap and 8px group gap. `Canvas::layout` takes a visibility
+flag rather than a page-selected bar height. All four pages use `control`,
+`trailing`, or `row` for the standard 28px button rectangles; Export's 32px
+primary action uses `primary_rect`. Both drawing and hit testing consume those
+rectangles. Labels/actions, widths required by their content and group ordering
+remain page-owned; colours, radii, fonts and effects stay in the shared painter.

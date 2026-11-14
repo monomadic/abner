@@ -1,5 +1,16 @@
 # abner — history
 
+## 2026-11-14 — Uniform button bar metrics
+
+Moved bar height and control spacing into `ButtonBar`. Sources, Timeline,
+Process and Export all reserve the same 40px bar, with standard controls
+28px high and vertically inset by 6px. Shared geometry helpers own horizontal
+padding, gaps, trailing alignment and the primary-action height. Process no
+longer uses a 36px bar or 24px comparison buttons. Page content still determines
+labels, actions, ordering and widths; the shared figleaf painter owns styling.
+Validated with 17 focused layout/input tests, a native build and targeted
+window captures of all four pages.
+
 ## 2026-11-14 — Shared figleaf canvas and attached timeline
 
 Extracted the canvas and button bar from `app.rs` into `src/canvas.rs`.
