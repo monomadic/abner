@@ -3287,6 +3287,22 @@ impl Panel {
                         max_width: Some(timing_width - 6.0),
                         ..TextItem::new(tx + width, row.y + 30.0, 10.0, hex_color(0xa4a7ad), label) }));
                 }
+                if live {
+                    let track = RectPx { x: tx, y: row.y + row.h - 5.0, w: width, h: 3.0 };
+                    items.push(Item::Rect(RectItem { radius: 1.5,
+                        ..RectItem::new(track, hex_color(0x303235)) }));
+                    let fill = if let Some(fraction) = self.render_fraction() {
+                        RectPx { w: track.w * fraction, ..track }
+                    } else {
+                        // Unknown totals still show activity without inventing a percentage.
+                        let travel = 0.5 - 0.5 * (self.busy_since.elapsed().as_secs_f32() * 3.0).cos();
+                        RectPx { x: track.x + track.w * 0.7 * travel, w: track.w * 0.3, ..track }
+                    };
+                    if fill.w > 0.0 {
+                        items.push(Item::Rect(RectItem { radius: 1.5,
+                            ..RectItem::new(fill, hex_color(RENDERING)) }));
+                    }
+                }
                 draw_icon(items, Icon::Trash, bin.x + bin.w / 2.0, bin.y + bin.h / 2.0,
                     if over(bin) && over(list) { hex_color(0xffffff) } else { WORKSPACE_DIM });
             }
@@ -3605,6 +3621,18 @@ impl Panel {
     /// keyframe glyphs, a triangle / two bars for the transport. The one
     /// under the pointer names itself beneath the row.
     /// Kept outside the video canvas so zoom/pan cannot cover render feedback.
+    /// Shared by the render controls and the active row in the renders pane.
+    fn render_fraction(&self) -> Option<f32> {
+        let stage = self.feedback.as_ref().and_then(StageFeedback::fraction);
+        if self.busy && self.expected > 1 {
+            Some(((self.preview_count as f32 + stage.unwrap_or(0.0)) / self.expected as f32).min(1.0))
+        } else if self.busy {
+            stage
+        } else {
+            self.render_result.filter(|ok| *ok).map(|_| 1.0)
+        }
+    }
+
     fn draw_progress(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
         let r = Self::progress_panel(vp);
         let ink = hex_color(0xededed);
@@ -3623,14 +3651,7 @@ impl Panel {
         // A stretch counts its frames: the stage's own progress restarts on
         // every frame, so the bar shows the whole render instead.
         let many = self.busy && self.expected != 1;
-        let stage = self.feedback.as_ref().and_then(StageFeedback::fraction);
-        let fraction = if self.busy && self.expected > 1 {
-            Some(((self.preview_count as f32 + stage.unwrap_or(0.0)) / self.expected as f32).min(1.0))
-        } else if self.busy {
-            stage
-        } else {
-            self.render_result.filter(|ok| *ok).map(|_| 1.0)
-        };
+        let fraction = self.render_fraction();
         let phase = if self.busy {
             self.feedback.as_ref().map_or_else(|| self.progress.map_or_else(
                 || "Preparing input and processors".into(),
