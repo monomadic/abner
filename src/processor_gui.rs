@@ -171,6 +171,7 @@ struct Render {
     slot: usize,
     thumbed: bool,
     frames: usize,
+    elapsed: Option<Duration>,
 }
 /// A rendered frame as an atlas cell: cover-cropped to 16:9 and box-sampled.
 fn thumbnail(rgba: &[u8], dims: [u32; 2]) -> Vec<u8> {
@@ -1729,6 +1730,9 @@ impl Panel {
         self.progress = None;
         self.feedback = None;
         self.render_elapsed = self.busy_since.elapsed();
+        if let Some(render) = self.renders.iter_mut().find(|r| r.id == self.rendering) {
+            render.elapsed = Some(self.render_elapsed);
+        }
         self.render_result = Some(false);
         self.status = "Frame preview cancelled".into();
     }
@@ -1832,6 +1836,7 @@ impl Panel {
             slot,
             thumbed: false,
             frames: 0,
+            elapsed: None,
         });
         self.rendering = id;
         self.render_key = self.frames_key.clone();
@@ -2989,6 +2994,9 @@ impl Panel {
                         self.running = None;
                         self.render_result = Some(result.is_ok());
                         self.render_elapsed = self.busy_since.elapsed();
+                        if let Some(render) = self.renders.iter_mut().find(|r| r.id == self.rendering) {
+                            render.elapsed = Some(self.render_elapsed);
+                        }
                         self.pending = None;
                         self.progress = None;
                         if let Err(e) = result {
@@ -3260,9 +3268,29 @@ impl Panel {
                 items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(width),
                     ..TextItem::new(tx, row.y + 14.0, 11.0, hex_color(if current || hover { 0xe6e6e6 } else { 0xc0c0c0 }),
                         format!("{} · {amount}", fmt_time(r.time))) }));
-                items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(width),
+                let elapsed = if live {
+                    Some(self.busy_since.elapsed())
+                } else if queued {
+                    None
+                } else {
+                    r.elapsed
+                };
+                let timing_width = if elapsed.is_some() { 46.0 } else { 0.0 };
+                items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle,
+                    max_width: Some((width - timing_width).max(1.0)),
                     ..TextItem::new(tx, row.y + 30.0, 10.0, if live { hex_color(RENDERING) } else { WORKSPACE_DIM },
                         if live { "Rendering…" } else if queued { "Queued" } else { r.chain.as_str() }) }));
+                if let Some(elapsed) = elapsed {
+                    let seconds = elapsed.as_secs();
+                    let label = if seconds < 60 {
+                        format!("{:.1}s", elapsed.as_secs_f64())
+                    } else {
+                        format!("{}:{:02}", seconds / 60, seconds % 60)
+                    };
+                    items.push(Item::Text(TextItem { align: Align::Right, valign: VAlign::Middle,
+                        max_width: Some(timing_width - 6.0),
+                        ..TextItem::new(tx + width, row.y + 30.0, 10.0, hex_color(0xa4a7ad), label) }));
+                }
                 draw_icon(items, Icon::Trash, bin.x + bin.w / 2.0, bin.y + bin.h / 2.0,
                     if over(bin) && over(list) { hex_color(0xffffff) } else { WORKSPACE_DIM });
             }
