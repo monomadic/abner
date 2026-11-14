@@ -184,6 +184,9 @@ pub struct App {
     editor: Option<crate::spatial::Editor>,
     detection_range:Option<crate::watermark::Range>,
     detection_drag:Option<bool>,
+    detection_panel:bool,
+    detection_samples:usize,
+    detection_samples_drag:bool,
     detection_area:Option<Crop>,
     detection_area_visible:bool,
     processors: crate::processor_gui::Panel,
@@ -720,6 +723,7 @@ impl App {
         Self {
             editor: None,
             detection_range:None, detection_drag:None,
+            detection_panel:false,detection_samples:3,detection_samples_drag:false,
             detection_area:None, detection_area_visible:false,
             processors: crate::processor_gui::Panel::default(),
             export_page: crate::export_page::Page::default(),
@@ -851,6 +855,7 @@ impl App {
         if return_mode != 4 { self.processors.close(); }
         self.export_page.open=false;self.cut_mode=false;
         self.detection_area=None;self.detection_area_visible=false;
+        self.detection_panel=false;
         self.detection_range=(!crop).then(||crate::watermark::Range{start:0.,end:self.videos[self.active].info.duration});
         self.mask_mode=true;self.playing=false;self.show_ui=true;self.ensure_mask();
         self.crop=if crop {Some(saved_crop.unwrap_or_else(||self.full_crop()))}else{None};
@@ -860,6 +865,7 @@ impl App {
         self.watermark_task = None;
         self.clear_mask_history();
         self.detection_range=None;self.detection_drag=None;
+        self.detection_panel=false;self.detection_samples_drag=false;
         self.detection_area=None;self.detection_area_visible=false;
         let Some(e)=self.editor.take() else{return};
         let draft=self.masks[e.source].take();
@@ -1138,6 +1144,7 @@ impl App {
         if !self.mask_mode || !self.cursor_inside || !self.ready() || self.active_marquee().is_some() {
             return false;
         }
+        if self.detection_panel && contains(self.detection_panel_rect(),self.cursor.0,self.cursor.1) {return false;}
         let r = self.content_rect(self.active);
         let (x, y) = self.cursor;
         x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h
@@ -1155,43 +1162,83 @@ impl App {
         self.mask_status.clear();
     }
 
+    fn detection_panel_rect(&self)->RectPx {
+        let c=self.canvas();RectPx{x:c.x+10.,y:c.y+8.,w:c.w-20.,h:116.}
+    }
     fn detection_track(&self)->RectPx {
-        let r=if self.processors.open {crate::processor_gui::Panel::timeline(self.vp)}else{self.seek_rect(self.vp)};
-        RectPx{x:r.x,y:r.y-16.,w:r.w,h:12.}
+        let p=self.detection_panel_rect();RectPx{x:p.x+16.,y:p.y+45.,w:p.w-32.,h:12.}
     }
     fn detection_whole(&self)->RectPx {
-        let c=self.canvas();RectPx{x:c.x+c.w-90.,y:c.y+c.h-31.,w:80.,h:24.}
+        let p=self.detection_panel_rect();RectPx{x:p.x+p.w-184.,y:p.y+8.,w:88.,h:26.}
+    }
+    fn detection_run(&self)->RectPx {
+        let p=self.detection_panel_rect();RectPx{x:p.x+p.w-88.,y:p.y+8.,w:76.,h:26.}
+    }
+    fn detection_area_button(&self)->RectPx {
+        let p=self.detection_panel_rect();RectPx{x:p.x+p.w-132.,y:p.y+76.,w:120.,h:28.}
+    }
+    fn detection_samples_track(&self)->RectPx {
+        let p=self.detection_panel_rect();RectPx{x:p.x+100.,y:p.y+84.,w:(p.w-254.).max(50.),h:12.}
+    }
+    fn detection_sample_count(&self)->Option<usize> {
+        [Some(8),Some(16),Some(32),Some(64),Some(128),Some(256),Some(512),None][self.detection_samples]
+    }
+    fn set_detection_samples(&mut self,x:f32) {
+        let r=self.detection_samples_track();
+        let index=(((x-r.x)/r.w).clamp(0.,1.)*7.).round() as usize;
+        if index!=self.detection_samples {self.watermark_task=None;self.mask_status.clear();self.detection_samples=index;}
+    }
+    fn toggle_detection_panel(&mut self) {
+        self.detection_panel=!self.detection_panel;
+        if !self.detection_panel {self.detection_area_visible=false;self.crop_drag=None;}
     }
     fn detection_press(&mut self,x:f32,y:f32)->bool {
-        if !self.show_ui||!self.mask_mode||self.crop.is_some(){return false;}
+        if !self.show_ui||!self.mask_mode||self.crop.is_some()||!self.detection_panel{return false;}
         let Some(range)=self.detection_range else{return false;};
         let duration=self.videos[self.active].info.duration;
         if contains(self.detection_whole(),x,y) {
             self.watermark_task=None;self.mask_status.clear();self.detection_range=Some(crate::watermark::Range{start:0.,end:duration});return true;
         }
+        if contains(self.detection_run(),x,y) {self.detect_watermark();return true;}
+        if contains(self.detection_area_button(),x,y) {self.activate(Action::DetectionArea);return true;}
+        let count=self.detection_samples_track();
+        if contains(RectPx{x:count.x-6.,y:count.y-8.,w:count.w+12.,h:28.},x,y) {
+            self.detection_samples_drag=true;self.set_detection_samples(x);return true;
+        }
         let t=self.detection_track();
         let start=t.x+t.w*(range.start/duration) as f32;let end=t.x+t.w*(range.end/duration) as f32;
-        if y>=t.y-5.&&y<=t.y+t.h+5. && ((x-start).abs()<=9.||(x-end).abs()<=9.) {
+        if y>=t.y-8.&&y<=t.y+t.h+8. && x>=t.x-9.&&x<=t.x+t.w+9. {
             self.watermark_task=None;self.mask_status.clear();self.detection_drag=Some((x-end).abs()<(x-start).abs());self.playing=false;return true;
         }
-        false
+        contains(self.detection_panel_rect(),x,y)
     }
     fn draw_detection_range(&self,items:&mut Vec<Item>) {
-        if !self.mask_mode||self.crop.is_some(){return;}
+        if !self.mask_mode||self.crop.is_some()||!self.detection_panel{return;}
         let Some(range)=self.detection_range else{return;};
-        let duration=self.videos[self.active].info.duration.max(0.001);let track=self.detection_track();
+        let duration=self.videos[self.active].info.duration.max(0.001);let track=self.detection_track();let panel=self.detection_panel_rect();
         let x=|t:f64|track.x+track.w*(t/duration) as f32;
         let color=hex_color(0xff8800);
         items.push(Item::Clip(None));
+        items.push(Item::Rect(RectItem{radius:8.,border_w:1.,border_color:WORKSPACE_RULE,..RectItem::new(panel,WORKSPACE_PANEL)}));
         items.push(Item::Rect(RectItem{radius:2.,..RectItem::new(track,hex_color(0x1a1a1a))}));
         items.push(Item::Rect(RectItem::new(RectPx{x:x(range.start),w:(x(range.end)-x(range.start)).max(1.),..track},hex_color(0x68421e))));
-        if let Ok(samples)=range.samples(duration,self.fps) {for t in samples {items.push(Item::Rect(RectItem::new(RectPx{x:x(t)-0.5,y:track.y+4.,w:1.,h:4.},color)));}}
+        // Markers are a visual summary; decoding uses the exact selected count.
+        if let Ok(samples)=range.samples_count(duration,self.videos[self.active].info.fps,Some(self.detection_sample_count().unwrap_or(128).min(128))) {
+            for t in samples.iter().step_by(samples.len().div_ceil(128).max(1)) {items.push(Item::Rect(RectItem::new(RectPx{x:x(*t)-0.5,y:track.y+4.,w:1.,h:4.},color)));}
+        }
         for t in [range.start,range.end] {items.push(Item::Rect(RectItem{radius:2.,..RectItem::new(RectPx{x:x(t)-3.,y:track.y-2.,w:6.,h:16.},color)}));}
-        let c=self.canvas();let button=self.detection_whole();
-        let label=format!("Detection range · {}–{} · {:.1}s",fmt_time(range.start),fmt_time(range.end),range.end-range.start);
-        ui_label(items,c.x+12.,c.y+c.h-19.,10.,WORKSPACE_TEXT,label,Align::Left,(c.w-112.).max(1.));
-        items.push(Item::Rect(RectItem{radius:4.,border_w:1.,border_color:color,..RectItem::new(button,hex_color(0x171717))}));
-        ui_label(items,button.x+button.w/2.,button.y+button.h/2.,10.,WORKSPACE_TEXT,"Whole clip",Align::Center,button.w-8.);
+        let label=format!("{}–{}",fmt_time(range.start),fmt_time(range.end));
+        ui_label(items,panel.x+16.,panel.y+21.,10.,WORKSPACE_TEXT,label,Align::Left,panel.w-212.);
+        for (r,label,selected) in [(self.detection_whole(),"Whole clip",false),(self.detection_run(),if self.watermark_task.is_some(){"Stop"}else{"Detect"},false),(self.detection_area_button(),"Detection area",self.detection_area_visible)] {
+            items.push(Item::Rect(RectItem{radius:4.,border_w:1.,border_color:if selected{color}else{WORKSPACE_RULE},..RectItem::new(r,hex_color(0x171717))}));
+            ui_label(items,r.x+r.w/2.,r.y+r.h/2.,10.,if selected{color}else{WORKSPACE_TEXT},label,Align::Center,r.w-8.);
+        }
+        let label=self.detection_sample_count().map_or("Frames · ∞".into(),|n|format!("Frames · {n}"));
+        ui_label(items,panel.x+16.,panel.y+90.,10.,WORKSPACE_TEXT,label,Align::Left,82.);
+        let t=self.detection_samples_track();
+        items.push(Item::Rect(RectItem{radius:2.,..RectItem::new(t,hex_color(0x383838))}));
+        for i in 0..8 {items.push(Item::Rect(RectItem::new(RectPx{x:t.x+t.w*i as f32/7.,y:t.y+3.,w:1.,h:6.},WORKSPACE_MUTED)));}
+        items.push(Item::Rect(RectItem{radius:5.,..RectItem::new(RectPx{x:t.x+t.w*self.detection_samples as f32/7.-5.,y:t.y-3.,w:10.,h:18.},color)}));
     }
 
     fn editor_processing_region(&self) -> Option<[usize;4]> {
@@ -1205,9 +1252,9 @@ impl App {
             self.mask_status="Watermark detection stopped".into();return;
         }
         if !self.ready() || !self.mask_mode || self.crop.is_some() {return;}
-        self.playing=false;self.mouse_up();self.ensure_mask();
+        self.playing=false;self.mouse_up();self.ensure_mask();self.detection_area_visible=false;
         let v=&self.videos[self.active];let mask=self.masks[self.active].as_ref().unwrap();
-        match crate::watermark::Task::spawn(v.info.clone(),v.spatial_id,mask.id,mask.revision,self.detection_search_region(),self.detection_range.unwrap_or_else(||crate::watermark::Range{start:0.,end:v.info.duration}),self.detection_area.is_some()) {
+        match crate::watermark::Task::spawn(v.info.clone(),v.spatial_id,mask.id,mask.revision,self.detection_search_region(),self.detection_range.unwrap_or_else(||crate::watermark::Range{start:0.,end:v.info.duration}),self.detection_area.is_some(),self.detection_sample_count()) {
             Ok(task)=>{self.mask_status=task.status();self.watermark_task=Some(task);}
             Err(e)=>self.mask_status=e,
         }
@@ -2231,7 +2278,7 @@ impl App {
                 Key::Char('[' | '-' | '_') => { self.resize_brush(0.8); return; }
                 Key::Char('c' | 'C') => { self.toggle_crop(); return; }
                 Key::Char('s' | 'S') => { self.save_mask(); return; }
-                Key::Char('d' | 'D') if self.crop.is_none() => { self.detect_watermark(); return; }
+                Key::Char('d' | 'D') if self.crop.is_none() => { self.toggle_detection_panel(); return; }
                 Key::Undo if self.crop.is_none() => { self.step_mask_history(false); return; }
                 Key::Redo if self.crop.is_none() => { self.step_mask_history(true); return; }
                 Key::Char('e' | 'E') if self.crop.is_some() => { self.export_crop(); return; }
@@ -2332,9 +2379,10 @@ impl App {
     }
 
     pub fn cursor_moved(&mut self, x: f32, y: f32) {
+        if self.detection_samples_drag {self.set_detection_samples(x);self.cursor=(x,y);return;}
         if let Some(end)=self.detection_drag {
-            let track=self.detection_track();let duration=self.videos[self.active].info.duration;
-            if let Some(range)=&mut self.detection_range {range.set_edge(end,((x-track.x)/track.w).clamp(0.,1.) as f64*duration,duration,self.fps);}
+            let track=self.detection_track();let info=&self.videos[self.active].info;let duration=info.duration;
+            if let Some(range)=&mut self.detection_range {range.set_edge(end,((x-track.x)/track.w).clamp(0.,1.) as f64*duration,duration,info.fps);}
             self.cursor=(x,y);self.cursor_inside=true;return;
         }
 
@@ -2559,7 +2607,7 @@ impl App {
     }
 
     pub fn mouse_up(&mut self) {
-        self.detection_drag=None;
+        self.detection_drag=None;self.detection_samples_drag=false;
         // Dragged shut: the toggle reopens the rail at the width it had.
         if let Some((_, from)) = self.source_resize.take() {
             if !self.show_sources { self.source_width = Some(from); }
@@ -2600,6 +2648,7 @@ impl App {
     /// for export — a full RGBA copy per video.
     fn leave_mask_mode(&mut self) {
         self.detection_range=None;self.detection_drag=None;
+        self.detection_panel=false;self.detection_samples_drag=false;
         self.detection_area=None;self.detection_area_visible=false;
         self.watermark_task = None;
         self.clear_mask_history();
@@ -2777,7 +2826,10 @@ impl App {
 
     fn base_rect(&self, idx: usize) -> RectPx {
         let dims = (self.videos[idx].info.width,self.videos[idx].info.height);
-        let cell = self.video_cell(idx);
+        let mut cell = self.video_cell(idx);
+        if self.mask_mode && self.crop.is_none() && self.detection_panel && self.show_ui {
+            let reserved=132f32.min((cell.h-80.).max(0.));cell.y+=reserved;cell.h-=reserved;
+        }
         let frame=if (self.processors.open || self.cut_mode) && self.show_ui {Canvas { r: cell }.fit(dims)}
             else {Self::fit_rect(dims, inset_rect(cell, if self.show_ui { 24.0 } else { 0.0 }))};
         if self.applied_crop(idx).is_some(){Self::fit_rect(self.image_dims(idx),frame)}else{frame}
@@ -3445,14 +3497,14 @@ impl App {
     fn embedded_editor_controls(&self) -> Vec<Control> {
         let v = self.canvas();
         let mut buttons = if self.crop.is_some() { vec![("Save still",Action::Save)] } else {
-            vec![("Detect",Action::DetectWatermark),("Search area",Action::DetectionArea),("−",Action::Brush(false)),("+",Action::Brush(true)),("Save mask",Action::Save)]
+            vec![("Autodetect",Action::Autodetect),("−",Action::Brush(false)),("+",Action::Brush(true)),("Save mask",Action::Save)]
         };
         if self.crop.is_none() { buttons.extend([("Undo",Action::UndoMask),("Redo",Action::RedoMask)]); }
         buttons.extend([("Reset",Action::ResetEdit),("Cancel",Action::CancelEdit),("Apply",Action::ApplyEdit)]);
         let gap = 4.0;
         let inset = 12.0;
         let w = ((v.w - 2.0 * inset + gap) / buttons.len() as f32 - gap).clamp(1.0, 116.0);
-        buttons.into_iter().enumerate().map(|(i,(label,action))| Control::new(RectPx {x:v.x+inset+i as f32*(w+gap),y:HEADER_H+6.0,w,h:v.y-HEADER_H-12.0},label,matches!(action,Action::DetectionArea)&&self.detection_area_visible,action)).collect()
+        buttons.into_iter().enumerate().map(|(i,(label,action))| Control::new(RectPx {x:v.x+inset+i as f32*(w+gap),y:HEADER_H+6.0,w,h:v.y-HEADER_H-12.0},label,matches!(action,Action::Autodetect)&&self.detection_panel,action)).collect()
     }
 
     fn controls(&self) -> Vec<Control> {
@@ -3573,8 +3625,7 @@ impl App {
             if self.vp.0-l.rail>740. {x += 118.0;}
             let detecting=self.watermark_task.is_some();
             for (label, w, action) in [
-                (if detecting {"Stop detection"}else{"Detect watermark"}, 140.0, Action::DetectWatermark),
-                ("Search area", 88.0, Action::DetectionArea),
+                (if detecting {"Autodetect…"}else{"Autodetect"}, 110.0, Action::Autodetect),
                 ("Undo", 48.0, Action::UndoMask),
                 ("Redo", 48.0, Action::RedoMask),
                 ("−", 28.0, Action::Brush(false)),
@@ -3585,7 +3636,7 @@ impl App {
                 out.push(Control::new(
                     RectPx { x, y, w, h: 27.0 },
                     label,
-                    matches!(action,Action::DetectionArea) && self.detection_area_visible,
+                    matches!(action,Action::Autodetect) && self.detection_panel,
                     action,
                 ));
                 x += w + 8.0;
@@ -3661,8 +3712,8 @@ impl App {
                 if self.videos.iter().any(|v|v.input_crop.is_some()) && !matches!(mode,Mode::Overlay|Mode::SideBySide) {self.notify("Use Single or Side by side for cropped sources".into());}
                 else {self.mode=mode;}
             },
+            Action::Autodetect => self.toggle_detection_panel(),
             Action::DetectionArea => self.toggle_detection_area(),
-            Action::DetectWatermark => self.detect_watermark(),
             Action::UndoMask => self.step_mask_history(false),
             Action::RedoMask => self.step_mask_history(true),
             Action::Brush(up) => self.resize_brush(if up { 1.25 } else { 0.8 }),
@@ -7256,7 +7307,7 @@ impl Workspace {
 }
 
 #[derive(Clone, Copy)]
-enum Action { LaunchEditor(bool), ResetEdit, ApplyEdit, CancelEdit, Duplicate, OpenFiles, ToggleSources, ToggleInspector, ToggleDetail, Tool(usize), View(Mode), DetectionArea, DetectWatermark, UndoMask, RedoMask, Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
+enum Action { LaunchEditor(bool), ResetEdit, ApplyEdit, CancelEdit, Duplicate, OpenFiles, ToggleSources, ToggleInspector, ToggleDetail, Tool(usize), View(Mode), Autodetect, DetectionArea, UndoMask, RedoMask, Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
 #[derive(Clone, Copy, PartialEq)]
 enum CutAction { TogglePosters, FrameChanges(bool), TimeDisplay(bool),
     // Set in / out: no key or button reaches these while the feature is disabled.
@@ -7514,6 +7565,25 @@ const CONTROL_BG: [f32; 4] = [26.0 / 255.0, 26.0 / 255.0, 26.0 / 255.0, 1.0];
 #[cfg(test)]
 mod tests {
     #[test]
+    fn autodetect_panel_controls_counts_without_seeking_or_painting() {
+        let clip=test_clip().expect("video fixture");let mut app=mk_app(&clip,1);
+        app.begin_editor(false,None);let before=app.t;
+        assert!(!app.detection_panel);assert_eq!(app.detection_sample_count(),Some(64));
+        app.activate(Action::Autodetect);
+        for width in [720.,900.,1280.] {
+            app.vp=(width,800.);
+            let p=app.detection_panel_rect();let count=app.detection_samples_track();
+            assert!(count.x+count.w<app.detection_area_button().x);
+            assert!(app.content_rect(0).y>=p.y+p.h);
+            app.mouse_down(count.x+count.w,count.y+4.);app.mouse_up();
+            assert_eq!(app.detection_sample_count(),None);
+            assert!(!app.detection_samples_drag);
+        }
+        assert_eq!(app.t,before);assert!(!app.painting);
+        app.activate(Action::Autodetect);assert!(!app.detection_panel);
+    }
+
+    #[test]
     fn mask_detection_defaults_to_entire_source_independently_of_playhead() {
         let clip=test_clip().expect("video test fixture");let mut app=mk_app(&clip,1);
         app.videos[0].info.duration=134.;app.t=70.;
@@ -7529,6 +7599,7 @@ mod tests {
     fn mask_detection_range_drag_does_not_seek_and_whole_clip_resets_it() {
         let clip=test_clip().expect("video test fixture");let mut app=mk_app(&clip,1);
         app.activate(Action::Tool(4));app.begin_editor(false,None);
+        app.activate(Action::Autodetect);
         let duration=app.videos[0].info.duration;let playhead=app.t;let track=app.detection_track();
         assert!(app.detection_press(track.x,track.y+6.));
         app.cursor_moved(track.x+track.w*0.25,track.y+6.);app.mouse_up();
@@ -7610,7 +7681,7 @@ mod tests {
         assert!(app.detection_search_region().is_none());
         for width in [720.,900.,1280.] {
             app.vp=(width,800.);
-            assert!(app.controls().iter().any(|c|matches!(c.action,Action::DetectionArea)));
+            assert!(app.controls().iter().any(|c|matches!(c.action,Action::Autodetect)));
         }
         app.activate(Action::DetectionArea);
         let original=app.full_crop();let r=app.crop_rect(original);
@@ -7654,7 +7725,7 @@ mod tests {
         for width in [720.,900.,1280.] {
             app.vp=(width,800.);
             let controls=app.controls();
-            let detect=controls.iter().find(|c|matches!(c.action,Action::DetectWatermark)).unwrap();
+            let detect=controls.iter().find(|c|matches!(c.action,Action::Autodetect)).unwrap();
             assert!(detect.r.x>=app.workspace().rail);
             let reset=controls.iter().find(|c|matches!(c.action,Action::ResetEdit)).unwrap();
             assert!(detect.r.x+detect.r.w<=reset.r.x);
@@ -7748,7 +7819,7 @@ mod tests {
         let mut encoder=Command::new("ffmpeg").args(["-v","error","-y","-f","rawvideo","-pix_fmt","rgb24","-s","160x96","-r","4","-i","pipe:0","-c:v","libx264","-crf","10","-pix_fmt","yuv420p"])
             .arg(&clip).stdin(std::process::Stdio::piped()).spawn().unwrap();
         let mut state=17u32;let mut input=encoder.stdin.take().unwrap();
-        for _ in 0..16 {let mut frame=Vec::new();for y in 0..96 {for x in 0..160 {
+        for _ in 0..80 {let mut frame=Vec::new();for y in 0..96 {for x in 0..160 {
             for _ in 0..3 {state=state.wrapping_mul(1664525).wrapping_add(1013904223);
                 frame.push(if (110..140).contains(&x)&&(64..80).contains(&y){240}else{(state>>24) as u8});}
         }}input.write_all(&frame).unwrap();}
@@ -7756,14 +7827,19 @@ mod tests {
         let mut app=mk_app(&clip,1);app.begin_editor(false,None);
         assert!(tick_until(&mut app,Duration::from_secs(10),|a|a.videos[0].delivered&&!a.videos[0].seeking));
         let before=app.t;
-        let r=app.controls().into_iter().find(|c|matches!(c.action,Action::DetectWatermark)).unwrap().r;
+        let r=app.controls().into_iter().find(|c|matches!(c.action,Action::Autodetect)).unwrap().r;
         app.mouse_down(r.x+r.w/2.,r.y+r.h/2.);app.mouse_up();
+        assert!(app.detection_panel);
+        let r=app.detection_run();app.mouse_down(r.x+r.w/2.,r.y+r.h/2.);app.mouse_up();
         assert!(app.watermark_task.is_some());
         assert!(tick_until(&mut app,Duration::from_secs(30),|a|a.watermark_task.is_none()),"detection did not finish");
         assert!(app.can_undo_mask(),"{}",app.mask_status);
         assert_eq!(app.t,before,"background sampling must not move the playhead");
         let mask=app.masks[0].as_ref().unwrap();
         assert_eq!(mask.pixels[70*160+120],255);
+        app.detection_samples=7;app.detect_watermark();
+        assert!(tick_until(&mut app,Duration::from_secs(30),|a|a.watermark_task.is_none()));
+        assert!(!app.mask_status.contains("failed"),"{}",app.mask_status);
         app.finish_editor(true);assert_eq!(app.masks[0].as_ref().unwrap().pixels[70*160+120],255);
         assert!(!app.mask_mode);
     }

@@ -145,21 +145,25 @@ tab closes and returns to Sources, Timeline, or Process. The editor stays attach
 to its original source until closed. Applied source masks persist in memory, and
 playback stays paused until Space.
 
-**Detect watermark** (or **D**) samples up to 16 frames spread across the entire clip by default
-(or the narrower range you select with the detection slider), and adds a proposed static-watermark mask to the
-current draft. This is built into mask mode and uses the native decoder. The
-button becomes **Stop detection** while scanning; progress appears in the status
-line. **Undo** / **Cmd-Z** restores the mask from before detection (until another
-paint edit). **Apply** keeps the draft and **Cancel** restores the original mask.
-Existing painted pixels are preserved. Editing the mask while scanning discards
-the pending result; no confident detection leaves the draft unchanged.
+**Autodetect** (or **D**) opens a compact panel beneath the mask toolbar.
+Choose the exact time range, then choose **Frames**: 8, 16, 32, **64** (default),
+128, 256, 512, or **∞**. Whole clip resets the range; moving the playhead does not
+change it. **Detection area** shows a movable, resizable rectangle; click it again
+to hide the handles while retaining the selected area. Double-click inside the
+rectangle to reset it. The area limits detection and retained sample memory,
+without cropping the source or changing existing paint.
 
-**Search area** shows draggable crop-style handles in mask mode. Resize or move
-the rectangle to limit autodetection, then click **Search area** again to hide
-the handles and resume painting. The selected area remains active while hidden;
-double-click inside the rectangle to reset it to the full frame. It changes only
-the detection search area, not the video crop or existing painted mask. Changing
-the rectangle stops pending detection. The area resets when you leave the editor.
+Press **Detect** in the panel to run, or **Stop** to cancel. The panel can be hidden
+with Autodetect. Changing either slider or the area cancels pending detection.
+**∞** examines every frame in the range in bounded batches distributed across that
+range, keeping pixels supported by at least 60% of batches. It takes longer and
+is not a guarantee of a better mask. Finite counts use one statistical fit over
+all selected samples; memory limits report an error rather than silently dropping
+samples. Samples retain native pixel resolution with context around the area.
+
+Detection adds to the draft; Undo restores the previous mask, Apply keeps it, and
+Cancel restores the original. A weaker static-scene fallback is used only when
+the temporal detector finds nothing inside an explicitly drawn area.
 
 Detection needs background variation and can mistake stationary scenery for an
 overlay. Inspect the result before applying. Sampling stays at native resolution;

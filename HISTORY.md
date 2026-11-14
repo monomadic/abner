@@ -1,5 +1,13 @@
 # abner — history
 
+## 2026-11-13 — Autodetect settings and frame sampling
+
+Mask mode now opens a compact Autodetect panel with time-range and frame-count
+sliders, Detection area handles, and Detect/Stop. The default is 64 frames from
+the selected range; infinity examines every frame in bounded interleaved batches.
+Samples retain only the detection area plus statistical context. Temporal masks
+are no longer overwritten by the weaker static-scene fallback.
+
 ## 2026-11-13 — Animated processor dragging
 
 Dragging lifts the processor card under the cursor, preserving the grab point and
