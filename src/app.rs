@@ -8,6 +8,7 @@
 //! jump in time — the other stream was already decoding the same moment.
 
 use std::time::Instant;
+use crate::canvas::{Canvas, ButtonBar, TimelineAttachment};
 
 use crate::cut::{Cut, Snap};
 use crate::player::Player;
@@ -2499,7 +2500,7 @@ impl App {
             let action = self.export_page.click(self.vp, x, y);
             if action != Some(crate::export_page::Action::EditFilename) && !self.export_page.finish_filename() { return; }
             if y < HEADER_H {
-                if let Some(control) = self.mode_selector().controls().into_iter().find(|c| contains(c.r,x,y)) { self.activate(control.action); }
+                if let Some(control) = self.mode_selector().controls().into_iter().find(|c| c.contains(x,y)) { self.activate(control.action); }
             } else if let Some(action) = action { self.export_action(action); }
             return;
         }
@@ -2509,7 +2510,7 @@ impl App {
         }
         if self.mask_mode && self.processors.open {
             self.cursor = (x,y); self.cursor_inside = true;
-            if let Some(c) = self.embedded_editor_controls().into_iter().find(|c| contains(c.r,x,y)) {
+            if let Some(c) = self.embedded_editor_controls().into_iter().find(|c| c.contains(x,y)) {
                 self.activate(c.action); return;
             }
         }
@@ -2534,7 +2535,7 @@ impl App {
             return;
         }
         if self.show_ui && !(self.mask_mode && self.processors.open) {
-            if let Some(control) = self.controls().into_iter().find(|c| contains(c.r, x, y)) {
+            if let Some(control) = self.controls().into_iter().find(|c| c.contains(x,y)) {
                 self.activate(control.action);
                 return;
             }
@@ -2677,7 +2678,7 @@ impl App {
     }
 
     pub fn scroll(&mut self, dx: f32, dy: f32) {
-        if self.export_page.open { return; }
+        if self.export_page.open { if self.ready() { self.pan_canvas(dx,dy); } return; }
         if self.show_ui && self.processors.scroll(dy, self.cursor, self.vp) { return; }
         self.stroke_last = None;
         if !self.ready() { return; }
@@ -2728,7 +2729,7 @@ impl App {
     /// center. Positive delta = fingers spreading = zoom in.
     pub fn pinch(&mut self, delta: f32) {
         self.stroke_last = None;
-        if self.ready() && !self.processors.open && self.cut_mode && self.show_ui && self.cut_over_panel() {
+        if self.ready() && !self.export_page.open && !self.processors.open && self.cut_mode && self.show_ui && self.cut_over_panel() {
             let lane = self.cut_lanes().video;
             let anchor = (self.cursor.0 - lane.x).clamp(0.0, lane.w);
             // Spreading zooms in, closing zooms out, anchored under the pointer.
@@ -2760,6 +2761,12 @@ impl App {
     /// The zoom at which the focused video shows at its original size:
     /// its native width over its fit width in physical pixels.
     fn actual_zoom(&self) -> Option<f32> {
+        if self.export_page.open {
+            let info=&self.videos.get(self.active)?.info;
+            let width=self.export_page.display_dims(info).0;
+            let base=self.base_rect(self.active);
+            return (base.w>0.).then(||width as f32/(base.w*self.scale.max(0.1)));
+        }
         if self.processors.open {
             return self.processors.actual_zoom(self.vp, self.show_ui, self.scale);
         }
@@ -2772,7 +2779,7 @@ impl App {
     /// centred where it was; a video bigger than the canvas is cropped,
     /// a smaller one sits letterboxed at its own size.
     pub fn actual_size(&mut self) {
-        if !self.ready() || self.export_page.open { return; }
+        if !self.ready() { return; }
         let Some(zoom) = self.actual_zoom() else { return };
         self.zoom = zoom.clamp(1.0 / 32.0, 32.0);
         self.clamp_center();
@@ -2786,22 +2793,13 @@ impl App {
     }
 
     pub(crate) fn fit_rect(dims: (u32, u32), c: RectPx) -> RectPx {
-        let (w, h) = (dims.0 as f32, dims.1 as f32);
-        let s = (c.w / w).min(c.h / h);
-        let (fw, fh) = (w * s, h * s);
-        RectPx { x: c.x + (c.w - fw) / 2.0, y: c.y + (c.h - fh) / 2.0, w: fw, h: fh }
+        crate::canvas::fit_rect(dims, c)
     }
 
     /// The fit rect scaled by `zoom` with content point `center` at the
     /// base rect's middle — the one transform every video shares.
     pub(crate) fn zoomed(base: RectPx, zoom: f32, center: (f32, f32)) -> RectPx {
-        let (w, h) = (base.w * zoom, base.h * zoom);
-        RectPx {
-            x: base.x + base.w / 2.0 - center.0 * w,
-            y: base.y + base.h / 2.0 - center.1 * h,
-            w,
-            h,
-        }
+        crate::canvas::zoomed(base, zoom, center)
     }
 
     /// The base fit rect a pointer gesture at (x, y) is anchored to: the
@@ -2817,6 +2815,7 @@ impl App {
     }
 
     fn gesture_base(&self, x: f32, _y: f32) -> RectPx {
+        if self.export_page.open { return self.base_rect(self.active); }
         let idx = if self.shown_mode() == Mode::SideBySide && !self.single() {
             let c = self.workspace().canvas;
             (((x - c.x).max(0.0) / (c.w / self.videos.len() as f32).max(1.0)) as usize).min(self.videos.len() - 1)
@@ -2825,12 +2824,13 @@ impl App {
     }
 
     fn base_rect(&self, idx: usize) -> RectPx {
+        if self.export_page.open { return self.export_page.base_rect(self.vp,self.show_ui,&self.videos[self.active].info); }
         let dims = (self.videos[idx].info.width,self.videos[idx].info.height);
         let mut cell = self.video_cell(idx);
         if self.mask_mode && self.crop.is_none() && self.detection_panel && self.show_ui {
             let reserved=132f32.min((cell.h-80.).max(0.));cell.y+=reserved;cell.h-=reserved;
         }
-        let frame=if (self.processors.open || self.cut_mode) && self.show_ui {Canvas { r: cell }.fit(dims)}
+        let frame=if (self.processors.open || self.cut_mode) && self.show_ui {Canvas::new(cell).fit(dims)}
             else {Self::fit_rect(dims, inset_rect(cell, if self.show_ui { 24.0 } else { 0.0 }))};
         if self.applied_crop(idx).is_some(){Self::fit_rect(self.image_dims(idx),frame)}else{frame}
     }
@@ -2839,6 +2839,7 @@ impl App {
     /// viewer while that mode is up (the same `Canvas` as the timeline's),
     /// the workspace canvas otherwise.
     fn canvas(&self) -> RectPx {
+        if self.export_page.open { return crate::export_page::Page::canvas(self.vp,self.show_ui).r; }
         if self.processors.open && self.show_ui { crate::processor_gui::Panel::viewer(self.vp) } else { self.workspace().canvas }
     }
 
@@ -3105,12 +3106,11 @@ impl App {
         }
         let mode = if self.single() { Mode::Overlay } else { self.shown_mode() };
         let canvas = self.workspace().canvas;
-        let board = Canvas { r: canvas };
+        let board = Canvas::new(canvas);
         if self.show_ui {
-            if self.cut_mode { board.ground(&mut items); }
-            else { items.push(Item::Rect(RectItem::new(canvas, CANVAS_BG))); }
+            board.ground(&mut items);
         }
-        items.push(Item::Clip(Some(canvas)));
+        board.clip(&mut items);
         // Keep the lifted picture attached to its zoomed bounds, while the
         // recessed document edge stays attached to the canvas itself.
         if self.show_ui {
@@ -3171,7 +3171,7 @@ impl App {
             }
         }
 
-        items.push(Item::Clip(Some(canvas)));
+        board.clip(&mut items);
         if self.mask_mode {
             self.build_mask_layer(&mut items);
         }
@@ -3233,8 +3233,8 @@ impl App {
         self.processors.draw(&mut items, vp, n, self.view(), self.show_ui);
         if self.processors.open && self.mask_mode && self.show_ui {
             let canvas = self.canvas();
-            let board = Canvas { r: canvas };
-            items.push(Item::Clip(Some(canvas)));
+            let board = Canvas::new(canvas);
+            board.clip(&mut items);
             board.ground(&mut items);
             let picture = self.content_rect(self.active);
             Canvas::lift(&mut items, picture);
@@ -3255,10 +3255,10 @@ impl App {
             board.recess(&mut items);
             let header = RectPx { x:canvas.x,y:HEADER_H,w:canvas.w,h:canvas.y-HEADER_H };
             items.push(Item::Clip(Some(header)));
-            draw_canvas_bar(&mut items, header);
+            ButtonBar { r: header }.draw(&mut items);
             for c in self.embedded_editor_controls() {
                 let hovered = self.cursor_inside && contains(c.r, self.cursor.0, self.cursor.1);
-                draw_canvas_button(&mut items, c.r, &c.label, c.selected, hovered, self.control_dead(&c.action));
+                c.draw(&mut items, hovered, self.control_dead(&c.action));
             }
             items.push(Item::Clip(None));
         }
@@ -3271,7 +3271,7 @@ impl App {
         if self.export_page.open {
             self.update_export_copy_availability();
             items.clear();
-            self.export_page.draw(&mut items,vp,self.active,n+1,&self.videos[self.active].info,self.cursor,self.videos[self.active].shown_pts,self.show_ui);
+            self.export_page.draw(&mut items,vp,self.active,n+1,&self.videos[self.active].info,self.cursor,self.videos[self.active].shown_pts,self.show_ui,self.view());
             if self.show_ui {
             items.push(Item::Rect(RectItem::new(RectPx{x:0.,y:0.,w:vp.0,h:HEADER_H},WORKSPACE_PANEL)));
             items.push(Item::Rect(RectItem::new(RectPx { x: 0., y: HEADER_H - 1., w: vp.0, h: 1. }, WORKSPACE_RULE)));
@@ -3501,10 +3501,10 @@ impl App {
         };
         if self.crop.is_none() { buttons.extend([("Undo",Action::UndoMask),("Redo",Action::RedoMask)]); }
         buttons.extend([("Reset",Action::ResetEdit),("Cancel",Action::CancelEdit),("Apply",Action::ApplyEdit)]);
-        let gap = 4.0;
-        let inset = 12.0;
-        let w = ((v.w - 2.0 * inset + gap) / buttons.len() as f32 - gap).clamp(1.0, 116.0);
-        buttons.into_iter().enumerate().map(|(i,(label,action))| Control::new(RectPx {x:v.x+inset+i as f32*(w+gap),y:HEADER_H+6.0,w,h:v.y-HEADER_H-12.0},label,matches!(action,Action::Autodetect)&&self.detection_panel,action)).collect()
+        let bar=ButtonBar { r:RectPx{x:v.x,y:HEADER_H,w:v.w,h:v.y-HEADER_H} };
+        let rects=bar.row(buttons.len(),116.);
+        buttons.into_iter().zip(rects).map(|((label,action),r)| Control::new(r,label,matches!(action,Action::Autodetect)&&self.detection_panel,action)).collect()
+
     }
 
     fn controls(&self) -> Vec<Control> {
@@ -3909,7 +3909,7 @@ impl App {
             RectPx { x: l.rail, y: l.transport.y, w: l.canvas.w, h: 1.0 }] {
             items.push(Item::Rect(RectItem::new(r, WORKSPACE_RULE)));
         }
-        draw_canvas_bar(items, RectPx { x: l.canvas.x, y: HEADER_H, w: l.canvas.w, h: CONTEXT_H });
+        if let Some(bar) = l.surface.button_bar { bar.draw(items); }
         self.mode_selector().draw(items, self.cursor, self.cursor_inside);
         let (text, lamp) = self.encode_status();
         draw_status_chip(items, self.status_chip(), lamp, text, hex_color(0xc8c8c8));
@@ -3923,7 +3923,7 @@ impl App {
                 || matches!(control.action, Action::Save) && self.mask_save.is_some()
                 || matches!(control.action, Action::Export) && self.crop_export.is_some();
             if (HEADER_H..HEADER_H + CONTEXT_H).contains(&control.r.y) {
-                draw_canvas_button(items, control.r, &control.label, control.selected, hovered, disabled);
+                control.draw(items, hovered, disabled);
                 continue;
             }
             if matches!(control.action, Action::Duplicate | Action::OpenFiles) {
@@ -5189,7 +5189,7 @@ impl App {
         // selects a removed range, or activates a timeline control.
         if self.cut_edge_at(x, y).is_some()
             || self.cut_ghost_at(x, y).is_some()
-            || self.controls().iter().any(|c| contains(c.r, x, y))
+            || self.controls().iter().any(|c| c.contains(x,y))
             || self.cut_encode_regions().iter().any(|(_, r)| r.w >= 54.0 && contains(Self::encode_button(*r), x, y)) {
             return None;
         }
@@ -6009,7 +6009,7 @@ impl App {
         if self.fullscreen || !self.show_ui || !(78.0..self.vp.0).contains(&x)
             || !(0.0..HEADER_H).contains(&y) { return false; }
         !self.ready() || (!contains(self.header_tabs(), x, y)
-            && !self.controls().iter().any(|c| contains(c.r, x, y)))
+            && !self.controls().iter().any(|c| c.contains(x,y)))
     }
 
     pub fn native_header_controls(&self) -> Vec<RectPx> {
@@ -6058,12 +6058,13 @@ impl App {
             items.push(Item::Rect(RectItem::new(r, rule)));
         }
 
+        if let Some(bar) = l.surface.button_bar { bar.draw(items); }
         // ---- Figma timeline header ----
         let controls = self.controls();
         self.build_cut_header(items);
         for control in controls.iter().filter(|c|matches!(c.action,Action::LaunchEditor(_))) {
-            items.push(Item::Rect(RectItem{radius:6.,..RectItem::new(control.r,CONTROL_BG)}));
-            ui_label(items,control.r.x+control.r.w/2.,control.r.y+control.r.h/2.,11.,WORKSPACE_TEXT,&control.label,Align::Center,control.r.w-8.);
+            ButtonBar::button(items, control.r, &control.label, control.selected,
+                self.cursor_inside && contains(control.r,self.cursor.0,self.cursor.1), self.control_dead(&control.action));
         }
 
         // ---- scrub toolbar: play, the clock, the edit tools, the zoom ----
@@ -7149,8 +7150,6 @@ const CUT_PAD: f32 = 16.0;
 const CUT_GRIP: f32 = 12.0;
 // The Timeline Edit design's tokens, sRGB hex (its oklch values converted).
 const CUT_BG: u32 = 0x0e0f10;
-/// Timeline preview surround from Figma 12:42.
-const CUT_CANVAS: u32 = 0x2c2c2c;
 /// Stacked current-chapter tag and transport readout (35:24 / 73:126).
 const CUT_CHAPTER_TAG: u32 = 0xd00070;
 /// The selected Figma transport/toolbar uses a black ground.
@@ -7207,6 +7206,7 @@ struct Workspace {
     /// keycap column and `source_row` a keycap, not a card.
     mini: bool,
     canvas: RectPx,
+    surface: Canvas,
     list: RectPx,
     /// The visible part of the focused inspector (its content is
     /// `RAIL_INSPECTOR_H` tall, anchored at the top, clipped to this).
@@ -7259,21 +7259,24 @@ impl Workspace {
             let side_w = if w >= CUT_COLUMNS_MIN_W { CUT_SIDE_W } else { 0.0 };
             let side_in = (side_w * ease(side_slide)).round();
             let side = if side_in > 0.0 { side_w } else { 0.0 };
-            let transport_y = h - CUT_STATUS_H - lanes - CUT_TOOLBAR_H;
+            let surface = Canvas::layout(RectPx { x:rail, y:HEADER_H, w:(w-side_in-rail).max(1.), h:(h-CUT_STATUS_H-HEADER_H).max(0.) },
+                Some(CONTEXT_H), Some(TimelineAttachment { x:0.,width:w,transport_height:CUT_TOOLBAR_H,lanes_height:lanes }));
+            let attached = surface.timeline.unwrap();
+            let transport_y = attached.transport.y;
             let top = (transport_y - CUT_HEADER_H).max(1.0);
             let (grip, inspector) = Self::detail(ox, panel, h, list_y, transport_y, detail_slide);
             return Self {
                 rail, panel, mini, inspector, grip,
                 list: list_of(transport_y, grip.y),
-                canvas: RectPx { x: rail, y: CUT_HEADER_H, w: (w - side_in - rail).max(1.0), h: top },
+                canvas: surface.r, surface,
                 side: RectPx { x: w - side_in, y: CUT_HEADER_H, w: side, h: top },
-                transport: RectPx { x: 0.0, y: transport_y, w, h: CUT_TOOLBAR_H },
-                timeline: RectPx { x: 0.0, y: transport_y + CUT_TOOLBAR_H, w, h: lanes },
+                transport: attached.transport,
+                timeline: attached.lanes,
             };
         }
-        let header = if visible { HEADER_H + CONTEXT_H } else { 0.0 };
-        let bottom = if visible { TRANSPORT_H + STATUS_H } else { 0.0 };
-        let canvas = RectPx { x: rail, y: header, w: (w - rail).max(1.0), h: (h - header - bottom).max(1.0) };
+        let surface = Canvas::layout(RectPx { x:rail,y:if visible {HEADER_H}else{0.},w:(w-rail).max(1.),h:if visible {(h-HEADER_H-STATUS_H).max(0.)}else{h} },
+            visible.then_some(CONTEXT_H), visible.then_some(TimelineAttachment { x:rail,width:w-rail,transport_height:TRANSPORT_H,lanes_height:0. }));
+        let canvas = surface.r;
         // Sources sidebar (278:584): the list starts 14px under the header
         // and the focused inspector is 216px. The app's own rows — the
         // footer line above the inspector and the Duplicate / Add files
@@ -7281,9 +7284,9 @@ impl Workspace {
         // strips, so nothing overlaps the inspector's path line.
         let (grip, inspector) = Self::detail(ox, panel, h, list_y, h - STATUS_H - RAIL_ACTIONS_H, detail_slide);
         Self {
-            rail, panel, mini, canvas, inspector, grip, timeline: none, side: none,
+            rail, panel, mini, canvas, surface, inspector, grip, timeline: none, side: none,
             list: list_of(h - STATUS_H, grip.y),
-            transport: RectPx { x: rail, y: h - STATUS_H - TRANSPORT_H, w: w - rail, h: TRANSPORT_H },
+            transport: surface.timeline.map_or(none, |t| t.transport),
         }
     }
 
@@ -7314,12 +7317,7 @@ enum CutAction { TogglePosters, FrameChanges(bool), TimeDisplay(bool),
     #[allow(dead_code)] In, #[allow(dead_code)] Out,
     Split, ToggleSplit, Join, Apply, DeletePicked, Undo, Export, SaveProject, EncodeAll, Encode(f64), Snap(Snap), Play, Zoom(bool), Step(i32), Keyframe(i32), Chapter(i32) }
 /// `hint` is the key cap a cut-mode button carries ("" for none).
-struct Control { r: RectPx, label: String, selected: bool, action: Action, hint: &'static str }
-impl Control {
-    fn new(r: RectPx, label: &str, selected: bool, action: Action) -> Self {
-        Self { r, label: label.into(), selected, action, hint: "" }
-    }
-}
+type Control = crate::canvas::Button<Action>;
 pub(crate) fn contains(r: RectPx, x: f32, y: f32) -> bool {
     x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h
 }
@@ -7355,73 +7353,6 @@ pub(crate) fn draw_cut_footer_button(items: &mut Vec<Item>, r: RectPx, label: &s
     items.push(Item::Rect(RectItem { radius: 5.0, ..RectItem::new(key, hex_color(if disabled { 0x151515 } else { 0x1b1b1b })) }));
     ui_label(items, key.x + key.w / 2.0, cy, 10.0, ink, key_label, Align::Center, key.w);
 }
-/// The timeline's canvas (12:2), the one picture surface the Timeline and
-/// Processors modes share: a #2c2c2c ground, the footage fitted into the
-/// board's 764×430-of-1140×583 window and lifted on a drop shadow, under
-/// the recessed inner edge. Zoom and pan are `App`'s one shared
-/// `(zoom, center)`, so a pinch carries across modes.
-#[derive(Clone, Copy)]
-pub(crate) struct Canvas { pub r: RectPx }
-impl Canvas {
-    pub fn fit(&self, dims: (u32, u32)) -> RectPx {
-        let c = self.r;
-        let (dx, dy) = (c.w * 188.0 / 1140.0, c.h * 76.5 / 583.0);
-        App::fit_rect(dims, RectPx { x: c.x + dx, y: c.y + dy, w: c.w - 2.0 * dx, h: c.h - 2.0 * dy })
-    }
-    /// `fit` under the shared zoom/center.
-    pub fn picture(&self, dims: (u32, u32), view: (f32, (f32, f32))) -> RectPx {
-        App::zoomed(self.fit(dims), view.0, view.1)
-    }
-    pub fn ground(&self, items: &mut Vec<Item>) {
-        items.push(Item::Rect(RectItem::new(self.r, hex_color(CUT_CANVAS))));
-    }
-    /// The picture's drop shadow, attached to its zoomed bounds.
-    pub fn lift(items: &mut Vec<Item>, picture: RectPx) {
-        items.push(Item::Shadow { r: picture, inner: false, blur: 18.0, alpha: 0.42 });
-    }
-    /// The recessed edge, attached to the canvas itself.
-    pub fn recess(&self, items: &mut Vec<Item>) {
-        items.push(Item::Shadow { r: self.r, inner: true, blur: 16.0, alpha: 0.28 });
-    }
-}
-/// Signal's recessed canvas toolbar and outlined controls.
-/// Figma "Button Bar" (463:6046 in the Signal design system), drawn by
-/// figleaf from Figma's own values: top corners 4, a 1px stroke of 585454 on
-/// the bottom edge, and an inner shadow (black 29%, Y 2, blur 2.9). Figma's
-/// fill is 6B6B6A at 53%; it is written here as the opaque colour that makes
-/// on the workspace panel, so footage never shows through the shell. The
-/// buttons in Figma's bar are placeholders: Abner keeps its own.
-pub(crate) fn draw_canvas_bar(items: &mut Vec<Item>, r: RectPx) {
-    use figleaf::{Rect, Shadow, Shape};
-    let frame = Shape::rect(Rect::new(r.x, r.y, r.w, r.h)).radii([4.0, 4.0, 0.0, 0.0]);
-    items.push(Item::Shape(frame.clone().fill(hex_color(0x3b3b3a))));
-    items.push(Item::Shape(Shape::rect(Rect::new(r.x, r.y + r.h - 1.0, r.w, 1.0)).fill(hex_color(0x585454))));
-    // The shadow falls over the stroke, as Figma paints it.
-    items.push(Item::Shape(frame.shadow(Shadow::inner([0.0, 0.0, 0.0, 0.29], [0.0, 2.0], 2.9))));
-}
-
-pub(crate) fn draw_canvas_button(
-    items: &mut Vec<Item>, r: RectPx, label: &str, selected: bool, hovered: bool, disabled: bool,
-) {
-    use figleaf::{Rect, Shadow, Shape, StrokeAlign, Text, paint::Align as Place};
-    let selected = selected && !disabled;
-    let hovered = hovered && !disabled;
-    // The attached Figma bar: filled grey buttons with dark outlines; the
-    // selected control is a darker, recessed surface. Values are sRGB.
-    let fill = hex_color(if selected { 0x302d2b } else if hovered { 0x5b5959 } else { 0x514f4f });
-    // Follow figleaf's abner_button_bar example through the host's ordered
-    // figleaf canvas, including CoreText labels (not the legacy quad atlas).
-    let button = Shape::rect(Rect::new(r.x, r.y, r.w, r.h)).radius(6.0).fill(fill)
-        .stroke(1.0, hex_color(if selected { 0x211f1e } else { 0x383636 }), StrokeAlign::Inside);
-    items.push(Item::Shape(if selected {
-        button.shadow(Shadow::inner([0.0, 0.0, 0.0, 0.22], [0.0, 2.0], 2.2))
-    } else { button }));
-    let ink = if disabled { 0x858587 } else if selected || hovered { 0xf1efed } else { 0xbab8b8 };
-    let label_rect = Rect::new(r.x + 10.0, r.y, (r.w - 18.0).max(1.0), r.h);
-    items.push(Item::Label(Text::new(label, label_rect).font(1).size(12.0, 16.0)
-        .color(hex_color(ink)).align(Place::Start, Place::Center).clip(label_rect)));
-}
-
 /// The Sources rail's full panel width at window width `w` (the processors
 /// panel's left column uses the same, so the two rails line up).
 pub(crate) fn rail_full_width(w: f32) -> f32 {
@@ -7561,7 +7492,6 @@ pub(crate) const SOURCE_INK: u32 = 0xf0f3f7;
 pub(crate) const SOURCE_SECONDARY: u32 = 0xb3bdc9;
 pub(crate) const SOURCE_SUBTLE: u32 = 0x8d9aab;
 pub(crate) const WORKSPACE_PANEL: [f32; 4] = [0.0196, 0.0196, 0.0235, 1.0];
-const CANVAS_BG: [f32; 4] = [29.0 / 255.0, 27.0 / 255.0, 27.0 / 255.0, 1.0];
 pub(crate) const WORKSPACE_TEXT: [f32; 4] = [209.0 / 255.0, 209.0 / 255.0, 209.0 / 255.0, 1.0];
 pub(crate) const WORKSPACE_DIM: [f32; 4] = [0.57, 0.57, 0.57, 1.0];
 pub(crate) const WORKSPACE_MUTED: [f32; 4] = [0.43, 0.43, 0.43, 1.0];
@@ -8504,6 +8434,40 @@ mod tests {
         app.cursor_moved(80.0, HEADER_H + 80.0);
         app.pinch(0.5);
         assert_eq!(app.zoom, old, "pinching the source list must not zoom the image");
+    }
+
+    #[test]
+    fn export_canvas_shares_zoom_and_excludes_attached_controls() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 2);
+        app.select_workspace_mode(5);
+        app.vp=(1280.,800.);
+        app.playing=false;
+        let base=app.base_rect(app.active);
+        let pointer=(base.x+base.w*0.6,base.y+base.h*0.4);
+        app.cursor_moved(pointer.0,pointer.1);
+        app.pinch(0.5);
+        let picture=app.content_rect(app.active);
+        assert!(((pointer.0-picture.x)/picture.w-0.6).abs()<0.001);
+        assert!(((pointer.1-picture.y)/picture.h-0.4).abs()<0.001);
+        let zoom=app.zoom;
+        let layout=crate::export_page::Layout::new(app.vp);
+        for r in [layout.context,layout.transport,layout.sidebar] {
+            app.cursor_moved(r.x+10.,r.y+10.);
+            app.pinch(0.5);
+            assert_eq!(app.zoom,zoom);
+        }
+        app.cursor_moved(pointer.0,pointer.1);
+        let before=app.center;
+        app.scroll(10.,10.);
+        assert_ne!(app.center,before);
+        let mut items=Vec::new();
+        app.export_page.draw(&mut items,app.vp,app.active,3,&app.videos[app.active].info,app.cursor,0.,true,app.view());
+        let shown=items.iter().find_map(|i|if let Item::Video{r,..}=i{Some(*r)}else{None}).unwrap();
+        let expected=app.content_rect(app.active);
+        assert_eq!((shown.x,shown.y,shown.w,shown.h),(expected.x,expected.y,expected.w,expected.h));
+        app.actual_size();
+        assert!((app.content_rect(app.active).w*app.scale-app.videos[app.active].info.width as f32).abs()<0.01);
     }
 
     #[test]

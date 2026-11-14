@@ -15,6 +15,7 @@ mod processor_presets;
 mod export_page;
 mod text_edit;
 mod app;
+mod canvas;
 mod config;
 mod cut;
 mod smart;

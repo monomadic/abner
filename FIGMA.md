@@ -446,3 +446,23 @@ A chip filters the rows (`Panel::filter` / `visible`); Move up / down step over
 hidden rows. The focused inspector shows the chain position as a 24px round
 badge before the name. `chips`, `card` and `card_switch` are the one geometry
 for drawing and hit testing.
+
+### Shared canvas and attachments (2026-11-14)
+
+`src/canvas.rs` owns the reusable `Canvas`, `ButtonBar`, typed `Button<Action>`,
+and optional bottom `TimelineAttachment`. `Canvas::layout` reserves the top bar
+and bottom transport/lanes before returning the video viewport. Timeline can
+request a full-window-width bottom attachment while the video stays between
+its side columns. Sources, Timeline, Process and Export all use this layout;
+Mask/Crop use the workspace or embedded Process canvas.
+
+Canvas grounds, inner edges, video shadows, button surfaces and button labels
+use figleaf through the host renderer. The embedded editor's equal-width button
+row uses figleaf auto layout; its resolved rectangles are the hit targets.
+Page-specific actions, video textures, mask overlays and timeline editing state
+remain in their owners. Fit/zoom math lives with the canvas; Export now uses the
+same pointer-anchored zoom, scroll-pan and actual-size path as other pages.
+
+The shared ground is currently #1d1b1b. Existing inset versus document-style
+fit policies remain explicit; full Figma canvas-style reconciliation is deferred.
+Change shared styling here rather than introducing a page-local drawing path.

@@ -1,9 +1,10 @@
 //! Runtime-schema controls and cancellable, bounded display previews.
 //! No processor identity or implementation belongs in this module.
+use crate::canvas::{Canvas, ButtonBar, TimelineAttachment};
 use abner_processor_api::{VideoFrame, FramePixels, PixelFormat};
 use crate::{
     app::{
-        ACCENT, CUT_HEADER_BLUE, CUT_STATUS_H, Canvas, DETAIL_SLIDE_S, HEADER_H, INSPECTOR_BG,
+        ACCENT, CUT_HEADER_BLUE, CUT_STATUS_H, DETAIL_SLIDE_S, HEADER_H, INSPECTOR_BG,
         INSPECTOR_PATH, Icon, Key, MONO_ADV, RAIL_ACTIONS_H, RAIL_FOOTER_H, RAIL_GRIP_H, RAIL_HEAD_H,
         RAIL_INSPECTOR_H, SOURCE_BORDER, SOURCE_INK, SOURCE_RING,
         SOURCE_SUBTLE, SOURCE_SURFACE, WORKSPACE_DIM, WORKSPACE_MUTED,
@@ -2336,22 +2337,19 @@ impl Panel {
     fn right(vp: (f32, f32)) -> f32 {
         (vp.0 * 0.25).clamp(200.0, 310.0)
     }
-    pub(crate) fn viewer(vp: (f32, f32)) -> RectPx {
-        let l = Self::left(vp);
-        let r = Self::right(vp);
-        RectPx {
-            x: l,
-            y: HEADER_H + CANVAS_HEADER_H,
-            w: (vp.0 - l - r).max(1.0),
-            h: (Self::transport_y(vp) - 20.0 - HEADER_H - CANVAS_HEADER_H).max(1.0),
-        }
+    fn canvas_layout(vp:(f32,f32)) -> Canvas {
+        let x=Self::left(vp);
+        let width=(vp.0-x-Self::right(vp)).max(1.);
+        Canvas::layout(RectPx{x,y:HEADER_H,w:width,h:(Self::bottom(vp)-HEADER_H).max(0.)},Some(CANVAS_HEADER_H),
+            Some(TimelineAttachment{x,width,transport_height:165.,lanes_height:0.}))
     }
+    pub(crate) fn viewer(vp: (f32, f32)) -> RectPx { Self::canvas_layout(vp).r }
     /// The Source | Rendered switch at the viewer's top-right, level with
     /// the format summary. Tab flips the same flag; the zoom is shared, so both sides
     /// show the same region of the picture.
     fn compare_switch(vp: (f32, f32)) -> RectPx {
         let v = Self::viewer(vp);
-        RectPx { x: v.x + v.w - 12.0 - 144.0, y: HEADER_H + 6.0, w: 144.0, h: 24.0 }
+        RectPx { x: v.x + v.w - 12.0 - 168.0, y: HEADER_H + 6.0, w: 168.0, h: 24.0 }
     }
     fn compare_half(vp: (f32, f32), rendered: bool) -> RectPx {
         let s = Self::compare_switch(vp);
@@ -2362,7 +2360,7 @@ impl Panel {
         for (rendered, label) in [(false, "Source"), (true, "Rendered")] {
             let h = Self::compare_half(vp, rendered);
             let button = RectPx { x: h.x + 2.0, w: h.w - 4.0, ..h };
-            crate::app::draw_canvas_button(items, button, label,
+            ButtonBar::button(items, button, label,
                 self.show_rendered == rendered, hit(button, self.cursor.0, self.cursor.1), !available);
         }
     }
@@ -2411,7 +2409,7 @@ impl Panel {
             w: (vp.0 - Self::right(vp) - 16.0 - x).max(1.0), h: 28.0 }
     }
     fn transport_y(vp: (f32, f32)) -> f32 {
-        Self::bottom(vp) - 145.0
+        Self::canvas_layout(vp).timeline.unwrap().transport.y + 20.0
     }
     /// The Timeline's transport spacing: 24px glyph buttons on a 31px
     /// pitch, 36px either side of the 34px play disc.
@@ -3351,7 +3349,7 @@ impl Panel {
         let dims = (dims[0], dims[1]);
         if dims.0 == 0 || dims.1 == 0 { return None; }
         let base = if show_ui {
-            Canvas { r: Self::viewer(vp) }.fit(dims)
+            Canvas::new(Self::viewer(vp)).fit(dims)
         } else {
             crate::app::App::fit_rect(dims, RectPx { x: 0.0, y: 0.0, w: vp.0, h: vp.1 })
         };
@@ -3400,9 +3398,9 @@ impl Panel {
         } else {
             self.source
         };
-        let board = Canvas { r: v };
+        let board = Self::canvas_layout(vp);
         board.ground(items);
-        items.push(Item::Clip(Some(v)));
+        board.clip(items);
         let picture = board.picture((dims[0], dims[1]), view);
         Canvas::lift(items, picture);
         items.push(Item::Video {
@@ -3416,8 +3414,8 @@ impl Panel {
         });
         board.recess(items);
         items.push(Item::Clip(Some(r)));
-        let header = RectPx { x: v.x, y: HEADER_H, w: v.w, h: CANVAS_HEADER_H };
-        crate::app::draw_canvas_bar(items, header);
+        let header = board.button_bar.unwrap().r;
+        board.button_bar.unwrap().draw(items);
         let resolution = |dims: [u32; 2]| match dims {
             [3840, 2160] | [4096, 2160] => "4k".to_owned(),
             [7680, 4320] => "8k".to_owned(),
@@ -3662,10 +3660,10 @@ impl Panel {
         let inset = |b: RectPx| RectPx { x: b.x + 1.0, w: b.w - 2.0, ..b };
         let looped = Self::loop_button(vp);
         if looped.x > r.x + 8.0 {
-            crate::app::draw_canvas_button(items, inset(looped), "Loop", self.loop_preview, over(looped), false);
+            ButtonBar::button(items, inset(looped), "Loop", self.loop_preview, over(looped), false);
             for (i, (label, ..)) in LENGTHS.iter().enumerate() {
                 let b = Self::length_button(vp, i);
-                crate::app::draw_canvas_button(items, inset(b), label, self.length == i, over(b), false);
+                ButtonBar::button(items, inset(b), label, self.length == i, over(b), false);
             }
         }
         // The panel's primary action: a filled blue button that lifts under

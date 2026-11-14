@@ -1,5 +1,22 @@
 # abner — history
 
+## 2026-11-14 — Shared figleaf canvas and attached timeline
+
+Extracted the canvas and button bar from `app.rs` into `src/canvas.rs`.
+The shared layout owns an optional top button bar and an optional bottom
+transport/timeline attachment, including Timeline's full-width lanes. All
+workspace pages consume those rectangles for their video and controls.
+Canvas grounds, shadows, and toolbar surfaces/text now use figleaf; editor
+button rows use its layout solver. Page-owned media and editing actions stay
+separate. Export gains the common pinch, scroll-pan and actual-size transform.
+
+Validated 243 library tests plus the hardware export regression (outside the
+sandbox); four tests remain ignored. Three unrelated UI tests also fail on the
+unchanged parent: native workspace transitions, titlebar control count and
+portrait source-card ring geometry. Captured Sources, Timeline, Process, Export,
+Crop and Mask, including compact Timeline/Mask layouts. Figma styling refinement
+remains separate from this structural consolidation.
+
 ## 2026-11-14 — Figma button bar styling
 
 Shared canvas toolbar buttons now follow the attached Figma reference: opaque

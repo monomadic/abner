@@ -1,4 +1,5 @@
 //! Minimal export workspace. Workers publish a bounded latest-frame mailbox; no GUI waits for rendering.
+use crate::canvas::{Canvas, ButtonBar, TimelineAttachment};
 use crate::{
     app::{Key, hex_color, ui_label},
     player::Rgba,
@@ -175,6 +176,7 @@ impl Drop for Page {
 pub(crate) struct Layout {
     pub sidebar: RectPx,
     pub video: RectPx,
+    pub canvas: Canvas,
     pub context: RectPx,
     pub transport: RectPx,
     pub footer: RectPx,
@@ -186,16 +188,18 @@ impl Layout {
         let footer_y = vp.1 - crate::app::CUT_STATUS_H;
         let sidebar = RectPx { x: 0., y: crate::app::HEADER_H,
             w: side, h: footer_y - crate::app::HEADER_H };
-        let context = RectPx { x: side, y: sidebar.y, w: vp.0 - side, h: 40. };
-        let transport = RectPx { x: side, y: footer_y - 60., w: vp.0 - side, h: 60. };
-        let video = RectPx { x: side, y: context.y + context.h,
-            w: context.w, h: transport.y - context.y - context.h };
+        let canvas = Canvas::layout(RectPx{x:side,y:sidebar.y,w:vp.0-side,h:footer_y-sidebar.y},Some(40.),
+            Some(TimelineAttachment{x:side,width:vp.0-side,transport_height:60.,lanes_height:0.}));
+        let context=canvas.button_bar.unwrap().r;
+        let transport=canvas.timeline.unwrap().transport;
+        let video=canvas.r;
         let seek = RectPx { x: transport.x + 20., y: transport.y + 15.,
             w: (transport.w - 212.).max(80.), h: 4. };
 
         Self {
             sidebar,
             video,
+            canvas,
             context,
             transport,
             seek,
@@ -689,6 +693,15 @@ impl Page {
         }
         None
     }
+    pub(crate) fn canvas(vp:(f32,f32),show_ui:bool) -> Canvas {
+        if show_ui { Layout::new(vp).canvas } else { Canvas::new(RectPx{x:0.,y:0.,w:vp.0,h:vp.1}) }
+    }
+    pub(crate) fn display_dims(&self, info:&VideoInfo)->(u32,u32) {
+        self.current().filter(|_| !self.original).map_or((info.width,info.height),|f|(f.dims[0],f.dims[1]))
+    }
+    pub(crate) fn base_rect(&self,vp:(f32,f32),show_ui:bool,info:&VideoInfo)->RectPx {
+        Self::canvas(vp,show_ui).fit_inset(self.display_dims(info),if !show_ui {0.}else if vp.0<900. {16.}else{24.})
+    }
     pub fn draw(
         &self,
         items: &mut Vec<Item>,
@@ -699,6 +712,7 @@ impl Page {
         cursor: (f32, f32),
         shown_pts: f64,
         show_ui: bool,
+        view: (f32,(f32,f32)),
     ) {
         if !show_ui {
             let f = self.current();
@@ -723,7 +737,7 @@ impl Page {
                 items.push(Item::Video {
                     a: idx,
                     b: idx,
-                    r: crate::app::App::fit_rect(dims, r),
+                    r: crate::canvas::zoomed(crate::canvas::fit_rect(dims, r),view.0,view.1),
                     uv: [0., 0., 1., 1.],
                     mode: VideoMode::Tex,
                     p0: 0.,
@@ -743,17 +757,14 @@ impl Page {
         };
         items.push(Item::Rect(RectItem::new(RectPx { x: 0., y: l.sidebar.y,
             w: vp.0, h: vp.1 - l.sidebar.y }, WORKSPACE_PANEL)));
-        items.push(Item::Rect(RectItem::new(l.video, hex_color(0x1d1b1b))));
+        l.canvas.ground(items);
+        if let Some(bar) = l.canvas.button_bar { bar.draw(items); }
         let current = self.current();
         let fps = current.map_or(info.fps, |f| 1. / f.frame_duration);
-        let dims = current.filter(|_| !self.original)
-            .map_or((info.width, info.height), |f| (f.dims[0], f.dims[1]));
         let idx = if current.is_some() && !self.original { slot } else { source };
-        let inset = if vp.0 < 900. { 16. } else { 24. };
-        let picture = crate::app::App::fit_rect(dims, RectPx {
-            x: l.video.x + inset, y: l.video.y + inset,
-            w: l.video.w - inset * 2., h: l.video.h - inset * 2. });
-        items.push(Item::Clip(Some(l.video)));
+        let picture = crate::canvas::zoomed(self.base_rect(vp,show_ui,info),view.0,view.1);
+        l.canvas.clip(items);
+        Canvas::lift(items,picture);
         if self.original && current.is_some_and(|f| (f.source_pts - shown_pts).abs() > 0.51 / info.fps.max(1.)) {
             ui_label(items, l.video.x + l.video.w / 2., l.video.y + l.video.h / 2.,
                 12., dim, "Seeking matching original…", Align::Center, l.video.w);
@@ -761,6 +772,7 @@ impl Page {
             items.push(Item::Video { a: idx, b: idx, r: picture,
                 uv: [0., 0., 1., 1.], mode: VideoMode::Tex, p0: 0., p1: 0. });
         }
+        l.canvas.recess(items);
         items.push(Item::Clip(None));
         for r in [
             RectPx { x: l.sidebar.w - 1., y: l.sidebar.y, w: 1., h: l.sidebar.h },
@@ -867,10 +879,7 @@ impl Page {
                 continue;
             }
             if a == Action::Reveal || (a == Action::Export && self.path.is_none()) {
-                let blue = hex_color(if hovered { 0x237ce5 } else { 0x0967cc });
-                items.push(Item::Rect(RectItem { radius: 7., ..RectItem::new(r, blue) }));
-                ui_label(items, r.x + r.w / 2., r.y + r.h / 2., 13.,
-                    [1.; 4], t, Align::Center, r.w - 16.);
+                ButtonBar::primary(items,r,t,hovered,disabled);
                 continue;
             }
             if a == Action::Follow {
@@ -884,11 +893,14 @@ impl Page {
                     t, Align::Left, r.w - 34.);
                 continue;
             }
-            let toolbar = matches!(a, Action::Compare);
+            if r.y >= l.context.y && r.y + r.h <= l.context.y + l.context.h && r.x >= l.context.x {
+                ButtonBar::button(items,r,t,selected,hovered,disabled);
+                continue;
+            }
             items.push(Item::Rect(RectItem { radius: 6.,
-                border_w: if toolbar { 0. } else { 1. },
+                border_w: 1.,
                 border_color: hex_color(if disabled { 0x252525 } else if selected { 0x315576 } else if hovered { 0x555555 } else { 0x2d2d2d }),
-                ..RectItem::new(r, hex_color(if selected { if toolbar { 0x1a1a1a } else { 0x0b1926 } } else if toolbar { 0x050506 } else { 0x10151a })) }));
+                ..RectItem::new(r, hex_color(if selected { 0x0b1926 } else { 0x10151a })) }));
             let title = if a == Action::EditFilename {
                 self.filename_edit.clone().unwrap_or_else(|| self.destination_name())
             } else { t.to_string() };
