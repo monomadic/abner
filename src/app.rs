@@ -1686,23 +1686,21 @@ impl App {
     }
 
     /// Take on newly loaded clips — from a drop, or (later) an Open With.
-    /// They fill the next free slots in drop order (A, B, C…); `replace`
-    /// starts a fresh comparison from the first of them instead.
+    /// Retain existing sources, append arrivals in drop order, and focus
+    /// the first incoming clip. The legacy replace flag no longer discards sources.
     ///
     /// Every stream rewinds to 0: the arrivals decode from the top, and a
     /// clip already running at t=42 that kept its position would be
     /// unsynced against them — the one thing this product must never
     /// show. Frame-lock is re-established by construction, as at startup.
-    pub fn add_videos(&mut self, mut videos: Vec<Video>, replace: bool) {
+    pub fn add_videos(&mut self, mut videos: Vec<Video>, _replace: bool) {
         self.finish_editor(false);
         self.source_copy_drag = None;
         if videos.is_empty() {
             return;
         }
-        if replace {
-            self.videos.clear();
-            self.masks.clear();
-        }
+        self.export_page.new_source();
+        let incoming = self.videos.len();
         self.cut = None;
         self.cut_restore = None;
         self.cut_mode = false;
@@ -1724,7 +1722,7 @@ impl App {
         self.t = 0.0;
         self.started = false;
         self.playing = !self.start_paused;
-        self.active = 0;
+        self.active = incoming;
         self.speed = 1.0;
         self.zoom = 1.0;
         self.center = (0.5, 0.5);
@@ -1732,6 +1730,7 @@ impl App {
         self.scrubbing = false;
         self.drag_hover = false;
         self.settle_cut_default();
+        self.reveal_source();
     }
 
     /// Duplicate the viewed item with independent playback and mask state.
@@ -2543,6 +2542,15 @@ impl App {
                 let first = self.source_first();
                 for idx in first..(first + self.source_capacity()).min(self.videos.len()) {
                     if contains(self.source_card(idx), x, y) {
+                        if !self.workspace().mini {
+                            for (button, remove) in self.source_hover_buttons(idx) {
+                                if contains(button,x,y) {
+                                    if remove { self.select(idx); self.close_active(); }
+                                    else { self.duplicate_source(idx,idx+1); }
+                                    return;
+                                }
+                            }
+                        }
                         if self.workspace().mini && idx == self.active {
                             // The mini strip's focused keycap reopens the rail.
                             self.show_sources = true;
@@ -2678,7 +2686,7 @@ impl App {
     }
 
     pub fn scroll(&mut self, dx: f32, dy: f32) {
-        if self.export_page.open { if self.ready() { self.pan_canvas(dx,dy); } return; }
+        if self.export_page.open { if self.export_page.scroll(dy,self.cursor,self.vp) { return; } if self.ready() { self.pan_canvas(dx,dy); } return; }
         if self.show_ui && self.processors.scroll(dy, self.cursor, self.vp) { return; }
         self.stroke_last = None;
         if !self.ready() { return; }
@@ -2862,7 +2870,7 @@ impl App {
 
     pub fn tick(&mut self, dt: f32, vp: (f32, f32), scale: f32) -> FrameDesc {
         self.scale = scale;
-        if self.videos.is_empty(){self.processors.abandon();self.export_page.open=false;self.export_page.cancel();}
+        if self.videos.is_empty(){self.processors.abandon();self.export_page.open=false;}
         if self.vp != vp {
             self.stroke_last = None;
             self.vp = vp;
@@ -2915,6 +2923,7 @@ impl App {
         }
         // Nothing loaded — paint the launch window and stop.
         if !self.ready() {
+            self.export_page.poll(&mut Vec::new(), 0);
             let plate = self.tick_backdrop(dt);
             // The logo-only window (any command-line argument) draws no
             // recent row, so it spawns no thumbnail workers either.
@@ -2935,7 +2944,7 @@ impl App {
             }
             // Thumbnail workers still out: look again soon even without a
             // moving floor to pace the loop.
-            if self.recent.pending() {
+            if self.recent.pending() || self.export_page.has_jobs() {
                 let soon = Instant::now() + std::time::Duration::from_millis(100);
                 desc.redraw_at = Some(desc.redraw_at.map_or(soon, |t| t.min(soon)));
             }
@@ -3280,7 +3289,7 @@ impl App {
             draw_status_chip(&mut items, self.status_chip(), lamp, text, WORKSPACE_TEXT);
             }
         }
-        let animating = self.export_page.busy() || self.export_page.playing() || self.processors.animating()
+        let animating = self.export_page.has_jobs() || self.export_page.playing() || self.processors.animating()
             || self.playing
             || !self.started
             || self.cut_thumb.play.is_some()
@@ -3882,6 +3891,7 @@ impl App {
         // viewing another page. Bypassed processors do not affect the result.
         if self.crop.is_some() || self.processors.modifies_video()
             || self.export_page.crop.is_some() || self.export_page.prores
+            || (self.export_page.open && !self.export_page.lossless)
             || (self.ready() && !self.crop_schedule().is_empty()) {
             return ("FULL RE-ENCODE", 0xf08566);
         }
@@ -4026,6 +4036,12 @@ impl App {
     /// focused clip and on a navy surface otherwise. The hover checkbox,
     /// the shared/linked chip and the footer line are the app's batch
     /// affordances, kept where the design leaves room for them.
+    fn source_hover_buttons(&self, index: usize) -> [(RectPx, bool); 2] {
+        let thumb = self.source_thumb(index);
+        [(RectPx { x: thumb.x + thumb.w - 56., y: thumb.y + 6., w: 24., h: 24. }, false),
+         (RectPx { x: thumb.x + thumb.w - 28., y: thumb.y + 6., w: 24., h: 24. }, true)]
+    }
+
     fn build_sources(&self, items: &mut Vec<Item>) {
         let l = self.workspace();
         if l.rail <= 0.0 { return; }
@@ -4140,6 +4156,24 @@ impl App {
             }
             if v.player.failed() {
                 ui_label(items, thumb.x + 8.0, thumb.y + 52.0, 11.0, ERR, "DECODE FAILED", Align::Left, thumb.w - 16.0);
+            }
+            if hover && !l.mini {
+                for (button, remove) in self.source_hover_buttons(i) {
+                    ButtonBar::button(items, button, if remove { "×" } else { "" }, false,
+                        contains(button,self.cursor.0,self.cursor.1), false);
+                    if !remove {
+                        for (dx,dy) in [(6.,6.),(9.,9.)] {
+                            items.push(Item::Shape(figleaf::Shape::rect(figleaf::Rect::new(button.x+dx,button.y+dy,9.,9.))
+                                .radius(1.).fill(hex_color(0x514f4f)).stroke(1.,hex_color(0xe0dedb),figleaf::StrokeAlign::Inside)));
+                        }
+                    }
+                    if contains(button,self.cursor.0,self.cursor.1) {
+                        items.push(Item::Text(TextItem { tooltip:true, align:Align::Right, valign:VAlign::Middle,
+                            bg:Some(TextBg { radius:5.,pad_x:8.,pad_y:5.,..TextBg::new(hex_color(0x26282b)) }),
+                            ..TextItem::new(button.x+button.w,button.y+button.h+15.,10.5,ink,
+                                if remove { "Remove source" } else { "Duplicate source" }) }));
+                    }
+                }
             }
             if compact { continue; }
             // Text block: 7px side padding inside the ring, 6px below the
@@ -8135,8 +8169,23 @@ mod tests {
         assert_eq!(app.videos.len(), 2);
         assert!(clip.exists());
         app.add_videos(vec![mk_video(&clip)], true);
-        assert_eq!(app.videos.len(), 1);
-        assert!(!app.videos[0].linked_copy);
+        assert_eq!(app.videos.len(), 3);
+        assert_eq!(app.active, 2);
+        assert!(!app.videos[2].linked_copy);
+    }
+
+    #[test]
+    fn source_hover_buttons_duplicate_and_remove_the_target_card() {
+        let Some(clip) = test_clip() else { return; };
+        let mut app = mk_app(&clip, 2); app.vp = (1280.,800.);
+        app.select(1);
+        let duplicate = app.source_hover_buttons(1)[0].0;
+        app.mouse_down(duplicate.x+12.,duplicate.y+12.); app.mouse_up();
+        assert_eq!(app.videos.len(),3); assert_eq!(app.active,2);
+        assert!(app.videos[2].linked_copy);
+        let remove = app.source_hover_buttons(2)[1].0;
+        app.mouse_down(remove.x+12.,remove.y+12.); app.mouse_up();
+        assert_eq!(app.videos.len(),2); assert!(clip.exists());
     }
 
     #[test]
@@ -8568,7 +8617,8 @@ mod tests {
         assert!(app.masks[0].is_some());
         assert!(!app.mask_mode);
         app.add_videos(vec![mk_video(&clip), mk_video(&clip)], true);
-        assert!(app.masks.iter().all(Option::is_none));
+        assert!(app.masks[0].is_some(), "opening a new file preserves existing masks");
+        assert!(app.masks[app.active..].iter().all(Option::is_none));
     }
 
     /// Frame > Copy Frame as PNG: the frame on screen is read back from
@@ -9000,9 +9050,10 @@ mod tests {
             - pts.iter().cloned().fold(f64::MAX, f64::min);
         assert!(spread < 1.5 / app.fps, "streams drifted after an append: {pts:?}");
 
-        // ⌘-drop replaces the whole set instead of adding to it.
+        // Opening new files retains the existing sources and focuses the arrivals.
         app.add_videos(vec![mk_video(&clip), mk_video(&clip)], true);
-        assert_eq!(app.videos.len(), 2, "replace starts a fresh comparison");
+        assert_eq!(app.videos.len(), 5, "existing sources remain loaded");
+        assert_eq!(app.active, 3);
         assert_eq!(app.t, 0.0);
     }
 
@@ -9554,6 +9605,8 @@ mod tests {
         assert_eq!(app.encode_status().0, "FULL RE-ENCODE", "explicit codec conversion encodes pixels");
         app.export_page.prores = false;
         app.export_page.open = true;
+        assert_eq!(app.encode_status().0, "FULL RE-ENCODE");
+        app.export_page.lossless = true;
         let frame = app.tick(0.0, (1280.0, 800.0), 1.0);
         assert!(frame.items.iter().any(|item| matches!(item, Item::Text(t) if t.text == "STREAM COPY")));
         assert!(!frame.items.iter().any(|item| matches!(item, Item::Text(t) if t.text == "READY")));
@@ -9578,9 +9631,10 @@ mod tests {
         assert!(app.cut_mode, "one file should open on the timeline");
         app.add_videos(vec![mk_video(&clip)], false);
         assert!(!app.cut_mode, "two files compare in Sources");
-        // Replacing with a single file goes back to the timeline.
+        // Opening another file keeps the previous sources available.
         app.add_videos(vec![mk_video(&clip)], true);
-        assert!(app.cut_mode);
+        assert!(!app.cut_mode);
+        assert_eq!(app.active, 2);
         // --mask style: the mask tool takes it back.
         app.key(Key::Char('m'));
         assert!(app.mask_mode && !app.cut_mode);

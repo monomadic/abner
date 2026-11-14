@@ -577,3 +577,13 @@ strip may show sequence and open editors, but it is not a free-form graph editor
 Keep edits non-destructive wherever possible; expose compression, stream-copy and
 re-encoding decisions directly rather than hiding their consequences. Users are
 expected to understand video compression.
+
+## Export queue and incoming sources (2026-11-15)
+
+Incoming Finder/external opens and all file drops retain the existing source list
+and select the first arrival; the former replace route no longer clears sources.
+Source thumbnails offer Figleaf Duplicate/Remove buttons on hover.
+`export_page::Page` retains per-job snapshots in its session queue across source
+changes; one worker runs at a time, and completed outputs have their own Player
+for full-file review. The HEVC target defaults to 40 Mbps; an explicit bitrate
+forces conversion even with no processing stages. Copy is a separate selection.

@@ -3315,7 +3315,7 @@ pub(crate) fn pipeline_export(
     chain:&[(String,serde_json::Value)],prores:bool,crop:Option<(u32,u32,u32,u32)>,
     cancel:&abner_processor_api::Cancellation,active:&Mutex<Vec<abner_processor_api::Cancellation>>,
     emit:impl FnMut(crate::export_page::Rendered)->Result<(),String>,
-)->Result<()> {pipeline_export_with_inputs(&Default::default(),info,dest,keeps,&[],registry,chain,prores,crop,cancel,active,None,emit)}
+)->Result<()> {pipeline_export_with_inputs(&Default::default(),info,dest,keeps,&[],registry,chain,prores,None,crop,cancel,active,None,emit)}
 
 pub(crate) fn pipeline_export_with_inputs(
     inputs:&crate::spatial::JobInputs,
@@ -3326,6 +3326,7 @@ pub(crate) fn pipeline_export_with_inputs(
     registry: &abner_processor_api::Registry,
     chain: &[(String, serde_json::Value)],
     prores: bool,
+    bitrate_kbps: Option<u32>,
     crop: Option<(u32, u32, u32, u32)>,
     cancel: &abner_processor_api::Cancellation,
     active: &Mutex<Vec<abner_processor_api::Cancellation>>,
@@ -3350,7 +3351,7 @@ pub(crate) fn pipeline_export_with_inputs(
     );
     ensure!(!prores || extension != "mp4", "ProRes requires MOV or MKV");
     cancel.check().map_err(anyhow::Error::msg)?;
-    if chain.is_empty() && crop.is_none() && inputs.crops.is_empty() && !prores {
+    if bitrate_kbps.is_none() && chain.is_empty() && crop.is_none() && inputs.crops.is_empty() && !prores {
         // Keep the packet path available through the Export workspace. Repair
         // only boundary GOPs, and never pass untouched HDR through the SDR host.
         // Publish after checking cancellation; RAII removes unpublished work.
@@ -3480,6 +3481,7 @@ pub(crate) fn pipeline_export_with_inputs(
                         f.height as u32,
                         duration,
                         prores,
+                        bitrate_kbps.unwrap_or(40_000),
                     )?);
                 }
                 let e = encoder.as_mut().unwrap();
@@ -3639,7 +3641,7 @@ enum PipelineEncoder {
     },
 }
 impl PipelineEncoder {
-    fn new(w: u32, h: u32, duration: f64, prores: bool) -> Result<Self> {
+    fn new(w: u32, h: u32, duration: f64, prores: bool, bitrate_kbps: u32) -> Result<Self> {
         ensure!(
             w.is_multiple_of(2) && h.is_multiple_of(2),
             "Export requires even output dimensions"
@@ -3655,7 +3657,7 @@ impl PipelineEncoder {
         {
             let settings = filmcraft_export::ExportSettings {
                 format: filmcraft_export::Format::Hevc,
-                bitrate_kbps: 35000,
+                bitrate_kbps,
                 ..Default::default()
             };
             let encoder = filmcraft_platform::hardware_encode::videotoolbox_encoder_factory(

@@ -1,5 +1,26 @@
 # abner — history
 
+## 2026-11-15 — Export queue, bitrate and retained sources
+
+Export Settings leads with the target source thumbnail, filename, codec, dimensions,
+frame rate and duration. HEVC has an editable approximate target bitrate (40 Mbps
+by default); explicit HEVC selection now encodes even with no processing stages.
+The lower Exports pane retains queued, running, completed and failed jobs across
+source changes. Jobs execute in order with captured inputs/settings; selecting
+a running entry reviews its preview, while completed entries open the full output
+for playback and seeking. Queue entries last for the current app session.
+
+Finder opens, external opens and drops retain existing sources and focus the first
+arrival. Source cards expose Duplicate and Remove on hover, with Figleaf buttons,
+a drawn duplicate icon and tooltips. Removing a source never deletes its file.
+
+Validation: 247 library tests plus both native export regressions passed; four
+tests remain ignored. The three previously documented UI failures remain (workspace
+mode transitions, titlebar control count, portrait source ring geometry). Native
+checks cover explicit HEVC without stages, bitrate input, and completed-output
+seeking. Targeted UI checks covered export layout, queue selection/seeking, retained
+sources, and both hover actions.
+
 ## 2026-11-14 — Uniform button bar metrics
 
 Moved bar height and control spacing into `ButtonBar`. Sources, Timeline,

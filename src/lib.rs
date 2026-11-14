@@ -61,10 +61,9 @@ usage: abner [--config <file.toml>] [--no-video-splash] [--duplicate] [--no-sour
 
 Run with no arguments (or launched from the .app bundle) to open the
 launch window, then drag clips onto it: one drop fills slot 1 and plays
-on its own, two fill 1 and 2, more add 3, 4… Dropping onto a running
-clip or comparison REPLACES the whole set; drop onto the sources panel to
-add streams instead. Opening a file from Finder (Open With / double-click)
-replaces the whole set too. A single path on the command line loads slot 1 the same way.
+on its own, two fill 1 and 2, more add 3, 4… Dropping or opening files
+from Finder keeps existing sources loaded and switches to the first new clip.
+A single path on the command line loads slot 1 the same way.
 Any arguments skip the animated splash; video paths play directly.
 Use --no-video-splash alone for just the centered logo and drag clips onto it.
 
@@ -517,8 +516,8 @@ impl Runner {
     /// Each path is probed and spawned right here — a bad file (a folder,
     /// a PDF, a clip on a vanished mount) is logged and skipped rather
     /// than taken as a reason to fail the app, because a drop is a guess
-    /// by definition. Survivors fill the next free slots; `replace` (⌘
-    /// held) starts over from the first of them.
+    /// by definition. Survivors fill the next free slots, retaining existing
+    /// sources and selecting the first arrival.
     /// The GPU's per-video textures are indexed by video slot, so they
     /// follow the app's list; unchanged slots keep their texture (see
     /// `set_video_dims`), so an append never blanks what is on screen.
@@ -577,7 +576,7 @@ impl Runner {
         log::info!(
             "{} clip(s) dropped on the window ({})",
             videos.len(),
-            if replace { "replace" } else { "add" }
+            if replace { "open and retain sources" } else { "add and select" }
         );
         self.app.add_videos(videos, replace);
         // The recent entry is what is open NOW — the pair, not the one
@@ -1082,8 +1081,8 @@ impl ApplicationHandler for Runner {
         // choose. (switchblade, `FilesDropped`.)
         if !self.dropped.is_empty() {
             let paths = std::mem::take(&mut self.dropped);
-            // A drop on the sources rail adds a source; anywhere else it
-            // replaces the set, like a Finder open.
+            // Both rail and canvas drops retain sources and select the arrival.
+            // Keep the route flag for the existing open-event plumbing.
             let onto_sources = self
                 .drop_point()
                 .is_some_and(|(x, y)| self.app.over_sources(x, y));
