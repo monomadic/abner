@@ -8519,7 +8519,7 @@ mod tests {
         assert!(((pointer.1-picture.y)/picture.h-0.4).abs()<0.001);
         let zoom=app.zoom;
         let layout=crate::export_page::Layout::new(app.vp);
-        for r in [layout.context,layout.transport,layout.sidebar] {
+        for r in [layout.canvas.button_bar.unwrap().r,layout.transport,layout.sidebar] {
             app.cursor_moved(r.x+10.,r.y+10.);
             app.pinch(0.5);
             assert_eq!(app.zoom,zoom);

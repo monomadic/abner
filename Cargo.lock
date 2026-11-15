@@ -766,6 +766,7 @@ dependencies = [
 name = "figleaf"
 version = "0.0.1"
 dependencies = [
+ "tiny-skia-path",
  "wgpu",
 ]
 

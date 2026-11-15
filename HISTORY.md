@@ -1,5 +1,19 @@
 # abner — history
 
+## 2026-11-16 — Edited Figma Export screen back in Abner
+
+Applied Signal frame 548:5796 to the native Export page using figleaf and the
+shared Canvas/ButtonBar. Added the compact preset rows, recessed filename,
+directory-only chooser, blue actions, live progress card and original Figma SVG
+playback controls. The existing queue and output review remain functional;
+completed outputs support keyframe navigation and live previews use buffer
+boundaries. The compact layout reserves enough height to keep the card and
+playback controls separate. Shared primary-button styling owns the blue/radius.
+
+Validation: 12 Export tests (including native HEVC/ProRes/packet-copy coverage),
+3 Canvas tests and 4 icon/render tests passed. HEVC required host VideoToolbox
+access outside the sandbox. Native build and 1280×800 / 720×480 captures checked.
+
 ## 2026-11-15 — Export queue, bitrate and retained sources
 
 Export Settings leads with the target source thumbnail, filename, codec, dimensions,

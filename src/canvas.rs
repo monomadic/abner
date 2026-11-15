@@ -243,7 +243,7 @@ impl ButtonBar {
         // The attached Figma bar: filled grey buttons with dark outlines; the
         // selected control is a darker, recessed surface. Values are sRGB.
         let fill = hex_color(if primary && !disabled {
-            if hovered { 0x237ce5 } else { 0x0967cc }
+            if hovered { 0x2874ff } else { 0x0059ff }
         } else if selected {
             0x302d2b
         } else if hovered {
@@ -254,7 +254,7 @@ impl ButtonBar {
         // Follow figleaf's abner_button_bar example through the host's ordered
         // figleaf canvas, including CoreText labels (not the legacy quad atlas).
         let button = Shape::rect(Rect::new(r.x, r.y, r.w, r.h))
-            .radius(if primary { 7.0 } else { 6.0 })
+            .radius(if primary { 8.0 } else { 6.0 })
             .fill(fill)
             .stroke(
                 if primary { 0.0 } else { 1.0 },
@@ -279,7 +279,7 @@ impl ButtonBar {
         items.push(Item::Label(
             Text::new(label, label_rect)
                 .font(1)
-                .size(if primary { 13.0 } else { 12.0 }, 16.0)
+                .size(12.0, 16.0)
                 .color(hex_color(ink))
                 .align(
                     if primary { Place::Center } else { Place::Start },

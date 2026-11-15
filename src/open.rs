@@ -200,3 +200,19 @@ pub(crate) fn export_destination(name: &str) -> Option<std::path::PathBuf> {
     #[cfg(not(target_os="macos"))]
     { Some(std::path::PathBuf::from(name)) }
 }
+
+/// Choose a directory without changing the Export page's editable filename.
+pub(crate) fn export_directory(current: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    #[cfg(target_os="macos")]
+    unsafe {
+        unsafe extern "C" { fn ab_export_directory(directory:*const std::ffi::c_char)->*mut std::ffi::c_char; fn ab_free_text(text:*mut std::ffi::c_char); }
+        let current = std::ffi::CString::new(current.map(|p|p.to_string_lossy().into_owned()).unwrap_or_default()).ok()?;
+        let path = ab_export_directory(current.as_ptr());
+        if path.is_null() { return None; }
+        let value = std::path::PathBuf::from(std::ffi::CStr::from_ptr(path).to_string_lossy().into_owned());
+        ab_free_text(path);
+        Some(value)
+    }
+    #[cfg(not(target_os="macos"))]
+    { let _ = current; None }
+}

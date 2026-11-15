@@ -476,3 +476,20 @@ flag rather than a page-selected bar height. All four pages use `control`,
 primary action uses `primary_rect`. Both drawing and hit testing consume those
 rectangles. Labels/actions, widths required by their content and group ordering
 remain page-owned; colours, radii, fonts and effects stay in the shared painter.
+
+### Export screen round trip (2026-11-16)
+
+The edited Export screen is now `548:5796` on **04 · Screens** in the Signal
+file (`oDvZ81OLuzewiI2oLcqeVU`); it supersedes the exported `545:36` frame.
+The native page uses its compact codec/container choices, recessed filename,
+directory picker, blue actions, progress card and five playback controls.
+The six static control SVGs are preserved in `assets/export-icons/` and rendered
+through the existing icon atlas. Figleaf draws the controls, labels and surfaces;
+the shared Canvas/ButtonBar and native application header remain shared.
+
+Progress, ETA, footage, source metadata and queue entries remain live data.
+Completed-output review uses keyframe navigation; while exporting, the boundary
+controls visit the oldest/latest buffered preview. Tab still switches the source
+comparison. The design omits the former bitrate field; the existing HEVC target
+and export pipeline are retained. The bottom attachment adapts down to 720×480,
+hiding the secondary subtitle/timecode where needed to keep controls separate.

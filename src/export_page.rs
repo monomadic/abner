@@ -1,7 +1,7 @@
 //! Minimal export workspace. Workers publish a bounded latest-frame mailbox; no GUI waits for rendering.
 use crate::canvas::{Canvas, ButtonBar, TimelineAttachment};
 use crate::{
-    app::{Key, hex_color, ui_label},
+    app::{Key, hex_color},
     player::Rgba,
     probe::VideoInfo,
     render::{Align, Item, RectItem, RectPx, Upload, VideoMode},
@@ -50,13 +50,13 @@ pub(crate) enum Action {
     EditFilename,
     EditBitrate,
     OpenExport(usize),
-    Destination,
     RevealDirectory,
     Cancel,
-    Compare,
     Follow,
     Play,
     Step(bool),
+    Keyframe(bool),
+    ChooseDirectory,
     Seek(f64),
     Reveal,
 }
@@ -199,7 +199,6 @@ pub(crate) struct Layout {
     pub sidebar: RectPx,
     pub video: RectPx,
     pub canvas: Canvas,
-    pub context: RectPx,
     pub transport: RectPx,
     pub footer: RectPx,
     pub seek: RectPx,
@@ -210,19 +209,18 @@ impl Layout {
         let footer_y = vp.1 - crate::app::CUT_STATUS_H;
         let sidebar = RectPx { x: 0., y: crate::app::HEADER_H,
             w: side, h: footer_y - crate::app::HEADER_H };
+        let attachment_h = (vp.1 * 0.325).clamp(176., 260.);
         let canvas = Canvas::layout(RectPx{x:side,y:sidebar.y,w:vp.0-side,h:footer_y-sidebar.y},true,
-            Some(TimelineAttachment{x:side,width:vp.0-side,transport_height:60.,lanes_height:0.}));
-        let context=canvas.button_bar.unwrap().r;
+            Some(TimelineAttachment{x:side,width:vp.0-side,transport_height:attachment_h,lanes_height:0.}));
         let transport=canvas.timeline.unwrap().transport;
         let video=canvas.r;
-        let seek = RectPx { x: transport.x + 20., y: transport.y + 15.,
-            w: (transport.w - 212.).max(80.), h: 4. };
+        let seek = RectPx { x: transport.x + 38., y: footer_y - 24.,
+            w: (transport.w - 76.).max(80.), h: 4. };
 
         Self {
             sidebar,
             video,
             canvas,
-            context,
             transport,
             seek,
             footer: RectPx {
@@ -234,6 +232,37 @@ impl Layout {
         }
     }
 }
+/// Export owns its content slots, while Canvas and ButtonBar retain shared shell geometry.
+struct SettingsLayout { width:f32, codec:f32, container:f32, filename:RectPx, directory:RectPx, export:RectPx }
+impl SettingsLayout {
+    fn new(l:Layout)->Self {
+        let width=l.sidebar.w-32.;
+        let scale=((l.sidebar.h-50.)/668.).clamp(0.72,1.);
+        let y=|offset:f32| l.sidebar.y+offset*scale;
+        Self {width,codec:y(130.),container:y(182.),
+            filename:RectPx{x:16.,y:y(266.),w:width,h:32.},
+            directory:RectPx{x:16.,y:y(336.),w:width,h:32.},
+            export:RectPx{x:16.,y:y(406.),w:width,h:31.}}
+    }
+}
+impl Layout {
+    fn job_card(&self)->RectPx { RectPx{x:self.transport.x+16.,y:self.transport.y+16.,w:self.transport.w-32.,h:(self.transport.h-112.).max(76.)} }
+}
+fn surface(items:&mut Vec<Item>,r:RectPx,color:u32,radius:f32) { surface_alpha(items,r,hex_color(color),radius); }
+fn surface_alpha(items:&mut Vec<Item>,r:RectPx,color:[f32;4],radius:f32) {
+    items.push(Item::Shape(figleaf::Shape::rect(figleaf::Rect::new(r.x,r.y,r.w.max(0.),r.h.max(0.))).radius(radius).fill(color)));
+}
+fn export_label(items:&mut Vec<Item>,r:RectPx,value:&str,size:f32,color:[f32;4],mono:bool,align:Align) {
+    use figleaf::{Text,Rect,paint::Align as Place};
+    let bounds=Rect::new(r.x,r.y,r.w.max(1.),r.h.max(1.));
+    items.push(Item::Label(Text::new(value,bounds).font(if mono{3}else{2}).size(size,size*1.4).color(color)
+        .align(match align {Align::Left=>Place::Start,Align::Center=>Place::Center,Align::Right=>Place::End},Place::Center).clip(bounds)));
+}
+fn duration_label(time:f64)->String { let s=time.max(0.) as u64;format!("{:02}:{:02}",s/60,s%60) }
+fn timecode(time:f64,fps:f64)->String {
+    let s=time.max(0.) as u64;format!("{:02}:{:02}:{:02}:{:02}",s/3600,s/60%60,s%60,(time.fract()*fps.max(1.)).floor() as u64)
+}
+
 fn hit(r: RectPx, x: f32, y: f32) -> bool {
     x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h
 }
@@ -273,7 +302,7 @@ impl Page {
     pub fn has_jobs(&self) -> bool { self.busy() || self.history.iter().any(Self::busy) }
     fn queue_rect(&self, vp: (f32,f32)) -> RectPx {
         let l = Layout::new(vp);
-        let y = l.sidebar.y + 336.;
+        let y = self.settings(l).export.y + 45.;
         RectPx { x: 0., y, w: l.sidebar.w-1., h: (l.footer.y-y).max(0.) }
     }
     pub fn scroll(&mut self, dy: f32, cursor: (f32,f32), vp:(f32,f32)) -> bool {
@@ -283,8 +312,8 @@ impl Page {
         else if dy > 0. { self.queue_scroll = self.queue_scroll.saturating_sub(1); }
         true
     }
-    fn settings_geometry(l: Layout) -> (f32, f32, f32, f32) {
-        (16., l.sidebar.w - 32., l.sidebar.y + 116., 28.)
+    fn settings(&self, l: Layout) -> SettingsLayout {
+        SettingsLayout::new(l)
     }
     pub fn editing_filename(&self) -> bool { self.open && (self.filename_edit.is_some() || self.bitrate_edit.is_some()) }
     pub fn finish_filename(&mut self) -> bool {
@@ -727,44 +756,39 @@ impl Page {
     }
     pub fn actions(&self, vp: (f32, f32)) -> Vec<(RectPx, &'static str, bool, Action)> {
         let l = Layout::new(vp);
-        let bar = l.canvas.button_bar.unwrap();
-        let (x, w, y, _) = Self::settings_geometry(l);
-        let third = (w - 8.) / 3.;
-        let r = |x, y, w| RectPx { x, y, w, h: 26. };
+        let settings = self.settings(l);
+        let third = (settings.width - 4.) / 3.;
+        let r = |col: f32, y| RectPx { x: 16. + col*(third+2.), y, w: third, h: 21. };
         let mut actions = vec![
-            (r(x, y + 16., third), "Copy", self.lossless, Action::Lossless),
-            (r(x + third + 4., y + 16., third), "HEVC", !self.prores && !self.lossless, Action::Preset(false)),
-            (r(x + 2. * (third + 4.), y + 16., third), "ProRes", self.prores && !self.lossless, Action::Preset(true)),
-            (r(x, y + 66., third), "MP4", self.container == Container::Mp4, Action::Container(Container::Mp4)),
-            (r(x + third + 4., y + 66., third), "MOV", self.container == Container::Mov, Action::Container(Container::Mov)),
-            (r(x + 2. * (third + 4.), y + 66., third), "MKV", self.container == Container::Mkv, Action::Container(Container::Mkv)),
-            (r(x, y + 116., w - 32.), "", self.filename_edit.is_some(), Action::EditFilename),
-            (r(x + w - 26., y + 116., 26.), "Save as", false, Action::Destination),
-            (r(x + w - 24., y + 156., 24.), "", false, Action::RevealDirectory),
-            (bar.control(bar.content().x,124.), "Original / Output", self.original, Action::Compare),
-            (r(l.transport.x + 20., l.transport.y + 30., 26.), "‹", false, Action::Step(false)),
-            (r(l.transport.x + 50., l.transport.y + 30., 56.), if self.playing() { "Pause" } else { "Play" }, false, Action::Play),
-            (r(l.transport.x + 110., l.transport.y + 30., 26.), "›", false, Action::Step(true)),
-            (r(l.transport.x + l.transport.w - 134., l.transport.y + 30., 114.), "Follow render", self.following, Action::Follow),
+            (r(0.,settings.codec), "Copy", self.lossless, Action::Lossless),
+            (r(1.,settings.codec), "HEVC", !self.prores && !self.lossless, Action::Preset(false)),
+            (r(2.,settings.codec), "ProRes", self.prores && !self.lossless, Action::Preset(true)),
+            (r(0.,settings.container), "MOV", self.container == Container::Mov, Action::Container(Container::Mov)),
+            (r(1.,settings.container), "MP4", self.container == Container::Mp4, Action::Container(Container::Mp4)),
+            (r(2.,settings.container), "MKV", self.container == Container::Mkv, Action::Container(Container::Mkv)),
+            (settings.filename, "", self.filename_edit.is_some(), Action::EditFilename),
+            (RectPx{x: settings.directory.x+settings.directory.w-38.,w:38.,..settings.directory}, "Change directory", false, Action::ChooseDirectory),
+            (RectPx{w:settings.directory.w-38.,..settings.directory}, "", false, Action::RevealDirectory),
+            (settings.export, "Export", false, Action::Export),
+            (l.canvas.button_bar.unwrap().primary_rect(148.), "Export", false, Action::Export),
         ];
-        if !self.lossless && !self.prores {
-            actions.push((r(x + 112., y + 190., w - 112.), "", self.bitrate_edit.is_some(), Action::EditBitrate));
+        let cy = l.seek.y - 50.;
+        // The time/follow row collapses gracefully while retaining all five transport controls.
+        let center = if l.transport.w < 700. { l.transport.x+110. } else { l.transport.x+l.transport.w/2. };
+        for (offset, width, label, action) in [(-93.,34.,"Previous keyframe",Action::Keyframe(false)),
+            (-55.,34.,"Previous frame",Action::Step(false)),(-17.,34.,"Play / pause",Action::Play),
+            (21.,34.,"Next frame",Action::Step(true)),(59.,34.,"Next keyframe",Action::Keyframe(true))] {
+            actions.push((RectPx{x:center+offset,y:cy,w:width,h:34.},label,false,action));
         }
+        actions.push((RectPx{x:l.transport.x+l.transport.w-192.,y:cy,w:154.,h:34.},"Follow latest frame",self.following,Action::Follow));
+        let card = l.job_card();
+        if self.busy() { actions.push((RectPx{x:card.x+card.w-146.,y:card.y+if card.h<110.{4.}else{20.},w:130.,h:if card.h<110.{30.}else{38.}},"Cancel",false,Action::Cancel)); }
+        else if self.path.is_some() { actions.push((RectPx{x:card.x+card.w-146.,y:card.y+if card.h<110.{4.}else{20.},w:130.,h:if card.h<110.{30.}else{38.}},"Reveal output",false,Action::Reveal)); }
         let queue = self.queue_rect(vp);
         for (row, index) in (0..self.history.len() + usize::from(self.record.is_some())).rev().skip(self.queue_scroll).enumerate() {
             let rect = RectPx { x: 8., y: queue.y + 24. + row as f32 * 38., w: l.sidebar.w - 16., h: 34. };
             if rect.y + rect.h > l.footer.y { break; }
             actions.push((rect, "", index == self.history.len(), Action::OpenExport(index)));
-        }
-        let primary = bar.primary_rect(148.);
-        if self.busy() {
-            actions.push((primary, "Cancel export", false, Action::Cancel));
-            actions.push((bar.control(primary.x-ButtonBar::GROUP_GAP-86.,86.), "Export", false, Action::Export));
-        } else if self.path.is_some() {
-            actions.push((bar.control(primary.x-ButtonBar::GROUP_GAP-86.,86.), "Export", false, Action::Export));
-            actions.push((primary, "Reveal output", false, Action::Reveal));
-        } else {
-            actions.push((primary, "Export", false, Action::Export));
         }
         actions
     }
@@ -831,14 +855,23 @@ impl Page {
                     self.container = container;
                 }
             }
-            Action::Destination => {
-                if let Some(mut path) = crate::open::export_destination(&self.destination_name()) {
-                    path.set_extension(self.container.extension());
-                    self.destination = Some(path);
+            Action::ChooseDirectory => {
+                if let Some(dir) = crate::open::export_directory(self.directory().as_deref()) {
+                    self.destination = Some(dir.join(self.destination_name()));
+                }
+            }
+            Action::Keyframe(forward) => {
+                if let Some(player) = &self.review {
+                    let time = self.current().map_or(0., Self::frame_time);
+                    player.seek_biased((time + if forward { 0.5/self.review_fps } else { -0.5/self.review_fps }).max(0.),false,forward);
+                    self.review_pending = true; self.playback = None;
+                } else if !self.frames.is_empty() {
+                    // Live previews are unencoded frames; their available boundaries are the navigation anchors.
+                    self.following=false; self.playback=None;
+                    self.show_frame(if forward { self.frames.len()-1 } else { 0 });
                 }
             }
             Action::Cancel => self.cancel(),
-            Action::Compare if self.review.is_none() && self.preview_source.as_ref().is_none_or(|p|Some(p)==self.source.as_ref()) => self.original = !self.original,
             Action::Play => self.toggle_playback(),
             Action::Step(forward) => self.step_preview(forward),
             Action::Follow => {
@@ -911,197 +944,143 @@ impl Page {
             }
             return;
         }
-        use crate::app::{WORKSPACE_PANEL, WORKSPACE_TEXT, WORKSPACE_DIM, ACCENT};
         use crate::render::{TextItem, VAlign};
         let l = Layout::new(vp);
-        let ink = WORKSPACE_TEXT;
-        let dim = WORKSPACE_DIM;
-        let mono = |items: &mut Vec<Item>, x, y, size, color, value: String, align, width| {
-            items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle,
-                align, max_width: Some(width), ..TextItem::new(x, y, size, color, value) }));
-        };
-        items.push(Item::Rect(RectItem::new(RectPx { x: 0., y: l.sidebar.y,
-            w: vp.0, h: vp.1 - l.sidebar.y }, WORKSPACE_PANEL)));
+        let settings = self.settings(l);
+        let ink = hex_color(0xf4f3ed);
+        let dim = hex_color(0xc6c8c0);
+        let blue = hex_color(0x0059ff);
+        surface(items,l.sidebar,0x050505,0.);
+        surface(items,l.transport,0x1d1b1b,0.);
         l.canvas.ground(items);
-        if let Some(bar) = l.canvas.button_bar { bar.draw(items); }
+        l.canvas.button_bar.unwrap().draw(items);
         let current = self.current();
-
         let idx = if current.is_some() && !self.original { slot } else { source };
         let picture = crate::canvas::zoomed(self.base_rect(vp,show_ui,info),view.0,view.1);
         l.canvas.clip(items);
         Canvas::lift(items,picture);
-        if self.original && current.is_some_and(|f| (f.source_pts - shown_pts).abs() > 0.51 / info.fps.max(1.)) {
-            ui_label(items, l.video.x + l.video.w / 2., l.video.y + l.video.h / 2.,
-                12., dim, "Seeking matching original…", Align::Center, l.video.w);
-        } else {
-            items.push(Item::Video { a: idx, b: idx, r: picture,
-                uv: [0., 0., 1., 1.], mode: VideoMode::Tex, p0: 0., p1: 0. });
-        }
+        if self.original && current.is_some_and(|f| (f.source_pts-shown_pts).abs()>0.51/info.fps.max(1.)) {
+            export_label(items,l.video,"Seeking matching original…",12.,dim,false,Align::Center);
+        } else { items.push(Item::Video{a:idx,b:idx,r:picture,uv:[0.,0.,1.,1.],mode:VideoMode::Tex,p0:0.,p1:0.}); }
         l.canvas.recess(items);
         items.push(Item::Clip(None));
-        for r in [
-            RectPx { x: l.sidebar.w - 1., y: l.sidebar.y, w: 1., h: l.sidebar.h },
-            RectPx { x: 0., y: l.footer.y, w: vp.0, h: 1. },
-        ] { items.push(Item::Rect(RectItem::new(r, hex_color(0x191919)))); }
-        items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle,
-            max_width: Some(l.sidebar.w - 32.),
-            ..TextItem::new(14., l.sidebar.y + 18., 13., ink, "Export Settings") }));
-        let (x, w, y, _) = Self::settings_geometry(l);
-        for (offset, title) in [(0., "Codec"), (50., "Container"), (100., "Filename"), (150., "Directory")] {
-            mono(items, x, y + offset, 11., dim, title.into(), Align::Left, w);
+        export_label(items,RectPx{x:16.,y:l.sidebar.y+8.,w:settings.width,h:22.},"Export Settings",13.,hex_color(0xc8c8c8),true,Align::Left);
+        let thumb=RectPx{x:16.,y:l.sidebar.y+38.,w:72.,h:40.5};
+        items.push(Item::Video{a:source,b:source,r:crate::canvas::fit_rect((info.width,info.height),thumb),uv:[0.,0.,1.,1.],mode:VideoMode::Tex,p0:0.,p1:0.});
+        export_label(items,RectPx{x:98.,y:thumb.y,w:settings.width-82.,h:18.},&info.path.file_name().unwrap_or_default().to_string_lossy(),11.,ink,true,Align::Left);
+        export_label(items,RectPx{x:98.,y:thumb.y+22.,w:settings.width-82.,h:14.},&format!("{} · {}p · {:.0}fps",info.codec,info.height,info.fps),8.,hex_color(0x8b8b8b),true,Align::Left);
+        for y in [settings.codec-34.,settings.filename.y-42.,settings.export.y-20.].into_iter().filter(|_|l.sidebar.h>=550.) {
+            surface(items,RectPx{x:16.,y,w:settings.width,h:1.},0x303030,0.);
         }
-        mono(items, x, y + 169., 10., ink,
-            self.directory().map(|p| p.display().to_string()).unwrap_or_default(),
-            Align::Left, w - 34.);
-        let thumb = RectPx { x, y: l.sidebar.y + 38., w: 72., h: 48. };
-        items.push(Item::Video { a: source, b: source,
-            r: crate::canvas::fit_rect((info.width, info.height), thumb),
-            uv: [0.,0.,1.,1.], mode: VideoMode::Tex, p0: 0., p1: 0. });
-        mono(items, x + 82., thumb.y + 8., 11., ink,
-            info.path.file_name().unwrap_or_default().to_string_lossy().into_owned(), Align::Left, w - 82.);
-        mono(items, x + 82., thumb.y + 26., 10., dim,
-            format!("{} · {}×{}", info.codec, info.width, info.height), Align::Left, w - 82.);
-        mono(items, x, thumb.y + 62., 10., dim,
-            format!("{:.3} fps · {:02}:{:02}", info.fps, info.duration as u64 / 60, info.duration as u64 % 60), Align::Left, w);
-        if !self.lossless && !self.prores {
-            mono(items, x, y + 203., 10., dim, "Target Mbps ≈".into(), Align::Left, 108.);
+        for (title,y) in [("Codec",settings.codec-15.),("Container",settings.container-15.),("Filename",settings.filename.y-18.),("Directory",settings.directory.y-18.)] {
+            export_label(items,RectPx{x:16.,y,w:settings.width,h:12.},title,8.,hex_color(0xc8c8c8),true,Align::Left);
         }
+        let field = |items:&mut Vec<Item>,r:RectPx,fill:u32,shadow:bool| {
+            let mut s=figleaf::Shape::rect(figleaf::Rect::new(r.x,r.y,r.w,r.h)).radius(6.)
+                .fill(hex_color(fill)).stroke(1.,hex_color(0x5d5e5d),figleaf::StrokeAlign::Inside);
+            if shadow { s=s.shadow(figleaf::Shadow::inner([0.,0.,0.,1.],[0.,3.],9.)); }
+            items.push(Item::Shape(s));
+        };
+        field(items,settings.filename,0x222422,true);
+        field(items,settings.directory,0x050505,false);
+        export_label(items,RectPx{x:settings.directory.x+10.,w:settings.directory.w-52.,..settings.directory},
+            &self.directory().map(|p|p.display().to_string()).unwrap_or_default(),11.,ink,true,Align::Left);
+        let queue=self.queue_rect(vp);
         if self.record.is_some() || !self.history.is_empty() {
-            let queue = self.queue_rect(vp);
-            items.push(Item::Shape(figleaf::Shape::rect(figleaf::Rect::new(queue.x,queue.y,queue.w,queue.h)).fill(hex_color(0x0f0f0f))));
-            mono(items, x, queue.y + 12., 11., ink,
-                format!("Exports · {}", self.history.len() + usize::from(self.record.is_some())), Align::Left, w);
+            surface(items,queue,0x0f0f0f,0.);
+            export_label(items,RectPx{x:16.,y:queue.y,w:settings.width,h:24.},&format!("Exports · {}",self.history.len()+usize::from(self.record.is_some())),11.,ink,true,Align::Left);
         }
-        let time = current.map_or(0., Self::frame_time);
-        let fraction = |time: f64| (time / self.duration.max(0.001)).clamp(0., 1.) as f32;
-        let position = fraction(time);
-        items.push(Item::Rect(RectItem { radius: 2., ..RectItem::new(l.seek, hex_color(0x454545)) }));
-        if let (Some(first), Some(last)) = (self.frames.front(), self.frames.back()) {
-            let start = fraction(Self::frame_time(first));
-            let end = fraction(last.output_time);
-            items.push(Item::Rect(RectItem::new(RectPx {
-                x: l.seek.x + l.seek.w * start, w: l.seek.w * (end - start), ..l.seek
-            }, hex_color(0x265473))));
-            items.push(Item::Rect(RectItem { radius: 6., ..RectItem::new(RectPx {
-                x: l.seek.x + l.seek.w * position - 6., y: l.seek.y - 4., w: 12., h: 12.
-            }, ACCENT) }));
+        let card=l.job_card();
+        items.push(Item::Shape(figleaf::Shape::rect(figleaf::Rect::new(card.x,card.y,card.w,card.h)).radius(8.)
+            .fill(hex_color(0x0f0e0e)).stroke(1.,hex_color(0x2b2a2a),figleaf::StrokeAlign::Inside)));
+        let done=(self.rendered_time/self.duration.max(0.001)).clamp(0.,1.);
+        let queued=self.job.as_ref().is_some_and(|j|j.launch.is_some());
+        let title=if queued { "Queued".into() } else if self.busy() {
+            if self.export_lossless { "Copying packets…".into() } else if self.count==0 { "Preparing export…".into() }
+            else { format!("Rendering & encoding   {:.0}%",done*100.) }
+        } else if self.path.is_some() { "Export complete".into() } else if self.record.is_some() { self.status.clone() } else { "Ready to export".into() };
+        let elapsed=if self.busy() {self.started.elapsed().as_secs_f64()}else{self.elapsed};
+        let subtitle=if self.busy() && !queued && done>0. && done<1. {
+            format!("About {} remaining",remaining(elapsed*(1.-done)/done))
+        } else if queued { "Waiting for the previous export".into() }
+        else if self.busy() { "Waiting for progress…".into() }
+        else { self.path.as_ref().map(|p|p.display().to_string()).unwrap_or_else(||"Choose a preset and export the enabled pipeline.".into()) };
+        let text_w=card.w-if self.busy()||self.path.is_some(){184.}else{40.};
+        export_label(items,RectPx{x:card.x+20.,y:card.y+if card.h<110.{4.}else{14.},w:text_w,h:26.},&title,if card.h<110.{14.}else{18.},ink,false,Align::Left);
+        if card.h>=110. {
+            export_label(items,RectPx{x:card.x+20.,y:card.y+42.,w:text_w,h:20.},&subtitle,13.,dim,false,Align::Left);
         }
-        ui_label(items, l.seek.x + l.seek.w + 18., l.seek.y + 2., 11., ink,
-            format!("{:02}:{:06.3} / {:02}:{:06.3}", time as u64 / 60, time % 60., self.duration as u64 / 60, self.duration % 60.), Align::Left, 166.);
-        let amber = hex_color(0xffb653);
-        ui_label(items, 16., l.footer.y + if self.busy() { 12. } else { 19. }, 10.,
-            if self.busy() { amber } else { dim }, "EXPORT", Align::Left, 60.);
-        if self.busy() && !self.export_lossless {
-            let done = fraction(self.rendered_time);
-            for i in 0..10 {
-                let cell = RectPx { x: 16. + i as f32 * 7., y: l.footer.y + 23., w: 5., h: 8. };
-                items.push(Item::Rect(RectItem::new(cell, hex_color(0x372c1e))));
-                let filled = (done * 10. - i as f32).clamp(0., 1.);
-                if filled > 0. {
-                    items.push(Item::Rect(RectItem::new(RectPx { h: cell.h * filled,
-                        y: cell.y + cell.h * (1. - filled), ..cell }, amber)));
-                }
-            }
+        let progress=RectPx{x:card.x+20.,y:card.y+card.h-if card.h<110.{32.}else{42.},w:card.w-40.,h:6.};
+        surface(items,progress,0x202020,0.);
+        surface(items,RectPx{w:progress.w*if self.path.is_some(){1.}else{done as f32},..progress},0x0059ff,0.);
+        let stats_y=card.y+card.h-24.;
+        let third=(card.w-40.)/3.;
+        for (i,text,align) in [(0,format!("{} of {} processed",duration_label(self.rendered_time),duration_label(self.duration)),Align::Left),
+            (1,format!("{:.1} fps",self.count as f64/elapsed.max(0.001)),Align::Center),
+            (2,format!("{} elapsed",remaining(elapsed)),Align::Right)] {
+            export_label(items,RectPx{x:card.x+20.+i as f32*third,y:stats_y,w:third,h:20.},&text,if card.w<600.{9.}else{12.},dim,false,align);
         }
-        let render_status = if self.busy() && !self.export_lossless {
-            let done = (self.rendered_time / self.duration.max(0.001)).clamp(0., 1.);
-            let stage = self.job.as_ref().and_then(|j| j.stage.lock().unwrap().clone());
-            render_line(done, self.count, self.frames.back().map(|f| f.frame_duration), self.duration,
-                self.started.elapsed().as_secs_f64(), stage.as_ref())
-        } else { self.status.clone() };
-        let status = if self.actions(vp).iter().any(|(r, _, _, a)| *a == Action::Lossless && hit(*r, cursor.0, cursor.1)) {
-            self.copy_unavailable.unwrap_or(&self.status)
-        } else { &render_status };
-        ui_label(items, 98., l.footer.y + 19., 10., dim,
-            status, Align::Left, (vp.0 - 114.).max(0.));
-        for (r, t, selected, a) in self.actions(vp) {
-            let hovered = hit(r, cursor.0, cursor.1);
-            let disabled = match a {
-                Action::Compare => self.review.is_some() || self.preview_source.as_ref().is_some_and(|p|Some(p)!=self.source.as_ref()),
-                Action::Export => false,
-                Action::Cancel => !self.busy(),
-                Action::Reveal => self.path.is_none(),
-                Action::Play | Action::Step(_) => self.frames.is_empty(),
-                Action::Lossless => self.copy_unavailable.is_some(),
-                Action::Container(Container::Mp4) => self.prores && !self.lossless,
-                Action::Preset(_) | Action::Container(_) | Action::Destination | Action::EditFilename => false,
-                _ => false,
+        let time=current.map_or(0.,Self::frame_time);
+        if l.transport.w>=700. {
+            export_label(items,RectPx{x:l.seek.x,y:l.seek.y-50.,w:185.,h:34.},&timecode(time,current.map_or(info.fps,|f|1./f.frame_duration)),16.,ink,true,Align::Left);
+        }
+        surface(items,l.seek,0x000000,0.);
+        surface(items,RectPx{w:l.seek.w*(time/self.duration.max(0.001)).clamp(0.,1.) as f32,..l.seek},0x0059ff,0.);
+        surface(items,l.footer,0x050505,0.);
+        export_label(items,RectPx{x:16.,y:l.footer.y,w:70.,h:l.footer.h},"EXPORT",10.,hex_color(0x8b8b8b),false,Align::Left);
+        let status=if self.busy() {render_line(done,self.count,self.frames.back().map(|f|f.frame_duration),self.duration,elapsed,self.job.as_ref().and_then(|j|j.stage.lock().ok().and_then(|s|s.clone())).as_ref())}else{self.status.clone()};
+        export_label(items,RectPx{x:98.,y:l.footer.y,w:vp.0-114.,h:l.footer.h},&status,10.,hex_color(0x8b8b8b),false,Align::Left);
+        for (r,t,selected,a) in self.actions(vp) {
+            let hovered=hit(r,cursor.0,cursor.1);
+            let disabled=match a {
+                Action::Play|Action::Step(_)|Action::Keyframe(_)=>self.frames.is_empty(),
+                Action::Lossless=>self.copy_unavailable.is_some(),
+                Action::Container(Container::Mp4)=>self.prores&&!self.lossless,
+                _=>false,
             };
-            if a == Action::Destination {
-                let color = if disabled { dim } else if hovered { ACCENT } else { ink };
-                let disk = RectPx { x: r.x + 6., y: r.y + 6., w: 14., h: 14. };
-                items.push(Item::Rect(RectItem { radius: 1., border_w: 1.2, border_color: color,
-                    ..RectItem::new(disk, [0.; 4]) }));
-                for mark in [
-                    RectPx { x: disk.x + 3., y: disk.y, w: 8., h: 5. },
-                    RectPx { x: disk.x + 3., y: disk.y + 9., w: 8., h: 5. },
-                ] { items.push(Item::Rect(RectItem { border_w: 1., border_color: color, ..RectItem::new(mark, [0.; 4]) })); }
-                continue;
-            }
-            if a == Action::RevealDirectory {
-                let color = if hovered { ACCENT } else { hex_color(crate::app::INSPECTOR_PATH) };
-                let folder = RectPx { x: r.x + 5., y: r.y + 9., w: 14., h: 10. };
-                items.push(Item::Rect(RectItem { radius: 1., border_w: 1.3, border_color: color,
-                    ..RectItem::new(folder, [0.; 4]) }));
-                items.push(Item::Rect(RectItem { radius: 0.5, ..RectItem::new(
-                    RectPx { x: folder.x, y: folder.y - 2.5, w: 6., h: 2.5 }, color) }));
-                continue;
-            }
-            if a == Action::Reveal || (a == Action::Export && self.path.is_none()) {
-                ButtonBar::primary(items,r,t,hovered,disabled);
-                continue;
-            }
-            if a == Action::Follow {
-                let track = RectPx { x: r.x, y: r.y + 6., w: 28., h: 14. };
-                items.push(Item::Rect(RectItem { radius: 7., ..RectItem::new(track,
-                    if selected { ACCENT } else { hex_color(0x414141) }) }));
-                items.push(Item::Rect(RectItem { radius: 5., ..RectItem::new(RectPx {
-                    x: track.x + if selected { 16. } else { 2. }, y: track.y + 2., w: 10., h: 10.
-                }, ink) }));
-                ui_label(items, r.x + 34., r.y + 13., 11., if hovered || selected { ink } else { dim },
-                    t, Align::Left, r.w - 34.);
-                continue;
-            }
-            if r.y >= l.context.y && r.y + r.h <= l.context.y + l.context.h && r.x >= l.context.x {
-                ButtonBar::button(items,r,t,selected,hovered,disabled);
-                continue;
-            }
-            items.push(Item::Shape(figleaf::Shape::rect(figleaf::Rect::new(r.x,r.y,r.w,r.h))
-                .radius(6.).fill(hex_color(if selected { 0x19334b } else if hovered { 0x303438 } else { 0x171c21 }))));
-            if let Action::OpenExport(index) = a {
-                let page = self.history.get(index).unwrap_or(self);
-                let name = page.record.as_ref().and_then(|p| p.file_name()).unwrap_or_default().to_string_lossy();
-                mono(items, r.x+8., r.y+10., 10., ink, name.into_owned(), Align::Left, r.w-16.);
-                let state = if page.busy() {
-                    if page.job.as_ref().is_some_and(|j|j.launch.is_some()) { "Queued".into() }
-                    else if page.count == 0 { "Preparing…".into() }
-                    else { format!("Rendering · {:.0}%", page.rendered_time / page.duration.max(0.001) * 100.) }
-                } else if page.path.is_some() { "Completed · click to view".into() } else { page.status.clone() };
-                mono(items, r.x+8., r.y+25., 9., dim, state, Align::Left, r.w-16.);
-                continue;
-            }
-            if a == Action::EditBitrate {
-                let value = self.bitrate_edit.clone().unwrap_or_else(||self.bitrate_mbps.to_string());
-                items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle,
-                    caret: self.bitrate_edit.as_ref().map(|v| self.filename_cursor.position(v)),
-                    caret_visible: !self.filename_cursor.selected(), max_width: Some(r.w-16.),
-                    ..TextItem::new(r.x+8.,r.y+r.h/2.,11.,ink,value) }));
-                continue;
-            }
-            let title = if a == Action::EditFilename {
-                self.filename_edit.clone().unwrap_or_else(|| self.destination_name())
-            } else { t.to_string() };
-            if a == Action::EditFilename {
-                items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle,
-                    caret: self.filename_edit.as_ref().map(|name| self.filename_cursor.position(name)),
-                    caret_visible: !self.filename_cursor.selected(),
-                    max_width: Some(r.w - 16.),
-                    color: if self.filename_cursor.selected() { ACCENT } else { ink },
-                    ..TextItem::new(r.x + 8., r.y + r.h / 2., 10., if disabled { dim } else { ink }, title) }));
-            } else {
-                ui_label(items, r.x + r.w / 2., r.y + r.h / 2., 11.,
-                    if disabled { hex_color(0x686868) } else if selected || hovered { ink } else { dim },
-                    title, Align::Center, r.w - 12.);
+            match a {
+                Action::ChooseDirectory=>{
+                    items.push(Item::Shape(figleaf::Shape::rect(figleaf::Rect::new(r.x,r.y,r.w,r.h)).radii([0.,6.,6.,0.]).fill(hex_color(if hovered{0x484948}else{0x343534}))));
+                    items.push(Item::FrameIcon{x:r.x+(r.w-20.)/2.,y:r.y+(r.h-20.)/2.,index:6});
+                }
+                Action::RevealDirectory=>{},
+                Action::Export|Action::Cancel|Action::Reveal=>{
+                    ButtonBar::primary(items,r,t,hovered,false);
+                }
+                Action::Follow=>{
+                    export_label(items,RectPx{w:r.w-42.,..r},t,12.,ink,false,Align::Right);
+                    let switch=RectPx{x:r.x+r.w-32.,y:r.y+9.,w:32.,h:16.};
+                    items.push(Item::Shape(figleaf::Shape::rect(figleaf::Rect::new(switch.x,switch.y,switch.w,switch.h)).radius(8.).fill(hex_color(if selected{0xff9d00}else{0x414141})).stroke(1.,ink,figleaf::StrokeAlign::Inside)));
+                    surface(items,RectPx{x:switch.x+if selected{18.}else{2.},y:switch.y+2.,w:12.,h:12.},0xf4f3ed,6.);
+                }
+                Action::Play|Action::Step(_)|Action::Keyframe(_)=>{
+                    let index=match a {Action::Keyframe(false)=>7,Action::Step(false)=>8,Action::Play=>9,Action::Step(true)=>10,_=>11};
+                    if hovered&&!disabled {surface(items,r,0x303030,6.);}
+                    items.push(Item::FrameIcon{x:r.x,y:r.y+if a==Action::Play{0.}else{5.},index});
+                    if self.playing() && a==Action::Play {
+                        surface(items,r,0x168be0,17.);
+                        for x in [r.x+12.,r.x+20.] {surface(items,RectPx{x,y:r.y+10.,w:3.,h:14.},0xffffff,0.);}
+                    }
+                    if disabled {surface_alpha(items,r,[0.1,0.1,0.1,0.65],0.);}
+                }
+                Action::EditFilename=>{
+                    let value=self.filename_edit.clone().unwrap_or_else(||self.destination_name());
+                    items.push(Item::Text(TextItem{regular:true,valign:VAlign::Middle,caret:self.filename_edit.as_ref().map(|s|self.filename_cursor.position(s)),caret_visible:!self.filename_cursor.selected(),max_width:Some(r.w-24.),
+                        ..TextItem::new(r.x+12.,r.y+r.h/2.,11.,if self.filename_cursor.selected(){blue}else{ink},value)}));
+                }
+                Action::OpenExport(index)=>{
+                    surface(items,r,if selected{0x19334b}else if hovered{0x303438}else{0x171c21},6.);
+                    let page=self.history.get(index).unwrap_or(self);
+                    let name=page.record.as_ref().and_then(|p|p.file_name()).unwrap_or_default().to_string_lossy();
+                    export_label(items,RectPx{x:r.x+8.,y:r.y+2.,w:r.w-16.,h:15.},&name,10.,ink,true,Align::Left);
+                    let state=if page.busy(){if page.job.as_ref().is_some_and(|j|j.launch.is_some()){"Queued".into()}else{format!("Rendering · {:.0}%",page.rendered_time/page.duration.max(0.001)*100.)}}else if page.path.is_some(){"Completed · click to view".into()}else{page.status.clone()};
+                    export_label(items,RectPx{x:r.x+8.,y:r.y+17.,w:r.w-16.,h:15.},&state,9.,dim,true,Align::Left);
+                }
+                _=>{
+                    let border=hex_color(if selected{0xff8d28}else if disabled{0x393939}else{0x666666});
+                    items.push(Item::Shape(figleaf::Shape::rect(figleaf::Rect::new(r.x,r.y,r.w,r.h)).radius(5.).fill(hex_color(if hovered&&!disabled{0x242424}else{0x050505})).stroke(if selected{2.}else{1.},border,figleaf::StrokeAlign::Inside)));
+                    export_label(items,r,t,10.,if disabled{hex_color(0x686868)}else{ink},true,Align::Center);
+                }
             }
         }
 
@@ -1364,53 +1343,55 @@ mod tests {
         assert_eq!(render_line(1., 481, Some(1. / 24.), 20., 10., None), "100% · 481 of 481 frames · 48.1 fps");
     }
     #[test]
-    fn minimal_controls_fit_and_footer_is_status_only() {
+    fn export_controls_share_hit_bounds_at_supported_window_sizes() {
         let p = Page::default();
-        assert!(!p.actions((720., 480.)).iter().any(|(.., a)| matches!(a, Action::Cancel | Action::Reveal)));
-        for vp in [(720., 480.), (900., 600.), (1280., 800.), (1440., 900.)] {
-            let l = Layout::new(vp);
-            assert_eq!(l.sidebar.x, 0.);
-            assert_eq!(l.video.x, l.sidebar.w);
-            assert_eq!(l.video.y, crate::app::HEADER_H + ButtonBar::HEIGHT);
-            assert_eq!(l.video.w + l.sidebar.w, vp.0);
-            assert_eq!(l.sidebar.y, crate::app::HEADER_H);
-            assert_eq!(p.actions(vp).iter().filter(|(.., a)| *a == Action::Export).count(), 1);
-            for (r, _, _, a) in p.actions(vp) {
-                assert!(r.x >= 0. && r.x + r.w <= vp.0 + 0.1);
-                assert!(r.y >= crate::app::HEADER_H && r.y + r.h <= vp.1);
-                assert!(!hit(l.video, r.x, r.y));
-                if a == Action::Compare {
-                    assert!(r.y >= l.context.y && r.y + r.h <= l.context.y + l.context.h);
-                }
-                if matches!(a, Action::Follow | Action::Play | Action::Step(_)) {
-                    assert!(r.y >= l.seek.y + 14. && r.y + r.h <= l.footer.y);
-                    assert_eq!(p.click(vp, r.x + 2., r.y + 2.), Some(a));
-                }
-                assert!(r.y + r.h <= l.footer.y);
-                if a == Action::Export {
-                    assert!(r.y >= l.context.y && r.y + r.h <= l.context.y + l.context.h);
-                    assert_eq!(r.x + r.w, vp.0 - ButtonBar::PADDING_X);
+        for vp in [(720.,480.),(900.,600.),(1280.,800.),(1440.,900.)] {
+            let l=Layout::new(vp);
+            assert_eq!(l.video.y,crate::app::HEADER_H+ButtonBar::HEIGHT);
+            assert_eq!(p.actions(vp).iter().filter(|(..,a)|*a==Action::Export).count(),2);
+            let actions=p.actions(vp);
+            let play=actions.iter().find(|(..,a)|*a==Action::Play).unwrap().0;
+            assert!(play.y >= l.job_card().y+l.job_card().h, "card must clear transport");
+            for (i,(r,_,_,a)) in actions.iter().enumerate() {
+                assert!(r.x>=0. && r.x+r.w<=vp.0+0.1,"{a:?} at {vp:?}");
+                assert!(r.y>=crate::app::HEADER_H && r.y+r.h<=l.footer.y,"{a:?} at {vp:?}");
+                assert!(!hit(l.video,r.x,r.y));
+                assert_eq!(p.click(vp,r.x+r.w/2.,r.y+r.h/2.),Some(*a));
+                for (other,_,_,_) in &actions[i+1..] {
+                    assert!(!(r.x<other.x+other.w && r.x+r.w>other.x && r.y<other.y+other.h && r.y+r.h>other.y),"overlapping control {a:?}");
                 }
             }
+            assert_eq!(p.click(vp,l.seek.x+l.seek.w/2.,l.seek.y),Some(Action::Seek(0.5)));
         }
     }
     #[test]
-    fn directory_reveal_uses_destination_parent_and_output_reveal_is_top_right() {
-        let mut p = Page::default();
-        p.source = Some(PathBuf::from("/clips/source.mp4"));
-        assert_eq!(p.apply(Action::RevealDirectory), Some(PathBuf::from("/clips")));
-        p.destination = Some(PathBuf::from("/exports/output.mp4"));
-        assert_eq!(p.apply(Action::RevealDirectory), Some(PathBuf::from("/exports")));
-        p.path = p.destination.clone();
-        let actions = p.actions((720., 480.));
-        let reveal = actions.iter().find(|(.., a)| *a == Action::Reveal).unwrap();
-        let l = Layout::new((720., 480.));
-        assert!(reveal.0.y >= l.context.y && reveal.0.y + reveal.0.h <= l.video.y);
-        assert_eq!(reveal.0.x + reveal.0.w, 720. - ButtonBar::PADDING_X);
-        let export = actions.iter().find(|(.., a)| *a == Action::Export).unwrap();
-        assert!(export.0.x + export.0.w < reveal.0.x);
-        assert_eq!(p.click((720., 480.), reveal.0.x + 1., reveal.0.y + 1.), Some(Action::Reveal));
-        assert_eq!(p.apply(Action::Reveal), p.destination);
+    fn reveal_is_in_job_card_and_export_remains_available() {
+        let mut p=Page::default();p.source=Some(PathBuf::from("/clips/source.mp4"));
+        assert_eq!(p.apply(Action::RevealDirectory),Some(PathBuf::from("/clips")));
+        p.destination=Some(PathBuf::from("/exports/output.mp4"));p.path=p.destination.clone();
+        assert_eq!(p.apply(Action::RevealDirectory),Some(PathBuf::from("/exports")));
+        for vp in [(720.,480.),(1280.,800.)] {
+            let actions=p.actions(vp);
+            let play=actions.iter().find(|(..,a)|*a==Action::Play).unwrap().0;
+            let l=Layout::new(vp);
+            assert!(play.y >= l.job_card().y+l.job_card().h, "card must clear transport");
+            let reveal=actions.iter().find(|(..,a)|*a==Action::Reveal).unwrap();
+            assert!(hit(l.job_card(),reveal.0.x,reveal.0.y));
+            let card=l.job_card();
+            assert!(reveal.0.y+reveal.0.h <= card.y+card.h-if card.h<110.{32.}else{42.});
+            assert_eq!(p.click(vp,reveal.0.x+1.,reveal.0.y+1.),Some(Action::Reveal));
+            assert_eq!(actions.iter().filter(|(..,a)|*a==Action::Export).count(),2);
+        }
+        assert_eq!(p.apply(Action::Reveal),p.destination);
+    }
+    #[test]
+    fn preview_navigation_uses_available_boundaries_without_a_decoder() {
+        let mut p=Page::default();
+        for i in 0..3 { p.frames.push_back(Rendered{pixels:Arc::new(vec![0;4]),dims:[1,1],source_pts:i as f64,output_time:i as f64+1.,count:i,frame_duration:1.}); }
+        p.apply(Action::Keyframe(true));assert_eq!(p.current().unwrap().count,2);
+        p.apply(Action::Keyframe(false));assert_eq!(p.current().unwrap().count,0);
+        p.apply(Action::Step(true));assert_eq!(p.current().unwrap().count,1);
+        assert!(!p.following);
     }
     #[test]
     fn filename_edits_commit_in_place_without_changing_directory() {
@@ -1438,9 +1419,9 @@ mod tests {
         assert_eq!(p.destination_name(), "final.mp4");
         let actions = p.actions((720., 480.));
         let field = actions.iter().find(|(.., a)| *a == Action::EditFilename).unwrap().0;
-        let save_as = actions.iter().find(|(.., a)| *a == Action::Destination).unwrap().0;
-        assert!(save_as.x >= field.x + field.w);
-        assert_eq!(field.y, save_as.y);
+        let chooser = actions.iter().find(|(.., a)| *a == Action::ChooseDirectory).unwrap().0;
+        assert!(chooser.y >= field.y + field.h);
+        assert_eq!(chooser.x + chooser.w, field.x + field.w);
     }
     #[test]
     fn native_pipeline_writes_selected_codecs_containers_audio_and_processed_pixels() {

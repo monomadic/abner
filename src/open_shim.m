@@ -293,3 +293,16 @@ char *ab_export_destination(const char *name) {
     if ([panel runModal] != NSModalResponseOK) return NULL;
     return strdup(panel.URL.path.UTF8String);
 }
+
+char *ab_export_directory(const char *directory) {
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.canChooseDirectories = YES;
+    panel.canChooseFiles = NO;
+    panel.allowsMultipleSelection = NO;
+    panel.canCreateDirectories = YES;
+    if (directory && directory[0]) {
+        panel.directoryURL = [NSURL fileURLWithPath:[NSString stringWithUTF8String:directory]];
+    }
+    if ([panel runModal] != NSModalResponseOK) return NULL;
+    return strdup(panel.URL.path.UTF8String);
+}
