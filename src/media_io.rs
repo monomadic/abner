@@ -1334,16 +1334,19 @@ fn cfg(entry: SampleEntry, language: &str) -> mp4::TrackConfig {
     c
 }
 
-/// Lossless packet selection: key boundaries are checked again at the I/O boundary.
-fn copy_ranges(
-    input: &Input,
-    mux: &mut mp4::Mp4Writer<std::fs::File>,
-    keeps: &[(f64, f64)],
-    cancel: &AtomicBool,
-    subtitles: bool,
-) -> Result<()> {
+/// Read-only eligibility check, run on a worker before offering source Render.
+pub(crate) fn can_copy(path: &Path, keeps: &[(f64, f64)]) -> Result<()> {
+    validate_ranges(keeps)?;
+    let input = Input::open(path)?;
     let vi = input.video()?;
-    let video = &input.tracks[vi];
+    validate_copy_ranges(&input.tracks[vi], keeps)?;
+    for t in input.tracks.iter().filter(|t| matches!(t.kind, Kind::Video | Kind::Audio)) {
+        ensure!(t.entry.is_some(), "This track has no lossless native MP4 mapping");
+    }
+    Ok(())
+}
+
+fn validate_copy_ranges(video: &Track, keeps: &[(f64, f64)]) -> Result<()> {
     for &(a, b) in keeps {
         ensure!(
             video
@@ -1366,6 +1369,20 @@ fn copy_ranges(
             "Stream-copy end is not a keyframe"
         );
     }
+    Ok(())
+}
+
+/// Lossless packet selection: key boundaries are checked again at the I/O boundary.
+fn copy_ranges(
+    input: &Input,
+    mux: &mut mp4::Mp4Writer<std::fs::File>,
+    keeps: &[(f64, f64)],
+    cancel: &AtomicBool,
+    subtitles: bool,
+) -> Result<()> {
+    let vi = input.video()?;
+    let video = &input.tracks[vi];
+    validate_copy_ranges(video, keeps)?;
     for (ti, t) in input.tracks.iter().enumerate().filter(|(ti, t)| {
         t.kind == Kind::Audio
             || (t.kind == Kind::Video && *ti == vi)
@@ -1777,6 +1794,36 @@ fn trim_regions(input: &Input, keeps: &[(f64, f64)]) -> Result<Vec<crate::smart:
         }
     }
     Ok(regions)
+}
+
+/// Publish a packet copy beside its source without replacing any existing file.
+pub(crate) fn render_copy(path: &Path, keeps: &[(f64, f64)], chapters: &[ExportChapter]) -> Result<PathBuf> {
+    let ext = path.extension().context("source has no container extension")?;
+    let staging = loop {
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let mut suffix = std::ffi::OsString::from(format!("{}.{}.rendering.", std::process::id(), n));
+        suffix.push(ext);
+        let candidate = path.with_extension(suffix);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
+            Ok(_) => break Pending(candidate),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
+        }
+    };
+    export(path, &staging.0, keeps, true, chapters, None)?;
+    for n in 1u64.. {
+        let mut name = path.file_stem().unwrap_or_default().to_os_string();
+        name.push(if n == 1 { ".render".to_owned() } else { format!(".render-{n}") });
+        name.push(".");
+        name.push(ext);
+        let dest = path.with_file_name(name);
+        match std::fs::hard_link(&staging.0, &dest) {
+            Ok(()) => return Ok(dest),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    unreachable!()
 }
 
 pub(crate) fn export(

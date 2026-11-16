@@ -1,5 +1,26 @@
 # abner — history
 
+## 2026-11-17 — Sources Render stream copy
+
+The Sources action area offers **Render** only after a background native packet
+check confirms the selected source's kept ranges can be copied. Pixel edits,
+enabled processing, pending timeline analysis and non-keyframe cuts hide it.
+The button uses the existing native export path with the current cuts and
+chapters, independent of the Export page's encoding preset. It writes beside
+the original as `name.render.ext` (then `name.render-2.ext`, and so on), publishes
+only a completed file without replacing existing files, and adds/selects the
+result in the same window while retaining all original sources. A running copy
+disables repeat clicks; failures appear in the status line without adding a source.
+The extra action row reserves its own space, including at compact rail widths.
+
+Validation: `cargo build --bin abner` and all three new source-render tests pass
+(eligibility/compact layout, packet-identical trimmed copy/additive loading and
+filename collisions, error handling). The broader library run passed 255 tests;
+three documented UI failures remain (titlebar, workspace selection, source-edge
+drag). The HEVC pipeline test passed when rerun with hardware-encoder access.
+Native Sources-row visual verification was blocked by window-automation timeouts.
+
+
 ## 2026-11-17 — Process canvas: bar under a rounded picture, inset rail
 
 The Process page follows the rest of the edited Figma frame (Signal 590:5862).

@@ -602,6 +602,15 @@ impl Runner {
                         log::warn!("could not open {}: {err}", path.display());
                     }
                 }
+                Cmd::AddRendered(path) => {
+                    let count = self.app.videos.len();
+                    self.files_dropped(vec![path.clone()], false);
+                    if self.app.videos.len() == count {
+                        self.app.notify(format!("Rendered {}, but could not open its preview", path.display()));
+                    }
+                    self.animating = true;
+                    if let Some(w) = &self.window { w.request_redraw(); }
+                }
                 Cmd::Reveal(path) => open::reveal(&path),
                 Cmd::Quit => event_loop.exit(),
                 Cmd::ToggleFullscreen => {
