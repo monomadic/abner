@@ -500,7 +500,12 @@ The native Process page is `590:5862`, "Process / Native app · Ready", on
 **04 · Screens** in the Signal file (`oDvZ81OLuzewiI2oLcqeVU`), below the
 native Export frame `548:5796`. It was rebuilt as editable layers from a
 1280×800 window capture (`--process` on two test clips: first processor
-focused, nothing enabled, no renders), so geometry is within about a pixel.
+focused, nothing enabled, no renders). The frame is nested auto layout
+(header / body / status vertically; rail, canvas and inspector across the
+body, each a vertical stack), so its spacing is padding and gaps chosen to
+land within a pixel or two of the capture, not the app's own rectangles.
+Only the switch housings, icon vectors and slider/seek tracks stay
+absolutely positioned.
 The header is an instance of `Header / mode + session` 77:778 in Night mode
 with Process selected; it keeps that component's 45px height and tab styling.
 Rail rows, settings fields and inspector rows are instances of three local
