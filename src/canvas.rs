@@ -77,6 +77,15 @@ impl Canvas {
             timeline,
         }
     }
+    /// The same solve with the bar attached under the video instead of over
+    /// it (Process: the picture meets the header, its controls sit below).
+    pub fn bar_below(mut self) -> Self {
+        if let Some(bar) = &mut self.button_bar {
+            self.r.y = bar.r.y;
+            bar.r.y = self.r.y + self.r.h;
+        }
+        self
+    }
     /// Preserve the document-style fit used by Timeline and Process.
     pub fn fit(&self, dims: (u32, u32)) -> RectPx {
         let c = self.r;
@@ -108,8 +117,12 @@ impl Canvas {
         zoomed(self.fit(dims), view.0, view.1)
     }
     pub fn ground(&self, items: &mut Vec<Item>) {
+        self.ground_radii(items, [0.; 4]);
+    }
+    /// Corner radii clockwise from the top left.
+    pub fn ground_radii(&self, items: &mut Vec<Item>, radii: [f32; 4]) {
         items.push(Item::Shape(
-            Shape::rect(rect(self.r)).fill(hex_color(0x1d1b1b)),
+            Shape::rect(rect(self.r)).radii(radii).fill(hex_color(0x1d1b1b)),
         ));
     }
     pub fn clip(&self, items: &mut Vec<Item>) {
@@ -121,8 +134,13 @@ impl Canvas {
         ));
     }
     pub fn recess(&self, items: &mut Vec<Item>) {
+        self.recess_radii(items, [0.; 4]);
+    }
+    pub fn recess_radii(&self, items: &mut Vec<Item>, radii: [f32; 4]) {
         items.push(Item::Shape(
-            Shape::rect(rect(self.r)).shadow(Shadow::inner([0., 0., 0., 0.28], [0., 0.], 16.)),
+            Shape::rect(rect(self.r))
+                .radii(radii)
+                .shadow(Shadow::inner([0., 0., 0., 0.28], [0., 0.], 16.)),
         ));
     }
 }
@@ -199,12 +217,19 @@ impl ButtonBar {
     }
 
     pub fn draw(&self, items: &mut Vec<Item>) {
+        self.draw_radii(items, [4.0, 4.0, 0.0, 0.0]);
+    }
+    /// The bar with its own corner radii (clockwise from the top left); the
+    /// bottom hairline stops short of rounded bottom corners.
+    pub fn draw_radii(&self, items: &mut Vec<Item>, radii: [f32; 4]) {
         let r = self.r;
         use figleaf::{Rect, Shadow, Shape};
-        let frame = Shape::rect(Rect::new(r.x, r.y, r.w, r.h)).radii([4.0, 4.0, 0.0, 0.0]);
+        let frame = Shape::rect(Rect::new(r.x, r.y, r.w, r.h)).radii(radii);
         items.push(Item::Shape(frame.clone().fill(hex_color(0x3b3b3a))));
+        let inset = radii[2].max(radii[3]);
         items.push(Item::Shape(
-            Shape::rect(Rect::new(r.x, r.y + r.h - 1.0, r.w, 1.0)).fill(hex_color(0x585454)),
+            Shape::rect(Rect::new(r.x + inset, r.y + r.h - 1.0, (r.w - 2.0 * inset).max(0.0), 1.0))
+                .fill(hex_color(0x585454)),
         ));
         // The shadow falls over the stroke, as Figma paints it.
         items.push(Item::Shape(frame.shadow(Shadow::inner(

@@ -530,6 +530,19 @@ settings header already carries the input shape. `INFO_H` 220 and
 the description in the inspector face, not the frame's JetBrains Mono Bold /
 Regular. The description copy in the frame is placeholder text.
 
-The same frame carries edits that are NOT implemented: the canvas column is a
-`Document` 595:6384 with a rounded viewport and an aspect / size / Reset /
-Save bar under the picture, and the rail's sections are inset.
+### Process canvas and rail (2026-11-17)
+
+The frame's `Document` 595:6384 and inset rail are implemented. The canvas
+has a 10px corner radius (`CANVAS_RADIUS`) and its ButtonBar sits UNDER the
+picture (`Canvas::bar_below`), carrying the lower corners; the picture meets
+the header. The bar in the frame is the shared Button Bar component with its
+default labels (16:9 / 1080p / Reset / Save ProRes) — content belongs to the
+page, so the code keeps the format summary and the Source | Rendered switch
+there. The bar keeps the shared 40px height (the frame's instance is 35) and
+the ground stays #1d1b1b. A picture zoomed past the viewport is clipped
+square: there is no rounded clip. The rail follows the frame's auto-layout
+padding: every section is inset 10px (`RAIL_PAD_X`) and the column 14px top
+and bottom (`RAIL_PAD_Y`); the processor box and renders pane are 260px wide
+in a 280px rail, chips wrap between 23px and 16px from the edges, and the
+Move up / down buttons are 27px tall with a 9px gap in a 39px strip
+(`ACTIONS_H`). The grip keeps the Sources rail's 14px strip (9 in the frame).

@@ -5,7 +5,7 @@ use abner_processor_api::{VideoFrame, FramePixels, PixelFormat};
 use crate::{
     app::{
         ACCENT, CUT_HEADER_BLUE, CUT_STATUS_H, DETAIL_SLIDE_S, HEADER_H, INSPECTOR_BG,
-        INSPECTOR_PATH, Icon, Key, MONO_ADV, RAIL_ACTIONS_H, RAIL_FOOTER_H, RAIL_GRIP_H, RAIL_HEAD_H,
+        INSPECTOR_PATH, Icon, Key, MONO_ADV, RAIL_FOOTER_H, RAIL_GRIP_H, RAIL_HEAD_H,
         RAIL_INSPECTOR_H, SOURCE_BORDER, SOURCE_INK, SOURCE_RING,
         SOURCE_SUBTLE, SOURCE_SURFACE, WORKSPACE_DIM, WORKSPACE_MUTED,
         WORKSPACE_PANEL, WORKSPACE_RULE, WORKSPACE_TEXT, draw_cut_footer_button,
@@ -43,7 +43,15 @@ const ROW_H: f32 = 30.0;
 const GROUP_PAD: f32 = 10.0;
 /// Category chips: 18px pills, wrapping on a 24px pitch from the rail's
 /// 13px gutter; mono 10px labels, never narrower than ALL's 62px pill.
-const CHIP_TOP: f32 = 67.0;
+/// The rail's auto-layout padding in the Process frame: every section is
+/// inset this far from the rail's edges.
+const RAIL_PAD_X: f32 = 10.0;
+const RAIL_PAD_Y: f32 = 14.0;
+/// The Move up / down strip: 27px buttons on 6px of padding.
+const ACTIONS_H: f32 = 39.0;
+/// The canvas's corner radius; the bar under the picture carries the lower pair.
+const CANVAS_RADIUS: f32 = 10.0;
+const CHIP_TOP: f32 = 80.0;
 const CHIP_H: f32 = 18.0;
 const CHIP_PITCH: f32 = 24.0;
 const CHIP_PX: f32 = 10.0;
@@ -2055,7 +2063,7 @@ impl Panel {
         if self.descriptors.is_empty() {
             return Vec::new();
         }
-        let (x0, x1) = (13.0, Self::left(vp) - 13.0);
+        let (x0, x1) = (RAIL_PAD_X + 13.0, Self::left(vp) - RAIL_PAD_X - 6.0);
         let (mut x, mut y) = (x0, HEADER_H + CHIP_TOP);
         std::iter::once(None)
             .chain(self.chip_categories().into_iter().map(Some))
@@ -2235,24 +2243,29 @@ impl Panel {
     /// The grip strip and the visible part of the focused inspector, as
     /// the Sources rail lays them out: above the Move up / down row, and
     /// only when the list keeps room for one card and its footer line.
+    /// Where the Move up / down strip starts, above the rail's bottom padding.
+    fn actions_top(vp: (f32, f32)) -> f32 {
+        Self::bottom(vp) - RAIL_PAD_Y - ACTIONS_H
+    }
     fn detail(&self, vp: (f32, f32)) -> (RectPx, RectPx) {
         let l = Self::left(vp);
-        let bottom = Self::bottom(vp) - RAIL_ACTIONS_H;
-        let none = RectPx { x: 0.0, y: bottom, w: l, h: 0.0 };
+        let bottom = Self::actions_top(vp);
+        let (x, w) = (RAIL_PAD_X, l - 2.0 * RAIL_PAD_X);
+        let none = RectPx { x, y: bottom, w, h: 0.0 };
         let needed = CARD_PITCH + RAIL_FOOTER_H + RAIL_GRIP_H + RAIL_INSPECTOR_H;
         if self.descriptors.is_empty() || bottom - self.list_top(vp) < needed {
             return (none, none);
         }
         let t = self.detail_slide();
         let shown = (RAIL_INSPECTOR_H * t * t * (3.0 - 2.0 * t)).round();
-        let inspector = RectPx { x: 0.0, y: bottom - shown, w: l, h: shown };
-        let grip = RectPx { x: 0.0, y: inspector.y - RAIL_GRIP_H, w: l, h: RAIL_GRIP_H };
+        let inspector = RectPx { x, y: bottom - shown, w, h: shown };
+        let grip = RectPx { x, y: inspector.y - RAIL_GRIP_H, w, h: RAIL_GRIP_H };
         (grip, inspector)
     }
     fn list(&self, vp: (f32, f32)) -> RectPx {
         let (grip, _) = self.detail(vp);
         let y = self.list_top(vp);
-        let end = if grip.h > 0.0 { grip.y } else { Self::bottom(vp) - RAIL_ACTIONS_H };
+        let end = if grip.h > 0.0 { grip.y } else { Self::actions_top(vp) };
         RectPx { x: 0.0, y, w: Self::left(vp), h: (end - RAIL_FOOTER_H - GROUP_PAD - y).max(CARD_PITCH) }
     }
     /// Processor `i`'s row; a row the filter hides has no area.
@@ -2261,9 +2274,9 @@ impl Panel {
             return RectPx { x: 0.0, y: -1e4, w: 0.0, h: 0.0 };
         };
         RectPx {
-            x: 13.0 + GROUP_PAD,
+            x: RAIL_PAD_X + 1.0 + GROUP_PAD,
             y: self.list_top(vp) + at as f32 * CARD_PITCH - self.list_scroll,
-            w: Self::left(vp) - 2.0 * (13.0 + GROUP_PAD),
+            w: Self::left(vp) - 2.0 * (RAIL_PAD_X + 1.0 + GROUP_PAD),
             h: ROW_H,
         }
     }
@@ -2343,8 +2356,9 @@ impl Panel {
         RectPx { x: r.x + r.w - 46.0, y: r.y + (r.h - 18.0) / 2.0, w: 34.0, h: 18.0 }
     }
     fn move_button(vp: (f32, f32), down: bool) -> RectPx {
-        let w = (Self::left(vp) - 32.0) / 2.0;
-        RectPx { x: if down { 20.0 + w } else { 12.0 }, y: Self::bottom(vp) - 34.0, w, h: 28.0 }
+        let x = RAIL_PAD_X + 12.0;
+        let w = (Self::left(vp) - 2.0 * x - 9.0) / 2.0;
+        RectPx { x: if down { x + w + 9.0 } else { x }, y: Self::actions_top(vp) + 6.0, w, h: 27.0 }
     }
     fn right(vp: (f32, f32)) -> f32 {
         (vp.0 * 0.25).clamp(200.0, 310.0)
@@ -2353,11 +2367,11 @@ impl Panel {
         let x=Self::left(vp);
         let width=(vp.0-x-Self::right(vp)).max(1.);
         Canvas::layout(RectPx{x,y:HEADER_H,w:width,h:(Self::bottom(vp)-HEADER_H).max(0.)},true,
-            Some(TimelineAttachment{x,width,transport_height:165.,lanes_height:0.}))
+            Some(TimelineAttachment{x,width,transport_height:165.,lanes_height:0.})).bar_below()
     }
     pub(crate) fn viewer(vp: (f32, f32)) -> RectPx { Self::canvas_layout(vp).r }
-    /// The Source | Rendered switch at the viewer's top-right, level with
-    /// the format summary. Tab flips the same flag; the zoom is shared, so both sides
+    /// The Source | Rendered switch at the right end of the bar under the
+    /// picture, level with the format summary. Tab flips the same flag; the zoom is shared, so both sides
     /// show the same region of the picture.
     fn compare_switch(vp: (f32, f32)) -> RectPx {
         Self::canvas_layout(vp).button_bar.unwrap().trailing(168.)
@@ -2414,7 +2428,7 @@ impl Panel {
     /// Row `n` of the pane, newest render first.
     fn render_row(&self, n: usize, vp: (f32, f32)) -> RectPx {
         let list = self.renders_list(vp);
-        RectPx { x: 10.0, y: list.y + n as f32 * RENDER_PITCH - self.renders_scroll, w: list.w - 20.0, h: RENDER_ROW }
+        RectPx { x: list.x + 10.0, y: list.y + n as f32 * RENDER_PITCH - self.renders_scroll, w: list.w - 20.0, h: RENDER_ROW }
     }
     fn render_delete(row: RectPx) -> RectPx {
         RectPx { x: row.x + row.w - 28.0, y: row.y + (row.h - 22.0) / 2.0, w: 22.0, h: 22.0 }
@@ -3162,7 +3176,7 @@ impl Panel {
             RectPx { x: l - 1.0, y: HEADER_H, w: 1.0, h: Self::bottom(vp) - HEADER_H },
             WORKSPACE_RULE,
         )));
-        let (hx, hy) = (14.0, HEADER_H + RAIL_HEAD_H / 2.0);
+        let (hx, hy) = (RAIL_PAD_X + 14.0, HEADER_H + RAIL_PAD_Y + RAIL_HEAD_H / 2.0);
         items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(l - 110.0),
             ..TextItem::new(hx, hy, 13.0, ink, "Processors") }));
         items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(40.0),
@@ -3170,12 +3184,12 @@ impl Panel {
         let on = self.enabled.iter().filter(|e| **e).count();
         if !self.descriptors.is_empty() {
             items.push(Item::Text(TextItem { regular: true, align: Align::Right, valign: VAlign::Middle, max_width: Some(70.0),
-                ..TextItem::new(l - 14.0, hy, 11.0, if on > 0 { hex_color(CUT_HEADER_BLUE) } else { subtle }, format!("{on} ACTIVE")) }));
+                ..TextItem::new(l - RAIL_PAD_X - 14.0, hy, 11.0, if on > 0 { hex_color(CUT_HEADER_BLUE) } else { subtle }, format!("{on} ACTIVE")) }));
         }
         let chips = self.chips(vp);
         if let Some((first, ..)) = chips.first() {
             items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, tracking: 0.5,
-                ..TextItem::new(14.0, first.y - 14.0, 10.0, subtle, "CATEGORY") }));
+                ..TextItem::new(RAIL_PAD_X + 13.0, first.y - 12.5, 10.0, subtle, "CATEGORY") }));
         }
         for (r, c, label) in &chips {
             let picked = *c == self.filter;
@@ -3196,7 +3210,7 @@ impl Panel {
             let rows = visible.len() as f32 * CARD_PITCH - 3.0;
             let h = (rows.min(list.h) + 2.0 * GROUP_PAD).max(0.0);
             items.push(Item::Rect(RectItem { radius: 14.0, border_w: 1.0, border_color: hex_color(0x2e2e2e),
-                ..RectItem::new(RectPx { x: 13.0, y: top, w: l - 26.0, h }, hex_color(0x121212)) }));
+                ..RectItem::new(RectPx { x: RAIL_PAD_X, y: top, w: l - 2.0 * RAIL_PAD_X, h }, hex_color(0x121212)) }));
         }
         items.push(Item::Clip(Some(list)));
         let now = Instant::now();
@@ -3208,13 +3222,13 @@ impl Panel {
         }
         items.push(Item::Clip(None));
         let footer = if self.descriptors.is_empty() { "No processors in this build" } else { "Drag processors to reorder" };
-        items.push(Item::Text(TextItem { interface: true, valign: VAlign::Middle, max_width: Some(l - 24.0),
-            ..TextItem::new(12.0, list.y + list.h + 16.0, 11.0, subtle, footer) }));
+        items.push(Item::Text(TextItem { interface: true, valign: VAlign::Middle, max_width: Some(l - 2.0 * RAIL_PAD_X - 24.0),
+            ..TextItem::new(RAIL_PAD_X + 12.0, list.y + list.h + 16.0, 11.0, subtle, footer) }));
         self.draw_renders(items, vp);
         for down in [false, true] {
             let b = Self::move_button(vp, down);
             let hover = over(b) && !self.descriptors.is_empty();
-            items.push(Item::Rect(RectItem { radius: 8.0, border_w: 1.0,
+            items.push(Item::Rect(RectItem { radius: 6.0, border_w: 1.0,
                 border_color: hex_color(SOURCE_BORDER), ..RectItem::new(b, hex_color(SOURCE_SURFACE)) }));
             items.push(Item::Text(TextItem { interface: true, align: Align::Center, valign: VAlign::Middle, max_width: Some(b.w - 8.0),
                 ..TextItem::new(b.x + b.w / 2.0, b.y + b.h / 2.0, 11.0, if hover { WORKSPACE_TEXT } else { WORKSPACE_DIM },
@@ -3238,16 +3252,16 @@ impl Panel {
             items.push(Item::Rect(RectItem::new(RectPx { h: RAIL_INSPECTOR_H, ..pane }, hex_color(INSPECTOR_BG))));
             let hy = pane.y + RENDER_HEAD / 2.0 + 2.0;
             items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(l - 110.0),
-                ..TextItem::new(16.0, hy, 13.0, hex_color(SOURCE_INK), "Renders") }));
+                ..TextItem::new(pane.x + 16.0, hy, 13.0, hex_color(SOURCE_INK), "Renders") }));
             items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(40.0),
-                ..TextItem::new(16.0 + 8.0 * 13.0 * MONO_ADV, hy, 13.0, hex_color(0xa3a5a8), self.renders.len().to_string()) }));
+                ..TextItem::new(pane.x + 16.0 + 8.0 * 13.0 * MONO_ADV, hy, 13.0, hex_color(0xa3a5a8), self.renders.len().to_string()) }));
             items.push(Item::Text(TextItem { regular: true, align: Align::Right, valign: VAlign::Middle, max_width: Some(70.0),
-                ..TextItem::new(l - 16.0, hy, 10.0, WORKSPACE_DIM, "` cycles") }));
+                ..TextItem::new(pane.x + pane.w - 16.0, hy, 10.0, WORKSPACE_DIM, "` cycles") }));
             let list = self.renders_list(vp);
             items.push(Item::Clip(Some(list)));
             if self.renders.is_empty() {
-                items.push(Item::Text(TextItem { regular: true, wrap: Some(l - 32.0),
-                    ..TextItem::new(16.0, list.y + 6.0, 11.0, WORKSPACE_DIM,
+                items.push(Item::Text(TextItem { regular: true, wrap: Some(pane.w - 32.0),
+                    ..TextItem::new(pane.x + 16.0, list.y + 6.0, 11.0, WORKSPACE_DIM,
                         "Nothing rendered yet. Every render is kept here: click one to return to its frame, chain and settings.") }));
             }
             for (n, r) in self.renders.iter().rev().enumerate() {
@@ -3327,7 +3341,7 @@ impl Panel {
             }
             items.push(Item::Clip(None));
         }
-        draw_rail_grip(items, grip, l, hit(grip, self.cursor.0, self.cursor.1));
+        draw_rail_grip(items, grip, grip.w, hit(grip, self.cursor.0, self.cursor.1));
     }
     /// Focused inspector (278:609), for the focused processor, under its
     /// settings in the right column: the name as the title row, five mono
@@ -3452,7 +3466,8 @@ impl Panel {
             self.source
         };
         let board = Self::canvas_layout(vp);
-        board.ground(items);
+        let top = [CANVAS_RADIUS, CANVAS_RADIUS, 0.0, 0.0];
+        board.ground_radii(items, top);
         board.clip(items);
         let picture = board.picture((dims[0], dims[1]), view);
         Canvas::lift(items, picture);
@@ -3465,10 +3480,10 @@ impl Panel {
             p0: 0.0,
             p1: 0.0,
         });
-        board.recess(items);
+        board.recess_radii(items, top);
         items.push(Item::Clip(Some(r)));
         let header = board.button_bar.unwrap().r;
-        board.button_bar.unwrap().draw(items);
+        board.button_bar.unwrap().draw_radii(items, [0.0, 0.0, CANVAS_RADIUS, CANVAS_RADIUS]);
         let resolution = |dims: [u32; 2]| match dims {
             [3840, 2160] | [4096, 2160] => "4k".to_owned(),
             [7680, 4320] => "8k".to_owned(),
@@ -5517,8 +5532,9 @@ mod tests {
             let canvas = Panel::viewer(vp);
             assert_eq!(canvas.x, Panel::left(vp));
             assert_eq!(canvas.x + canvas.w, vp.0 - Panel::right(vp));
-            assert_eq!(canvas.y, HEADER_H + ButtonBar::HEIGHT);
+            assert_eq!(canvas.y, HEADER_H);
             let bar=Panel::canvas_layout(vp).button_bar.unwrap();
+            assert_eq!(bar.r.y, canvas.y + canvas.h);
             for rendered in [false,true] {
                 let button=Panel::compare_half(vp,rendered);
                 assert_eq!(button.y,bar.content().y);

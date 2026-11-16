@@ -8565,10 +8565,12 @@ mod tests {
             let timeline=Workspace::new(vp,true,true,0.,1.,1.,1.,None);
             let export=crate::export_page::Layout::new(vp);
             let process=crate::processor_gui::Panel::viewer(vp);
-            for viewport in [sources.canvas,timeline.canvas,export.video,process] {
+            for viewport in [sources.canvas,timeline.canvas,export.video] {
                 assert_eq!(viewport.y,HEADER_H+ButtonBar::HEIGHT);
             }
             for bar in [sources.surface.button_bar.unwrap(),timeline.surface.button_bar.unwrap(),export.canvas.button_bar.unwrap()] {
+            // Process keeps the same bar under its picture, which meets the header.
+            assert_eq!(process.y,HEADER_H);
                 assert_eq!(bar.r.h,ButtonBar::HEIGHT);
                 let control=bar.control(bar.content().x,60.);
                 assert_eq!(control.y,HEADER_H+ButtonBar::PADDING_Y);

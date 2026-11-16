@@ -1,5 +1,17 @@
 # abner — history
 
+## 2026-11-17 — Process canvas: bar under a rounded picture, inset rail
+
+The Process page follows the rest of the edited Figma frame (Signal 590:5862).
+The canvas is a rounded document: the picture meets the header and the
+ButtonBar (format summary, Source | Rendered) sits under it, carrying the
+lower corners (`Canvas::bar_below`, `ButtonBar::draw_radii`). The frame's bar
+is the shared component with placeholder labels, so no new actions came with
+it. The rail's sections are inset by the frame's padding (`RAIL_PAD_X`,
+`RAIL_PAD_Y`), Renders pane and Move up / down included. Sources, Timeline and
+Export keep the bar on top; `canvas_bar_metrics_match_across_all_pages` now
+says so.
+
 ## 2026-11-16 — Process info pane: default icon, categories, no chain badge
 
 The Process page's info pane follows the edited Figma frame (Signal 594:6111).
