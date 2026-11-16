@@ -513,3 +513,10 @@ components beside the frame: `Process / Processor row` 590:5863,
 `Process / Settings field` 590:5867 and `Process / Info row` 590:5871.
 Colours are bound to Signal variables only where the hex matched exactly.
 The canvas picture is an image fill of the test pattern.
+
+The info pane in that frame was then edited ahead of the code: the round
+chain-position badge is gone, a 24px default processor icon
+(`Process / Processor icon / Default` 596:5924, a frame passing through one
+stage) takes its place, and the description sits under the name at the
+native 11px #a3a5a8. `draw_info` still draws the badge; the icon is not
+implemented, and the description copy in the frame is placeholder text.
