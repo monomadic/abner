@@ -3015,6 +3015,11 @@ impl App {
         let capture = self.mask_mode;
         let editor_crops=if self.editor.as_ref().is_some_and(|e|matches!(e.owner,crate::spatial::Owner::Plugin{..})) {self.crop_schedule()}else{Vec::new()};
         let live_scrub = self.processors.scrubbing();
+        // A trim is made by eye, so an edge drag shows each frame that lands
+        // on the way, like a processor scrub, instead of waiting for the
+        // pointer to rest: a right edge's seeks are cold (nothing decodes
+        // ahead into removed material), so they queue behind one another.
+        let edge_drag = matches!(self.cut_drag, Some(CutDrag::Edge(_)));
         let superseded_seek = self.queued_seek.is_some();
         let mut adopt = None;
         let shown: Vec<bool> = (0..self.videos.len()).map(|i| self.on_screen(i)).collect();
@@ -3036,7 +3041,7 @@ impl App {
             // During a processor drag, show completed exact frames as they
             // arrive while the decoder follows the newest target. The pointer
             // still owns the clock; other seek paths suppress old landings.
-            let got = if superseded_seek && !live_scrub {
+            let got = if superseded_seek && !live_scrub && !edge_drag {
                 None
             } else if v.pending {
                 let g = v.player.take_next();
@@ -3056,7 +3061,7 @@ impl App {
             }
             if let Some((pts, mut buf)) = got {
                 if i==active && !editor_crops.is_empty() {buf=crate::spatial::crop_rgba(&buf,v.player.w,v.player.h,pts,&editor_crops);}
-                if was_pending && self.adopt_seek && i == active && !self.playing {
+                if was_pending && self.adopt_seek && i == active && !self.playing && !superseded_seek {
                     adopt = Some(pts);
                 }
                 v.shown_pts = pts;
@@ -5883,11 +5888,20 @@ impl App {
                 self.adopt_seek = false;
             },
             Some(CutDrag::Edge(edge)) => {
-                // The canvas follows the edge, so the trim is made by eye.
+                // The canvas follows the edge, so the trim is made by eye: a
+                // clip's left edge shows its first frame, and a right edge
+                // (removed material or the clip's end follows) its LAST one,
+                // the frame before the boundary, whose pts the clock adopts.
                 let now = cut.move_edge(edge, at);
                 self.cut_drag = Some(CutDrag::Edge(now));
-                self.seek_all(now.min(end), true);
-                self.adopt_seek = false;
+                let right = now > 1e-6 && (cut.skip(now).is_some() || now >= cut.duration - 1e-6);
+                if right {
+                    let last = (now - 1.0 / self.fps.max(1.0) - 1e-4).max(0.0);
+                    self.seek_all(last.min(end), true);
+                } else {
+                    self.seek_all(now.min(end), true);
+                    self.adopt_seek = false;
+                }
             }
             Some(CutDrag::Zoom) => {
                 // About the playhead when it is on screen, the middle if not.
@@ -9610,6 +9624,56 @@ mod tests {
         app.cut_drag_to(x + 41.0);
         assert!(app.t > dragged, "and keeps scrubbing without a dead zone");
         app.mouse_up();
+    }
+
+    /// Trimming a clip's right edge shows that clip's last frame as the edge
+    /// moves — while the pointer is still moving, not once it rests — and
+    /// leaves the playhead on it; a left edge shows the clip's first frame.
+    #[test]
+    fn right_edge_drag_previews_the_last_kept_frame() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        let vp = (1280.0, 720.0);
+        app.playing = false;
+        app.set_cut_mode(true);
+        let settle = |app: &mut App| for _ in 0..40 {
+            app.tick(0.016, vp, 1.0);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        settle(&mut app);
+        let lane = app.cut_lanes().video;
+        let (dur, pps, t0) = { let c = app.cut.as_mut().unwrap(); c.snap = Snap::Frame; (c.duration, c.pps, c.t0) };
+        let frame = 1.0 / app.fps;
+        let x_of = |t: f64| lane.x + ((t - t0) * pps) as f32;
+        let y = lane.y + lane.h / 2.0;
+        let drag = |app: &mut App, from: f64, to: f64| {
+            app.cursor_moved(x_of(from) - 3.0, y);
+            app.mouse_down(x_of(from) - 3.0, y);
+            assert!(matches!(app.cut_drag, Some(CutDrag::Edge(_))));
+            for k in 1..=30 {
+                app.cursor_moved(x_of(from + (to - from) * k as f64 / 30.0), y);
+                app.tick(0.016, vp, 1.0);
+                std::thread::sleep(std::time::Duration::from_millis(8));
+            }
+        };
+        // The clip's own end, pulled in to 60% of the clip.
+        let to = dur * 0.6;
+        drag(&mut app, dur, to);
+        let shown = app.videos[0].shown_pts;
+        assert!(shown > 0.5 && shown < dur - 0.2, "the picture follows the moving edge, shown {shown:.3}");
+        app.mouse_released();
+        settle(&mut app);
+        let end = app.cut.as_ref().unwrap().keeps()[0].1;
+        assert!((end - to).abs() < frame, "the edge is where it was dropped");
+        assert!((app.t - (end - frame)).abs() < 1e-3, "the playhead is on the last kept frame: {:.4} vs edge {end:.4}", app.t);
+        assert!((app.videos[0].shown_pts - app.t).abs() < 1e-3);
+        // The clip's start: the first kept frame, at the edge itself.
+        drag(&mut app, 0.0, dur * 0.2);
+        app.mouse_released();
+        settle(&mut app);
+        let start = app.cut.as_ref().unwrap().keeps()[0].0;
+        assert!(start > 0.0 && (app.t - start).abs() < 1e-3);
+        assert!((app.videos[0].shown_pts - start).abs() < 1e-3);
     }
 
     /// Resting on the timeline prefetches the frame a click there would
