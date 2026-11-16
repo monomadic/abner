@@ -281,6 +281,11 @@ pub trait Factory: Send {
         Ok(input)
     }
 
+    /// Human-readable description of this processor. Empty when unspecified.
+    fn description(&self) -> &str {
+        ""
+    }
+
     fn descriptor(&self) -> Descriptor;
     fn create(
         &self,
