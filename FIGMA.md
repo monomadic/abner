@@ -514,9 +514,22 @@ components beside the frame: `Process / Processor row` 590:5863,
 Colours are bound to Signal variables only where the hex matched exactly.
 The canvas picture is an image fill of the test pattern.
 
-The info pane in that frame was then edited ahead of the code: the round
-chain-position badge is gone, a 24px default processor icon
-(`Process / Processor icon / Default` 596:5924, a frame passing through one
-stage) takes its place, and the description sits under the name at the
-native 11px #a3a5a8. `draw_info` still draws the badge; the icon is not
-implemented, and the description copy in the frame is placeholder text.
+### Process info pane (2026-11-16)
+
+`draw_info` follows the edited `Processor info` 594:6111 in that frame. The
+round chain-position badge is gone; a 24px default processor icon takes its
+place (`assets/process-icons/processor.svg`, the tile outline and chip glyph
+exported from 598:5986, drawn through the icon atlas over a #1c1d1c tile).
+The categories sit under the name in #ff8d28, then a blank line and the
+wrapped description when the processor declares one. Four rows follow on a
+24px pitch, labels indented 31px past the icon and values at 10px #c8c8c8;
+the Input row is hidden in the design and dropped from the code, since the
+settings header already carries the input shape. `INFO_H` 220 and
+`INFO_DESCRIPTION_H` 56 are the pane's two heights. The pane keeps its native
+310px width (the frame's column is 290). The name stays in the header face and
+the description in the inspector face, not the frame's JetBrains Mono Bold /
+Regular. The description copy in the frame is placeholder text.
+
+The same frame carries edits that are NOT implemented: the canvas column is a
+`Document` 595:6384 with a rounded viewport and an aspect / size / Reset /
+Save bar under the picture, and the rail's sections are inset.

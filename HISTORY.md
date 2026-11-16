@@ -1,5 +1,19 @@
 # abner — history
 
+## 2026-11-16 — Process info pane: default icon, categories, no chain badge
+
+The Process page's info pane follows the edited Figma frame (Signal 594:6111).
+The chain-position badge is replaced by a default processor icon, an SVG in
+the icon atlas; the categories lead in orange under the name, above the
+description when one is declared; the rows are indented past the icon and the
+Input row is gone (the settings header already shows it). The pane has its own
+heights (`INFO_H`, `INFO_DESCRIPTION_H`) instead of borrowing the Sources
+inspector's.
+
+Validation: native build, 1280×800 captures with and without a description.
+`cargo test`: 253 pass; three `app::tests` (titlebar, header selection, source
+edge drag) fail with and without this change.
+
 ## 2026-11-16 — Edited Figma Export screen back in Abner
 
 Applied Signal frame 548:5796 to the native Export page using figleaf and the

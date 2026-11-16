@@ -127,7 +127,7 @@ fn decode_logo() -> Logo {
 }
 
 // Original Figma card-instance exports, including their intrinsic view boxes.
-const FRAME_ICON_SVGS: [&[u8]; 12] = [
+const FRAME_ICON_SVGS: [&[u8]; 13] = [
     include_bytes!("../assets/frame-icons/key.svg"), include_bytes!("../assets/frame-icons/i.svg"),
     include_bytes!("../assets/frame-icons/p.svg"), include_bytes!("../assets/frame-icons/b.svg"),
     include_bytes!("../assets/spatial-icons/mask.svg"), include_bytes!("../assets/spatial-icons/crop.svg"),
@@ -137,6 +137,8 @@ const FRAME_ICON_SVGS: [&[u8]; 12] = [
     include_bytes!("../assets/export-icons/play.svg"),
     include_bytes!("../assets/export-icons/next-frame.svg"),
     include_bytes!("../assets/export-icons/next-keyframe.svg"),
+    // The default processor icon (Process info pane), tile outline included.
+    include_bytes!("../assets/process-icons/processor.svg"),
 ];
 /// The Process page's render snapshots: `RENDER_THUMBS` atlas cells after the
 /// frame icons, so the recent row and the timeline strip never share them.
@@ -529,7 +531,7 @@ pub struct Gpu {
     /// rows of `ATLAS_COLS` — bound in every group like the plate, so mode 14
     /// needs no batch key.
     thumbs: VideoTex,
-    frame_icon_sizes: [(f32, f32); 12],
+    frame_icon_sizes: [(f32, f32); FRAME_ICON_SVGS.len()],
     mask_tex: wgpu::Texture,
     mask_view: wgpu::TextureView,
     mask_version: Option<(u64, u64)>,

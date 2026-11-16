@@ -147,6 +147,12 @@ const LENGTHS: [(&str, &str, u32, u32); 4] = [
     ("5s", "5 seconds", 0, 5),
 ];
 /// The renders pane: a heading strip, then 44px rows on a 48px pitch.
+/// The info pane under the settings: icon, name and categories, four rows
+/// and the registry ID. A description adds a blank line and three of text.
+const INFO_H: f32 = 220.0;
+const INFO_DESCRIPTION_H: f32 = 56.0;
+/// The default processor icon's index among the renderer's bundled SVGs.
+const PROCESSOR_ICON: usize = 12;
 const RENDER_HEAD: f32 = 34.0;
 const RENDER_ROW: f32 = 44.0;
 const RENDER_PITCH: f32 = 48.0;
@@ -2396,7 +2402,7 @@ impl Panel {
     fn info(&self, vp: (f32, f32)) -> RectPx {
         let w = Self::right(vp);
         let bottom = Self::bottom(vp);
-        let height = RAIL_INSPECTOR_H + self.info_description().map_or(0.0, |_| 42.0);
+        let height = INFO_H + self.info_description().map_or(0.0, |_| INFO_DESCRIPTION_H);
         let h = if bottom - HEADER_H - 158.0 - height < 96.0 { 0.0 } else { height };
         RectPx { x: vp.0 - w, y: bottom - h, w, h }
     }
@@ -3339,15 +3345,20 @@ impl Panel {
         items.push(Item::Clip(Some(pane)));
         items.push(Item::Rect(RectItem::new(pane, hex_color(INSPECTOR_BG))));
         items.push(Item::Rect(RectItem::new(RectPx { h: 1.0, ..pane }, hex_color(0x303234))));
-        // The chain position as a round badge, the Sources keycap's place.
-        let badge = RectPx { x: x0, y: y + 16.0, w: 24.0, h: 24.0 };
-        items.push(Item::Rect(RectItem { radius: 12.0, ..RectItem::new(badge, hex_color(0xb4b4b8)) }));
-        items.push(Item::Text(TextItem { inspector: 2, align: Align::Center, valign: VAlign::Middle, max_width: Some(22.0),
-            ..TextItem::new(badge.x + 12.0, badge.y + 12.0, 14.0, hex_color(0x161616), (i + 1).to_string()) }));
-        items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(pane.w - 80.0),
-            ..TextItem::new(x0 + 32.0, y + 28.0, 13.0, hex_color(SOURCE_INK), d.name.as_str()) }));
+        // The default processor icon where the chain-position badge was: no
+        // processor supplies its own yet. The SVG carries the tile's outline.
+        let tile = RectPx { x: x0, y: y + 17.0, w: 24.0, h: 24.0 };
+        items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(tile, hex_color(0x1c1d1c)) }));
+        items.push(Item::FrameIcon { x: tile.x, y: tile.y, index: PROCESSOR_ICON });
+        let text_x = x0 + 32.0;
+        items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(x1 - text_x),
+            ..TextItem::new(text_x, y + 28.0, 13.0, hex_color(SOURCE_INK), d.name.as_str()) }));
+        // The categories lead the description, in the focus colour.
+        let category = category_label(&self.categories[i]);
+        items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(x1 - text_x),
+            ..TextItem::new(text_x, y + 46.0, 11.0, hex_color(0xff8d28), category.as_str()) }));
         let description_height = if let Some(description) = self.info_description() {
-            let area = RectPx { x: x0 + 32.0, y: y + 42.0, w: (x1 - x0 - 32.0).max(1.0), h: 42.0 };
+            let area = RectPx { x: text_x, y: y + 67.0, w: (x1 - text_x).max(1.0), h: 42.0 };
             items.push(Item::Clip(Some(area)));
             items.push(Item::Text(TextItem {
                 inspector: 1,
@@ -3355,31 +3366,32 @@ impl Panel {
                 ..TextItem::new(area.x, area.y, 11.0, hex_color(0xa3a5a8), description)
             }));
             items.push(Item::Clip(Some(pane)));
-            area.h
+            INFO_DESCRIPTION_H
         } else {
             0.0
         };
         let y = y + description_height;
-        for ry in [y + 49.0, y + 178.0] {
+        for ry in [y + 67.0, y + 182.0] {
             items.push(Item::Rect(RectItem::new(
                 RectPx { x: x0, y: ry, w: x1 - x0, h: 1.0 }, hex_color(0x303234))));
         }
         let settings = format!("{} fields · {} presets", self.fields.len(), d.presets.len());
+        // Rows sit under the name, past the icon; the input shape is already
+        // in the settings header's summary line.
         for (k, (key, value)) in [
-            ("Category", category_label(&self.categories[i])),
+            ("Category", category),
             ("Role", role_label(c).to_string()),
-            ("Input", input_label(c)),
             ("Preview", if self.supported[i] { "Frame preview".into() } else { "Not supported".into() }),
             ("Settings", settings),
         ].into_iter().enumerate() {
-            let ry = y + 68.5 + k as f32 * 23.0;
+            let ry = y + 92.5 + k as f32 * 24.0;
             items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(78.0),
-                ..TextItem::new(x0, ry, 11.0, WORKSPACE_DIM, key) }));
-            items.push(Item::Text(TextItem { regular: true, align: Align::Right, valign: VAlign::Middle, max_width: Some(pane.w - 110.0),
-                ..TextItem::new(x1, ry, 11.0, hex_color(0xa3a5a8), value) }));
+                ..TextItem::new(x0 + 31.0, ry, 11.0, WORKSPACE_DIM, key) }));
+            items.push(Item::Text(TextItem { regular: true, align: Align::Right, valign: VAlign::Middle, max_width: Some(pane.w - 141.0),
+                ..TextItem::new(x1, ry, 10.0, hex_color(0xc8c8c8), value) }));
         }
         items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(pane.w - 32.0),
-            ..TextItem::new(x0, y + 195.0, 10.0, hex_color(INSPECTOR_PATH), d.id.as_str()) }));
+            ..TextItem::new(x0, y + 200.0, 10.0, hex_color(INSPECTOR_PATH), d.id.as_str()) }));
         items.push(Item::Clip(None));
     }
     /// Use the dimensions and fit of the image actually displayed, including
