@@ -3227,8 +3227,10 @@ impl App {
         let mode = if self.single() { Mode::Overlay } else { self.shown_mode() };
         let canvas = self.workspace().canvas;
         let board = Canvas::new(canvas);
+        // Timeline's picture meets the header on a rounded canvas, its bar below.
+        let corners = if self.cut_mode { [CANVAS_RADIUS, CANVAS_RADIUS, 0.0, 0.0] } else { [0.0; 4] };
         if self.show_ui {
-            board.ground(&mut items);
+            board.ground_radii(&mut items, corners);
         }
         board.clip(&mut items);
         // Keep the lifted picture attached to its zoomed bounds, while the
@@ -3298,7 +3300,7 @@ impl App {
         if self.cut_mode && self.show_ui {
             self.build_cut_chips(&mut items);
         }
-        if self.show_ui { board.recess(&mut items); }
+        if self.show_ui { board.recess_radii(&mut items, corners); }
         items.push(Item::Clip(None));
         if self.show_ui {
             if self.cut_mode {
@@ -3635,7 +3637,8 @@ impl App {
 
     fn controls(&self) -> Vec<Control> {
         let l = self.workspace();
-        let bar = ButtonBar::at(l.canvas.x, HEADER_H, l.canvas.w);
+        // Timeline keeps its bar under the picture; the other pages over it.
+        let bar = l.surface.button_bar.filter(|_| self.cut_mode).unwrap_or(ButtonBar::at(l.canvas.x, HEADER_H, l.canvas.w));
         let mut out = self.mode_selector().controls();
         out.push(Control { hint: "⌘E", ..Control::new(self.footer_export(), "Export", false, Action::Export) });
         if self.processors.open || self.export_page.open {
@@ -5235,20 +5238,10 @@ impl App {
             push(RectPx { x: self.cut_clock_x() + offset, y: bar.y + 5.0, w: width, h: 16.0 },
                 label, self.cut_frames == frames, CutAction::TimeDisplay(frames), "`");
         }
-        let mut x = self.cut_tools_x();
         let keyframe = cut.snap == Snap::Keyframe;
-        for (label, action, hint) in [
-            ("Split tool", CutAction::ToggleSplit, "Esc to leave · S split"),
-            (if keyframe { "Snap to keyframes: on" } else { "Snap to keyframes: off" },
-                CutAction::Snap(if keyframe { Snap::Frame } else { Snap::Keyframe }), "K"),
-        ] {
-            // The snap control is the keyframe glyph and a switch.
-            // It carries its name when the toolbar has room before the clock.
-            let w = if !matches!(action, CutAction::Snap(_)) { 32.0 }
-                else if self.cut_clock_x() - x >= CUT_SNAP_LABEL_W + 16.0 { CUT_SNAP_LABEL_W } else { CUT_SNAP_W };
-            push(RectPx { x, y: cy - 16.0, w, h: 32.0 }, label, matches!(action, CutAction::Snap(_)) && keyframe, action, hint);
-            x += w + 6.0;
-        }
+        push(RectPx { x: self.cut_tools_x(), y: cy - 16.0, w: 32.0, h: 32.0 }, "Split tool", false, CutAction::ToggleSplit, "Esc to leave · S split");
+        push(self.cut_snap_rect(), if keyframe { "Snap to keyframes: on" } else { "Snap to keyframes: off" }, keyframe,
+            CutAction::Snap(if keyframe { Snap::Frame } else { Snap::Keyframe }), "K");
         push(self.cut_footer_split(), "Split", false, CutAction::Split, "S");
         push(self.cut_footer_join(), "Join", false, CutAction::Join, "J");
         push(self.cut_footer_delete(), "Delete", false, CutAction::DeletePicked, "⌫");
@@ -5261,9 +5254,18 @@ impl App {
         }
     }
 
-    /// Edit tools follow playback; the clock follows the edit buttons and the snap switch.
+    /// The split tool follows the clock.
     fn cut_tools_x(&self) -> f32 {
-        self.workspace().transport.x + 254.0
+        self.cut_clock_x() + 179.0
+    }
+
+    /// "Snap to Keyframes" and its switch end the toolbar; the label goes
+    /// when it would run into the split tool.
+    fn cut_snap_rect(&self) -> RectPx {
+        let bar = self.workspace().transport;
+        let end = bar.x + bar.w - 16.0;
+        let w = if end - CUT_SNAP_LABEL_W >= self.cut_tools_x() + 48.0 { CUT_SNAP_LABEL_W } else { CUT_SNAP_W };
+        RectPx { x: end - w, y: bar.y + bar.h / 2.0 - 16.0, w, h: 32.0 }
     }
 
     /// Split · Join · Delete · Save · Render, then Export. Under 900px wide the
@@ -5295,18 +5297,16 @@ impl App {
         Self::cut_footer_next(self.cut_footer_save())
     }
 
-    /// The clock is right-aligned beside zoom, or the right edge on narrow windows.
+    /// The clock follows the step controls.
     fn cut_clock_x(&self) -> f32 {
-        let bar = self.workspace().transport;
-        if bar.w >= 900.0 { self.cut_zoom_bar().x - 200.0 }
-        else { bar.x + bar.w - 180.0 }
+        self.workspace().transport.x + 278.0
     }
 
-    /// The zoom slider's track, at the toolbar's right.
+    /// The zoom slider's track, before the snap switch at the toolbar's right.
     fn cut_zoom_bar(&self) -> RectPx {
         let bar = self.workspace().transport;
         let width = if self.vp.0 < 900.0 { 60.0 } else { 110.0 };
-        RectPx { x: bar.x + bar.w - 40.0 - width, y: bar.y + bar.h / 2.0 - 1.5, w: width, h: 3.0 }
+        RectPx { x: self.cut_snap_rect().x - 59.0 - width, y: bar.y + bar.h / 2.0 - 1.5, w: width, h: 3.0 }
     }
 
     fn encode_button(r: RectPx) -> RectPx {
@@ -6238,7 +6238,7 @@ impl App {
             items.push(Item::Rect(RectItem::new(r, rule)));
         }
 
-        if let Some(bar) = l.surface.button_bar { bar.draw(items); }
+        if let Some(bar) = l.surface.button_bar { bar.draw_radii(items, [0.0, 0.0, CANVAS_RADIUS, CANVAS_RADIUS]); }
         // ---- Figma timeline header ----
         let controls = self.controls();
         self.build_cut_header(items);
@@ -6267,7 +6267,7 @@ impl App {
             items.push(Item::Text(TextItem { valign: VAlign::Middle, tracking: -0.2,
                 ..TextItem::new(x, clock_y, clock_px, mix(CUT_BAR, 0xffffff, 0.3), format!("        {frames}")) }));
         }
-        for (offset, alpha) in [(13.0, 0.2), (231.0, 0.25), (x - bar.x - 12.0, 0.25)] {
+        for (offset, alpha) in [(13.0, 0.2), (238.0, 0.25), (x - bar.x + 157.0, 0.25), (self.cut_snap_rect().x - bar.x - 19.0, 0.25)] {
             items.push(Item::Rect(RectItem::new(RectPx { x: bar.x + offset, y: cy - 10.0, w: 1.0, h: 20.0 }, mix(CUT_BAR, 0xffffff, alpha))));
         }
         if bar.w >= 900.0 {
@@ -6275,7 +6275,6 @@ impl App {
             items.push(Item::Rect(RectItem { radius: 1.5, ..RectItem::new(zoom, mix(CUT_BAR, 0xffffff, 0.14)) }));
             let knob = zoom.x + zoom.w * cut.zoom_fraction(self.cut_lanes().video.w) as f32;
             items.push(Item::Rect(RectItem { radius: 5.5, ..RectItem::new(RectPx { x: knob - 5.5, y: cy - 5.5, w: 11.0, h: 11.0 }, hex_color(CUT_INK)) }));
-            items.push(Item::Rect(RectItem::new(RectPx { x: zoom.x - 39.0, y: cy - 10.0, w: 1.0, h: 20.0 }, mix(CUT_BAR, 0xffffff, 0.1))));
         }
 
         self.build_cut_inspector(items);
@@ -6322,29 +6321,22 @@ impl App {
                     &control.label, Align::Left, r.w);
             }
             CutAction::Snap(_) => {
-                // The keyframe glyph, then an iOS-style switch: knob left on a
-                // grey track = off, knob right on the keyframe green = on, the
-                // track outlined white like the rail's (`draw_rail_switch`).
-                // On: the orange selection ring. Off: the footer buttons' 1px grey
-                // edge (`draw_cut_footer_button`). The glyph takes the label's ink.
+                // Figma 617:8899: the label, then a 32x16 switch at the
+                // toolbar's end. On: the selection orange under a white edge,
+                // knob right; off: a grey track, knob left.
                 let on = cut.snap == Snap::Keyframe;
-                let (border_w, border) = if on { (2.0, SOURCE_RING) } else { (1.0, if hovered { 0x555555 } else { 0x303030 }) };
-                items.push(Item::Rect(RectItem { radius: 8.0, border_w, border_color: hex_color(border),
-                    ..RectItem::new(r, if hovered { mix(CUT_BAR, 0xffffff, 0.07) } else { [0.0; 4] }) }));
-                let ink = hex_color(if on || hovered { CUT_INK } else { 0xc8c8c8 });
-                draw_icon(items, Icon::SnapKeyframe, r.x + 16.0, cy, ink);
+                let ink = hex_color(if on || hovered { 0xf4f3ed } else { 0xc8c8c8 });
                 if r.w > CUT_SNAP_W {
-                    ui_label(items, r.x + 30.0, cy, 13.0, ink,
-                        "Snap to Keyframe", Align::Left, r.w - 30.0 - CUT_SWITCH_W - 12.0);
+                    ui_label(items, r.x, cy, 12.0, ink, "Snap to Keyframes", Align::Left, r.w - CUT_SWITCH_W - 8.0);
                 }
-                let track = RectPx { x: r.x + r.w - 6.0 - CUT_SWITCH_W, y: cy - CUT_SWITCH_H / 2.0, w: CUT_SWITCH_W, h: CUT_SWITCH_H };
-                items.push(Item::Rect(RectItem { radius: CUT_SWITCH_H / 2.0, border_w: 1.5,
+                let track = RectPx { x: r.x + r.w - CUT_SWITCH_W, y: cy - CUT_SWITCH_H / 2.0, w: CUT_SWITCH_W, h: CUT_SWITCH_H };
+                items.push(Item::Rect(RectItem { radius: CUT_SWITCH_H / 2.0, border_w: 1.0,
                     border_color: hex_color(if on { 0xffffff } else { 0xdcdcdc }),
-                    ..RectItem::new(track, if on { hex_color(FRAME_KEY) } else { hex_color(0x3a3a3c) }) }));
-                let d = CUT_SWITCH_H - 5.0;
-                let kx = if on { track.x + track.w - 2.5 - d } else { track.x + 2.5 };
+                    ..RectItem::new(track, hex_color(if on { SOURCE_RING } else { 0x3a3a3c })) }));
+                let d = CUT_SWITCH_H - 4.0;
+                let kx = if on { track.x + track.w - 2.0 - d } else { track.x + 2.0 };
                 items.push(Item::Rect(RectItem { radius: d / 2.0,
-                    ..RectItem::new(RectPx { x: kx, y: track.y + 2.5, w: d, h: d }, hex_color(0xffffff)) }));
+                    ..RectItem::new(RectPx { x: kx, y: track.y + 2.0, w: d, h: d }, hex_color(0xf4f3ed)) }));
             }
             // Only the footer carries Split now.
             CutAction::Split => draw_cut_footer_button(items, r, &control.label, control.hint, true, hovered, false),
@@ -7308,6 +7300,8 @@ fn wrap_text(text: &str, columns: usize) -> Vec<String> {
 }
 
 const CUT_TOOLBAR_H: f32 = 50.0;
+/// The Timeline canvas's corner radius (Process uses the same).
+const CANVAS_RADIUS: f32 = 10.0;
 /// Below this width cut mode keeps neither side column: the cut inspector
 /// goes and the source rail is the mini strip.
 const CUT_COLUMNS_MIN_W: f32 = 1000.0;
@@ -7440,7 +7434,7 @@ impl Workspace {
             let side_in = (side_w * ease(side_slide)).round();
             let side = if side_in > 0.0 { side_w } else { 0.0 };
             let surface = Canvas::layout(RectPx { x:rail, y:HEADER_H, w:(w-side_in-rail).max(1.), h:(h-CUT_STATUS_H-HEADER_H).max(0.) },
-                true, Some(TimelineAttachment { x:0.,width:w,transport_height:CUT_TOOLBAR_H,lanes_height:lanes }));
+                true, Some(TimelineAttachment { x:0.,width:w,transport_height:CUT_TOOLBAR_H,lanes_height:lanes })).bar_below();
             let attached = surface.timeline.unwrap();
             let transport_y = attached.transport.y;
             let top = (transport_y - CUT_HEADER_H).max(1.0);
@@ -7655,12 +7649,12 @@ const RAIL_GRIP_DOT_FILL: u32 = 0x2a2a2a;
 /// card renders, #444444), and the keycap plate (white @ 0.5 in Figma;
 /// linear blending wants less).
 pub(crate) const SOURCE_RING: u32 = 0xff9d00;
-/// Cut mode's snap control: keyframe glyph + switch.
-const CUT_SNAP_W: f32 = 70.0;
-/// The same with its "Snap to Keyframe" label, when the toolbar has room.
-const CUT_SNAP_LABEL_W: f32 = 196.0;
-const CUT_SWITCH_W: f32 = 36.0;
-const CUT_SWITCH_H: f32 = 20.0;
+/// Cut mode's snap control: the switch alone.
+const CUT_SNAP_W: f32 = 32.0;
+/// The same with its "Snap to Keyframes" label, when the toolbar has room.
+const CUT_SNAP_LABEL_W: f32 = 154.0;
+const CUT_SWITCH_W: f32 = 32.0;
+const CUT_SWITCH_H: f32 = 16.0;
 pub(crate) const SOURCE_EDGE: u32 = 0x444444;
 pub(crate) const SOURCE_EDGE_HOVER: u32 = 0x5c5c5c;
 const SOURCE_KEYCAP: [f32; 4] = [1.0, 1.0, 1.0, 0.3];
@@ -8664,12 +8658,16 @@ mod tests {
             let timeline=Workspace::new(vp,true,true,0.,1.,1.,1.,None,false);
             let export=crate::export_page::Layout::new(vp);
             let process=crate::processor_gui::Panel::viewer(vp);
-            for viewport in [sources.canvas,timeline.canvas,export.video] {
+            for viewport in [sources.canvas,export.video] {
                 assert_eq!(viewport.y,HEADER_H+ButtonBar::HEIGHT);
             }
-            // Process keeps the same bar under its picture, which meets the header.
+            // Process and Timeline keep the same bar under the picture, which meets the header.
             assert_eq!(process.y,HEADER_H);
-            for bar in [sources.surface.button_bar.unwrap(),timeline.surface.button_bar.unwrap(),export.canvas.button_bar.unwrap()] {
+            assert_eq!(timeline.canvas.y,HEADER_H);
+            let under=timeline.surface.button_bar.unwrap().r;
+            assert_eq!((under.y,under.h),(timeline.canvas.y+timeline.canvas.h,ButtonBar::HEIGHT));
+            assert_eq!(under.y+under.h,timeline.transport.y);
+            for bar in [sources.surface.button_bar.unwrap(),export.canvas.button_bar.unwrap()] {
                 assert_eq!(bar.r.h,ButtonBar::HEIGHT);
                 let control=bar.control(bar.content().x,60.);
                 assert_eq!(control.y,HEADER_H+ButtonBar::PADDING_Y);
@@ -9433,7 +9431,9 @@ mod tests {
                         "overlapping toolbar controls: {} / {}", c.label, other.label);
                 }
             }
-            assert!(app.cut_tools_x() < app.cut_clock_x());
+            // Steps, clock, split tool, then zoom and the snap switch at the end.
+            assert!(app.cut_clock_x() < app.cut_tools_x());
+            assert!(app.cut_tools_x() + 32.0 <= app.cut_snap_rect().x);
         }
         app.vp = original_vp;
         let press = |app: &mut App, want: CutAction| {
@@ -10593,7 +10593,10 @@ mod tests {
         assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.cut.as_ref().is_some_and(|c| !c.scanning())));
         assert_eq!(app.cut.as_ref().unwrap().keys.len(), 4);
         let l = app.workspace();
-        assert_eq!(l.canvas.y + l.canvas.h, l.transport.y);
+        // The canvas, its bar underneath, then the transport.
+        let under = l.surface.button_bar.unwrap().r;
+        assert_eq!(l.canvas.y + l.canvas.h, under.y);
+        assert_eq!(under.y + under.h, l.transport.y);
         assert_eq!(l.transport.y + l.transport.h, l.timeline.y);
         assert_eq!(l.canvas.x + l.canvas.w, l.side.x);
         let lanes = app.cut_lanes();

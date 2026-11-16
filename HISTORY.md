@@ -1,5 +1,18 @@
 # abner — history
 
+## 2026-11-17 — Timeline follows its edited Figma frame
+
+The Timeline frame (`612:5851`) was edited in Figma after its export and the
+page now matches it. The picture meets the header on a 10px-radius canvas and
+the button bar ("Crop clip") sits under it with the lower corners, as on
+Process. The transport is reordered: step controls, the clock, the split tool,
+then at the right the zoom slider and "Snap to Keyframes" with a plain 32×16
+orange switch (the bordered box and keyframe glyph are gone). The lanes were
+replaced in Figma by the library lanes component, which the app already
+implements, so they are unchanged. Verified in a targeted window capture
+against the frame; `canvas_bar_metrics_match_across_all_pages` and the toolbar
+overlap test cover the new geometry.
+
 ## 2026-11-17 — Show Sources Render on the default Timeline page
 
 The first Sources Render action was omitted by the Timeline control builder's

@@ -576,3 +576,18 @@ Not carried over: the diagonal hatching on GOP cells whose thumbnails have not
 loaded (flat `CUT_FILM` cells), the Split button's glyph, and the exact
 waveform. The icons are redrawn as vectors; the app draws them from rects and
 triangles, so there is no source SVG to import.
+
+**Edited in Figma the same day and implemented** (`612:5851` re-read): the
+canvas (`617:8883`) is a 10px-radius panel whose picture meets the header and
+whose `Button Bar` instance sits UNDER it with the lower corners, as on
+Process (`Canvas::bar_below`, `CANVAS_RADIUS`); the transport runs steps ·
+clock · split tool · spacer · zoom · divider · "Snap to Keyframes" with a
+32×16 switch (`617:8899`: `SOURCE_RING` orange under a 1px white edge, no box,
+no keyframe glyph) ending 16px from the right (`cut_snap_rect`); the divider
+before the zoom is hidden. The bar's labels (16:9 · 1080p · Reset · Save
+ProRes) are the component's defaults, so the app keeps its own "Crop clip".
+The lanes are now an unmodified instance of the library component
+`Abner / Timeline / Lanes` (`117:4432`), whose row offsets are `cut_lanes`'s
+own; its sample content (chapters, cuts, captions) is not this capture's
+state. One known difference is left alone: the component draws the playhead's
+timecode chip in the chapter row, the app in the tick row under the lanes.
