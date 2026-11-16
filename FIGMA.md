@@ -493,3 +493,18 @@ controls visit the oldest/latest buffered preview. Tab still switches the source
 comparison. The design omits the former bitrate field; the existing HEVC target
 and export pipeline are retained. The bottom attachment adapts down to 720×480,
 hiding the secondary subtitle/timecode where needed to keep controls separate.
+
+### Process screen export (2026-11-16)
+
+The native Process page is `590:5862`, "Process / Native app · Ready", on
+**04 · Screens** in the Signal file (`oDvZ81OLuzewiI2oLcqeVU`), below the
+native Export frame `548:5796`. It was rebuilt as editable layers from a
+1280×800 window capture (`--process` on two test clips: first processor
+focused, nothing enabled, no renders), so geometry is within about a pixel.
+The header is an instance of `Header / mode + session` 77:778 in Night mode
+with Process selected; it keeps that component's 45px height and tab styling.
+Rail rows, settings fields and inspector rows are instances of three local
+components beside the frame: `Process / Processor row` 590:5863,
+`Process / Settings field` 590:5867 and `Process / Info row` 590:5871.
+Colours are bound to Signal variables only where the hex matched exactly.
+The canvas picture is an image fill of the test pattern.
