@@ -1,5 +1,14 @@
 # abner — history
 
+## 2026-11-17 — Show Sources Render on the default Timeline page
+
+The first Sources Render action was omitted by the Timeline control builder's
+early return, so opening a single file hid it. The Timeline Sources pane now
+adds and paints Render above its transport, reserving space above the button
+for cards and the inspector. Eligibility and copying use the same action as
+the Sources page. Verified in a targeted native window capture; the build and
+four Render tests pass, including the single-file startup, drawing and click path.
+
 ## 2026-11-17 — Sources Render stream copy
 
 The Sources action area offers **Render** only after a background native packet

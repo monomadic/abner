@@ -3657,6 +3657,11 @@ impl App {
                 Action::ToggleDetail,
             ));
         }
+        if l.panel > 0.0 && !self.mask_mode && self.can_render_source() {
+            let y = if self.cut_mode { l.transport.y - 34. } else { self.vp.1 - STATUS_H - 68. };
+            out.push(Control::new(RectPx { x: l.list.x + 12., y,
+                w: l.panel - 24., h: 28. }, "Render", false, Action::RenderSource));
+        }
         if self.cut_mode {
             out.push(Control::new(bar.control(bar.content().x,92.),"Crop clip",false,Action::LaunchEditor(true)));
             if self.vp.0 >= CUT_COLUMNS_MIN_W {
@@ -3671,10 +3676,6 @@ impl App {
             return out;
         }
         if l.panel > 0.0 && !self.mask_mode {
-            if self.can_render_source() {
-                out.push(Control::new(RectPx { x: l.list.x + 12., y: self.vp.1 - STATUS_H - 68.,
-                    w: l.panel - 24., h: 28. }, "Render", false, Action::RenderSource));
-            }
             // A compact panel keeps one full-width Add button.
             let compact = l.panel < SOURCE_COMPACT_W;
             let w = if compact { l.panel - 24.0 } else { (l.panel - 32.0) / 2.0 };
@@ -4213,7 +4214,8 @@ impl App {
         // for even that it reaches past what is under it (cut mode's
         // transport, Input's status line): clip to the rail's real end
         // and drop the footer line when there is no room for it.
-        let end = if self.cut_mode { l.transport.y } else { self.vp.1 - STATUS_H };
+        let end = if self.cut_mode { l.transport.y - if self.can_render_source() { 40. } else { 0. } }
+            else { self.vp.1 - STATUS_H };
         let visible = RectPx { x: 0.0, y: l.list.y, w: l.rail, h: l.list.h.min(end - l.list.y).max(0.0) };
         items.push(Item::Clip(Some(visible)));
         for i in first..(first + self.source_capacity()).min(self.videos.len()) {
@@ -6240,7 +6242,7 @@ impl App {
         // ---- Figma timeline header ----
         let controls = self.controls();
         self.build_cut_header(items);
-        for control in controls.iter().filter(|c|matches!(c.action,Action::LaunchEditor(_))) {
+        for control in controls.iter().filter(|c|matches!(c.action,Action::LaunchEditor(_) | Action::RenderSource)) {
             ButtonBar::button(items, control.r, &control.label, control.selected,
                 self.cursor_inside && contains(control.r,self.cursor.0,self.cursor.1), self.control_dead(&control.action));
         }
@@ -7429,8 +7431,8 @@ impl Workspace {
             // Timeline Edit (12:2): the source rail, the canvas and the
             // inspector share the top; the transport and the lanes run the
             // full width underneath (compact lanes on short windows). The
-            // rail keeps its focused inspector; its action row stays in
-            // Sources, where Duplicate / Add files live.
+            // rail keeps its focused inspector and reserves a row for Render
+            // above the transport when the focused source can be copied.
             let lanes = if h >= CUT_FULL_MIN_H { CUT_TIMELINE_H } else { CUT_TIMELINE_COMPACT_H } + lift;
             // The inspector keeps its width and slides past the right edge;
             // `side_in` is the part still inside, which the canvas reclaims.
@@ -7442,7 +7444,7 @@ impl Workspace {
             let attached = surface.timeline.unwrap();
             let transport_y = attached.transport.y;
             let top = (transport_y - CUT_HEADER_H).max(1.0);
-            let (grip, inspector) = Self::detail(ox, panel, h, list_y, transport_y, detail_slide);
+            let (grip, inspector) = Self::detail(ox, panel, h, list_y, transport_y - if render_source { 40. } else { 0. }, detail_slide);
             return Self {
                 rail, panel, mini, inspector, grip,
                 list: list_of(transport_y, grip.y),
@@ -8826,6 +8828,30 @@ mod tests {
         cut.snap = Snap::Frame;
         cut.split(0.5);
         assert!(!app.can_render_source());
+    }
+
+    #[test]
+    fn source_render_is_drawn_and_clickable_on_single_file_timeline() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        app.set_cut_default(true); // Same startup path as the executable.
+        assert!(app.cut_mode);
+        assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.can_render_source()));
+        let render = app.controls().into_iter().find(|c| matches!(c.action, Action::RenderSource))
+            .expect("Timeline must expose Render in its Sources pane");
+        let ws = app.workspace();
+        assert!(render.r.y + render.r.h <= ws.transport.y);
+        assert!(ws.inspector.y + ws.inspector.h <= render.r.y);
+        let mut items = Vec::new();
+        app.build_cut_hud(&mut items, app.vp);
+        assert!(items.iter().any(|item| matches!(item, Item::Label(t)
+            if t.string == "Render" && t.rect.y < ws.transport.y)), "button must be painted, not just hit-testable");
+        app.mouse_down(render.r.x + render.r.w / 2., render.r.y + render.r.h / 2.);
+        assert!(app.source_render.is_some(), "click must launch the source copy");
+        assert!(tick_until(&mut app, Duration::from_secs(15), |a| a.source_render.is_none()));
+        for cmd in app.take_cmds() {
+            if let Cmd::AddRendered(path) = cmd { std::fs::remove_file(path).unwrap(); }
+        }
     }
 
     #[test]
