@@ -826,13 +826,22 @@ impl App {
         }
     }
 
-    fn begin_editor(&mut self, crop:bool, plugin:Option<(String,String)>) {
+    fn begin_editor(&mut self, crop:bool, plugin:Option<(String,String)>) { self.begin_editor_for(crop,plugin,false) }
+    /// The sources rail's crop button: the marquee for that SOURCE on any
+    /// page, the timeline included (where `C` crops the picked clip).
+    fn crop_source(&mut self, idx:usize) {
+        if self.crop.is_some() && self.editor.as_ref().is_some_and(|e|e.source==idx && matches!(e.owner,crate::spatial::Owner::Source)) {return}
+        if self.editor.is_some() { self.finish_editor(false); }
+        self.select(idx);
+        self.begin_editor_for(true,None,true);
+    }
+    fn begin_editor_for(&mut self, crop:bool, plugin:Option<(String,String)>, source_only:bool) {
         if !self.ready() {return}
         if self.editor.is_some() { self.finish_editor(false); }
         self.processors.input_owner(self.videos[self.active].spatial_id);
         let return_mode=self.workspace_mode();
         let owner=if let Some((id,key))=plugin { crate::spatial::Owner::Plugin{id,key} }
-            else if self.cut_mode && crop {
+            else if self.cut_mode && crop && !source_only {
                 let segment=self.cut.as_ref().and_then(|c| c.segments().into_iter().find(|s|!s.cut &&
                     if self.cut_picks.len()==1 { let p=self.cut_picks[0]; (s.start-p.0).abs()<1e-6 && (s.end-p.1).abs()<1e-6 }
                     else { self.cut_picks.is_empty() && self.t>=s.start&&self.t<s.end }));
@@ -873,7 +882,9 @@ impl App {
         self.masks[e.source]=e.original_mask;
         if apply {match e.owner {
             crate::spatial::Owner::Source=>{
-                if let Some(c)=self.crop {self.videos[e.source].input_crop=if c==Crop::full(self.videos[e.source].info.width,self.videos[e.source].info.height){None}else{Some(c)};if !matches!(self.mode,Mode::Overlay|Mode::SideBySide){self.mode=Mode::Overlay;}}
+                if let Some(c)=self.crop {self.videos[e.source].input_crop=if c==Crop::full(self.videos[e.source].info.width,self.videos[e.source].info.height){None}else{Some(c)};if !matches!(self.mode,Mode::Overlay|Mode::SideBySide){self.mode=Mode::Overlay;}
+                    // An open timeline with no crop of its own takes the source's.
+                    if self.cut_video==e.source {let c=self.videos[e.source].input_crop;if let Some(t)=self.cut.as_mut(){t.inherit_crop(c);}}}
                 else {self.masks[e.source]=draft;}
             }
             crate::spatial::Owner::Timeline{start,end}=>{if let (Some(c),Some(t))=(self.crop,self.cut.as_mut()){t.set_crop(start,end,c);}}
@@ -2543,10 +2554,13 @@ impl App {
                 for idx in first..(first + self.source_capacity()).min(self.videos.len()) {
                     if contains(self.source_card(idx), x, y) {
                         if !self.workspace().mini {
-                            for (button, remove) in self.source_hover_buttons(idx) {
+                            for (button, action) in self.source_hover_buttons(idx) {
                                 if contains(button,x,y) {
-                                    if remove { self.select(idx); self.close_active(); }
-                                    else { self.duplicate_source(idx,idx+1); }
+                                    match action {
+                                        SourceAction::Remove => { self.select(idx); self.close_active(); }
+                                        SourceAction::Duplicate => self.duplicate_source(idx,idx+1),
+                                        SourceAction::Crop => self.crop_source(idx),
+                                    }
                                     return;
                                 }
                             }
@@ -3428,20 +3442,26 @@ impl App {
 
     fn source_thumb_height(&self, index: usize) -> f32 {
         let width = (self.workspace().panel - 32.0).max(1.0);
-        let info = &self.videos[index].info;
+        let (iw, ih) = self.source_dims(index);
         // A portrait clip stops at a 4:3 card's height: `source_thumb`
         // centres the narrower preview and `source_card` hugs it, so it
         // doesn't fill the rail on its own.
-        (width * info.height.max(1) as f32 / info.width.max(1) as f32)
+        (width * ih / iw)
             .min(width * PORTRAIT_THUMB_MAX)
             .min((self.workspace().list.h - self.source_chrome()).max(1.0))
     }
 
+    /// The picture a source card shows: the clip, or its crop once it has one.
+    fn source_dims(&self, index: usize) -> (f32, f32) {
+        let v = &self.videos[index];
+        v.input_crop.map_or((v.info.width.max(1) as f32, v.info.height.max(1) as f32), |c| (c.w.max(1.0), c.h.max(1.0)))
+    }
+
     fn source_thumb(&self, index: usize) -> RectPx {
         let r = self.source_row(index);
-        let info = &self.videos[index].info;
+        let (iw, ih) = self.source_dims(index);
         let h = self.source_thumb_height(index);
-        let w = h * info.width.max(1) as f32 / info.height.max(1) as f32;
+        let w = h * iw / ih;
         RectPx { x: r.x + (r.w - w) / 2.0, y: r.y + 4.0, w, h }
     }
 
@@ -4036,10 +4056,10 @@ impl App {
     /// focused clip and on a navy surface otherwise. The hover checkbox,
     /// the shared/linked chip and the footer line are the app's batch
     /// affordances, kept where the design leaves room for them.
-    fn source_hover_buttons(&self, index: usize) -> [(RectPx, bool); 2] {
+    fn source_hover_buttons(&self, index: usize) -> [(RectPx, SourceAction); 3] {
         let thumb = self.source_thumb(index);
-        [(RectPx { x: thumb.x + thumb.w - 56., y: thumb.y + 6., w: 24., h: 24. }, false),
-         (RectPx { x: thumb.x + thumb.w - 28., y: thumb.y + 6., w: 24., h: 24. }, true)]
+        let at = |dx: f32| RectPx { x: thumb.x + thumb.w - dx, y: thumb.y + 6., w: 24., h: 24. };
+        [(at(56.), SourceAction::Duplicate), (at(28.), SourceAction::Remove), (at(84.), SourceAction::Crop)]
     }
 
     fn build_sources(&self, items: &mut Vec<Item>) {
@@ -4113,8 +4133,9 @@ impl App {
             let quad = thumb;
             items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(quad, WORKSPACE_PANEL) }));
             if v.delivered {
-                items.push(Item::Video { a: i, b: i, r: quad, uv: [0.0, 0.0, 1.0, 1.0],
-                    mode: VideoMode::Tex, p0: 6.0, p1: 0.0 });
+                let (w, h) = (v.info.width.max(1) as f32, v.info.height.max(1) as f32);
+                let uv = v.input_crop.map_or([0.0, 0.0, 1.0, 1.0], |c| [c.x / w, c.y / h, (c.x + c.w) / w, (c.y + c.h) / h]);
+                items.push(Item::Video { a: i, b: i, r: quad, uv, mode: VideoMode::Tex, p0: 6.0, p1: 0.0 });
             }
             // Overlaid, a dark strip across the preview's foot carries the
             // label: clipped flat on top, the preview's rounding below.
@@ -4157,21 +4178,35 @@ impl App {
             if v.player.failed() {
                 ui_label(items, thumb.x + 8.0, thumb.y + 52.0, 11.0, ERR, "DECODE FAILED", Align::Left, thumb.w - 16.0);
             }
-            if hover && !l.mini {
-                for (button, remove) in self.source_hover_buttons(i) {
-                    ButtonBar::button(items, button, if remove { "×" } else { "" }, false,
-                        contains(button,self.cursor.0,self.cursor.1), false);
-                    if !remove {
-                        for (dx,dy) in [(6.,6.),(9.,9.)] {
+            // The actions come up on hover; Crop stays lit on a cropped
+            // source, so the card says its picture is not the whole frame.
+            let cropped = v.input_crop.is_some();
+            if !l.mini && (hover || (cropped && !compact)) {
+                for (button, action) in self.source_hover_buttons(i) {
+                    if !hover && action != SourceAction::Crop { continue; }
+                    let over = hover && contains(button,self.cursor.0,self.cursor.1);
+                    ButtonBar::button(items, button, if action == SourceAction::Remove { "×" } else { "" },
+                        action == SourceAction::Crop && cropped, over, false);
+                    match action {
+                        SourceAction::Duplicate => for (dx,dy) in [(6.,6.),(9.,9.)] {
                             items.push(Item::Shape(figleaf::Shape::rect(figleaf::Rect::new(button.x+dx,button.y+dy,9.,9.))
                                 .radius(1.).fill(hex_color(0x514f4f)).stroke(1.,hex_color(0xe0dedb),figleaf::StrokeAlign::Inside)));
                         }
+                        // Two overlapping corners, the crop tool's mark.
+                        SourceAction::Crop => for (dx,dy,w,h) in [(8.,5.,1.5,12.5),(8.,16.,11.,1.5),(5.,7.5,11.,1.5),(14.5,7.5,1.5,11.5)] {
+                            items.push(Item::Rect(RectItem::new(RectPx { x: button.x+dx, y: button.y+dy, w, h },
+                                hex_color(if cropped { 0xffffff } else { 0xe0dedb }))));
+                        }
+                        SourceAction::Remove => {}
                     }
-                    if contains(button,self.cursor.0,self.cursor.1) {
+                    if over {
                         items.push(Item::Text(TextItem { tooltip:true, align:Align::Right, valign:VAlign::Middle,
                             bg:Some(TextBg { radius:5.,pad_x:8.,pad_y:5.,..TextBg::new(hex_color(0x26282b)) }),
-                            ..TextItem::new(button.x+button.w,button.y+button.h+15.,10.5,ink,
-                                if remove { "Remove source" } else { "Duplicate source" }) }));
+                            ..TextItem::new(button.x+button.w,button.y+button.h+15.,10.5,ink, match action {
+                                SourceAction::Remove => "Remove source",
+                                SourceAction::Duplicate => "Duplicate source",
+                                SourceAction::Crop => if cropped { "Edit crop" } else { "Crop source" },
+                            }) }));
                     }
                 }
             }
@@ -7341,6 +7376,10 @@ impl Workspace {
     }
 }
 
+/// The buttons over a source card's preview.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum SourceAction { Duplicate, Remove, Crop }
+
 #[derive(Clone, Copy)]
 enum Action { LaunchEditor(bool), ResetEdit, ApplyEdit, CancelEdit, Duplicate, OpenFiles, ToggleSources, ToggleInspector, ToggleDetail, Tool(usize), View(Mode), Autodetect, DetectionArea, UndoMask, RedoMask, Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
 #[derive(Clone, Copy, PartialEq)]
@@ -8186,6 +8225,29 @@ mod tests {
         let remove = app.source_hover_buttons(2)[1].0;
         app.mouse_down(remove.x+12.,remove.y+12.); app.mouse_up();
         assert_eq!(app.videos.len(),2); assert!(clip.exists());
+    }
+
+    #[test]
+    fn source_crop_button_crops_that_source_and_reshapes_its_thumb() {
+        let Some(clip) = test_clip() else { return; };
+        let mut app = mk_app(&clip, 2); app.vp = (1280.,1100.);
+        let before = app.source_thumb(1);
+        let crop = app.source_hover_buttons(1)[2].0;
+        app.mouse_down(crop.x+12.,crop.y+12.); app.mouse_up();
+        assert_eq!(app.active,1);
+        assert!(app.mask_mode && app.crop.is_some());
+        let (w,h) = (app.videos[1].info.width as f32, app.videos[1].info.height as f32);
+        app.crop = Some(Crop { x: 0., y: 0., w: h/2., h: h/2. });
+        app.finish_editor(true);
+        assert!(app.videos[1].input_crop.is_some() && app.videos[0].input_crop.is_none());
+        let after = app.source_thumb(1);
+        assert!((after.w/after.h-1.).abs()<1e-3, "the card takes the crop's shape");
+        assert!((before.w/before.h-w/h).abs()<1e-3);
+        // From the timeline it is still the source that is cropped.
+        app.set_cut_mode(true);
+        app.crop_source(1);
+        assert!(matches!(app.editor.as_ref().unwrap().owner, crate::spatial::Owner::Source));
+        assert_eq!(app.crop, app.videos[1].input_crop);
     }
 
     #[test]
