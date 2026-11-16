@@ -591,3 +591,8 @@ The lanes are now an unmodified instance of the library component
 own; its sample content (chapters, cuts, captions) is not this capture's
 state. One known difference is left alone: the component draws the playhead's
 timecode chip in the chapter row, the app in the tick row under the lanes.
+A later edit made the page black: the frame (#010101), the header and the
+inspector fill #000000, the header's bottom hairline and the inspector's edge
+are gone, and the lanes instance takes a #161515 ground (`CUT_TL`). In the
+app the Timeline header, rail and inspector are one black ground with no
+rules, and the clear behind the canvas's rounded corners is black.

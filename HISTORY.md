@@ -13,6 +13,11 @@ implements, so they are unchanged. Verified in a targeted window capture
 against the frame; `canvas_bar_metrics_match_across_all_pages` and the toolbar
 overlap test cover the new geometry.
 
+A second edit the same day made the page black: the Timeline header, sources
+rail and inspector share one black ground, the hairlines under the header and
+beside the rail and inspector are gone, the canvas's rounded corners cut into
+black, and the lanes ground is #161515. Other pages keep their shell colours.
+
 ## 2026-11-17 — Show Sources Render on the default Timeline page
 
 The first Sources Render action was omitted by the Timeline control builder's

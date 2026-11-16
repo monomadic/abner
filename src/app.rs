@@ -3409,7 +3409,8 @@ impl App {
             || self.cut_hot_animating()
             || self.rail_sliding();
         FrameDesc {
-            clear: FRAME_BG,
+            // Timeline's page is black, so the canvas's rounded corners cut into black.
+            clear: if self.cut_mode && self.show_ui { [0.0, 0.0, 0.0, 1.0] } else { FRAME_BG },
             uploads,
             plate: None,
             thumbs: {
@@ -6220,14 +6221,12 @@ impl App {
         let cut = self.cut.as_ref().unwrap();
         let rule = mix(0x050506, 0xffffff, 0.06);
         // Opaque shell surfaces, as in Input.
-        items.push(Item::Rect(RectItem::new(RectPx { x: 0.0, y: 0.0, w: vp.0, h: CUT_HEADER_H }, WORKSPACE_PANEL)));
-        items.push(Item::Rect(RectItem::new(l.side, hex_color(CUT_BG))));
-        items.push(Item::Rect(RectItem::new(RectPx { x: 0.0, y: CUT_HEADER_H, w: l.rail, h: l.transport.y - CUT_HEADER_H }, WORKSPACE_PANEL)));
-        for r in [RectPx { x: 0.0, y: CUT_HEADER_H - 1.0, w: vp.0, h: 1.0 },
-            RectPx { w: if l.side.w > 0.0 { 1.0 } else { 0.0 }, ..l.side },
-            RectPx { x: l.rail - 1.0, y: CUT_HEADER_H, w: if l.rail > 0.0 { 1.0 } else { 0.0 }, h: l.transport.y - CUT_HEADER_H }] {
-            items.push(Item::Rect(RectItem::new(r, rule)));
-        }
+        // Figma 612:5851: the header, the rail and the inspector are one
+        // black ground with no hairlines between them or under the header.
+        let black = hex_color(0x000000);
+        items.push(Item::Rect(RectItem::new(RectPx { x: 0.0, y: 0.0, w: vp.0, h: CUT_HEADER_H }, black)));
+        items.push(Item::Rect(RectItem::new(l.side, black)));
+        items.push(Item::Rect(RectItem::new(RectPx { x: 0.0, y: CUT_HEADER_H, w: l.rail, h: l.transport.y - CUT_HEADER_H }, black)));
         self.build_sources(items);
         self.build_inspector(items);
         // The transport and the lanes are opaque grounds painted AFTER
@@ -7333,7 +7332,7 @@ const CUT_TOOL_ON: u32 = 0x0b1926;
 /// The inspector's segmented controls: a hairlined housing on a near-black ground.
 const CUT_SEG_BG: u32 = 0x131313;
 const CUT_SEG_EDGE: u32 = 0x2d2d2d;
-const CUT_TL: u32 = 0x121212;
+const CUT_TL: u32 = 0x161515;
 /// The inspector's segment rows.
 const CUT_LANE: u32 = 0x151719;
 /// A kept piece of picture, and of sound (alternating, so neighbours part).
