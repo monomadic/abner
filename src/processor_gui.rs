@@ -1073,6 +1073,7 @@ pub struct Panel {
     registry: Arc<Mutex<Registry>>,
     pub open: bool,
     descriptors: Vec<Descriptor>,
+    descriptions: BTreeMap<String, String>,
     selected: usize,
     saved: Vec<Value>,
     enabled: Vec<bool>,
@@ -1188,6 +1189,7 @@ impl Default for Panel {
             registry: Arc::new(Mutex::new(Registry::default())),
             open: false,
             descriptors: vec![],
+            descriptions: BTreeMap::new(),
             selected: 0,
             saved: vec![],
             enabled: vec![],
@@ -1308,6 +1310,10 @@ impl Panel {
         let enabled = vec![false; descriptors.len()];
         let declarations=descriptors.iter().map(|d|(d.id.clone(),registry.get(&d.id).unwrap().spatial_inputs())).collect();
         let scales: Vec<Vec<ScaleOption>> = descriptors.iter().map(|d| registry.get(&d.id).unwrap().scales()).collect();
+        let descriptions = descriptors.iter().filter_map(|d| {
+            let description = registry.get(&d.id).ok()?.description().trim();
+            (!description.is_empty()).then(|| (d.id.clone(), description.to_owned()))
+        }).collect();
         let registry = Arc::new(Mutex::new(registry));
         let worker = (!descriptors.is_empty()).then(|| Worker::new(registry.clone()));
         let mut s = Self::default();
@@ -1316,6 +1322,7 @@ impl Panel {
         s.declarations = declarations;
         s.registry = registry;
         s.descriptors = descriptors;
+        s.descriptions = descriptions;
         s.saved = saved;
         s.enabled = enabled;
         s.switch_slides = vec![None; s.descriptors.len()];
@@ -2381,10 +2388,16 @@ impl Panel {
     }
     /// The focused processor's facts, pinned under its settings; dropped
     /// when the column is too short to keep a few settings above it.
-    fn info(vp: (f32, f32)) -> RectPx {
+    fn info_description(&self) -> Option<&str> {
+        let descriptor = self.descriptors.get(self.selected)?;
+        self.descriptions.get(&descriptor.id).map(String::as_str)
+    }
+
+    fn info(&self, vp: (f32, f32)) -> RectPx {
         let w = Self::right(vp);
         let bottom = Self::bottom(vp);
-        let h = if bottom - HEADER_H - 158.0 - RAIL_INSPECTOR_H < 96.0 { 0.0 } else { RAIL_INSPECTOR_H };
+        let height = RAIL_INSPECTOR_H + self.info_description().map_or(0.0, |_| 42.0);
+        let h = if bottom - HEADER_H - 158.0 - height < 96.0 { 0.0 } else { height };
         RectPx { x: vp.0 - w, y: bottom - h, w, h }
     }
     /// The renders pane's rows, under its heading strip.
@@ -2577,7 +2590,7 @@ impl Panel {
             if index == 0 && name.is_some() { set_caret(items, &self.text_cursor, caret); }
         }
         items.push(Item::Rect(RectItem::new(RectPx { x, y: top + 136.0, w, h: 1.0 }, hex_color(0x303234))));
-        let clip = RectPx { x: x - 16.0, y: top + 158.0, w: Self::right(vp), h: (Self::info(vp).y - top - 158.0).max(1.0) };
+        let clip = RectPx { x: x - 16.0, y: top + 158.0, w: Self::right(vp), h: (self.info(vp).y - top - 158.0).max(1.0) };
         items.push(Item::Clip(Some(clip)));
         for (i, f) in self.fields.iter().enumerate() {
             let row = self.row(i, vp);
@@ -2703,7 +2716,7 @@ impl Panel {
             }
             self.scroll = (self.scroll - dy).clamp(
                 0.0,
-                (self.settings_height() - (Self::info(vp).y - 210.0)).max(0.0),
+                (self.settings_height() - (self.info(vp).y - 210.0)).max(0.0),
             );
             return true;
         }
@@ -2816,7 +2829,7 @@ impl Panel {
             }
             return true;
         }
-        if y < Self::info(vp).y && y >= HEADER_H + 158.0 {
+        if y < self.info(vp).y && y >= HEADER_H + 158.0 {
             self.preset_name=None;
             for i in 0..self.fields.len() {
                 let row = self.row(i, vp);
@@ -3315,7 +3328,7 @@ impl Panel {
     /// rows between solid hairlines (categories first) and the registry ID
     /// where Sources puts the path.
     fn draw_info(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
-        let pane = Self::info(vp);
+        let pane = self.info(vp);
         if pane.h <= 0.0 || self.descriptors.is_empty() {
             return;
         }
@@ -3333,6 +3346,20 @@ impl Panel {
             ..TextItem::new(badge.x + 12.0, badge.y + 12.0, 14.0, hex_color(0x161616), (i + 1).to_string()) }));
         items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(pane.w - 80.0),
             ..TextItem::new(x0 + 32.0, y + 28.0, 13.0, hex_color(SOURCE_INK), d.name.as_str()) }));
+        let description_height = if let Some(description) = self.info_description() {
+            let area = RectPx { x: x0 + 32.0, y: y + 42.0, w: (x1 - x0 - 32.0).max(1.0), h: 42.0 };
+            items.push(Item::Clip(Some(area)));
+            items.push(Item::Text(TextItem {
+                inspector: 1,
+                wrap: Some(area.w),
+                ..TextItem::new(area.x, area.y, 11.0, hex_color(0xa3a5a8), description)
+            }));
+            items.push(Item::Clip(Some(pane)));
+            area.h
+        } else {
+            0.0
+        };
+        let y = y + description_height;
         for ry in [y + 49.0, y + 178.0] {
             items.push(Item::Rect(RectItem::new(
                 RectPx { x: x0, y: ry, w: x1 - x0, h: 1.0 }, hex_color(0x303234))));
