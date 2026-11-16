@@ -546,3 +546,33 @@ and bottom (`RAIL_PAD_Y`); the processor box and renders pane are 260px wide
 in a 280px rail, chips wrap between 23px and 16px from the edges, and the
 Move up / down buttons are 27px tall with a 9px gap in a 39px strip
 (`ACTIONS_H`). The grip keeps the Sources rail's 14px strip (9 in the frame).
+
+### Timeline screen export (2026-11-17)
+
+The native Timeline page is `612:5851`, "Timeline / Native app · Ready", on
+**04 · Screens** in the Signal file (`oDvZ81OLuzewiI2oLcqeVU`), below the
+Process frame and its components. It was rebuilt as editable layers from a
+1280×800 window capture (`--cut 6,9` on a 20 s test clip with sound: one clip,
+a selection whose out snapped from 9 s to the 10 s keyframe, the playhead on
+the in point, and the inspector on Info, which is now its default tab).
+The frame is nested auto layout: header / body / transport / lanes / status
+vertically; the sources rail, canvas and inspector across the body; each lane
+a row of gutter + track; the ruler, the picture clip's GOP cells and the sound
+clip's peaks are rows of equal fills. Spacing is padding and gaps chosen to
+land within a pixel or two of the capture, not the app's own rectangles.
+Only what rides OVER the layout is absolutely positioned: the frame badge on
+the canvas, the zoom thumb, and in the lanes the in / out markers, the dashed
+"as asked" line and the playhead (itself a vertical stack: pin, stem, chip).
+The header is a copy of the Process frame's `Header / mode + session` instance
+with the selected-tab overrides moved to Timeline. Inspector rows and the
+status-line buttons are instances of local components under the frame:
+`Timeline / Footer button` 612:5839 (Label, Key), `Timeline / Info row`
+612:5843 (Label, Value) and the set `Timeline / Info section header` 613:5921
+(Title; Kind = Picture / Sound / Keyframes picks the icon).
+Colours are bound to Signal variables only where the hex matched exactly
+(blue, the Night canvas, raised and transport-bar surfaces). The canvas and
+thumbnail pictures reuse the Process frame's test-pattern image fill.
+Not carried over: the diagonal hatching on GOP cells whose thumbnails have not
+loaded (flat `CUT_FILM` cells), the Split button's glyph, and the exact
+waveform. The icons are redrawn as vectors; the app draws them from rects and
+triangles, so there is no source SVG to import.

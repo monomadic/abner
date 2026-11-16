@@ -248,7 +248,8 @@ pub struct App {
     /// A lone clip opens on the timeline (main.rs turns this on; tests leave
     /// it off so Sources stays the layout they exercise).
     cut_default: bool,
-    /// The inspector's tab (0 chapters, 1 streams) and its chapter view.
+    /// The inspector's tab (0 chapters, 1 info — the default — 2 subtitles,
+    /// 3 segments) and its chapter view.
     cut_tab: usize,
     /// Only discrete seeks/framesteps adopt a decoded timestamp; pointer seeks stay pinned.
     adopt_seek: bool,
@@ -750,7 +751,7 @@ impl App {
             cut_mode: false,
             cut_default: false,
             cut_drag: None,
-            cut_tab: 0,
+            cut_tab: 1,
             adopt_seek: false,
             cut_scrub_press: None,
             cut_hover_at: None,
@@ -8568,9 +8569,9 @@ mod tests {
             for viewport in [sources.canvas,timeline.canvas,export.video] {
                 assert_eq!(viewport.y,HEADER_H+ButtonBar::HEIGHT);
             }
-            for bar in [sources.surface.button_bar.unwrap(),timeline.surface.button_bar.unwrap(),export.canvas.button_bar.unwrap()] {
             // Process keeps the same bar under its picture, which meets the header.
             assert_eq!(process.y,HEADER_H);
+            for bar in [sources.surface.button_bar.unwrap(),timeline.surface.button_bar.unwrap(),export.canvas.button_bar.unwrap()] {
                 assert_eq!(bar.r.h,ButtonBar::HEIGHT);
                 let control=bar.control(bar.content().x,60.);
                 assert_eq!(control.y,HEADER_H+ButtonBar::PADDING_Y);
@@ -8978,6 +8979,7 @@ mod tests {
         assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.cut.as_ref().is_some_and(|c| !c.scanning())));
         assert!(tick_until(&mut app, Duration::from_secs(5), |a| a.t > 2.3));
         app.key(Key::Space);
+        app.cut_tab = 0;
         for _ in 0..3 { app.tick(0.0, (1280.0, 800.0), 2.0); }
         let side = app.cut_side();
         let add = |app: &mut App| { app.mouse_down(side.add_btn.x + 4.0, side.add_btn.y + 4.0); app.mouse_up(); };
@@ -9195,6 +9197,11 @@ mod tests {
         assert_eq!(app.cut.as_ref().unwrap().chapters.len(), 2);
         assert!(!app.cut.as_ref().unwrap().facts.chips.is_empty(), "the stream chips never arrived");
 
+        // The inspector opens on Info; the chapters tab is the first icon.
+        assert_eq!(app.cut_tab, 1);
+        let side = app.cut_side();
+        app.mouse_down(side.tab[0].x + 4.0, side.tab[0].y + 4.0);
+        app.mouse_up();
         // Chapter rows seek to their chapter.
         assert_eq!(app.cut_tab, 0);
         let rows = app.cut_chapter_rows();
