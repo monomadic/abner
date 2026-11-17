@@ -16,7 +16,9 @@ overlap test cover the new geometry.
 A second edit the same day made the page black: the Timeline header, sources
 rail and inspector share one black ground, the hairlines under the header and
 beside the rail and inspector are gone, the canvas's rounded corners cut into
-black, and the lanes ground is #161515. Other pages keep their shell colours.
+black, and the lanes ground is #161515. The black header with no line under
+it then went to Sources, Process and Export as well; their rails and panes
+keep their colours.
 
 ## 2026-11-17 — Show Sources Render on the default Timeline page
 

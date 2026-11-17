@@ -3395,8 +3395,7 @@ impl App {
             items.clear();
             self.export_page.draw(&mut items,vp,self.active,n+1,&self.videos[self.active].info,self.cursor,self.videos[self.active].shown_pts,self.show_ui,self.view());
             if self.show_ui {
-            items.push(Item::Rect(RectItem::new(RectPx{x:0.,y:0.,w:vp.0,h:HEADER_H},WORKSPACE_PANEL)));
-            items.push(Item::Rect(RectItem::new(RectPx { x: 0., y: HEADER_H - 1., w: vp.0, h: 1. }, WORKSPACE_RULE)));
+            items.push(Item::Rect(RectItem::new(RectPx{x:0.,y:0.,w:vp.0,h:HEADER_H},hex_color(0x000000))));
             self.mode_selector().draw(&mut items,self.cursor,self.cursor_inside);
             let (text, lamp) = self.encode_status();
             draw_status_chip(&mut items, self.status_chip(), lamp, text, WORKSPACE_TEXT);
@@ -4033,13 +4032,13 @@ impl App {
         let l = self.workspace();
         let panel = WORKSPACE_PANEL;
         // Opaque shell surfaces keep zoomed footage out of the interface.
-        for r in [RectPx { x: 0.0, y: 0.0, w: vp.0, h: HEADER_H },
-            RectPx { x: 0.0, y: HEADER_H, w: l.rail, h: vp.1 - HEADER_H - STATUS_H },
+        for r in [RectPx { x: 0.0, y: HEADER_H, w: l.rail, h: vp.1 - HEADER_H - STATUS_H },
             l.transport] {
             items.push(Item::Rect(RectItem::new(r, panel)));
         }
-        for r in [RectPx { x: 0.0, y: HEADER_H - 1.0, w: vp.0, h: 1.0 },
-            RectPx { x: l.rail - 1.0, y: HEADER_H, w: 1.0, h: vp.1 - HEADER_H - STATUS_H },
+        // The header is black with no line under it on every page (Figma 612:5852).
+        items.push(Item::Rect(RectItem::new(RectPx { x: 0.0, y: 0.0, w: vp.0, h: HEADER_H }, hex_color(0x000000))));
+        for r in [RectPx { x: l.rail - 1.0, y: HEADER_H, w: 1.0, h: vp.1 - HEADER_H - STATUS_H },
             RectPx { x: l.rail, y: l.canvas.y - 1.0, w: l.canvas.w, h: 1.0 },
             RectPx { x: l.rail, y: l.transport.y, w: l.canvas.w, h: 1.0 }] {
             items.push(Item::Rect(RectItem::new(r, WORKSPACE_RULE)));
