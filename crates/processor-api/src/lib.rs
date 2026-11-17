@@ -1,6 +1,6 @@
 //! Streaming CPU frame contracts, including optional host-negotiated layouts.
 //! No media implementation dependencies.
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 mod formats;
 mod spatial;
 pub use formats::*;
@@ -77,15 +77,61 @@ impl Frame {
         Ok(())
     }
 }
-#[derive(Clone, Serialize)]
+/// A phase-local report: what a stage is doing and how far into THAT phase it
+/// is. `completed / total` describes this phase only; a stage may run several
+/// phases inside one call, each restarting at 0, so the host never reads it as
+/// frame or job progress. Hosts show it as detail ("Tiles 3/12"). Unchanged
+/// since API 0.2 (fields and JSON shape) so existing plugins keep compiling.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Progress {
     pub phase: String,
     pub completed: u64,
     pub total: Option<u64>,
 }
-/// Optional in-flight updates, including work inside a single process() call.
-/// The host callback must return promptly. Percentages describe this phase only.
+impl Progress {
+    /// `completed / total` in 0..=1, or `None` when the total is unknown or 0.
+    pub fn fraction(&self) -> Option<f64> {
+        self.total
+            .filter(|t| *t > 0)
+            .map(|t| self.completed.min(t) as f64 / t as f64)
+    }
+}
+/// Optional in-flight phase reports, including work inside a single process()
+/// call. The host callback must return promptly. Percentages describe this
+/// phase only; report [`FrameProgress`] for the whole call's share.
 pub type ProgressReporter = Arc<dyn Fn(Progress) + Send + Sync>;
+
+/// How far the CURRENT call (`process`, `process_video`, `process_with_inputs`,
+/// `finish`, `finish_video`) is through ALL of its work: every step that call
+/// performs before it returns, counted once (e.g. VAE encode tiles + transformer
+/// blocks + decode tiles + colour pass = 63 steps). This is the frame bar.
+///
+/// Contract:
+/// - Report only while one of those calls is running, from any thread.
+/// - `total` is the whole call's step count, > 0, and stays the same within
+///   the call; `completed` never decreases within the call and is ≤ `total`.
+/// - Every call starts over: the first report of a call may be `completed: 0`.
+/// - `phase` names the step in progress; it may change freely within the call
+///   without restarting the count.
+/// - Reaching `total` does not mean output was delivered; the host finishes the
+///   frame when the call returns.
+///
+/// The host owns job totals (frames done of frames to do) and folds this
+/// fraction into them, so the total bar moves smoothly during slow frames.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrameProgress {
+    pub phase: String,
+    pub completed: u64,
+    pub total: u64,
+}
+impl FrameProgress {
+    /// `completed / total` in 0..=1, or `None` for a zero total.
+    pub fn fraction(&self) -> Option<f64> {
+        (self.total > 0).then(|| self.completed.min(self.total) as f64 / self.total as f64)
+    }
+}
+/// Receives [`FrameProgress`]. Must return promptly.
+pub type FrameProgressReporter = Arc<dyn Fn(FrameProgress) + Send + Sync>;
 
 #[derive(Clone, Copy, Default, Serialize)]
 pub enum Role {
@@ -189,8 +235,13 @@ pub trait Session {
     /// Lets implementations aggregate required warmup/context work for progress;
     /// it must not change the model's output or truncate required input history.
     fn set_preview_target(&mut self, _pts: i64, _time_base: [u32; 2]) {}
-    /// Implementations may retain this callback to report progress during work.
+    /// Implementations may retain this callback to report phase-local
+    /// progress ([`Progress`]) during work.
     fn set_progress_reporter(&mut self, _reporter: ProgressReporter) {}
+    /// Implementations whose calls are slow (seconds or more per frame) should
+    /// retain this callback and report [`FrameProgress`] for the whole call.
+    /// Wrapping sessions must forward it. Both reporters may be used together.
+    fn set_frame_progress_reporter(&mut self, _reporter: FrameProgressReporter) {}
     fn process(&mut self, _input: Frame) -> Result<Vec<Frame>> {
         Err("session requires negotiated frames".into())
     }
@@ -210,7 +261,8 @@ pub trait Session {
     }
     fn output_dimensions(&self) -> [usize; 2];
     fn cancellation(&self) -> Cancellation;
-    /// Completed output frames; the host owns timeline totals and job-wide progress.
+    /// Completed output frames. The host owns timeline totals and job-wide
+    /// progress; per-call work goes through [`FrameProgress`].
     fn progress(&self) -> Progress;
 }
 /// An integer upscale a processor offers, and the settings overlay that

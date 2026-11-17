@@ -337,9 +337,9 @@ fn packet_hash(
     }
     Ok(hash.finalize().into())
 }
-/// The phase of the job-level report: frames written out of the whole clip's.
-/// Every other report is a stage's own, about the work in front of it.
-pub const JOB_PHASE: &str = "Encoded frames";
+/// What a job reports: frames encoded out of the clip's, the in-flight frame's
+/// share folded in, and the working stage's frame and phase reports.
+pub type JobReporter = std::sync::Arc<dyn Fn(&crate::progress::JobProgress) + Send + Sync>;
 
 /// Run a complete, ordered job. Currently accepts zero-start CFR MP4/MOV SDR
 /// sources and writes ProRes HQ MOV. Rejects unsupported formats before inference.
@@ -348,7 +348,7 @@ pub fn run(
     job: &Job,
     registry: &Registry,
     cancel: &Cancellation,
-    progress: abner_processor_api::ProgressReporter,
+    progress: JobReporter,
 ) -> Result<Report> {
     cancel.check()?;
     if job.output.symlink_metadata().is_ok() {
@@ -524,7 +524,9 @@ pub fn run(
         job.memory_bytes,
         cancel.clone(),
     )?;
-    chain.set_progress_reporter(progress.clone());
+    let tracker = crate::progress::ProgressTracker::new(chain.stages(), progress);
+    chain.track(&tracker);
+    tracker.frames(0, Some(expected_frames));
     let [ow, oh] = chain.dimensions();
     if !ow.is_multiple_of(2) || !oh.is_multiple_of(2) {
         return Err("ProRes output requires even dimensions".into());
@@ -590,11 +592,7 @@ pub fn run(
                 )
                 .map_err(err)?;
                 frames += 1;
-                progress(abner_processor_api::Progress {
-                    phase: JOB_PHASE.into(),
-                    completed: frames as u64,
-                    total: Some(expected_frames.max(frames as u64)),
-                });
+                tracker.frames(frames as u64, Some(expected_frames));
             }
             Ok(())
         };

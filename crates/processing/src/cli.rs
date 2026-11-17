@@ -3,6 +3,7 @@ use crate::{
     Stage,
     media::{self, Job},
 };
+use crate::progress::JobProgress;
 use abner_processor_api::{Cancellation, Registry, Result};
 use std::{
     collections::BTreeMap,
@@ -129,7 +130,17 @@ pub fn run_args(registry: &Registry, args: impl IntoIterator<Item = String>) -> 
         &cancellation,
         Arc::new({
             let started = std::time::Instant::now();
-            move |p| eprintln!("{}", progress_line(&p, started.elapsed().as_secs_f64()))
+            // One line per visible change: a 63-step frame prints its steps,
+            // not every repeated snapshot.
+            let last = std::sync::Mutex::new(String::new());
+            move |p: &JobProgress| {
+                let line = progress_line(p, started.elapsed().as_secs_f64());
+                let mut last = last.lock().unwrap_or_else(|e| e.into_inner());
+                if *last != line {
+                    eprintln!("{line}");
+                    *last = line;
+                }
+            }
         }),
     );
     drop(signals);
@@ -150,20 +161,30 @@ fn remaining(seconds: f64) -> String {
         format!("{s}s")
     }
 }
-/// One stderr line per report. A stage's report shows its own fraction; the
-/// job-level one adds the whole clip's percentage and the time left at the
-/// pace so far, `elapsed` seconds into the job.
-fn progress_line(p: &abner_processor_api::Progress, elapsed: f64) -> String {
-    let Some(total) = p.total.filter(|t| *t > 0) else {
-        return format!("{}: {}", p.phase, p.completed);
+/// One stderr line per report: the whole job first (frames encoded, the
+/// total share with the in-flight frame folded in, time left at the pace so
+/// far, `elapsed` seconds into the job), then the frame bar (the working
+/// stage's steps in its current call) or, without one, the stage's own phase.
+fn progress_line(p: &JobProgress, elapsed: f64) -> String {
+    let mut line = match p.frames_total.filter(|t| *t > 0) {
+        Some(total) => format!("Encoded frames: {}/{total}", p.frames_done.min(total)),
+        None => format!("Encoded frames: {}", p.frames_done),
     };
-    let done = p.completed.min(total);
-    let mut line = format!("{}: {done}/{total}", p.phase);
-    if p.phase == media::JOB_PHASE {
-        line.push_str(&format!(" · {}%", done * 100 / total));
-        if done > 0 && done < total {
-            let left = elapsed / done as f64 * (total - done) as f64;
-            line.push_str(&format!(" · ~{} left", remaining(left)));
+    if let Some(fraction) = p.fraction {
+        line.push_str(&format!(" · {:.0}%", (fraction * 100.).floor()));
+        if fraction > 0. && fraction < 1. {
+            line.push_str(&format!(" · ~{} left", remaining(elapsed / fraction * (1. - fraction))));
+        }
+    }
+    let stage = p.stage.map_or_else(String::new, |s| format!("stage {} ", s + 1));
+    if let Some(f) = &p.frame {
+        let phase = if f.phase.trim().is_empty() { "processing" } else { &f.phase };
+        line.push_str(&format!(" · {stage}frame {}/{} {phase}", f.completed.min(f.total), f.total));
+    } else if let Some(d) = &p.detail {
+        let phase = if d.phase.trim().is_empty() { "Processing" } else { &d.phase };
+        match d.total.filter(|t| *t > 0) {
+            Some(t) => line.push_str(&format!(" · {stage}{phase} {}/{t}", d.completed.min(t))),
+            None => line.push_str(&format!(" · {stage}{phase}")),
         }
     }
     line
@@ -224,34 +245,32 @@ impl Drop for Signals {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use abner_processor_api::Progress;
+    use abner_processor_api::{FrameProgress, Progress};
+    fn job(done: u64, total: Option<u64>, fraction: Option<f64>) -> JobProgress {
+        JobProgress { frames_done: done, frames_total: total, fraction, ..Default::default() }
+    }
     #[test]
-    fn job_report_adds_whole_clip_percentage_and_time_left() {
-        let line = |phase: &str, completed, total, elapsed| {
-            progress_line(
-                &Progress {
-                    phase: phase.into(),
-                    completed,
-                    total,
-                },
-                elapsed,
-            )
-        };
-        assert_eq!(line("Tiles", 3, None, 9.), "Tiles: 3");
-        assert_eq!(line("Tiles", 3, Some(0), 9.), "Tiles: 3");
-        // A stage's fraction is about its own work, so it gets no clip estimate.
-        assert_eq!(line("Tiles", 3, Some(12), 9.), "Tiles: 3/12");
+    fn job_line_shows_total_then_frame_or_phase() {
+        assert_eq!(progress_line(&job(3, None, None), 9.), "Encoded frames: 3");
         assert_eq!(
-            line(media::JOB_PHASE, 30, Some(120), 600.),
+            progress_line(&job(30, Some(120), Some(0.25)), 600.),
             "Encoded frames: 30/120 · 25% · ~30m 00s left"
         );
-        assert_eq!(
-            line(media::JOB_PHASE, 119, Some(120), 119.),
-            "Encoded frames: 119/120 · 99% · ~1s left"
-        );
-        // Nothing to extrapolate from before the first frame or after the last.
-        assert_eq!(line(media::JOB_PHASE, 0, Some(120), 50.), "Encoded frames: 0/120 · 0%");
-        assert_eq!(line(media::JOB_PHASE, 130, Some(120), 50.), "Encoded frames: 120/120 · 100%");
+        // Nothing to extrapolate from before the first step or after the last.
+        assert_eq!(progress_line(&job(0, Some(120), Some(0.)), 50.), "Encoded frames: 0/120 · 0%");
+        assert_eq!(progress_line(&job(130, Some(120), Some(1.)), 50.), "Encoded frames: 120/120 · 100%");
+        // A slow single frame: the total moves with the frame's steps.
+        let mut p = job(0, Some(1), Some(0.5));
+        p.stage = Some(0);
+        p.frame = Some(FrameProgress { phase: "transformer".into(), completed: 31, total: 62 });
+        assert_eq!(progress_line(&p, 60.), "Encoded frames: 0/1 · 50% · ~1m 00s left · stage 1 frame 31/62 transformer");
+        // A stage without frame progress shows its phase, never as a total.
+        p.frame = None;
+        p.fraction = Some(0.);
+        p.detail = Some(Progress { phase: "Tiles".into(), completed: 3, total: Some(12) });
+        assert_eq!(progress_line(&p, 9.), "Encoded frames: 0/1 · 0% · stage 1 Tiles 3/12");
+        p.detail = Some(Progress { phase: String::new(), completed: 3, total: None });
+        assert_eq!(progress_line(&p, 9.), "Encoded frames: 0/1 · 0% · stage 1 Processing");
         assert_eq!(remaining(7300.), "2h 01m");
     }
 }

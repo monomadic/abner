@@ -265,6 +265,9 @@ impl Session for Rgb16Boundary {
     fn set_progress_reporter(&mut self, r: abner_processor_api::ProgressReporter) {
         self.sessions[0].set_progress_reporter(r)
     }
+    fn set_frame_progress_reporter(&mut self, r: abner_processor_api::FrameProgressReporter) {
+        self.sessions[0].set_frame_progress_reporter(r)
+    }
     fn set_preview_target(&mut self, p: i64, t: [u32; 2]) {
         self.sessions[0].set_preview_target(p, t)
     }

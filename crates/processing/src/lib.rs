@@ -4,6 +4,7 @@ pub mod cli;
 pub mod color;
 pub mod media;
 pub mod negotiation;
+pub mod progress;
 use abner_processor_api::{Cancellation, Frame, InputRequirement, Registry, Result, Role, Session};
 use serde::{Deserialize, Serialize};
 
@@ -227,6 +228,19 @@ impl Chain {
         for session in &mut self.sessions {
             session.set_progress_reporter(reporter.clone());
         }
+    }
+    /// Report every stage to `tracker`: phase detail, frame progress, and the
+    /// end of each call. Call before negotiating or processing.
+    pub fn track(&mut self, tracker: &progress::ProgressTracker) {
+        let sessions = std::mem::take(&mut self.sessions);
+        self.sessions = sessions
+            .into_iter()
+            .enumerate()
+            .map(|(i, s)| Box::new(progress::CallBoundary::tracked(s, tracker, i)) as Box<dyn Session>)
+            .collect();
+    }
+    pub fn stages(&self) -> usize {
+        self.sessions.len()
     }
     pub fn process(&mut self, frame: Frame) -> Result<Vec<Frame>> {
         if self.closed || self.plan.is_some() {

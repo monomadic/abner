@@ -20,7 +20,7 @@ use crate::{
     },
 };
 use abner_processor_api::{
-    Cancellation, Capabilities, Category, Descriptor, Frame, InputRequirement, Progress, Rate,
+    Cancellation, Capabilities, Category, Descriptor, Frame, FrameProgress, InputRequirement, Progress, Rate,
     Registry, Role, ScaleOption, Session,
 };
 use serde_json::{Value, json};
@@ -487,8 +487,47 @@ struct StageFeedback {
     name: String,
     index: usize,
     count: usize,
+    /// The stage's latest phase-local report: detail, never the total bar.
     progress: Progress,
+    /// The stage's report for its current call (the frame bar); cleared when
+    /// the call returns.
+    frame: Option<FrameProgress>,
     rates: RateSnapshot,
+}
+/// One stage's live reporting state in a preview render: both reporters and
+/// the call boundaries publish a full snapshot into the worker's live slot.
+struct StageLive {
+    live: Option<LiveProgress>,
+    generation: u64,
+    name: String,
+    index: usize,
+    count: usize,
+    frames: Arc<AtomicU64>,
+    state: Mutex<(StageClock, Progress, Option<FrameProgress>)>,
+}
+impl StageLive {
+    fn publish(&self, state: &(StageClock, Progress, Option<FrameProgress>)) {
+        if let Some(live) = &self.live {
+            // One latest snapshot: tile callbacks never fill the frame channel
+            // or leave the UI displaying a queue of obsolete percentages.
+            *live.lock().unwrap() = Some((self.generation, StageFeedback {
+                name: self.name.clone(), index: self.index, count: self.count,
+                progress: state.1.clone(), frame: state.2.clone(), rates: state.0.rates,
+            }));
+        }
+    }
+    fn phase(&self, progress: Progress) {
+        let mut state = self.state.lock().unwrap();
+        state.0.sample(&progress, self.frames.load(Ordering::Relaxed), Instant::now());
+        state.1 = progress;
+        self.publish(&state);
+    }
+    fn frame(&self, frame: Option<FrameProgress>) {
+        let mut state = self.state.lock().unwrap();
+        if frame.is_none() && state.2.is_none() { return; }
+        state.2 = frame;
+        self.publish(&state);
+    }
 }
 #[derive(Clone, Copy)]
 struct RateSnapshot {
@@ -540,10 +579,22 @@ fn remaining_label(seconds: f64) -> String {
     else { format!("{seconds}s") }
 }
 impl StageFeedback {
+    /// The phase-local fraction: the stage's own detail, not the frame's.
     fn fraction(&self) -> Option<f32> {
-        self.progress.total.filter(|total| *total > 0).map(|total| {
-            (self.progress.completed.min(total) as f64 / total as f64) as f32
-        })
+        self.progress.fraction().map(|f| f as f32)
+    }
+    /// How far the stage's current call is: the frame bar.
+    fn frame_fraction(&self) -> Option<f64> {
+        self.frame.as_ref().and_then(FrameProgress::fraction)
+    }
+    /// The status line: the call's steps when the stage reports them.
+    fn status(&self) -> String {
+        match &self.frame {
+            Some(f) => format!("{} · {} · step {}/{}", self.name,
+                if f.phase.trim().is_empty() { "Processing" } else { &f.phase },
+                f.completed.min(f.total), f.total),
+            None => stage_status(&self.name, &self.progress),
+        }
     }
 }
 enum Event {
@@ -559,7 +610,7 @@ fn stage_status(name: &str, progress: &Progress) -> String {
     };
     match progress.total.filter(|total| *total > 0) {
         Some(total) => format!(
-            "{name} · {phase} · {:.0}% of stage",
+            "{name} · {phase} · {:.0}% of phase",
             (progress.completed.min(total) as f64 / total as f64 * 100.0).floor()
         ),
         None => format!("{name} · {phase} · working"),
@@ -609,6 +660,9 @@ struct ReportingSession {
     report: abner_processor_api::ProgressReporter,
     frames: Arc<AtomicU64>,
     callbacks: Arc<AtomicU64>,
+    /// Runs at the start and end of every call: a frame report describes
+    /// only the call it came from.
+    call_boundary: Arc<dyn Fn() + Send + Sync>,
 }
 impl Session for ReportingSession {
     fn format_pairs(&self) -> Vec<abner_processor_api::FormatPair> { self.inner.format_pairs() }
@@ -616,7 +670,9 @@ impl Session for ReportingSession {
     fn process_video(&mut self, input: VideoFrame) -> Result<Vec<VideoFrame>, String> {
         let before = self.callbacks.load(Ordering::Relaxed);
         if before == 0 { (self.report)(Progress { phase: "Processing".into(), completed: 0, total: None }); }
+        (self.call_boundary)();
         let result = self.inner.process_video(input);
+        (self.call_boundary)();
         if let Ok(frames) = &result { self.frames.fetch_add(frames.len() as u64, Ordering::Relaxed); }
         if self.callbacks.load(Ordering::Relaxed) == before { (self.report)(self.inner.progress()); }
         result
@@ -624,7 +680,9 @@ impl Session for ReportingSession {
     fn finish_video(&mut self) -> Result<Vec<VideoFrame>, String> {
         let before = self.callbacks.load(Ordering::Relaxed);
         if before == 0 { (self.report)(Progress { phase: "Finishing buffered frames".into(), completed: 0, total: None }); }
+        (self.call_boundary)();
         let result = self.inner.finish_video();
+        (self.call_boundary)();
         if let Ok(frames) = &result { self.frames.fetch_add(frames.len() as u64, Ordering::Relaxed); }
         if self.callbacks.load(Ordering::Relaxed) == before { (self.report)(self.inner.progress()); }
         result
@@ -636,7 +694,9 @@ impl Session for ReportingSession {
             completed: 0,
             total: None,
         }); }
+        (self.call_boundary)();
         let result = self.inner.process(input);
+        (self.call_boundary)();
         if let Ok(frames) = &result { self.frames.fetch_add(frames.len() as u64, Ordering::Relaxed); }
         if self.callbacks.load(Ordering::Relaxed) == before { (self.report)(self.inner.progress()); }
         result
@@ -648,7 +708,9 @@ impl Session for ReportingSession {
             completed: 0,
             total: None,
         }); }
+        (self.call_boundary)();
         let result = self.inner.finish();
+        (self.call_boundary)();
         if let Ok(frames) = &result { self.frames.fetch_add(frames.len() as u64, Ordering::Relaxed); }
         if self.callbacks.load(Ordering::Relaxed) == before { (self.report)(self.inner.progress()); }
         result
@@ -810,17 +872,13 @@ fn render(
         let live = live.cloned();
         let frames = Arc::new(AtomicU64::new(0));
         let counted = frames.clone();
-        let clock = Mutex::new(StageClock::new(Instant::now()));
-        let report: abner_processor_api::ProgressReporter = Arc::new(move |progress| {
-            if let Some(live) = &live {
-                // One latest snapshot: tile callbacks never fill the frame channel
-                // or leave the UI displaying a queue of obsolete percentages.
-                *live.lock().unwrap() = Some((generation, StageFeedback {
-                    name: name.clone(), index, count,
-                    rates: clock.lock().unwrap().sample(&progress, counted.load(Ordering::Relaxed), Instant::now()),
-                    progress,
-                }));
-            }
+        let stage = Arc::new(StageLive {
+            live, generation, name, index, count, frames: counted,
+            state: Mutex::new((StageClock::new(Instant::now()), Progress::default(), None)),
+        });
+        let report: abner_processor_api::ProgressReporter = Arc::new({
+            let stage = stage.clone();
+            move |progress| stage.phase(progress)
         });
         report(Progress { phase: "Preparing processor".into(), completed: 0, total: None });
         let mut session = abner_processor_api::create_bound(factory,stage_dims[0],stage_dims[1],settings,r.inputs.bindings.get(id).cloned().unwrap_or_default())?;
@@ -834,11 +892,16 @@ fn render(
             observed.fetch_add(1, Ordering::Relaxed);
             detailed(progress);
         }));
+        session.set_frame_progress_reporter(Arc::new({
+            let stage = stage.clone();
+            move |frame| stage.frame(Some(frame))
+        }));
         let session: Box<dyn Session> = Box::new(ReportingSession {
             inner: session,
             report,
             frames,
             callbacks,
+            call_boundary: Arc::new(move || stage.frame(None)),
         });
         let session: Box<dyn Session> = if downsize > 1 {
             Box::new(Downsized { inner: Box::new(abner_processing::negotiation::Rgb16Boundary::new(session, r.budget)?), factor: downsize })
@@ -1042,6 +1105,9 @@ impl Session for Downsized {
     fn set_progress_reporter(&mut self, reporter: abner_processor_api::ProgressReporter) {
         self.inner.set_progress_reporter(reporter);
     }
+    fn set_frame_progress_reporter(&mut self, reporter: abner_processor_api::FrameProgressReporter) {
+        self.inner.set_frame_progress_reporter(reporter);
+    }
     fn process(&mut self, input: Frame) -> Result<Vec<Frame>, String> {
         let (w, h) = ((input.width / self.factor).max(1), (input.height / self.factor).max(1));
         let pixels = crate::resample::spline_resize_rgb16(&input.pixels, input.width, input.height, w, h);
@@ -1154,6 +1220,9 @@ pub struct Panel {
     pending: Option<f64>,
     progress: Option<(usize, usize)>,
     busy_since: Instant,
+    /// The total bar's high-water mark for the running render: a stage
+    /// restarting its count never moves the bar backwards.
+    render_floor: std::cell::Cell<f32>,
     playback: bool,
     editing: Option<(usize, String)>,
     scroll: f32,
@@ -1255,6 +1324,7 @@ impl Default for Panel {
             pending: None,
             progress: None,
             busy_since: Instant::now(),
+            render_floor: std::cell::Cell::new(0.0),
             playback: true,
             editing: None,
             scroll: 0.0,
@@ -1725,6 +1795,7 @@ impl Panel {
         });
         self.busy = true;
         self.busy_since = Instant::now();
+        self.render_floor.set(0.0);
         self.rendering = job.id;
         self.render_key = job.key.clone();
         self.pending = Some(job.at);
@@ -3057,7 +3128,7 @@ impl Panel {
             }
             if let Some((g, feedback)) = worker.live.lock().unwrap().take()
                 && g == self.generation && self.busy {
-                self.status = stage_status(&feedback.name, &feedback.progress);
+                self.status = feedback.status();
                 self.feedback = Some(feedback);
             }
         }
@@ -3676,14 +3747,35 @@ impl Panel {
     /// under the pointer names itself beneath the row.
     /// Kept outside the video canvas so zoom/pan cannot cover render feedback.
     /// Shared by the render controls and the active row in the renders pane.
+    /// The total bar: rendered frames plus the working frame's share (the
+    /// stage's call fraction, placed within the chain), over the frames
+    /// asked for. A stage's phase-local percentage never drives it — "Tiles
+    /// 12/12" is not a finished frame — so without frame progress a single
+    /// frame shows activity until it lands.
     fn render_fraction(&self) -> Option<f32> {
-        let stage = self.feedback.as_ref().and_then(StageFeedback::fraction);
-        if self.busy && self.expected > 1 {
-            Some(((self.preview_count as f32 + stage.unwrap_or(0.0)) / self.expected as f32).min(1.0))
-        } else if self.busy {
-            stage
-        } else {
-            self.render_result.filter(|ok| *ok).map(|_| 1.0)
+        use abner_processing::progress::{fold, frame_share};
+        if !self.busy {
+            return self.render_result.filter(|ok| *ok).map(|_| 1.0);
+        }
+        let share = self.feedback.as_ref().and_then(|f| {
+            f.frame_fraction().map(|x| frame_share(f.index, f.count, x))
+        });
+        let raw = if self.expected >= 1 {
+            if share.is_none() && self.preview_count == 0 { None }
+            else { fold(self.preview_count, self.expected as u64, share) }
+        } else { share };
+        let shown = (raw? as f32).max(self.render_floor.get());
+        self.render_floor.set(shown);
+        Some(shown)
+    }
+    /// The frame bar under the total: the working stage's steps through its
+    /// current call. A one-frame render's total already is that frame, so it
+    /// shows only the phase-local fallback there.
+    fn frame_bar(&self) -> Option<f32> {
+        let f = self.feedback.as_ref().filter(|_| self.busy)?;
+        match f.frame_fraction() {
+            Some(x) => (self.expected != 1).then_some(x as f32),
+            None => f.fraction(),
         }
     }
 
@@ -3710,8 +3802,17 @@ impl Panel {
             self.feedback.as_ref().map_or_else(|| self.progress.map_or_else(
                 || "Preparing input and processors".into(),
                 |(done, total)| format!("Preparing input · {done}/{total} frames")), |f| {
-                format!("{}/{} · {}", f.index + 1, f.count,
-                    if f.progress.phase.trim().is_empty() { "Processing" } else { &f.progress.phase })
+                let work = match (&f.frame, f.progress.total.filter(|t| *t > 0)) {
+                    (Some(step), _) => format!("{} {}/{}",
+                        if step.phase.trim().is_empty() { "Processing" } else { &step.phase },
+                        step.completed.min(step.total), step.total),
+                    (None, total) => {
+                        let phase = if f.progress.phase.trim().is_empty() { "Processing" } else { &f.progress.phase };
+                        total.map_or_else(|| phase.to_string(),
+                            |t| format!("{phase} {}/{t}", f.progress.completed.min(t)))
+                    }
+                };
+                format!("{}/{} · {work}", f.index + 1, f.count)
             })
         } else if self.render_result.is_some() {
             self.feedback.as_ref().filter(|f| !f.progress.phase.trim().is_empty())
@@ -3763,18 +3864,23 @@ impl Panel {
         if let Some(fraction) = fraction {
             line = format!("{line} · {}", if !self.busy { "100%".into() }
                 else if self.expected > 1 { format!("{:.0}% overall", (fraction * 100.0).floor()) }
-                else { format!("{:.0}% of stage", (fraction * 100.0).floor()) });
+                else { format!("{:.0}%", (fraction * 100.0).floor()) });
         }
         let metrics = if self.busy {
             let now = Instant::now();
             let fps = self.feedback.as_ref().and_then(|f| f.rates.output_fps(now))
                 .map_or_else(|| "Output FPS —".into(), |fps| format!("{fps:.2} output FPS"));
-            let eta = self.feedback.as_ref().and_then(|f| f.rates.eta(&f.progress, now))
+            // The whole render's time left once the total bar moves; until
+            // then, the working phase's own estimate.
+            let total_eta = fraction.filter(|f| *f > 0.0 && *f < 1.0)
+                .map(|f| elapsed.as_secs_f64() * (1.0 - f as f64) / f as f64);
+            let eta = if let Some(seconds) = total_eta { format!("ETA ~{}", remaining_label(seconds)) }
+            else { self.feedback.as_ref().and_then(|f| f.rates.eta(&f.progress, now))
                 .map_or_else(|| {
                     if self.feedback.as_ref().is_some_and(|f| f.progress.total.is_none_or(|n| n == 0)) {
                         "Stage ETA unavailable".into()
                     } else { "Stage ETA estimating…".into() }
-                }, |seconds| format!("Stage ETA ~{}", remaining_label(seconds)));
+                }, |seconds| format!("Stage ETA ~{}", remaining_label(seconds))) };
             format!("{fps} · {eta}")
         } else if self.preview_count > 0 && self.render_elapsed.as_secs_f64() > 0.0 {
             format!("{:.2} preview FPS · {}", self.preview_count as f64 / self.render_elapsed.as_secs_f64(),
@@ -3786,7 +3892,21 @@ impl Panel {
         }
         // Its own row under the controls, so a long line never runs into them.
         ui_label(items, r.x + 12.0, r.y + 39.0, 10.0, secondary, &line, Align::Left, (r.w - 24.0).max(1.0));
-        let track = RectPx { x: r.x + 12.0, y: r.y + 53.0, w: (r.w - 24.0).max(1.0), h: 6.0 };
+        // The total bar; with a frame bar, the two share its strip.
+        let frame_bar = self.frame_bar();
+        let track = if frame_bar.is_some() {
+            RectPx { x: r.x + 12.0, y: r.y + 50.0, w: (r.w - 24.0).max(1.0), h: 5.0 }
+        } else {
+            RectPx { x: r.x + 12.0, y: r.y + 53.0, w: (r.w - 24.0).max(1.0), h: 6.0 }
+        };
+        if let Some(step) = frame_bar {
+            let lane = RectPx { y: track.y + track.h + 3.0, h: 3.0, ..track };
+            items.push(Item::Rect(RectItem { radius: 1.5, ..RectItem::new(lane, hex_color(0x202225)) }));
+            if step > 0.0 {
+                items.push(Item::Rect(RectItem { radius: 1.5,
+                    ..RectItem::new(RectPx { w: lane.w * step.min(1.0), ..lane }, [accent[0], accent[1], accent[2], 0.55]) }));
+            }
+        }
         items.push(Item::Rect(RectItem { radius: 3.0, ..RectItem::new(track, hex_color(0x303235)) }));
         let fill = if let Some(fraction) = fraction {
             Some(RectPx { w: track.w * fraction, ..track })
@@ -4212,6 +4332,69 @@ mod tests {
         assert!(p.show_rendered, "no cached output must not toggle to an unrelated frame");
     }
     #[test]
+    fn total_bar_folds_frame_steps_and_phase_progress_stays_detail() {
+        let mut p = Panel::new(Registry::default());
+        let feedback = |frame: Option<(u64, u64)>, phase: Option<u64>| StageFeedback {
+            name: "Wonder".into(), index: 0, count: 1,
+            progress: Progress { phase: "Tiles".into(), completed: 12, total: phase },
+            frame: frame.map(|(completed, total)| FrameProgress { phase: "transformer".into(), completed, total }),
+            rates: StageClock::new(Instant::now()).rates,
+        };
+        p.busy = true;
+        p.expected = 1;
+        // A finished phase is not a finished frame: the reported bug, a bar at
+        // 100% while the frame kept rendering.
+        p.feedback = Some(feedback(None, Some(12)));
+        assert_eq!(p.render_fraction(), None, "activity, not a percentage");
+        assert_eq!(p.frame_bar(), Some(1.0), "the phase still shows as detail");
+        p.feedback = Some(feedback(Some((21, 63)), Some(12)));
+        assert!((p.render_fraction().unwrap() - 1.0 / 3.0).abs() < 1e-6);
+        assert_eq!(p.frame_bar(), None, "one frame: the total already is the frame");
+        p.feedback = Some(feedback(Some((63, 63)), None));
+        assert!(p.render_fraction().unwrap() < 1.0, "the last step is not the delivered frame");
+        assert!(p.feedback.as_ref().unwrap().status().ends_with("transformer · step 63/63"));
+        // A stretch: whole frames plus the working one, and a frame bar.
+        p.render_floor.set(0.0);
+        p.expected = 4;
+        p.preview_count = 1;
+        p.feedback = Some(feedback(Some((21, 63)), None));
+        assert!((p.render_fraction().unwrap() - (1.0 + 1.0 / 3.0) / 4.0).abs() < 1e-6);
+        assert!((p.frame_bar().unwrap() - 1.0 / 3.0).abs() < 1e-6);
+        // The call returned before its frame landed: the bar holds.
+        p.feedback = Some(feedback(None, None));
+        assert!((p.render_fraction().unwrap() - (1.0 + 1.0 / 3.0) / 4.0).abs() < 1e-6);
+    }
+    #[test]
+    fn frame_reports_end_with_their_call() {
+        struct Stepping(Option<abner_processor_api::FrameProgressReporter>);
+        impl Session for Stepping {
+            fn set_frame_progress_reporter(&mut self, r: abner_processor_api::FrameProgressReporter) { self.0 = Some(r); }
+            fn process(&mut self, input: Frame) -> Result<Vec<Frame>, String> {
+                (self.0.as_ref().unwrap())(FrameProgress { phase: "step".into(), completed: 2, total: 2 });
+                Ok(vec![input])
+            }
+            fn finish(&mut self) -> Result<Vec<Frame>, String> { Ok(vec![]) }
+            fn output_dimensions(&self) -> [usize; 2] { [2, 2] }
+            fn cancellation(&self) -> Cancellation { Cancellation::default() }
+            fn progress(&self) -> Progress { Progress::default() }
+        }
+        let live = LiveProgress::default();
+        let stage = Arc::new(StageLive { live: Some(live.clone()), generation: 3, name: "S".into(), index: 0, count: 1,
+            frames: Arc::default(), state: Mutex::new((StageClock::new(Instant::now()), Progress::default(), None)) });
+        let mut inner = Stepping(None);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        inner.set_frame_progress_reporter(Arc::new({
+            let (stage, seen, live) = (stage.clone(), seen.clone(), live.clone());
+            move |f| { stage.frame(Some(f)); seen.lock().unwrap().push(live.lock().unwrap().as_ref().unwrap().1.frame.clone()); }
+        }));
+        let mut session = ReportingSession { inner: Box::new(inner), report: Arc::new(|_| {}),
+            frames: Arc::default(), callbacks: Arc::new(AtomicU64::new(1)),
+            call_boundary: Arc::new({ let stage = stage.clone(); move || stage.frame(None) }) };
+        session.process(Frame { width: 2, height: 2, pixels: vec![0; 12], pts: 0, duration: 1, time_base: [1, 24] }).unwrap();
+        assert_eq!(seen.lock().unwrap()[0].as_ref().unwrap().completed, 2, "live during the call");
+        assert!(live.lock().unwrap().as_ref().unwrap().1.frame.is_none(), "cleared when it returns");
+    }
+    #[test]
     fn stage_feedback_never_invents_a_percentage() {
         let mut progress = Progress {
             phase: "Tiles".into(),
@@ -4225,9 +4408,9 @@ mod tests {
         progress.total = Some(0);
         assert!(!stage_status("Example", &progress).contains('%'));
         progress.total = Some(4);
-        assert!(stage_status("Example", &progress).ends_with("25% of stage"));
+        assert!(stage_status("Example", &progress).ends_with("25% of phase"));
         progress.completed = 9;
-        assert!(stage_status("Example", &progress).ends_with("100% of stage"));
+        assert!(stage_status("Example", &progress).ends_with("100% of phase"));
         progress.phase.clear();
         assert!(stage_status("Example", &progress).contains("Processing"));
     }
@@ -4286,7 +4469,7 @@ mod tests {
         let frames = Arc::new(AtomicU64::new(0));
         let mut session = ReportingSession {
             inner: Box::new(Detailed(Arc::new(move |p| { observed.fetch_add(1, Ordering::Relaxed); detailed(p); }))),
-            report, callbacks, frames: frames.clone(),
+            report, callbacks, frames: frames.clone(), call_boundary: Arc::new(|| {}),
         };
         session.process(Frame { width: 2, height: 2, pixels: vec![0; 12], pts: 0, duration: 1, time_base: [1, 24] }).unwrap();
         let events = events.lock().unwrap();
@@ -5118,6 +5301,7 @@ mod tests {
         let feedback = |done, total| StageFeedback {
             name: "Example stage".into(), index: 1, count: 2,
             progress: Progress { phase: "Tiles".into(), completed: done, total },
+            frame: None,
             rates: StageClock::new(Instant::now()).rates,
         };
         panel.busy = true;

@@ -316,6 +316,28 @@ streaming CPU RGB16 SDR frames, built-in processor presets, cancellation and
 completed-frame progress. API 0.2 allows buffered output and an explicit end-of-stream
 flush. Create a fresh session for each contiguous timeline segment or preview seek.
 
+**Progress has two levels.** The host owns the **total**: frames done out of the
+job's frames, which plugins never see. A plugin reports the **frame**: how far
+its current call (`process`, `process_video`, `process_with_inputs`, `finish`,
+`finish_video`) is through all of that call's work, through the reporter handed
+to `Session::set_frame_progress_reporter`, as
+`FrameProgress { phase, completed, total }`: `total` is the call's whole step
+count (> 0, fixed for the call), `completed` only rises within the call, each
+call starts over, and `phase` names the step without restarting the count. The
+host folds that fraction into the total (whole frames + the working frame's share,
+split evenly across chain stages, capped below a delivered frame, never moving
+backwards), so a 30–130 s frame moves the total bar smoothly. The older
+`Progress { phase, completed, total: Option }` via `set_progress_reporter` is
+unchanged and stays **phase-local detail**: shown as text ("Tiles 3/12"), never as
+the total. A plugin may send both. Wrapping sessions must forward both setters.
+The CLI prints `Encoded frames: 3/120 · 2% · ~41m 10s left · stage 1 frame 21/63
+transformer`. The Process panel shows the total bar by default; while a stretch
+(more than one frame) renders it adds a thin frame bar under it, and a
+one-frame render's total bar already is that frame. The Export job card adds the
+frame bar under its total whenever the working stage reports steps. A stage with
+only phase reports gets an activity mark on a one-frame total, with its phase
+fraction in the thin bar.
+
 
 The processing workspace is intended as an ordered experiment/editing workflow,
 never a user-editable node canvas. Compression and re-encoding choices stay visible;

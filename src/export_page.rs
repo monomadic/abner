@@ -61,7 +61,23 @@ pub(crate) enum Action {
     Reveal,
 }
 /// A stage's in-flight report during an export, with the stage's name.
-pub(crate) type StageReport = Arc<dyn Fn(&str, abner_processor_api::Progress) + Send + Sync>;
+pub(crate) type StageReport = Arc<dyn Fn(&str, StageUpdate) + Send + Sync>;
+pub(crate) enum StageUpdate {
+    /// The stage's phase-local detail.
+    Phase(abner_processor_api::Progress),
+    /// Stage `.0` of `.1`'s current call (the frame bar); `None` once the
+    /// call returns.
+    Frame(usize, usize, Option<abner_processor_api::FrameProgress>),
+}
+/// The working stage's frame report: name, index, stage count, steps.
+type FrameReport = (String, usize, usize, abner_processor_api::FrameProgress);
+/// The frame bar's live report, and the total bar's high-water mark: a frame
+/// report cleared just before its frame lands never moves the bar back.
+#[derive(Default)]
+struct FrameState {
+    report: Option<FrameReport>,
+    floor: f64,
+}
 /// `90` → `1m 30s`; under a minute, whole seconds.
 fn remaining(seconds: f64) -> String {
     let s = seconds.ceil().max(0.) as u64;
@@ -74,7 +90,7 @@ fn remaining(seconds: f64) -> String {
 /// left at that pace), then what the working stage says it is doing. Before
 /// the first frame only the stage has anything to report.
 fn render_line(done: f64, count: u64, frame_duration: Option<f64>, duration: f64, elapsed: f64,
-    stage: Option<&(String, abner_processor_api::Progress)>) -> String {
+    stage: Option<&(String, abner_processor_api::Progress)>, frame: Option<&FrameReport>) -> String {
     let frames = match frame_duration.filter(|d| *d > 0.) {
         Some(d) => format!("{count} of {:.0} frames", (duration / d).round().max(count as f64)),
         None => format!("{count} frames"),
@@ -85,19 +101,23 @@ fn render_line(done: f64, count: u64, frame_duration: Option<f64>, duration: f64
         else if pace >= 1. { format!(" · {pace:.1} fps") }
         else { format!(" · {} per frame", remaining(1. / pace)) };
     let eta = if done > 0. && done < 1. { format!(" · ~{} left", remaining(elapsed * (1. - done) / done)) } else { String::new() };
-    let stage = stage.map_or_else(String::new, |(name, p)| {
+    let stage = if let Some((name, _, _, f)) = frame {
+        let phase = if f.phase.trim().is_empty() { "Processing" } else { &f.phase };
+        format!(" · {name} · {phase} {}/{}", f.completed.min(f.total), f.total)
+    } else { stage.map_or_else(String::new, |(name, p)| {
         let phase = if p.phase.trim().is_empty() { "Processing" } else { &p.phase };
         match p.total.filter(|t| *t > 0) {
             Some(t) => format!(" · {name} · {phase} {:.0}%", (p.completed.min(t) as f64 / t as f64 * 100.).floor()),
             None => format!(" · {name} · {phase}"),
         }
-    });
+    }) };
     format!("{:.0}% · {frames}{pace}{eta}{stage}", (done * 100.).floor())
 }
 struct Job {
     launch: Option<Box<dyn FnOnce() + Send>>,
     latest: Arc<Mutex<Option<Rendered>>>,
     stage: Arc<Mutex<Option<(String, abner_processor_api::Progress)>>>,
+    frame: Arc<Mutex<FrameState>>,
     done: mpsc::Receiver<Result<PathBuf, String>>,
     cancel: Cancellation,
     active: Arc<Mutex<Vec<Cancellation>>>,
@@ -271,6 +291,26 @@ fn hit(r: RectPx, x: f32, y: f32) -> bool {
     x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h
 }
 impl Page {
+    /// The total bar while a job runs: the share of the clip written, plus the
+    /// working frame's share (its stage's steps through the current call,
+    /// placed within the chain) of one frame's length. Never decreases.
+    fn total_fraction(&self) -> f64 {
+        use abner_processing::progress::frame_share;
+        let duration = self.duration.max(0.001);
+        let done = (self.rendered_time / duration).clamp(0., 1.);
+        let Some(job) = &self.job else { return done };
+        let Ok(mut state) = job.frame.lock() else { return done };
+        let frame = self.frames.back().map_or(1. / self.review_fps.max(1.), |f| f.frame_duration);
+        let share = state.report.as_ref()
+            .and_then(|(_, i, n, f)| f.fraction().map(|x| frame_share(*i, *n, x)))
+            .unwrap_or(0.);
+        let total = if done >= 1. { 1. } else { (done + share * frame / duration).min(1.) };
+        state.floor = state.floor.max(total);
+        state.floor
+    }
+    fn frame_report(&self) -> Option<FrameReport> {
+        self.job.as_ref().and_then(|j| j.frame.lock().ok()?.report.clone())
+    }
     fn swap_preview(&mut self, other: &mut Self) {
         std::mem::swap(&mut self.export_lossless, &mut other.export_lossless);
         std::mem::swap(&mut self.review, &mut other.review);
@@ -467,9 +507,18 @@ impl Page {
         let (tx, done) = mpsc::sync_channel(1);
         let shared = latest.clone();
         let stage = Arc::new(Mutex::new(None));
+        let frame = Arc::new(Mutex::new(FrameState::default()));
         let report: StageReport = {
-            let stage = stage.clone();
-            Arc::new(move |name, p| *stage.lock().unwrap() = Some((name.to_owned(), p)))
+            let (stage, frame) = (stage.clone(), frame.clone());
+            Arc::new(move |name, update| match update {
+                StageUpdate::Phase(p) => *stage.lock().unwrap() = Some((name.to_owned(), p)),
+                StageUpdate::Frame(index, count, Some(f)) =>
+                    frame.lock().unwrap().report = Some((name.to_owned(), index, count, f)),
+                StageUpdate::Frame(index, _, None) => {
+                    let mut frame = frame.lock().unwrap();
+                    if frame.report.as_ref().is_some_and(|f| f.1 == index) { frame.report = None; }
+                }
+            })
         };
         let stop = cancel.clone();
         let inputs = self.inputs.clone();
@@ -531,6 +580,7 @@ impl Page {
             launch: Some(launch),
             latest,
             stage,
+            frame,
             done,
             cancel,
             active,
@@ -998,10 +1048,10 @@ impl Page {
         let card=l.job_card();
         items.push(Item::Shape(figleaf::Shape::rect(figleaf::Rect::new(card.x,card.y,card.w,card.h)).radius(8.)
             .fill(hex_color(0x0f0e0e)).stroke(1.,hex_color(0x2b2a2a),figleaf::StrokeAlign::Inside)));
-        let done=(self.rendered_time/self.duration.max(0.001)).clamp(0.,1.);
+        let done=if self.busy() {self.total_fraction()} else {(self.rendered_time/self.duration.max(0.001)).clamp(0.,1.)};
         let queued=self.job.as_ref().is_some_and(|j|j.launch.is_some());
         let title=if queued { "Queued".into() } else if self.busy() {
-            if self.export_lossless { "Copying packets…".into() } else if self.count==0 { "Preparing export…".into() }
+            if self.export_lossless { "Copying packets…".into() } else if self.count==0 && done<=0. { "Preparing export…".into() }
             else { format!("Rendering & encoding   {:.0}%",done*100.) }
         } else if self.path.is_some() { "Export complete".into() } else if self.record.is_some() { self.status.clone() } else { "Ready to export".into() };
         let elapsed=if self.busy() {self.started.elapsed().as_secs_f64()}else{self.elapsed};
@@ -1018,6 +1068,13 @@ impl Page {
         let progress=RectPx{x:card.x+20.,y:card.y+card.h-if card.h<110.{32.}else{42.},w:card.w-40.,h:6.};
         surface(items,progress,0x202020,0.);
         surface(items,RectPx{w:progress.w*if self.path.is_some(){1.}else{done as f32},..progress},0x0059ff,0.);
+        // The frame bar: the working stage's steps through the frame in hand,
+        // for processors slow enough to report them.
+        if card.h>=110. && self.busy() && let Some((_,_,_,f))=self.frame_report() && let Some(step)=f.fraction() {
+            let lane=RectPx{y:progress.y+progress.h+3.,h:3.,..progress};
+            surface(items,lane,0x181818,0.);
+            surface(items,RectPx{w:lane.w*step as f32,..lane},0x2d5fa8,0.);
+        }
         let stats_y=card.y+card.h-24.;
         let third=(card.w-40.)/3.;
         for (i,text,align) in [(0,format!("{} of {} processed",duration_label(self.rendered_time),duration_label(self.duration)),Align::Left),
@@ -1033,7 +1090,7 @@ impl Page {
         surface(items,RectPx{w:l.seek.w*(time/self.duration.max(0.001)).clamp(0.,1.) as f32,..l.seek},0x0059ff,0.);
         surface(items,l.footer,0x050505,0.);
         export_label(items,RectPx{x:16.,y:l.footer.y,w:70.,h:l.footer.h},"EXPORT",10.,hex_color(0x8b8b8b),false,Align::Left);
-        let status=if self.busy() {render_line(done,self.count,self.frames.back().map(|f|f.frame_duration),self.duration,elapsed,self.job.as_ref().and_then(|j|j.stage.lock().ok().and_then(|s|s.clone())).as_ref())}else{self.status.clone()};
+        let status=if self.busy() {render_line(done,self.count,self.frames.back().map(|f|f.frame_duration),self.duration,elapsed,self.job.as_ref().and_then(|j|j.stage.lock().ok().and_then(|s|s.clone())).as_ref(),self.frame_report().as_ref())}else{self.status.clone()};
         export_label(items,RectPx{x:98.,y:l.footer.y,w:vp.0-114.,h:l.footer.h},&status,10.,hex_color(0x8b8b8b),false,Align::Left);
         for (r,t,selected,a) in self.actions(vp) {
             let hovered=hit(r,cursor.0,cursor.1);
@@ -1079,7 +1136,7 @@ impl Page {
                     let page=self.history.get(index).unwrap_or(self);
                     let name=page.record.as_ref().and_then(|p|p.file_name()).unwrap_or_default().to_string_lossy();
                     export_label(items,RectPx{x:r.x+8.,y:r.y+2.,w:r.w-16.,h:15.},&name,10.,ink,true,Align::Left);
-                    let state=if page.busy(){if page.job.as_ref().is_some_and(|j|j.launch.is_some()){"Queued".into()}else{format!("Rendering · {:.0}%",page.rendered_time/page.duration.max(0.001)*100.)}}else if page.path.is_some(){"Completed · click to view".into()}else{page.status.clone()};
+                    let state=if page.busy(){if page.job.as_ref().is_some_and(|j|j.launch.is_some()){"Queued".into()}else{format!("Rendering · {:.0}%",page.total_fraction()*100.)}}else if page.path.is_some(){"Completed · click to view".into()}else{page.status.clone()};
                     export_label(items,RectPx{x:r.x+8.,y:r.y+17.,w:r.w-16.,h:15.},&state,9.,dim,true,Align::Left);
                 }
                 _=>{
@@ -1214,7 +1271,7 @@ mod tests {
         p.record = Some(PathBuf::from("output.mp4"));
         let cancel = Cancellation::default();
         let (tx, done) = mpsc::channel();
-        p.job = Some(Job { launch: None, latest: Arc::default(), stage: Arc::default(), done,
+        p.job = Some(Job { launch: None, latest: Arc::default(), stage: Arc::default(), frame: Arc::default(), done,
             cancel: cancel.clone(), active: Arc::default(), copy_cancel: Arc::default() });
         p.archive(); p.source = Some(PathBuf::from("new.mp4"));
         assert!(cancel.check().is_ok()); assert!(p.has_jobs());
@@ -1231,17 +1288,42 @@ mod tests {
     }
 
     #[test]
+    fn total_bar_folds_the_working_frame_and_never_moves_back() {
+        let mut p = Page::default();
+        let (_tx, done) = mpsc::channel();
+        let frame: Arc<Mutex<FrameState>> = Arc::default();
+        p.job = Some(Job { launch: None, latest: Arc::default(), stage: Arc::default(), frame: frame.clone(), done,
+            cancel: Cancellation::default(), active: Arc::default(), copy_cancel: Arc::default() });
+        p.duration = 4.;
+        p.review_fps = 1.;
+        p.rendered_time = 1.;
+        assert_eq!(p.total_fraction(), 0.25);
+        let steps = |completed| ("Wonder".to_string(), 0, 1,
+            abner_processor_api::FrameProgress { phase: "transformer".into(), completed, total: 63 });
+        frame.lock().unwrap().report = Some(steps(21));
+        assert!((p.total_fraction() - (1. + 21. / 63.) / 4.).abs() < 1e-12);
+        // The call returned: the report clears before the frame lands.
+        frame.lock().unwrap().report = None;
+        assert!((p.total_fraction() - (1. + 21. / 63.) / 4.).abs() < 1e-12);
+        p.rendered_time = 2.;
+        assert_eq!(p.total_fraction(), 0.5);
+        p.rendered_time = 4.;
+        frame.lock().unwrap().report = Some(steps(63));
+        assert_eq!(p.total_fraction(), 1.);
+    }
+
+    #[test]
     fn export_queue_runs_one_worker_at_a_time_and_can_cancel_waiting_job() {
         let mut p = Page::default();
         let (tx, done) = mpsc::channel();
-        p.job = Some(Job { launch: None, latest: Arc::default(), stage: Arc::default(), done,
+        p.job = Some(Job { launch: None, latest: Arc::default(), stage: Arc::default(), frame: Arc::default(), done,
             cancel: Cancellation::default(), active: Arc::default(), copy_cancel: Arc::default() });
         p.archive();
         let (tx2, done) = mpsc::channel();
         let launched = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = launched.clone();
         p.job = Some(Job { launch: Some(Box::new(move || { flag.store(true, std::sync::atomic::Ordering::SeqCst); let _ = tx2.send(Ok(PathBuf::from("second.mp4"))); })),
-            latest: Arc::default(), stage: Arc::default(), done, cancel: Cancellation::default(), active: Arc::default(), copy_cancel: Arc::default() });
+            latest: Arc::default(), stage: Arc::default(), frame: Arc::default(), done, cancel: Cancellation::default(), active: Arc::default(), copy_cancel: Arc::default() });
         p.poll(&mut vec![], 3);
         assert!(!launched.load(std::sync::atomic::Ordering::SeqCst));
         p.cancel(); assert!(!p.busy());
@@ -1295,6 +1377,7 @@ mod tests {
             launch: None,
             latest: latest.clone(),
             stage: Arc::default(),
+            frame: Arc::default(),
             done,
             cancel: Cancellation::default(),
             active: Arc::default(),
@@ -1336,17 +1419,21 @@ mod tests {
             ("Example".to_string(), Progress { phase: phase.into(), completed, total })
         };
         // Before the first frame only the stage has anything to say.
-        assert_eq!(render_line(0., 0, None, 20., 90., Some(&stage("Window 1 · encoding", 9, Some(18)))),
+        assert_eq!(render_line(0., 0, None, 20., 90., Some(&stage("Window 1 · encoding", 9, Some(18))), None),
             "0% · 0 frames · Example · Window 1 · encoding 50%");
         // 120 of 480 frames in ten minutes: five seconds a frame, thirty minutes to go.
-        assert_eq!(render_line(0.25, 120, Some(1. / 24.), 20., 600., Some(&stage("Window 25 · restoring", 16, Some(32)))),
+        assert_eq!(render_line(0.25, 120, Some(1. / 24.), 20., 600., Some(&stage("Window 25 · restoring", 16, Some(32))), None),
             "25% · 120 of 480 frames · 5s per frame · ~30m 00s left · Example · Window 25 · restoring 50%");
-        assert_eq!(render_line(0.5, 240, Some(1. / 24.), 20., 10., None),
+        assert_eq!(render_line(0.5, 240, Some(1. / 24.), 20., 10., None, None),
             "50% · 240 of 480 frames · 24.0 fps · ~10s left");
-        assert_eq!(render_line(0.5, 1, Some(0.5), 1., 4000., Some(&stage(" ", 3, None))),
+        assert_eq!(render_line(0.5, 1, Some(0.5), 1., 4000., Some(&stage(" ", 3, None)), None),
             "50% · 1 of 2 frames · 1h 06m per frame · ~1h 06m left · Example · Processing");
+        // A slow processor's steps replace its phase: the frame in hand.
+        let frame = ("Wonder".to_string(), 0, 1, abner_processor_api::FrameProgress { phase: "transformer".into(), completed: 21, total: 63 });
+        assert_eq!(render_line(0.5, 1, Some(0.5), 1., 60., Some(&stage("Tiles", 12, Some(12))), Some(&frame)),
+            "50% · 1 of 2 frames · 1m 00s per frame · ~1m 00s left · Wonder · transformer 21/63");
         // A rounded total never reads below the frames already written.
-        assert_eq!(render_line(1., 481, Some(1. / 24.), 20., 10., None), "100% · 481 of 481 frames · 48.1 fps");
+        assert_eq!(render_line(1., 481, Some(1. / 24.), 20., 10., None, None), "100% · 481 of 481 frames · 48.1 fps");
     }
     #[test]
     fn export_controls_share_hit_bounds_at_supported_window_sizes() {
@@ -1506,7 +1593,9 @@ mod tests {
             let stages = Arc::new(Mutex::new(Vec::new()));
             let report: StageReport = {
                 let stages = stages.clone();
-                Arc::new(move |name, p| stages.lock().unwrap().push((name.to_owned(), p.phase, p.total)))
+                Arc::new(move |name, update| if let StageUpdate::Phase(p) = update {
+                    stages.lock().unwrap().push((name.to_owned(), p.phase, p.total))
+                })
             };
             crate::media_io::pipeline_export_with_inputs(
                 &Default::default(),

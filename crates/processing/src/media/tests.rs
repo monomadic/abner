@@ -407,3 +407,94 @@ fn native_yuv_plugin_matches_empty_chain_encoded_packets() {
         packet_hash(&b, &Reader::open(&job.output).unwrap(), 0, &c).unwrap()
     );
 }
+
+/// Reports every call's four steps through the frame channel.
+struct Stepping([usize; 2], Option<abner_processor_api::FrameProgressReporter>);
+impl abner_processor_api::Session for Stepping {
+    fn format_pairs(&self) -> Vec<abner_processor_api::FormatPair> {
+        vec![abner_processor_api::FormatPair::same(
+            abner_processor_api::PixelFormat::Yuv422p10,
+        )]
+    }
+    fn configure_format(&mut self, _: abner_processor_api::FormatPair) -> Result<()> {
+        Ok(())
+    }
+    fn set_frame_progress_reporter(&mut self, r: abner_processor_api::FrameProgressReporter) {
+        self.1 = Some(r);
+    }
+    fn process_video(
+        &mut self,
+        f: abner_processor_api::VideoFrame,
+    ) -> Result<Vec<abner_processor_api::VideoFrame>> {
+        let report = self.1.as_ref().expect("host hands over the frame reporter");
+        for step in 0..=4 {
+            report(abner_processor_api::FrameProgress { phase: "step".into(), completed: step, total: 4 });
+        }
+        Ok(vec![f])
+    }
+    fn finish_video(&mut self) -> Result<Vec<abner_processor_api::VideoFrame>> {
+        Ok(vec![])
+    }
+    fn output_dimensions(&self) -> [usize; 2] {
+        self.0
+    }
+    fn cancellation(&self) -> Cancellation {
+        Cancellation::default()
+    }
+    fn progress(&self) -> abner_processor_api::Progress {
+        abner_processor_api::Progress::default()
+    }
+}
+struct SteppingFactory;
+impl abner_processor_api::Factory for SteppingFactory {
+    fn descriptor(&self) -> abner_processor_api::Descriptor {
+        abner_processor_api::Descriptor {
+            id: "stepping".into(),
+            name: "Stepping".into(),
+            settings_schema: serde_json::json!({}),
+            presets: vec![],
+        }
+    }
+    fn create(&self, w: usize, h: usize, _: &serde_json::Value) -> Result<Box<dyn abner_processor_api::Session>> {
+        Ok(Box::new(Stepping([w, h], None)))
+    }
+}
+#[test]
+fn job_progress_folds_frame_steps_into_the_total() {
+    let dir = std::env::temp_dir().join(format!(
+        "job-progress-{}-{}",
+        std::process::id(),
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    fs::create_dir(&dir).unwrap();
+    let work = Work(dir);
+    let input = work.0.join("in.mov");
+    fixture(&input);
+    let job = Job {
+        input,
+        output: work.0.join("out.mov"),
+        stages: vec![Stage { processor: "stepping".into(), settings: serde_json::json!({}) }],
+        copy_audio: true,
+        memory_bytes: 1024 * 1024,
+    };
+    let mut registry = Registry::default();
+    registry.register(Box::new(SteppingFactory)).unwrap();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = seen.clone();
+    let report = run(&job, &registry, &Cancellation::default(),
+        Arc::new(move |p: &crate::progress::JobProgress| log.lock().unwrap().push(p.clone()))).unwrap();
+    let seen = seen.lock().unwrap();
+    let total = report.frames as u64;
+    assert!(seen.iter().all(|p| p.frames_total == Some(total)));
+    let fractions: Vec<f64> = seen.iter().map(|p| p.fraction.unwrap()).collect();
+    assert!(fractions.windows(2).all(|w| w[1] >= w[0]), "total went backwards: {fractions:?}");
+    assert_eq!(*fractions.last().unwrap(), 1.0);
+    // Mid-frame: the frame bar is live and the total sits between whole frames.
+    let mid = seen.iter().find(|p| p.frame.as_ref().is_some_and(|f| f.completed == 2)).unwrap();
+    assert_eq!(mid.stage, Some(0));
+    assert_eq!(mid.frame_fraction(), Some(0.5));
+    assert_eq!(mid.fraction, Some((mid.frames_done as f64 + 0.5) / total as f64));
+    // Each call's last step ends with the call: no stale 4/4 on the frame bar.
+    assert!(seen.iter().filter(|p| p.frame.is_none()).count() >= total as usize);
+    assert!(seen.last().unwrap().frame.is_none());
+}

@@ -521,6 +521,12 @@ render) and steps, scrubs and picks the shown frame (`Panel::shown`, the output
 frame whose span holds the playhead) on the OUTPUT grid, while `source_seek` sends
 the players half a source frame before the original that precedes the playhead —
 so an exact seek lands on it — and the clock stays on the output time.
+**Progress has two levels** (2026-11-17): plugins report `FrameProgress` (the
+whole current call's steps, via `set_frame_progress_reporter`); the host owns the
+total and folds the frame in (`abner_processing::progress`, never backwards, capped
+below a delivered frame). Phase-local `Progress` is detail text only — it never
+drives a total bar (that was the "100% while still rendering" bug). Every wrapping
+`Session` must forward BOTH reporter setters.
 **Settings explain themselves**: a property's `description` is its hover tooltip,
 and `oneOf: [{const, title, description}]` names and explains each choice of a
 selector (plain `enum` still works); the tooltip is the setting's text then the
