@@ -3425,8 +3425,18 @@ pub(crate) fn pipeline_export_with_inputs(
             let mut session = abner_processor_api::create_bound(f,dims[0],dims[1],settings,inputs.bindings.get(id).cloned().unwrap_or_default())
                 .map_err(anyhow::Error::msg)?;
             if let Some(report) = stage_report {
-                let (report, name) = (report.clone(), f.descriptor().name);
-                session.set_progress_reporter(std::sync::Arc::new(move |p| report(&name, p)));
+                use crate::export_page::StageUpdate;
+                let (count, name) = (chain.len(), f.descriptor().name);
+                let phase = (report.clone(), name.clone());
+                session.set_progress_reporter(std::sync::Arc::new(move |p| (phase.0)(&phase.1, StageUpdate::Phase(p))));
+                let frame = (report.clone(), name.clone());
+                session.set_frame_progress_reporter(std::sync::Arc::new(move |p| {
+                    (frame.0)(&frame.1, StageUpdate::Frame(stage, count, Some(p)))
+                }));
+                // The frame bar ends with the call it described.
+                let report = report.clone();
+                session = Box::new(abner_processing::progress::CallBoundary::new(session,
+                    std::sync::Arc::new(move || report(&name, StageUpdate::Frame(stage, count, None)))));
             }
             active.lock().unwrap().push(session.cancellation());
             dims = session.output_dimensions();

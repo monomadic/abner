@@ -166,6 +166,9 @@ impl Session for BoundSession {
     fn set_progress_reporter(&mut self, r: ProgressReporter) {
         self.inner.set_progress_reporter(r)
     }
+    fn set_frame_progress_reporter(&mut self, r: FrameProgressReporter) {
+        self.inner.set_frame_progress_reporter(r)
+    }
 }
 #[cfg(test)]
 mod tests {

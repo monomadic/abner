@@ -1,5 +1,25 @@
 # abner — history
 
+## 2026-11-17 — Two-level processor progress (total + frame)
+
+A Wonder frame (30–130 s) left the Process panel at "100% of stage" for
+seconds: the only report was phase-local `Progress`, and a one-frame render
+drew it as the bar. The API now separates the two levels. Plugins report the
+whole current call with `FrameProgress { phase, completed, total }` through the
+new `Session::set_frame_progress_reporter` (default no-op; `Progress` and its
+JSON are unchanged, so API 0.2 plugins compile and run as before). The host
+folds it into the job total: `abner_processing::progress` (`fold`,
+`frame_share`, `ProgressTracker`, `JobProgress`, `CallBoundary` which ends a
+frame report when its call returns). `media::run` now reports `JobProgress`
+(`JOB_PHASE` is gone); the CLI line leads with frames, percent and time left,
+then the frame steps or the phase. The Process panel draws the total bar
+(phase fractions never drive it) plus a thin frame bar for stretches; the
+Export card folds the frame into its total and adds the same thin bar.
+
+Validation: progress tracker, CLI line, media job aggregation, Process panel
+and Export card tests. Three `app::tests` layout tests fail on the base commit
+too (titlebar/workspace selection/source edge drag), unrelated.
+
 ## 2026-11-16 — Edited Figma Export screen back in Abner
 
 Applied Signal frame 548:5796 to the native Export page using figleaf and the
