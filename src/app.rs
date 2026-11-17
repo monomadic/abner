@@ -8656,16 +8656,17 @@ mod tests {
             let timeline=Workspace::new(vp,true,true,0.,1.,1.,1.,None,false);
             let export=crate::export_page::Layout::new(vp);
             let process=crate::processor_gui::Panel::viewer(vp);
-            for viewport in [sources.canvas,export.video] {
-                assert_eq!(viewport.y,HEADER_H+ButtonBar::HEIGHT);
-            }
+            assert_eq!(sources.canvas.y,HEADER_H+ButtonBar::HEIGHT);
+            // Export has no bar: its picture meets the header.
+            assert_eq!(export.video.y,HEADER_H);
+            assert!(export.canvas.button_bar.is_none());
             // Process and Timeline keep the same bar under the picture, which meets the header.
             assert_eq!(process.y,HEADER_H);
             assert_eq!(timeline.canvas.y,HEADER_H);
             let under=timeline.surface.button_bar.unwrap().r;
             assert_eq!((under.y,under.h),(timeline.canvas.y+timeline.canvas.h,ButtonBar::HEIGHT));
             assert_eq!(under.y+under.h,timeline.transport.y);
-            for bar in [sources.surface.button_bar.unwrap(),export.canvas.button_bar.unwrap()] {
+            for bar in [sources.surface.button_bar.unwrap()] {
                 assert_eq!(bar.r.h,ButtonBar::HEIGHT);
                 let control=bar.control(bar.content().x,60.);
                 assert_eq!(control.y,HEADER_H+ButtonBar::PADDING_Y);
@@ -8692,7 +8693,7 @@ mod tests {
         assert!(((pointer.1-picture.y)/picture.h-0.4).abs()<0.001);
         let zoom=app.zoom;
         let layout=crate::export_page::Layout::new(app.vp);
-        for r in [layout.canvas.button_bar.unwrap().r,layout.transport,layout.sidebar] {
+        for r in [layout.transport,layout.sidebar] {
             app.cursor_moved(r.x+10.,r.y+10.);
             app.pinch(0.5);
             assert_eq!(app.zoom,zoom);

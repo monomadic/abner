@@ -494,6 +494,17 @@ comparison. The design omits the former bitrate field; the existing HEVC target
 and export pipeline are retained. The bottom attachment adapts down to 720×480,
 hiding the secondary subtitle/timecode where needed to keep controls separate.
 
+**Canvas side re-edited (2026-11-17, `Canvas / Export` 621:8921):** the Button
+Bar is hidden, so the page has no bar and one Export button (the sidebar's);
+the picture meets the header on a 10px-radius canvas (top corners); the bottom
+attachment is black and runs the transport row, the 4px review track 66px
+down, then the job card from 84px down to 16px above the status line
+(`Layout::seek`, `Layout::job_card`). The frame draws the card 11px lower
+(95px); the app keeps 84 so the card's text fits the 176px attachment of a
+minimum window. Dead step controls dim under a black veil, not the old grey.
+The card keeps its opaque fills (the frame's #1b1919 @ 46% and white @ 12%
+read too bright in linear blending).
+
 ### Process screen export (2026-11-16)
 
 The native Process page is `590:5862`, "Process / Native app · Ready", on

@@ -194,6 +194,7 @@ impl Drop for Page {
         self.cancel();
     }
 }
+const CANVAS_RADIUS: f32 = 10.;
 #[derive(Clone, Copy)]
 pub(crate) struct Layout {
     pub sidebar: RectPx,
@@ -210,11 +211,13 @@ impl Layout {
         let sidebar = RectPx { x: 0., y: crate::app::HEADER_H,
             w: side, h: footer_y - crate::app::HEADER_H };
         let attachment_h = (vp.1 * 0.325).clamp(176., 260.);
-        let canvas = Canvas::layout(RectPx{x:side,y:sidebar.y,w:vp.0-side,h:footer_y-sidebar.y},true,
+        // Figma 621:8921: no bar; the picture meets the header and the
+        // attachment runs transport, review track, then the job card.
+        let canvas = Canvas::layout(RectPx{x:side,y:sidebar.y,w:vp.0-side,h:footer_y-sidebar.y},false,
             Some(TimelineAttachment{x:side,width:vp.0-side,transport_height:attachment_h,lanes_height:0.}));
         let transport=canvas.timeline.unwrap().transport;
         let video=canvas.r;
-        let seek = RectPx { x: transport.x + 38., y: footer_y - 24.,
+        let seek = RectPx { x: transport.x + 38., y: transport.y + 66.,
             w: (transport.w - 76.).max(80.), h: 4. };
 
         Self {
@@ -246,7 +249,8 @@ impl SettingsLayout {
     }
 }
 impl Layout {
-    fn job_card(&self)->RectPx { RectPx{x:self.transport.x+16.,y:self.transport.y+16.,w:self.transport.w-32.,h:(self.transport.h-112.).max(76.)} }
+    /// Under the transport row and the review track, 16px from the attachment's edges.
+    fn job_card(&self)->RectPx { RectPx{x:self.transport.x+16.,y:self.transport.y+84.,w:self.transport.w-32.,h:(self.transport.h-100.).max(76.)} }
 }
 fn surface(items:&mut Vec<Item>,r:RectPx,color:u32,radius:f32) { surface_alpha(items,r,hex_color(color),radius); }
 fn surface_alpha(items:&mut Vec<Item>,r:RectPx,color:[f32;4],radius:f32) {
@@ -770,7 +774,6 @@ impl Page {
             (RectPx{x: settings.directory.x+settings.directory.w-38.,w:38.,..settings.directory}, "Change directory", false, Action::ChooseDirectory),
             (RectPx{w:settings.directory.w-38.,..settings.directory}, "", false, Action::RevealDirectory),
             (settings.export, "Export", false, Action::Export),
-            (l.canvas.button_bar.unwrap().primary_rect(148.), "Export", false, Action::Export),
         ];
         let cy = l.seek.y - 50.;
         // The time/follow row collapses gracefully while retaining all five transport controls.
@@ -951,9 +954,9 @@ impl Page {
         let dim = hex_color(0xc6c8c0);
         let blue = hex_color(0x0059ff);
         surface(items,l.sidebar,0x050505,0.);
-        surface(items,l.transport,0x1d1b1b,0.);
-        l.canvas.ground(items);
-        l.canvas.button_bar.unwrap().draw(items);
+        surface(items,l.transport,0x000000,0.);
+        let corners=[CANVAS_RADIUS,CANVAS_RADIUS,0.,0.];
+        l.canvas.ground_radii(items,corners);
         let current = self.current();
         let idx = if current.is_some() && !self.original { slot } else { source };
         let picture = crate::canvas::zoomed(self.base_rect(vp,show_ui,info),view.0,view.1);
@@ -962,7 +965,7 @@ impl Page {
         if self.original && current.is_some_and(|f| (f.source_pts-shown_pts).abs()>0.51/info.fps.max(1.)) {
             export_label(items,l.video,"Seeking matching original…",12.,dim,false,Align::Center);
         } else { items.push(Item::Video{a:idx,b:idx,r:picture,uv:[0.,0.,1.,1.],mode:VideoMode::Tex,p0:0.,p1:0.}); }
-        l.canvas.recess(items);
+        l.canvas.recess_radii(items,corners);
         items.push(Item::Clip(None));
         export_label(items,RectPx{x:16.,y:l.sidebar.y+8.,w:settings.width,h:22.},"Export Settings",13.,hex_color(0xc8c8c8),true,Align::Left);
         let thumb=RectPx{x:16.,y:l.sidebar.y+38.,w:72.,h:40.5};
@@ -1061,7 +1064,8 @@ impl Page {
                         surface(items,r,0x168be0,17.);
                         for x in [r.x+12.,r.x+20.] {surface(items,RectPx{x,y:r.y+10.,w:3.,h:14.},0xffffff,0.);}
                     }
-                    if disabled {surface_alpha(items,r,[0.1,0.1,0.1,0.65],0.);}
+                    // A veil of the attachment's own black dims a dead control.
+                    if disabled {surface_alpha(items,r,[0.,0.,0.,0.65],if a==Action::Play{17.}else{0.});}
                 }
                 Action::EditFilename=>{
                     let value=self.filename_edit.clone().unwrap_or_else(||self.destination_name());
@@ -1347,11 +1351,14 @@ mod tests {
         let p = Page::default();
         for vp in [(720.,480.),(900.,600.),(1280.,800.),(1440.,900.)] {
             let l=Layout::new(vp);
-            assert_eq!(l.video.y,crate::app::HEADER_H+ButtonBar::HEIGHT);
-            assert_eq!(p.actions(vp).iter().filter(|(..,a)|*a==Action::Export).count(),2);
+            assert_eq!(l.video.y,crate::app::HEADER_H);
+            assert!(l.canvas.button_bar.is_none());
+            assert_eq!(p.actions(vp).iter().filter(|(..,a)|*a==Action::Export).count(),1);
             let actions=p.actions(vp);
             let play=actions.iter().find(|(..,a)|*a==Action::Play).unwrap().0;
-            assert!(play.y >= l.job_card().y+l.job_card().h, "card must clear transport");
+            let card=l.job_card();
+            assert!(play.y+play.h <= l.seek.y && l.seek.y+l.seek.h+12. <= card.y, "transport, track, then card");
+            assert!(card.y+card.h <= l.footer.y, "card inside the attachment at {vp:?}");
             for (i,(r,_,_,a)) in actions.iter().enumerate() {
                 assert!(r.x>=0. && r.x+r.w<=vp.0+0.1,"{a:?} at {vp:?}");
                 assert!(r.y>=crate::app::HEADER_H && r.y+r.h<=l.footer.y,"{a:?} at {vp:?}");
@@ -1374,13 +1381,13 @@ mod tests {
             let actions=p.actions(vp);
             let play=actions.iter().find(|(..,a)|*a==Action::Play).unwrap().0;
             let l=Layout::new(vp);
-            assert!(play.y >= l.job_card().y+l.job_card().h, "card must clear transport");
+            assert!(play.y+play.h <= l.job_card().y, "card sits under the transport");
             let reveal=actions.iter().find(|(..,a)|*a==Action::Reveal).unwrap();
             assert!(hit(l.job_card(),reveal.0.x,reveal.0.y));
             let card=l.job_card();
             assert!(reveal.0.y+reveal.0.h <= card.y+card.h-if card.h<110.{32.}else{42.});
             assert_eq!(p.click(vp,reveal.0.x+1.,reveal.0.y+1.),Some(Action::Reveal));
-            assert_eq!(actions.iter().filter(|(..,a)|*a==Action::Export).count(),2);
+            assert_eq!(actions.iter().filter(|(..,a)|*a==Action::Export).count(),1);
         }
         assert_eq!(p.apply(Action::Reveal),p.destination);
     }

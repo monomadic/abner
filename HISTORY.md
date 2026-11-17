@@ -1,5 +1,14 @@
 # abner — history
 
+## 2026-11-17 — Export follows its re-edited Figma canvas
+
+The Export frame's canvas side (`621:8921`) was redone in Figma. The page no
+longer has a top bar or its second Export button (the sidebar's remains), the
+picture meets the header on a rounded canvas, and the bottom panel is black
+with the transport and review track above the job card instead of below it.
+Verified in a targeted window capture; the Export layout tests assert the new
+order and that the card stays inside the panel from 720×480 up.
+
 ## 2026-11-17 — Timeline follows its edited Figma frame
 
 The Timeline frame (`612:5851`) was edited in Figma after its export and the
