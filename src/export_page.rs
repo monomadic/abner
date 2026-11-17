@@ -978,16 +978,18 @@ impl Page {
         for (title,y) in [("Codec",settings.codec-15.),("Container",settings.container-15.),("Filename",settings.filename.y-18.),("Directory",settings.directory.y-18.)] {
             export_label(items,RectPx{x:16.,y,w:settings.width,h:12.},title,8.,hex_color(0xc8c8c8),true,Align::Left);
         }
-        let field = |items:&mut Vec<Item>,r:RectPx,fill:u32,shadow:bool| {
-            let mut s=figleaf::Shape::rect(figleaf::Rect::new(r.x,r.y,r.w,r.h)).radius(6.)
-                .fill(hex_color(fill)).stroke(1.,hex_color(0x5d5e5d),figleaf::StrokeAlign::Inside);
-            if shadow { s=s.shadow(figleaf::Shadow::inner([0.,0.,0.,1.],[0.,3.],9.)); }
-            items.push(Item::Shape(s));
+        // Figma 547:5962 / 547:5966: light recessed fields with dark type.
+        // The edge is the frame's white @ 62% over the fill, baked opaque.
+        let field_ink = hex_color(0x222422);
+        let field = |items:&mut Vec<Item>,r:RectPx| {
+            items.push(Item::Shape(figleaf::Shape::rect(figleaf::Rect::new(r.x,r.y,r.w,r.h)).radius(7.)
+                .fill(hex_color(0x9fa89f)).stroke(1.,hex_color(0xdbdedb),figleaf::StrokeAlign::Inside)
+                .shadow(figleaf::Shadow::inner([0.,0.,0.,0.45],[0.,2.],6.))));
         };
-        field(items,settings.filename,0x222422,true);
-        field(items,settings.directory,0x050505,false);
-        export_label(items,RectPx{x:settings.directory.x+10.,w:settings.directory.w-52.,..settings.directory},
-            &self.directory().map(|p|p.display().to_string()).unwrap_or_default(),11.,ink,true,Align::Left);
+        field(items,settings.filename);
+        field(items,settings.directory);
+        export_label(items,RectPx{x:settings.directory.x+12.,w:settings.directory.w-54.,..settings.directory},
+            &self.directory().map(|p|p.display().to_string()).unwrap_or_default(),11.,field_ink,true,Align::Left);
         let queue=self.queue_rect(vp);
         if self.record.is_some() || !self.history.is_empty() {
             surface(items,queue,0x0f0f0f,0.);
@@ -1043,7 +1045,7 @@ impl Page {
             };
             match a {
                 Action::ChooseDirectory=>{
-                    items.push(Item::Shape(figleaf::Shape::rect(figleaf::Rect::new(r.x,r.y,r.w,r.h)).radii([0.,6.,6.,0.]).fill(hex_color(if hovered{0x484948}else{0x343534}))));
+                    items.push(Item::Shape(figleaf::Shape::rect(figleaf::Rect::new(r.x,r.y,r.w,r.h)).radii([0.,7.,7.,0.]).fill(hex_color(if hovered{0x484948}else{0x343534}))));
                     items.push(Item::FrameIcon{x:r.x+(r.w-20.)/2.,y:r.y+(r.h-20.)/2.,index:6});
                 }
                 Action::RevealDirectory=>{},
@@ -1070,7 +1072,7 @@ impl Page {
                 Action::EditFilename=>{
                     let value=self.filename_edit.clone().unwrap_or_else(||self.destination_name());
                     items.push(Item::Text(TextItem{regular:true,valign:VAlign::Middle,caret:self.filename_edit.as_ref().map(|s|self.filename_cursor.position(s)),caret_visible:!self.filename_cursor.selected(),max_width:Some(r.w-24.),
-                        ..TextItem::new(r.x+12.,r.y+r.h/2.,11.,if self.filename_cursor.selected(){blue}else{ink},value)}));
+                        ..TextItem::new(r.x+12.,r.y+r.h/2.,11.,if self.filename_cursor.selected(){blue}else{field_ink},value)}));
                 }
                 Action::OpenExport(index)=>{
                     surface(items,r,if selected{0x19334b}else if hovered{0x303438}else{0x171c21},6.);

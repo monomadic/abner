@@ -504,6 +504,9 @@ down, then the job card from 84px down to 16px above the status line
 minimum window. Dead step controls dim under a black veil, not the old grey.
 The card keeps its opaque fills (the frame's #1b1919 @ 46% and white @ 12%
 read too bright in linear blending).
+The Filename and Directory fields follow 547:5962 / 547:5966: #9fa89f fill,
+7px radius, #222422 type, an inner shadow, and the frame's white @ 62% edge
+baked opaque (#dbdedb) over the fill.
 
 ### Process screen export (2026-11-16)
 

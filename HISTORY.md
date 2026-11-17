@@ -9,6 +9,9 @@ with the transport and review track above the job card instead of below it.
 Verified in a targeted window capture; the Export layout tests assert the new
 order and that the card stays inside the panel from 720×480 up.
 
+The Filename and Directory fields then took the frame's light grey-green
+fill with dark type; they had stayed dark since the first round trip.
+
 ## 2026-11-17 — Timeline follows its edited Figma frame
 
 The Timeline frame (`612:5851`) was edited in Figma after its export and the
