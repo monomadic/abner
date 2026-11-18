@@ -7401,7 +7401,7 @@ impl Workspace {
         // `rail` is what the layout gives the panel this frame; `panel` is
         // the panel's own width, and its rects start at `rail - panel` so
         // a half-open rail is the right-hand part of a whole one.
-        let full = source_width.unwrap_or_else(|| rail_full_width(w)).clamp(RAIL_MIN_W, (w * 0.45).clamp(180.0, 480.0));
+        let full = source_width.unwrap_or(SOURCES_DEFAULT_W).clamp(RAIL_MIN_W, (w * 0.45).clamp(180.0, 480.0));
         // Cut mode under CUT_COLUMNS_MIN_W drops its right column; the
         // rail collapses to the mini strip at the same width, so the two
         // columns go together and the lanes keep their room.
@@ -7606,6 +7606,9 @@ const SOURCE_OVERLAY_W: f32 = 260.0;
 /// Below this the cards drop the label: preview and keycap only, the
 /// heading drops its title, and the inspector and Duplicate go.
 const SOURCE_COMPACT_W: f32 = 180.0;
+/// The Sources rail's width until the user drags its edge: the narrowest that
+/// still keeps the cards' name strip, the heading and the inspector.
+const SOURCES_DEFAULT_W: f32 = SOURCE_COMPACT_W;
 /// Below this the focused preview washes out under a big slot number.
 const SOURCE_KEYCAP_W: f32 = 140.0;
 /// The narrowest the rail's panel can be dragged.
@@ -7959,6 +7962,7 @@ mod tests {
     fn source_edge_drag_resizes_cards_without_selecting_or_seeking() {
         let Some(clip) = test_clip() else { return };
         let mut app = mk_app(&clip, 3);
+        app.set_sources_width(280.0);
         app.tick(0.0, (1280.0, 1200.0), 2.0);
         let before = app.source_row(0);
         let t = app.t;
@@ -7991,7 +7995,7 @@ mod tests {
         let mut app = mk_app(&clip, 3);
         let vp = (1280.0, 1200.0);
         app.tick(0.0, vp, 2.0);
-        app.mouse_down(280.0, HEADER_H + 20.0);
+        app.mouse_down(SOURCES_DEFAULT_W, HEADER_H + 20.0);
         app.cursor_moved(40.0, HEADER_H + 20.0);
         assert!(!app.show_sources, "past the snap point the rail folds");
         app.cursor_moved(150.0, HEADER_H + 20.0);
@@ -8011,7 +8015,7 @@ mod tests {
         app.mouse_up();
         assert!(app.show_sources);
         app.tick(RAIL_SLIDE_S * 2.0, vp, 2.0);
-        assert_eq!(app.workspace().rail, 280.0);
+        assert_eq!(app.workspace().rail, SOURCES_DEFAULT_W);
     }
 
     #[test]
@@ -8502,10 +8506,10 @@ mod tests {
         let mut app = mk_app(&clip, 2);
         app.vp = (1280.0, 800.0);
         let tabs = app.header_tabs();
-        assert_eq!(app.workspace().rail, 280.0);
+        assert_eq!(app.workspace().rail, SOURCES_DEFAULT_W);
         assert!(app.controls().iter().any(|c| matches!(c.action, Action::ToggleSources) && c.selected));
         let r = app.sidebar_toggle();
-        assert!(r.x + r.w <= 280.0 && r.y >= HEADER_H && r.y + r.h <= HEADER_H + RAIL_HEAD_H, "the toggle rides the rail's heading strip");
+        assert!(r.x + r.w <= SOURCES_DEFAULT_W && r.y >= HEADER_H && r.y + r.h <= HEADER_H + RAIL_HEAD_H, "the toggle rides the rail's heading strip");
         assert_eq!(tabs.x, 78.0, "the selector starts where the toggle used to");
         app.mouse_down(r.x + 16.0, r.y + 14.0);
         app.mouse_up();
@@ -8515,9 +8519,9 @@ mod tests {
         // and sit partly off-screen; settled, the rail is gone.
         app.tick(RAIL_SLIDE_S / 2.0, (1280.0, 800.0), 2.0);
         let mid = app.workspace();
-        assert!(mid.rail > 0.0 && mid.rail < 280.0, "{}", mid.rail);
-        assert_eq!((mid.panel, mid.canvas.x, mid.list.w), (280.0, mid.rail, 280.0));
-        assert_eq!(app.source_row(0).w, 256.0);
+        assert!(mid.rail > 0.0 && mid.rail < SOURCES_DEFAULT_W, "{}", mid.rail);
+        assert_eq!((mid.panel, mid.canvas.x, mid.list.w), (SOURCES_DEFAULT_W, mid.rail, SOURCES_DEFAULT_W));
+        assert_eq!(app.source_row(0).w, SOURCES_DEFAULT_W - 24.0);
         assert!(app.source_row(0).x < 12.0);
         let desc = app.tick(RAIL_SLIDE_S, (1280.0, 800.0), 2.0);
         assert!(!desc.animating || app.playing);
@@ -8550,7 +8554,7 @@ mod tests {
         app.mouse_up();
         assert!(app.show_sources && app.mask_mode);
         app.tick(RAIL_SLIDE_S, (1280.0, 800.0), 2.0);
-        assert_eq!(app.workspace().rail, 280.0);
+        assert_eq!(app.workspace().rail, SOURCES_DEFAULT_W);
         // Timeline mode keeps the rail beside the video and a click there
         // re-cuts the chosen clip; the toggle hides it there too.
         app.key(Key::Char('m'));
@@ -8558,7 +8562,7 @@ mod tests {
         app.set_cut_mode(true);
         assert!(app.cut_mode);
         let l = app.workspace();
-        assert_eq!((l.rail, l.canvas.x, l.transport.x, l.timeline.x), (280.0, 280.0, 0.0, 0.0));
+        assert_eq!((l.rail, l.canvas.x, l.transport.x, l.timeline.x), (SOURCES_DEFAULT_W, SOURCES_DEFAULT_W, 0.0, 0.0));
         assert!(l.canvas.x + l.canvas.w <= l.side.x);
         let second = app.source_row(1);
         assert!(second.y + second.h <= l.list.y + l.list.h, "two cards fit at this height");
@@ -8591,7 +8595,7 @@ mod tests {
         app.tick(RAIL_SLIDE_S, (1280.0, 1100.0), 2.0);
         let l = app.workspace();
         assert!(!app.show_inspector && app.show_sources);
-        assert_eq!((l.side.w, l.canvas.x + l.canvas.w, l.rail), (0.0, 1280.0, 280.0));
+        assert_eq!((l.side.w, l.canvas.x + l.canvas.w, l.rail), (0.0, 1280.0, SOURCES_DEFAULT_W));
         app.mouse_down(t.x + 16.0, t.y + 14.0);
         app.mouse_up();
         app.tick(RAIL_SLIDE_S, (1280.0, 1100.0), 2.0);
@@ -8963,6 +8967,7 @@ mod tests {
     fn crop_marquee_drags_and_exports_mask_and_video_at_one_size() {
         let Some(clip) = test_clip() else { return };
         let mut app = mk_app(&clip, 2);
+        app.set_sources_width(280.0);
         app.key(Key::Char('m'));
         // The export needs real pixels, so wait for a decoded frame.
         assert!(
@@ -10693,6 +10698,7 @@ mod tests {
     fn option_drag_duplicates_only_the_dragged_source_on_release() {
         let Some(clip) = test_clip() else { return };
         let mut app = mk_app(&clip, 2);
+        app.set_sources_width(280.0);
         app.playing = false;
         app.tick(0.0, (1280.0, 800.0), 2.0);
         let row = app.source_row(0);

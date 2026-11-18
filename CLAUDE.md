@@ -192,7 +192,7 @@ from one to the other, keeping its number.
   ends in an **Export** button (`footer_export`, `Action::Export` → `App::export`, the
   File > Export path; dead when `can_export()` is false), drawn like cut mode's
   Split / Join / Delete / Save / Render footer buttons (`draw_cut_footer_button`); the Process
-  page paints it after its own footer (`draw_footer_end`). The rail is 280px (210 below 900px wide), the minimum window is 720×480, and
+  page paints it after its own footer (`draw_footer_end`). The rail opens at 180px (`SOURCES_DEFAULT_W`, the narrowest Overlay-stage width; it was 280 until 2026-11-18, and the Process and Export side columns still use `rail_full_width`, 280 / 210 below 900px wide), the minimum window is 720×480, and
   the rail's focused inspector exists only when the rail has room for one source
   card + footer + grip + inspector above its end (`Workspace::detail`) — the list
   never shrinks below a card, and cut mode's rail ends at the transport, so a
