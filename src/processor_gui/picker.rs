@@ -527,7 +527,9 @@ impl Panel {
             y: if empty {
                 self.group_top(vp) + (self.detail(vp).0.y - 16.0 - self.group_top(vp)) * 0.328
             } else {
-                self.group_top(vp) + 8.0
+                let list = self.list(vp);
+                let rows = self.visible().len() as f32 * CARD_PITCH - 3.0;
+                list.y + rows.min(list.h) + 12.0
             },
             w: 174.0,
             h: 32.0,
@@ -1193,7 +1195,7 @@ mod tests {
                 let list = p.list(vp);
                 for i in p.visible() {
                     let row = p.card(i, vp);
-                    assert!(row.y >= button.y + button.h);
+                    assert!((row.y + row.h).min(list.y + list.h) <= button.y - 12.0);
                     assert!(row.y.max(list.y) >= group.y);
                     assert!((row.y + row.h).min(list.y + list.h) <= group.y + group.h);
                 }

@@ -54,3 +54,8 @@ that the visible rows and Add Processor stay within the group and the button
 is painted above the background. All 47 processor tests and the composed
 release build pass. A targeted native capture with a synthetic clip confirms
 the populated panel, including the visible Add Processor button.
+
+The follow-up places Add Processor after the last visible processor row, with
+a 12px gap. Long chains reserve the same space beneath their scroll viewport
+so the button remains reachable. The group includes both rows and button;
+the regression check now asserts this ordering at both viewport sizes.

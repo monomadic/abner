@@ -2326,7 +2326,7 @@ impl Panel {
         HEADER_H + 46.0
     }
     fn list_top(&self, vp: (f32, f32)) -> f32 {
-        self.group_top(vp) + GROUP_PAD + if self.added.iter().any(|v| *v) { 44.0 } else { 0.0 }
+        self.group_top(vp) + GROUP_PAD
     }
     /// The grip strip and the visible part of the focused inspector, as
     /// the Sources rail lays them out: above the Move up / down row, and
@@ -2360,7 +2360,7 @@ impl Panel {
         let (grip, _) = self.detail(vp);
         let y = self.list_top(vp);
         let end = if grip.h > 0.0 { grip.y } else { Self::actions_top(vp) };
-        RectPx { x: 0.0, y, w: Self::left(vp), h: (end - RAIL_FOOTER_H - GROUP_PAD - y).max(CARD_PITCH) }
+        RectPx { x: 0.0, y, w: Self::left(vp), h: (end - RAIL_FOOTER_H - GROUP_PAD - y - if self.added.iter().any(|v| *v) { 44.0 } else { 0.0 }).max(CARD_PITCH) }
     }
     /// Processor `i`'s row; a row the filter hides has no area.
     fn card(&self, i: usize, vp: (f32, f32)) -> RectPx {
@@ -3307,10 +3307,10 @@ impl Panel {
         let list = self.list(vp);
         let visible = self.visible();
         if !visible.is_empty() {
-            // The group box hugs its rows, and stops at the list's end.
+            // The group contains the visible rows and the Add Processor footer.
             let top = self.group_top(vp);
-            let rows = visible.len() as f32 * CARD_PITCH - 3.0;
-            let h = (list.y - top + rows.min(list.h) + GROUP_PAD).max(0.0);
+            let add = self.add_button(vp);
+            let h = add.y + add.h + GROUP_PAD - top;
             items.push(Item::Rect(RectItem { radius: 14.0, border_w: 1.0, border_color: hex_color(0x2e2e2e),
                 ..RectItem::new(RectPx { x: RAIL_PAD_X, y: top, w: l - 2.0 * RAIL_PAD_X, h }, hex_color(0x121212)) }));
         }
