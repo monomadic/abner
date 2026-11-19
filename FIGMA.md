@@ -610,3 +610,19 @@ inspector fill #000000, the header's bottom hairline and the inspector's edge
 are gone, and the lanes instance takes a #161515 ground (`CUT_TL`). In the
 app the Timeline header, rail and inspector are one black ground with no
 rules, and the clear behind the canvas's rounded corners is black.
+
+
+### Empty processor chain and Add Processor dialog — 2026-11-20
+
+Refreshed Signal frames `655:6349` and `655:6576` (dialog `655:6669`) before
+implementation. The chain begins empty; the installed catalog lives in a modal
+with full-width category tabs, a searchable left list, and settings plus metadata
+on the right. The 880×640 reference geometry adapts to smaller windows. The
+empty state hides the inspector and keeps the render-history panel below the
+Add Processor card. Runtime descriptors supply every processor name, category,
+setting and metadata value. Draft settings stay separate from the live chain
+until Add; Cancel restores the previous selection. Existing spatial input
+editors remain available after adding a processor.
+
+Native release window captures inspected at 1280×800 logical pixels using a
+synthetic clip. See `docs/validation/add-processor-dialog.md` for checks and limits.

@@ -1,5 +1,17 @@
 # abner — history
 
+## 2026-11-20 — Build a processor chain from an empty list
+
+Process starts with an empty chain and an Add Processor button. The dialog
+browses the installed catalog on the left, with editable settings, presets and
+metadata on the right. Search and category filters narrow the catalog; Add
+appends the configured processor, while Cancel leaves the chain unchanged.
+Render history restores chain membership as well as settings and bypass state.
+The empty canvas expands into the space normally occupied by the inspector.
+
+The updated Figma frames are `655:6349` and `655:6576`; implementation and
+validation details are in `docs/validation/add-processor-dialog.md`.
+
 ## 2026-11-20 — Text fields take the pointer
 
 A click in a focused field puts the caret under the pointer, a drag selects,

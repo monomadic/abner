@@ -78,6 +78,7 @@ processor previews:
   --processor-render                render the current frame on open (captures)
   --export                          open the minimal Export workspace
   --process                         open the Process workspace
+  --add-processor                   open the Add Processor dialog
   R                                 preview current frame in Process
   Tab                               flip the Process canvas between source and rendered
   Shift-Left / Shift-Right           previous / next rendered frame
@@ -159,6 +160,7 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
     let mut export_workspace = false;
     let mut processor_settings = serde_json::json!({});
     let mut processor_render = false;
+    let mut add_processor = false;
     // The Sources sidebar hidden, as the header toggle leaves it: for captures.
     let mut no_sources = false;
     let mut sources_width: Option<f32> = None;
@@ -173,6 +175,7 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
     let mut it = args.iter();
     while let Some(a) = it.next() {
         if a == "--export" { export_workspace=true; }
+        else if a == "--add-processor" { add_processor = true; process_workspace = true; }
         else if a == "--process" {
             process_workspace = true;
         } else if a == "--processor" {
@@ -306,6 +309,7 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
             .map_err(anyhow::Error::msg)?;
         if processor_render { app.render_processor_frame(); }
     }
+    if add_processor { app.open_processor_picker(); }
     if export_workspace { app.select_workspace_mode(5); }
     app.set_recent(recent::load());
     app.set_video_splash(video_splash);
@@ -954,6 +958,8 @@ impl ApplicationHandler for Runner {
                     // ⇧ + arrow: cut mode's keyframe step (a plain arrow elsewhere).
                     WinitKey::Named(NamedKey::ArrowLeft) if self.mods.shift_key() => Some(Key::KeyLeft),
                     WinitKey::Named(NamedKey::ArrowRight) if self.mods.shift_key() => Some(Key::KeyRight),
+                    WinitKey::Named(NamedKey::ArrowUp) => Some(Key::Up),
+                    WinitKey::Named(NamedKey::ArrowDown) => Some(Key::Down),
                     WinitKey::Named(NamedKey::ArrowLeft) => Some(Key::Left),
                     WinitKey::Named(NamedKey::ArrowRight) => Some(Key::Right),
                     WinitKey::Named(NamedKey::Enter) => Some(Key::Enter),

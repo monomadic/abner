@@ -49,6 +49,8 @@ pub enum Key {
     Char(char),
     Left,
     Right,
+    Up,
+    Down,
     Enter,
     Space,
     Escape,
@@ -2185,6 +2187,7 @@ impl App {
         self.playing = false;
         Ok(())
     }
+    pub(crate) fn open_processor_picker(&mut self) { self.select_workspace_mode(4); self.processors.open_picker(); }
     /// `--processor-render`: what the panel's Render button does, for captures.
     pub fn render_processor_frame(&mut self) {
         self.processors.render_frame();
@@ -2259,6 +2262,7 @@ impl App {
     }
 
     pub fn key(&mut self, mut k: Key) {
+        if self.processors.modal_open() { self.processors.key(k); return; }
         if self.export_page.editing_filename() && self.export_page.key(k) { return; }
         if self.editor.is_some() {
             if k==Key::Escape {self.finish_editor(false);return}
@@ -2413,7 +2417,7 @@ impl App {
                 }
             }
             Key::Backspace => self.speed = 1.0,
-            Key::Close | Key::ActualSize | Key::CmdDigit(_) | Key::Undo | Key::Redo | Key::Render | Key::SaveProject | Key::KeyLeft | Key::KeyRight | Key::DuplicateSources | Key::OpenFiles | Key::PrevMode | Key::NextMode => {} // handled above
+            Key::Up | Key::Down | Key::Close | Key::ActualSize | Key::CmdDigit(_) | Key::Undo | Key::Redo | Key::Render | Key::SaveProject | Key::KeyLeft | Key::KeyRight | Key::DuplicateSources | Key::OpenFiles | Key::PrevMode | Key::NextMode => {} // handled above
             Key::Char('V') => self.mode = self.mode.cycle(-1),
             Key::Char(c @ '1'..='9') => {
                 let idx = c as usize - '1' as usize;
@@ -2595,6 +2599,7 @@ impl App {
     }
 
     pub fn mouse_down(&mut self, x: f32, y: f32) {
+        if self.processors.modal_open() { self.processors.click(x, y, self.vp); return; }
         if self.detection_press(x,y) {return;}
 
         if self.source_resize_hit(x, y) {
@@ -2852,6 +2857,7 @@ impl App {
     /// sits under it stays put, and every stream shares the resulting
     /// center. Positive delta = fingers spreading = zoom in.
     pub fn pinch(&mut self, delta: f32) {
+        if self.processors.modal_open() { return; }
         self.stroke_last = None;
         if self.ready() && !self.export_page.open && !self.processors.open && self.cut_mode && self.show_ui && self.cut_over_panel() {
             let lane = self.cut_lanes().video;
@@ -2964,7 +2970,7 @@ impl App {
     /// the workspace canvas otherwise.
     fn canvas(&self) -> RectPx {
         if self.export_page.open { return crate::export_page::Page::canvas(self.vp,self.show_ui).r; }
-        if self.processors.open && self.show_ui { crate::processor_gui::Panel::viewer(self.vp) } else { self.workspace().canvas }
+        if self.processors.open && self.show_ui { self.processors.viewer(self.vp) } else { self.workspace().canvas }
     }
 
     /// Zoom and pan as the processors viewer draws them.
@@ -3397,7 +3403,7 @@ impl App {
             items.push(Item::Clip(None));
         }
         if self.show_ui {self.draw_detection_range(&mut items);}
-        if self.processors.open && self.show_ui { self.draw_footer_end(&mut items, vp); }
+        if self.processors.open && self.show_ui { self.draw_footer_end(&mut items, vp); self.processors.draw_picker(&mut items, vp); }
 
         if self.ready() { self.export_page.reset_source(&self.videos[self.active].info); }
         self.export_page.poll(&mut uploads, n + 1);
@@ -8673,7 +8679,7 @@ mod tests {
             let sources=Workspace::new(vp,true,false,0.,1.,1.,1.,None,false);
             let timeline=Workspace::new(vp,true,true,0.,1.,1.,1.,None,false);
             let export=crate::export_page::Layout::new(vp);
-            let process=crate::processor_gui::Panel::viewer(vp);
+            let process=crate::processor_gui::Panel::default().viewer(vp);
             assert_eq!(sources.canvas.y,HEADER_H+ButtonBar::HEIGHT);
             // Export has no bar: its picture meets the header.
             assert_eq!(export.video.y,HEADER_H);
@@ -9655,9 +9661,9 @@ mod tests {
         let frame = app.tick(0.0, vp, 1.0);
         let track = frame.items.iter().rev().find_map(|item| match item {
             Item::Rect(r) if r.r.h == 4.0 && r.r.w > 100.0
-                && r.r.x > crate::processor_gui::Panel::viewer(vp).x
-                && r.r.y > crate::processor_gui::Panel::viewer(vp).y
-                    + crate::processor_gui::Panel::viewer(vp).h => Some(r.r),
+                && r.r.x > crate::processor_gui::Panel::default().viewer(vp).x
+                && r.r.y > crate::processor_gui::Panel::default().viewer(vp).y
+                    + crate::processor_gui::Panel::default().viewer(vp).h => Some(r.r),
             _ => None,
         }).expect("processor seek track");
         app.mouse_down(track.x + track.w * 0.3, track.y);
@@ -9694,7 +9700,7 @@ mod tests {
         app.activate(Action::Tool(4));
         app.playing = false;
         let frame = app.tick(0.0, vp, 1.0);
-        let canvas = crate::processor_gui::Panel::viewer(vp);
+        let canvas = crate::processor_gui::Panel::default().viewer(vp);
         let track = frame.items.iter().rev().find_map(|item| match item {
             Item::Rect(r) if r.r.h == 4.0 && r.r.w > 100.0
                 && r.r.x > canvas.x && r.r.y > canvas.y + canvas.h => Some(r.r),
