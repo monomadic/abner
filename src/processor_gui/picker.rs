@@ -1161,6 +1161,46 @@ mod tests {
         assert_eq!(p.build_statuses.len(), 1);
     }
     #[test]
+    fn populated_rail_box_contains_rows_and_does_not_cover_add_button() {
+        let mut registry = Registry::default();
+        for id in ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"] {
+            registry.register(Box::new(Example(id))).unwrap();
+        }
+        let mut p = Panel::with_presets(registry, None);
+        p.enter();
+        for count in [1, 3, 12] {
+            p.added.fill(false);
+            p.added[..count].fill(true);
+            for vp in [(720.0, 480.0), (1280.0, 800.0)] {
+                let mut items = Vec::new();
+                p.draw_rail(&mut items, vp);
+                let (box_at, group) = items
+                    .iter()
+                    .enumerate()
+                    .find_map(|(i, item)| match item {
+                        Item::Rect(r) if r.color == hex_color(0x121212) => Some((i, r.r)),
+                        _ => None,
+                    })
+                    .unwrap();
+                let button = p.add_button(vp);
+                let button_at = items.iter().position(|item| matches!(item, Item::Rect(r)
+                    if r.r.x == button.x && r.r.y == button.y && r.r.w == button.w && r.r.h == button.h)).unwrap();
+                assert!(
+                    box_at < button_at,
+                    "the box must be painted behind Add Processor"
+                );
+                assert!(button.y >= group.y && button.y + button.h <= group.y + group.h);
+                let list = p.list(vp);
+                for i in p.visible() {
+                    let row = p.card(i, vp);
+                    assert!(row.y >= button.y + button.h);
+                    assert!(row.y.max(list.y) >= group.y);
+                    assert!((row.y + row.h).min(list.y + list.h) <= group.y + group.h);
+                }
+            }
+        }
+    }
+    #[test]
     fn empty_chain_is_not_the_installed_catalog() {
         let mut p = catalog();
         p.enter();

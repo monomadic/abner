@@ -3304,17 +3304,17 @@ impl Panel {
             items.push(Item::Text(TextItem { regular: true, align: Align::Right, valign: VAlign::Middle, max_width: Some(70.0),
                 ..TextItem::new(l - RAIL_PAD_X - 14.0, hy, 11.0, if on > 0 { hex_color(CUT_HEADER_BLUE) } else { subtle }, format!("{on} ACTIVE")) }));
         }
-        self.draw_add_button(items, vp);
         let list = self.list(vp);
         let visible = self.visible();
         if !visible.is_empty() {
             // The group box hugs its rows, and stops at the list's end.
             let top = self.group_top(vp);
             let rows = visible.len() as f32 * CARD_PITCH - 3.0;
-            let h = (rows.min(list.h) + 2.0 * GROUP_PAD).max(0.0);
+            let h = (list.y - top + rows.min(list.h) + GROUP_PAD).max(0.0);
             items.push(Item::Rect(RectItem { radius: 14.0, border_w: 1.0, border_color: hex_color(0x2e2e2e),
                 ..RectItem::new(RectPx { x: RAIL_PAD_X, y: top, w: l - 2.0 * RAIL_PAD_X, h }, hex_color(0x121212)) }));
         }
+        self.draw_add_button(items, vp);
         items.push(Item::Clip(Some(list)));
         let now = Instant::now();
         for &i in &visible {

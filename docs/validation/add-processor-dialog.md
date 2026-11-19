@@ -41,3 +41,16 @@ the empty chain, widened canvas, modal placement, category bar, initial catalog
 scroll position, settings/presets, metadata and footer. Native input dispatch is
 covered by the panel tests; captures do not prove every pointer interaction or
 processing plugin. No performance or processing-quality claim is made.
+
+## Populated rail correction — 2026-11-20
+
+Adding a stage reserved 44px above the rows for Add Processor, but the group
+box still used the old rows-only height and was painted over that button.
+The group now includes the actual list-top offset, and the button is painted
+after its background. Card positioning and hit testing are unchanged.
+
+Regression coverage draws 1, 3 and 12 members at 720×480 and 1280×800, checking
+that the visible rows and Add Processor stay within the group and the button
+is painted above the background. All 47 processor tests and the composed
+release build pass. A targeted native capture with a synthetic clip confirms
+the populated panel, including the visible Add Processor button.
