@@ -988,7 +988,19 @@ impl Panel {
                 hex_color(INSPECTOR_PATH),
                 l.about.w,
             );
-            items.push(Item::Text(TextItem{inspector:1,wrap:Some(l.about.w),..TextItem::new(l.about.x,l.about.y+153.0,11.0,hex_color(0x999999),if self.added[self.selected]{"Already in your chain. Select its row in the workspace to edit it."}else{"Adds one step to your chain. You can change these settings after adding it."})}));
+            let status = self.build_statuses.get(&d.id);
+            if let Some(status) = status {
+                interface_text(
+                    items,
+                    l.about.x,
+                    l.about.y + 153.0,
+                    10.0,
+                    status,
+                    0xff8d28,
+                    l.about.w,
+                );
+            }
+            items.push(Item::Text(TextItem{inspector:1,wrap:Some(l.about.w),..TextItem::new(l.about.x,l.about.y+153.0+if status.is_some(){20.0}else{0.0},11.0,hex_color(0x999999),if self.added[self.selected]{"Already in your chain. Select its row in the workspace to edit it."}else{"Adds one step to your chain. You can change these settings after adding it."})}));
             items.push(Item::Clip(None));
             self.draw_fields(items, vp, l.fields);
         }
@@ -1098,6 +1110,13 @@ mod tests {
 
     struct Example(&'static str);
     impl abner_processor_api::Factory for Example {
+        fn build_status(&self) -> Option<&str> {
+            match self.0 {
+                "example.a" => Some("  Research build  "),
+                "example.c" => Some("  "),
+                _ => None,
+            }
+        }
         fn descriptor(&self) -> Descriptor {
             Descriptor {
                 id: self.0.into(),
@@ -1116,6 +1135,30 @@ mod tests {
             r.register(Box::new(Example(id))).unwrap();
         }
         Panel::with_presets(r, None)
+    }
+    #[test]
+    fn build_status_follows_the_selected_processor_and_hides_unspecified_values() {
+        let mut p = catalog();
+        p.enter();
+        p.open_picker();
+        let vp = (1280.0, 800.0);
+        for (id, expected) in [
+            ("example.a", true),
+            ("example.b", false),
+            ("example.c", false),
+        ] {
+            let i = p.descriptors.iter().position(|d| d.id == id).unwrap();
+            p.pick_candidate(i);
+            let mut items = Vec::new();
+            p.draw_picker(&mut items, vp);
+            assert_eq!(
+                items
+                    .iter()
+                    .any(|item| matches!(item, Item::Text(t) if t.text == "Research build")),
+                expected
+            );
+        }
+        assert_eq!(p.build_statuses.len(), 1);
     }
     #[test]
     fn empty_chain_is_not_the_installed_catalog() {

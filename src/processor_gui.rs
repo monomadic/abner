@@ -1150,6 +1150,7 @@ pub struct Panel {
     pub open: bool,
     descriptors: Vec<Descriptor>,
     descriptions: BTreeMap<String, String>,
+    build_statuses: BTreeMap<String, String>,
     selected: usize,
     saved: Vec<Value>,
     enabled: Vec<bool>,
@@ -1271,6 +1272,7 @@ impl Default for Panel {
             open: false,
             descriptors: vec![],
             descriptions: BTreeMap::new(),
+            build_statuses: BTreeMap::new(),
             selected: 0,
             saved: vec![],
             enabled: vec![],
@@ -1398,6 +1400,10 @@ impl Panel {
             let description = registry.get(&d.id).ok()?.description().trim();
             (!description.is_empty()).then(|| (d.id.clone(), description.to_owned()))
         }).collect();
+        let build_statuses = descriptors.iter().filter_map(|d| {
+            let status = registry.get(&d.id).ok()?.build_status()?.trim();
+            (!status.is_empty()).then(|| (d.id.clone(), status.to_owned()))
+        }).collect();
         let registry = Arc::new(Mutex::new(registry));
         let worker = (!descriptors.is_empty()).then(|| Worker::new(registry.clone()));
         let mut s = Self::default();
@@ -1407,6 +1413,7 @@ impl Panel {
         s.registry = registry;
         s.descriptors = descriptors;
         s.descriptions = descriptions;
+        s.build_statuses = build_statuses;
         s.saved = saved;
         s.enabled = enabled;
         s.added = vec![false; s.descriptors.len()];

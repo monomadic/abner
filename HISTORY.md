@@ -4,7 +4,8 @@
 
 Process starts with an empty chain and an Add Processor button. The dialog
 browses the installed catalog on the left, with editable settings, presets and
-metadata on the right. Search and category filters narrow the catalog; Add
+metadata on the right, including optional processor-supplied build status.
+Search and category filters narrow the catalog; Add
 appends the configured processor, while Cancel leaves the chain unchanged.
 Render history restores chain membership as well as settings and bypass state.
 The empty canvas expands into the space normally occupied by the inspector.
