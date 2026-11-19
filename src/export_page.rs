@@ -291,16 +291,17 @@ impl Page {
     /// working frame's share (its stage's steps through the current call,
     /// placed within the chain) of one frame's length. Never decreases.
     fn total_fraction(&self) -> f64 {
-        use abner_processing::progress::frame_share;
+        use abner_processing::progress::{FRAME_CAP, frame_share};
         let duration = self.duration.max(0.001);
         let done = (self.rendered_time / duration).clamp(0., 1.);
         let Some(job) = &self.job else { return done };
         let Ok(mut state) = job.frame.lock() else { return done };
         let frame = self.frames.back().map_or(1. / self.review_fps.max(1.), |f| f.frame_duration);
         let share = state.report.as_ref()
-            .and_then(|(_, i, n, f)| f.fraction().map(|x| frame_share(*i, *n, x)))
+            .and_then(|(_, i, n, f)| f.fraction().map(|x| frame_share(*i, *n, x, f.frame_count())))
             .unwrap_or(0.);
-        let total = if done >= 1. { 1. } else { (done + share * frame / duration).min(1.) };
+        // A batch call's share is several frames long; it never finishes the clip.
+        let total = if done >= 1. { 1. } else { (done + share * frame / duration).min(1. - (1. - FRAME_CAP) * frame / duration) };
         state.floor = state.floor.max(total);
         state.floor
     }
@@ -1293,7 +1294,7 @@ mod tests {
         p.rendered_time = 1.;
         assert_eq!(p.total_fraction(), 0.25);
         let steps = |completed| ("Wonder".to_string(), 0, 1,
-            abner_processor_api::FrameProgress { phase: "transformer".into(), completed, total: 63 });
+            abner_processor_api::FrameProgress { phase: "transformer".into(), completed, total: 63, frames: 0 });
         frame.lock().unwrap().report = Some(steps(21));
         assert!((p.total_fraction() - (1. + 21. / 63.) / 4.).abs() < 1e-12);
         // The call returned: the report clears before the frame lands.
@@ -1423,7 +1424,7 @@ mod tests {
         assert_eq!(render_line(0.5, 1, Some(0.5), 1., 4000., Some(&stage(" ", 3, None)), None),
             "50% · 1 of 2 frames · 1h 06m per frame · ~1h 06m left · Example · Processing");
         // A slow processor's steps replace its phase: the frame in hand.
-        let frame = ("Wonder".to_string(), 0, 1, abner_processor_api::FrameProgress { phase: "transformer".into(), completed: 21, total: 63 });
+        let frame = ("Wonder".to_string(), 0, 1, abner_processor_api::FrameProgress { phase: "transformer".into(), completed: 21, total: 63, frames: 0 });
         assert_eq!(render_line(0.5, 1, Some(0.5), 1., 60., Some(&stage("Tiles", 12, Some(12))), Some(&frame)),
             "50% · 1 of 2 frames · 1m 00s per frame · ~1m 00s left · Wonder · transformer 21/63");
         // A rounded total never reads below the frames already written.

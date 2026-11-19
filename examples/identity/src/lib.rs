@@ -6,7 +6,7 @@ impl Session for S {
     // A slow processor reports every step of the call (the frame bar); the host
     // folds it into the job's total. One step here, so it is only an example.
     fn set_frame_progress_reporter(&mut self, reporter: FrameProgressReporter) { self.frame = Some(reporter); }
-    fn process(&mut self, input: Frame) -> Result<Vec<Frame>> { self.c.check()?; self.n += 1; if let Some(report) = &self.reporter { report(Progress { phase: "Passing through frame".into(), completed: 1, total: Some(1) }); } if let Some(step) = &self.frame { step(FrameProgress { phase: "Passing through frame".into(), completed: 1, total: 1 }); } Ok(vec![input]) }
+    fn process(&mut self, input: Frame) -> Result<Vec<Frame>> { self.c.check()?; self.n += 1; if let Some(report) = &self.reporter { report(Progress { phase: "Passing through frame".into(), completed: 1, total: Some(1) }); } if let Some(step) = &self.frame { step(FrameProgress { phase: "Passing through frame".into(), completed: 1, total: 1, frames: 1 }); } Ok(vec![input]) }
     fn finish(&mut self) -> Result<Vec<Frame>> { Ok(vec![]) }
     fn output_dimensions(&self) -> [usize; 2] { [self.w, self.h] }
     fn cancellation(&self) -> Cancellation { self.c.clone() }

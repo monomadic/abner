@@ -525,7 +525,9 @@ so an exact seek lands on it — and the clock stays on the output time.
 whole current call's steps, via `set_frame_progress_reporter`); the host owns the
 total and folds the frame in (`abner_processing::progress`, never backwards, capped
 below a delivered frame). Phase-local `Progress` is detail text only — it never
-drives a total bar (that was the "100% while still rendering" bug). Every wrapping
+drives a total bar (that was the "100% while still rendering" bug). A stage that renders a buffered batch in one call sets
+`FrameProgress::frames` to the frames that call returns, so the total covers the batch
+(Astra: eight frames per call) instead of sitting on one frame's share. Every wrapping
 `Session` must forward BOTH reporter setters.
 **Settings explain themselves**: a property's `description` is its hover tooltip,
 and `oneOf: [{const, title, description}]` names and explains each choice of a

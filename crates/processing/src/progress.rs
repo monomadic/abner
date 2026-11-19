@@ -16,17 +16,21 @@ use std::sync::{Arc, Mutex};
 /// the last step of a call is followed by delivery, conversion and encoding.
 pub const FRAME_CAP: f64 = 0.99;
 
-/// The current frame's share, `0..=FRAME_CAP`: the working stage's fraction
-/// of its call, placed within the chain (`stage` of `stages`) so a frame that
-/// moves on to the next stage keeps going forward instead of restarting.
-pub fn frame_share(stage: usize, stages: usize, fraction: f64) -> f64 {
+/// The in-flight call's share, in frames: the working stage's fraction of its
+/// call, placed within the chain (`stage` of `stages`) so a frame that moves on
+/// to the next stage keeps going forward instead of restarting, times the
+/// `frames` the call delivers ([`FrameProgress::frame_count`]). The last of
+/// those frames never completes: at most `frames - 1 + FRAME_CAP`.
+pub fn frame_share(stage: usize, stages: usize, fraction: f64, frames: u64) -> f64 {
     let stages = stages.max(1);
     let stage = stage.min(stages - 1);
-    ((stage as f64 + fraction.clamp(0.0, 1.0)) / stages as f64).min(FRAME_CAP)
+    let frames = frames.max(1) as f64;
+    (frames * (stage as f64 + fraction.clamp(0.0, 1.0)) / stages as f64).min(frames - 1.0 + FRAME_CAP)
 }
 
-/// Total progress, `0..=1`: whole frames done plus the in-flight frame's share,
-/// out of `total`. A finished job (done ≥ total) is exactly 1.
+/// Total progress, `0..=1`: whole frames done plus the in-flight call's share
+/// (in frames, [`frame_share`]), out of `total`. A finished job (done ≥ total)
+/// is exactly 1; an unfinished one never reaches it.
 pub fn fold(done: u64, total: u64, frame_share: Option<f64>) -> Option<f64> {
     if total == 0 {
         return None;
@@ -34,7 +38,8 @@ pub fn fold(done: u64, total: u64, frame_share: Option<f64>) -> Option<f64> {
     if done >= total {
         return Some(1.0);
     }
-    let share = frame_share.unwrap_or(0.0).clamp(0.0, FRAME_CAP);
+    let left = (total - done) as f64;
+    let share = frame_share.unwrap_or(0.0).clamp(0.0, left - 1.0 + FRAME_CAP);
     Some((done as f64 + share) / total as f64)
 }
 
@@ -72,7 +77,9 @@ impl State {
     fn publish(&mut self) {
         let p = &mut self.progress;
         let share = match (&p.frame, p.stage) {
-            (Some(f), Some(stage)) => f.fraction().map(|x| frame_share(stage, self.stages, x)),
+            (Some(f), Some(stage)) => {
+                f.fraction().map(|x| frame_share(stage, self.stages, x, f.frame_count()))
+            }
             _ => None,
         };
         if let Some(total) = p.frames_total {
@@ -221,7 +228,7 @@ mod tests {
         (ProgressTracker::new(stages, Arc::new(move |p: &JobProgress| log.lock().unwrap().push(p.clone()))), seen)
     }
     fn step(completed: u64, total: u64) -> FrameProgress {
-        FrameProgress { phase: "transformer".into(), completed, total }
+        FrameProgress { phase: "transformer".into(), completed, total, frames: 0 }
     }
 
     #[test]
@@ -234,9 +241,30 @@ mod tests {
         assert_eq!(fold(0, 1, Some(1.0)), Some(FRAME_CAP));
         assert_eq!(fold(3, 4, Some(0.5)), Some(3.5 / 4.0));
         assert_eq!(fold(4, 4, Some(0.5)), Some(1.0));
-        assert_eq!(frame_share(0, 2, 1.0), 0.5);
-        assert_eq!(frame_share(1, 2, 0.5), 0.75);
-        assert_eq!(frame_share(5, 2, 1.0), FRAME_CAP);
+        assert_eq!(frame_share(0, 2, 1.0, 1), 0.5);
+        assert_eq!(frame_share(1, 2, 0.5, 1), 0.75);
+        assert_eq!(frame_share(5, 2, 1.0, 1), FRAME_CAP);
+        assert_eq!(frame_share(0, 1, 0.5, 0), 0.5, "0 frames means one");
+        // A batch call covers its frames; its last frame never completes.
+        assert_eq!(frame_share(0, 1, 0.5, 8), 4.0);
+        assert_eq!(frame_share(0, 1, 1.0, 8), 7.0 + FRAME_CAP);
+        assert_eq!(fold(0, 8, Some(4.0)), Some(0.5));
+        assert_eq!(fold(4, 8, Some(7.0 + FRAME_CAP)), Some((7.0 + FRAME_CAP) / 8.0), "capped at what is left");
+    }
+
+    #[test]
+    fn a_batch_call_moves_the_total_across_its_frames() {
+        // Eight frames buffered and rendered in one call: the total follows the
+        // call's steps across all eight, not one frame's eighth.
+        let (t, _) = tracker(1);
+        t.frames(0, Some(16));
+        let frame = t.frame_reporter(0);
+        frame(FrameProgress { frames: 8, ..step(22, 44) });
+        assert_eq!(t.snapshot().fraction, Some(0.25));
+        frame(FrameProgress { frames: 8, ..step(44, 44) });
+        assert_eq!(t.snapshot().fraction, Some((7.0 + FRAME_CAP) / 16.0));
+        t.frames(8, Some(16));
+        assert_eq!(t.snapshot().fraction, Some(0.5));
     }
 
     #[test]
@@ -309,6 +337,10 @@ mod tests {
         assert_eq!(p.fraction(), Some(0.25));
         let f: FrameProgress = serde_json::from_str(r#"{"phase":"vae","completed":1,"total":63}"#).unwrap();
         assert_eq!(f.fraction(), Some(1.0 / 63.0));
-        assert_eq!(FrameProgress { total: 0, ..f }.fraction(), None);
+        assert_eq!(FrameProgress { total: 0, ..f.clone() }.fraction(), None);
+        assert_eq!(f.frame_count(), 1);
+        assert_eq!(serde_json::to_string(&f).unwrap(), r#"{"phase":"vae","completed":1,"total":63}"#);
+        let b: FrameProgress = serde_json::from_str(r#"{"phase":"vae","completed":1,"total":63,"frames":8}"#).unwrap();
+        assert_eq!(b.frame_count(), 8);
     }
 }

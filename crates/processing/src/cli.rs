@@ -262,7 +262,7 @@ mod tests {
         // A slow single frame: the total moves with the frame's steps.
         let mut p = job(0, Some(1), Some(0.5));
         p.stage = Some(0);
-        p.frame = Some(FrameProgress { phase: "transformer".into(), completed: 31, total: 62 });
+        p.frame = Some(FrameProgress { phase: "transformer".into(), completed: 31, total: 62, frames: 0 });
         assert_eq!(progress_line(&p, 60.), "Encoded frames: 0/1 · 50% · ~1m 00s left · stage 1 frame 31/62 transformer");
         // A stage without frame progress shows its phase, never as a total.
         p.frame = None;

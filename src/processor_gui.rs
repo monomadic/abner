@@ -3704,7 +3704,8 @@ impl Panel {
             return self.render_result.filter(|ok| *ok).map(|_| 1.0);
         }
         let share = self.feedback.as_ref().and_then(|f| {
-            f.frame_fraction().map(|x| frame_share(f.index, f.count, x))
+            let frames = f.frame.as_ref().map_or(1, |p| p.frame_count());
+            f.frame_fraction().map(|x| frame_share(f.index, f.count, x, frames))
         });
         let raw = if self.expected >= 1 {
             if share.is_none() && self.preview_count == 0 { None }
@@ -4283,7 +4284,7 @@ mod tests {
         let feedback = |frame: Option<(u64, u64)>, phase: Option<u64>| StageFeedback {
             name: "Wonder".into(), index: 0, count: 1,
             progress: Progress { phase: "Tiles".into(), completed: 12, total: phase },
-            frame: frame.map(|(completed, total)| FrameProgress { phase: "transformer".into(), completed, total }),
+            frame: frame.map(|(completed, total)| FrameProgress { phase: "transformer".into(), completed, total, frames: 0 }),
             rates: StageClock::new(Instant::now()).rates,
         };
         p.busy = true;
@@ -4316,7 +4317,7 @@ mod tests {
         impl Session for Stepping {
             fn set_frame_progress_reporter(&mut self, r: abner_processor_api::FrameProgressReporter) { self.0 = Some(r); }
             fn process(&mut self, input: Frame) -> Result<Vec<Frame>, String> {
-                (self.0.as_ref().unwrap())(FrameProgress { phase: "step".into(), completed: 2, total: 2 });
+                (self.0.as_ref().unwrap())(FrameProgress { phase: "step".into(), completed: 2, total: 2, frames: 0 });
                 Ok(vec![input])
             }
             fn finish(&mut self) -> Result<Vec<Frame>, String> { Ok(vec![]) }

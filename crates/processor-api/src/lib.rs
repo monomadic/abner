@@ -115,6 +115,10 @@ pub type ProgressReporter = Arc<dyn Fn(Progress) + Send + Sync>;
 ///   without restarting the count.
 /// - Reaching `total` does not mean output was delivered; the host finishes the
 ///   frame when the call returns.
+/// - `frames` is how many output frames this call delivers when it returns: a
+///   stage that buffers and renders a batch in one call says so, so the host's
+///   total bar covers the whole batch instead of one frame. `0` (the default,
+///   and what an older report deserializes to) means one.
 ///
 /// The host owns job totals (frames done of frames to do) and folds this
 /// fraction into them, so the total bar moves smoothly during slow frames.
@@ -123,8 +127,17 @@ pub struct FrameProgress {
     pub phase: String,
     pub completed: u64,
     pub total: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub frames: u64,
+}
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 impl FrameProgress {
+    /// Output frames this call delivers, at least one.
+    pub fn frame_count(&self) -> u64 {
+        self.frames.max(1)
+    }
     /// `completed / total` in 0..=1, or `None` for a zero total.
     pub fn fraction(&self) -> Option<f64> {
         (self.total > 0).then(|| self.completed.min(self.total) as f64 / self.total as f64)

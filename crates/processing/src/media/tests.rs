@@ -428,7 +428,7 @@ impl abner_processor_api::Session for Stepping {
     ) -> Result<Vec<abner_processor_api::VideoFrame>> {
         let report = self.1.as_ref().expect("host hands over the frame reporter");
         for step in 0..=4 {
-            report(abner_processor_api::FrameProgress { phase: "step".into(), completed: step, total: 4 });
+            report(abner_processor_api::FrameProgress { phase: "step".into(), completed: step, total: 4, frames: 0 });
         }
         Ok(vec![f])
     }
