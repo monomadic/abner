@@ -1,5 +1,29 @@
 # abner — history
 
+## 2026-11-20 — Text fields take the pointer
+
+A click in a focused field puts the caret under the pointer, a drag selects,
+a double-click takes the word and a triple-click the whole field (a drag on
+from either extends by the same unit). The selection is white type on
+`#0059ff`, and the caret blinks on the half second in every field (the Export
+filename's never did), with `redraw_at` waking the loop at the next change.
+
+`text_edit::Cursor` owns all of it: the selection is an anchor beside the
+caret, edits act on the range, and the blink restarts at each edit. The
+renderer owns the font, so picking does not estimate glyph positions: each
+frame the renderer hands back the focused field's `FieldLayout` (the window x
+of every grapheme boundary) and the cursor resolves presses against it. A
+click that focuses a field arrives before that field has been laid out, so the
+press waits one frame, during which the field draws from its start, as it
+stood unfocused under the pointer. The field's scroll is now kept between
+frames and moves only to keep the caret in view; it used to pin the caret to
+the right edge, which would slide the text out from under a click.
+
+Unit-tested in `text_edit`. In a window capture only the single click and the
+drag highlight were seen; the white selected type, the multi-clicks and the
+blink were not captured (the test window was covered and occluded windows do
+not redraw).
+
 ## 2026-11-17 — Export follows its re-edited Figma canvas
 
 The Export frame's canvas side (`621:8921`) was redone in Figma. The page no

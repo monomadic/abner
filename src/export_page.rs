@@ -394,6 +394,19 @@ impl Page {
         self.filename_cursor.insert(value, &filtered, usize::MAX);
         true
     }
+    /// A press on the filename field: the caret goes under the pointer and
+    /// a drag from here selects.
+    pub(crate) fn press_text(&mut self, x: f32) {
+        if self.filename_edit.is_some() { self.filename_cursor.press(x); }
+    }
+    pub(crate) fn drag_text(&mut self, x: f32) -> bool {
+        self.editing_filename() && self.filename_cursor.drag(x)
+    }
+    pub(crate) fn release_text(&mut self) { self.filename_cursor.release(); }
+    pub(crate) fn text_layout(&mut self, layout: crate::text_edit::FieldLayout) -> bool {
+        self.filename_cursor.layout(layout) && self.editing_filename()
+    }
+    pub(crate) fn next_blink(&self) -> std::time::Instant { self.filename_cursor.next_blink() }
     pub(crate) fn edit_text(&mut self, edit: Edit) -> bool {
         if !self.editing_filename() { return false; }
         if matches!(edit, Edit::Paste) {
@@ -1002,7 +1015,6 @@ impl Page {
         let settings = self.settings(l);
         let ink = hex_color(0xf4f3ed);
         let dim = hex_color(0xc6c8c0);
-        let blue = hex_color(0x0059ff);
         surface(items,l.sidebar,0x050505,0.);
         surface(items,l.transport,0x000000,0.);
         let corners=[CANVAS_RADIUS,CANVAS_RADIUS,0.,0.];
@@ -1128,8 +1140,9 @@ impl Page {
                 }
                 Action::EditFilename=>{
                     let value=self.filename_edit.clone().unwrap_or_else(||self.destination_name());
-                    items.push(Item::Text(TextItem{regular:true,valign:VAlign::Middle,caret:self.filename_edit.as_ref().map(|s|self.filename_cursor.position(s)),caret_visible:!self.filename_cursor.selected(),max_width:Some(r.w-24.),
-                        ..TextItem::new(r.x+12.,r.y+r.h/2.,11.,if self.filename_cursor.selected(){blue}else{field_ink},value)}));
+                    items.push(Item::Text(TextItem{regular:true,valign:VAlign::Middle,max_width:Some(r.w-24.),
+                        ..TextItem::new(r.x+12.,r.y+r.h/2.,11.,field_ink,value)}));
+                    if self.filename_edit.is_some() && let Some(Item::Text(text)) = items.last_mut() { self.filename_cursor.show(text); }
                 }
                 Action::OpenExport(index)=>{
                     surface(items,r,if selected{0x19334b}else if hovered{0x303438}else{0x171c21},6.);

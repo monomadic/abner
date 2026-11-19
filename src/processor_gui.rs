@@ -1146,7 +1146,6 @@ pub struct Panel {
     preset_dir: Option<std::path::PathBuf>,
     user_presets: BTreeMap<String,std::path::PathBuf>,
     preset_name: Option<String>,
-    caret_at: Instant,
     /// Shared with the worker (locked for a whole render), so the page can
     /// ask the chain's output rate without waiting on one, and Export can
     /// hand the same registry to its own job.
@@ -1268,7 +1267,6 @@ impl Default for Panel {
             preset_dir: None,
             user_presets: BTreeMap::new(),
             preset_name: None,
-            caret_at: Instant::now(),
             registry: Arc::new(Mutex::new(Registry::default())),
             open: false,
             descriptors: vec![],
@@ -1570,12 +1568,17 @@ impl Panel {
         self.changed();
         Ok(())
     }
+    /// The frame's layout of the focused field; true when a waiting press
+    /// moved the caret and another frame should show it.
+    pub(crate) fn text_layout(&mut self, layout: crate::text_edit::FieldLayout) -> bool {
+        self.text_cursor.layout(layout) && self.editing_text()
+    }
+    pub(crate) fn next_blink(&self) -> Instant { self.text_cursor.next_blink() }
     pub(crate) fn editing_text(&self) -> bool {
         self.open && (self.preset_name.is_some() || self.editing.is_some())
     }
     pub(crate) fn edit_text(&mut self, edit: crate::text_edit::Edit) -> bool {
         if !self.editing_text() { return false; }
-        self.caret_at = Instant::now();
         if matches!(edit, crate::text_edit::Edit::Paste) {
             if let Some(text) = crate::open::paste_text() { self.text_input(&text); }
         } else {
@@ -1586,7 +1589,6 @@ impl Panel {
     }
     pub fn text_input(&mut self, text: &str) -> bool {
         if !self.editing_text() { return false; }
-        self.caret_at = Instant::now();
         let (value, max_bytes) = if let Some(value) = &mut self.preset_name {
             (value, 160)
         } else {
@@ -1615,6 +1617,9 @@ impl Panel {
             return false;
         }
         self.cursor = (x, y);
+        if self.editing_text() && self.text_cursor.drag(x) {
+            return true;
+        }
         if let Some(mut drag) = self.card_drag {
             drag.active |= (x - drag.origin.0).hypot(y - drag.origin.1) >= 4.0;
             drag.viewport = vp;
@@ -1657,6 +1662,7 @@ impl Panel {
     }
     pub(crate) fn scrubbing(&self) -> bool { self.open && self.scrubbing }
     pub fn release(&mut self) -> bool {
+        self.text_cursor.release();
         if self.card_drag.is_some() {
             self.finish_card_drag(true);
             return true;
@@ -2162,7 +2168,6 @@ impl Panel {
         }
     }
     pub fn key(&mut self, key: Key) -> bool {
-        self.caret_at = Instant::now();
         if matches!(key, Key::Escape) && self.card_drag.is_some() {
             self.finish_card_drag(false);
             return true;
@@ -2663,7 +2668,6 @@ impl Panel {
         let muted = hex_color(0xa3a5a8);
         let dim = hex_color(0x777b82);
         let blue = hex_color(0x007be5);
-        let caret = self.caret_at.elapsed().as_millis() % 1000 < 500;
         text(items, x, top + 20.0, 9.0, "PROCESSOR SETTINGS", dim, w - 70.0);
         let Some(d) = self.descriptors.get(self.selected) else { return; };
         text(items, x, top + 40.0, 15.0, &d.name, ink, w);
@@ -2678,7 +2682,7 @@ impl Panel {
         for (index,(r, label)) in Self::preset_buttons(vp).into_iter().zip([preset, "‹", "›", "Save", "Delete"]).enumerate() {
             items.push(Item::Rect(RectItem { radius: 6.0, border_w: 1.0, border_color: hex_color(0x303234), ..RectItem::new(r, hex_color(0x0a0a0a)) }));
             ui_label(items, r.x + r.w / 2.0, r.y + r.h / 2.0, 10.0, if index==4&&!custom {dim} else {muted}, label, Align::Center, r.w - 4.0);
-            if index == 0 && name.is_some() { set_caret(items, &self.text_cursor, caret); }
+            if index == 0 && name.is_some() { set_caret(items, &self.text_cursor); }
         }
         items.push(Item::Rect(RectItem::new(RectPx { x, y: top + 136.0, w, h: 1.0 }, hex_color(0x303234))));
         let clip = RectPx { x: x - 16.0, y: top + 158.0, w: Self::right(vp), h: (self.info(vp).y - top - 158.0).max(1.0) };
@@ -2705,7 +2709,7 @@ impl Panel {
                 items.push(Item::Rect(RectItem{radius:4.,border_w:if focused||!hovered{1.}else{0.},border_color:if focused{blue}else{hex_color(0x4e4e4e)},
                     ..RectItem::new(value_rect,hex_color(if focused||hovered{0x1a1a1a}else{0x0a0a0a}))}));
                 ui_label(items,value_rect.x+value_rect.w/2.,row.y+10.,10.,ink,&shown,Align::Center,value_rect.w-4.);
-                if focused {set_caret(items, &self.text_cursor, caret);}
+                if focused {set_caret(items, &self.text_cursor);}
                 let amount=((value.as_f64().unwrap_or(min)-min)/(max-min)).clamp(0.,1.) as f32;
                 let track=RectPx{x:row.x,y:row.y+26.,w:row.w,h:4.};
                 items.push(Item::Rect(RectItem{radius:2.,..RectItem::new(track,hex_color(0x303234))}));
@@ -2743,7 +2747,7 @@ impl Panel {
                 let hovered=hit(r,self.cursor.0,self.cursor.1);
                 items.push(Item::Rect(RectItem { radius: 4.0, border_w: 1.0, border_color: if editing.is_some(){blue}else{hex_color(0x303234)}, ..RectItem::new(r, hex_color(if hovered||editing.is_some(){0x1a1a1a}else{0x0a0a0a})) }));
                 ui_label(items, r.x + r.w / 2.0, r.y + r.h / 2.0, 10.0, ink, &shown, Align::Center, r.w - 12.0);
-                if editing.is_some() { set_caret(items, &self.text_cursor, caret); }
+                if editing.is_some() { set_caret(items, &self.text_cursor); }
             }
         }
         items.push(Item::Clip(None));
@@ -2814,7 +2818,6 @@ impl Panel {
         false
     }
     pub fn click(&mut self, x: f32, y: f32, vp: (f32, f32)) -> bool {
-        self.caret_at = Instant::now();
         if !self.open {
             return false;
         }
@@ -2914,7 +2917,7 @@ impl Panel {
             match button {
                 3=>self.save_preset(),
                 4=>self.delete_preset(),
-                0 if self.preset_name.is_some()=>self.text_cursor=Default::default(),
+                0 if self.preset_name.is_some()=>self.text_cursor.press(x),
                 1|2=>{let count=self.descriptors[self.selected].presets.len()+1;let at=if self.preset<count-1{self.preset+1}else{0};let next=if button==1{(at+count-1)%count}else{(at+1)%count};self.preset=if next==0{usize::MAX}else{next-1};self.apply_preset();},
                 _=>{}
             }
@@ -2928,9 +2931,15 @@ impl Panel {
                     continue;
                 }
                 let f = &self.fields[i];
+                // A press in the field being edited places the caret; it
+                // must not restart the edit from the stored value.
+                let focused = self.editing.as_ref().is_some_and(|(n, _)| *n == i);
                 if matches!(f.kind, Kind::Number { .. }) && hit(slider_value(row),x,y) {
-                    self.text_cursor = Default::default();
-                    self.editing = Some((i, self.settings[&f.key].to_string()));
+                    if !focused {
+                        self.text_cursor = Default::default();
+                        self.editing = Some((i, self.settings[&f.key].to_string()));
+                    }
+                    self.text_cursor.press(x);
                     return true;
                 }
                 match &f.kind {
@@ -2951,8 +2960,13 @@ impl Panel {
                         self.settings[&f.key] =
                             json!(!self.settings[&f.key].as_bool().unwrap_or(false))
                     }
+                    Kind::Text if focused => {
+                        self.text_cursor.press(x);
+                        return true;
+                    }
                     Kind::Text => {
                         self.text_cursor = Default::default();
+                        self.text_cursor.press(x);
                         self.editing = Some((
                             i,
                             self.settings[&f.key]
@@ -5770,9 +5784,8 @@ mod tests {
 }
 
 /// Attach to the label so placement uses the renderer's font metrics.
-fn set_caret(items: &mut [Item], cursor: &crate::text_edit::Cursor, visible: bool) {
+fn set_caret(items: &mut [Item], cursor: &crate::text_edit::Cursor) {
     if let Some(Item::Text(text)) = items.last_mut() {
-        text.caret = Some(cursor.position(&text.text));
-        text.caret_visible = visible && !cursor.selected();
+        cursor.show(text);
     }
 }

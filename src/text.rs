@@ -283,6 +283,22 @@ impl TextCtx {
         lines
     }
 
+    /// Pen position at every grapheme boundary of one line, from 0 to the
+    /// run's width, in `layout`'s units: where a caret can sit.
+    pub fn stops(&self, text: &str, px: f32, tracking: f32) -> Vec<(usize, f32)> {
+        use unicode_segmentation::UnicodeSegmentation;
+        let mut stops = vec![(0, 0.0)];
+        let px = self.raster_size(px);
+        let Some(font) = self.face() else { return stops };
+        let sf = font.as_scaled(px);
+        let mut pen = 0.0f32;
+        for (at, grapheme) in text.grapheme_indices(true) {
+            pen += grapheme.chars().map(|c| sf.h_advance(sf.glyph_id(c)) + tracking).sum::<f32>();
+            stops.push((at + grapheme.len(), pen));
+        }
+        stops
+    }
+
     /// Lay out one line at `px` physical pixels, adding `tracking` px of
     /// extra advance per glyph (CSS letter-spacing). Quads are relative
     /// to the line box's top-left.

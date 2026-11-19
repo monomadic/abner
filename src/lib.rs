@@ -1059,6 +1059,11 @@ impl ApplicationHandler for Runner {
                 gpu.render(&desc, vp);
                 self.animating = desc.animating;
                 self.redraw_at = desc.redraw_at;
+                // The frame laid the focused field out: a click that was
+                // waiting for that has its caret now, one frame late.
+                if self.app.text_layout(gpu.take_field()) {
+                    self.animating = true;
+                }
                 if desc.plate.is_some() {
                     // The first backdrop frame resized the plate.
                     self.app.set_plate(gpu.plate_size(), gpu.plate_horizon());

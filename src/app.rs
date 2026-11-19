@@ -2239,6 +2239,14 @@ impl App {
     pub(crate) fn editing_text(&self) -> bool {
         if self.export_page.open { self.export_page.editing_filename() } else { self.processors.editing_text() }
     }
+    /// Hand the focused field's layout from the frame just drawn to its
+    /// cursor. True when that placed a waiting click: draw again.
+    pub(crate) fn text_layout(&mut self, layout: crate::text_edit::FieldLayout) -> bool {
+        if self.export_page.open { self.export_page.text_layout(layout) } else { self.processors.text_layout(layout) }
+    }
+    fn next_blink(&self) -> Option<Instant> {
+        self.editing_text().then(|| if self.export_page.open { self.export_page.next_blink() } else { self.processors.next_blink() })
+    }
     pub(crate) fn edit_text(&mut self, edit: crate::text_edit::Edit) -> bool {
         if self.export_page.open { self.export_page.edit_text(edit) } else { self.processors.edit_text(edit) }
     }
@@ -2498,7 +2506,7 @@ impl App {
             self.cursor_inside = true;
             return;
         }
-        if self.export_page.open { self.cursor=(x,y);self.cursor_inside=true;return; }
+        if self.export_page.open { self.cursor=(x,y);self.cursor_inside=true;self.export_page.drag_text(x);return; }
         if self.show_ui && !(self.mask_mode && (self.painting || self.crop_drag.is_some() || contains(self.canvas(), x, y))) && self.processors.pointer(x, y, self.vp) {
             self.cursor = (x, y);
             self.apply_processor_transport();
@@ -2601,7 +2609,10 @@ impl App {
             if action != Some(crate::export_page::Action::EditFilename) && !self.export_page.finish_filename() { return; }
             if y < HEADER_H {
                 if let Some(control) = self.mode_selector().controls().into_iter().find(|c| c.contains(x,y)) { self.activate(control.action); }
-            } else if let Some(action) = action { self.export_action(action); }
+            } else if let Some(action) = action {
+                self.export_action(action);
+                if action == crate::export_page::Action::EditFilename { self.export_page.press_text(x); }
+            }
             return;
         }
         if self.show_ui && self.ready() && self.processors.open && contains(self.footer_export(), x, y) {
@@ -2720,6 +2731,7 @@ impl App {
     }
 
     pub fn mouse_up(&mut self) {
+        self.export_page.release_text();
         self.detection_drag=None;self.detection_samples_drag=false;
         // Dragged shut: the toggle reopens the rail at the width it had.
         if let Some((_, from)) = self.source_resize.take() {
@@ -3424,8 +3436,10 @@ impl App {
             } else if live_scrub && self.queued_seek.is_some() {
                 Some(self.processor_scrub_changed + PROCESSOR_SCRUB_DWELL)
             } else {
-                Some(Instant::now() + std::time::Duration::from_millis(
-                    if self.split_preview.as_ref().is_some_and(|p| p.waiting) { 16 } else { 100 }))
+                let idle = Instant::now() + std::time::Duration::from_millis(
+                    if self.split_preview.as_ref().is_some_and(|p| p.waiting) { 16 } else { 100 });
+                // A focused field's caret changes on the half second.
+                Some(self.next_blink().map_or(idle, |blink| blink.min(idle)))
             },
         }
     }
