@@ -2,6 +2,9 @@
 //! changes enabled stages, preview cache keys, exports, or a running job.
 use super::*;
 
+const CATALOG_PITCH: f32 = 45.0;
+const SEARCH_ICON: usize = 13;
+
 pub(super) struct Picker {
     pub(super) focus: usize,
     pub(super) preset: usize,
@@ -47,16 +50,16 @@ impl PickerLayout {
         let bw = if w >= 820.0 { 300.0 } else { 220.0 };
         let browser = RectPx { w: bw, ..body };
         let search = RectPx {
-            x: browser.x + 25.0,
+            x: browser.x + 20.0,
             y: body.y + 20.0,
-            w: bw - 50.0,
+            w: bw - 40.0,
             h: 34.0,
         };
         let list = RectPx {
             x: browser.x + 20.0,
             y: search.y + 48.0,
             w: bw - 40.0,
-            h: (body.h - 88.0).max(1.0),
+            h: (body.h - 88.0).clamp(1.0, 291.0),
         };
         let heading = RectPx {
             x: browser.x + bw + 24.0,
@@ -110,11 +113,19 @@ impl PickerLayout {
                 ..add
             },
             close: RectPx {
-                x: panel.x + w - 48.0,
+                x: panel.x + w - 55.0,
                 y: panel.y + 29.0,
-                w: 32.0,
-                h: 32.0,
+                w: 30.0,
+                h: 30.0,
             },
+        }
+    }
+    fn list_content(self) -> RectPx {
+        RectPx {
+            x: self.list.x + 2.0,
+            y: self.list.y + 12.0,
+            w: self.list.w - 4.0,
+            h: (self.list.h - 24.0).max(1.0),
         }
     }
     pub(super) fn presets(self) -> [RectPx; 5] {
@@ -411,7 +422,7 @@ impl Panel {
                     self.pick_candidate(rows[at]);
                     // Conservative visible range works at the minimum window height.
                     self.picker.as_mut().unwrap().list_scroll =
-                        (at.saturating_sub(1)) as f32 * CARD_PITCH;
+                        (at.saturating_sub(1)) as f32 * CATALOG_PITCH;
                 }
             }
             Key::Tab => {
@@ -435,7 +446,8 @@ impl Panel {
     pub(super) fn picker_scroll(&mut self, dy: f32, cursor: (f32, f32), vp: (f32, f32)) {
         let l = self.picker_layout(vp);
         if hit(l.browser, cursor.0, cursor.1) {
-            let max = (self.catalog_visible().len() as f32 * CARD_PITCH + 12.0 - l.list.h).max(0.0);
+            let max =
+                (self.catalog_visible().len() as f32 * CATALOG_PITCH + 21.0 - l.list.h).max(0.0);
             let p = self.picker.as_mut().unwrap();
             p.list_scroll = (p.list_scroll - dy).clamp(0.0, max);
         } else if hit(l.fields, cursor.0, cursor.1) {
@@ -483,7 +495,7 @@ impl Panel {
             self.set_filter(c);
             return true;
         }
-        if hit(l.list, x, y) {
+        if hit(l.list_content(), x, y) {
             for (n, i) in self.catalog_visible().into_iter().enumerate() {
                 if hit(self.catalog_row(n, vp), x, y) {
                     self.pick_candidate(i);
@@ -499,17 +511,15 @@ impl Panel {
     }
     pub(super) fn catalog_row(&self, n: usize, vp: (f32, f32)) -> RectPx {
         let r = self.picker_layout(vp).list;
-        let rows = self.catalog_visible();
-        let before = rows.iter().take(n).any(|i| *i == self.selected);
-        let chosen = rows.get(n) == Some(&self.selected);
         RectPx {
-            x: r.x + 11.0,
-            y: r.y + 11.0 + n as f32 * CARD_PITCH + if before { 12.0 } else { 0.0 }
+            x: r.x + 12.0,
+            y: r.y + 12.0 + n as f32 * CATALOG_PITCH
                 - self.picker.as_ref().map_or(0.0, |p| p.list_scroll),
             w: r.w - 22.0,
-            h: if chosen { 42.0 } else { 30.0 },
+            h: 42.0,
         }
     }
+
     pub(super) fn add_button(&self, vp: (f32, f32)) -> RectPx {
         let empty = !self.added.iter().any(|v| *v);
         RectPx {
@@ -631,7 +641,7 @@ impl Panel {
         }));
         items.push(Item::Rect(RectItem {
             radius: 14.0,
-            ..RectItem::new(RectPx { h: 87.0, ..r }, hex_color(0x202020))
+            ..RectItem::new(RectPx { h: 87.0, ..r }, hex_color(0x171717))
         }));
         items.push(Item::Rect(RectItem::new(
             RectPx {
@@ -640,7 +650,7 @@ impl Panel {
                 w: r.w - 2.0,
                 h: 14.0,
             },
-            hex_color(0x202020),
+            hex_color(0x171717),
         )));
         interface_text(
             items,
@@ -660,7 +670,13 @@ impl Panel {
             0x999999,
             r.w - 80.0,
         );
-        text_center(items, l.close, "×", 24.0, 0x999999);
+        items.push(Item::Rect(RectItem {
+            radius: 7.0,
+            border_w: 1.0,
+            border_color: hex_color(0x343434),
+            ..RectItem::new(l.close, [0.0; 4])
+        }));
+        text_center(items, l.close, "×", 18.0, 0x999999);
         items.push(Item::Rect(RectItem::new(
             RectPx {
                 x: r.x + 1.0,
@@ -684,13 +700,22 @@ impl Panel {
         items.push(Item::Rect(RectItem::new(l.browser, hex_color(0x0f0f0f))));
         items.push(Item::Rect(RectItem {
             radius: 17.0,
-            border_w: 1.0,
-            border_color: hex_color(if p.search_focus { 0xdbe0db } else { 0x6f776f }),
+            border_w: 2.0,
+            border_color: hex_color(if p.search_focus {
+                SOURCE_RING
+            } else {
+                0xdbe0db
+            }),
             ..RectItem::new(l.search, hex_color(0x9fa89f))
         }));
+        items.push(Item::FrameIcon {
+            x: l.search.x + 16.0,
+            y: l.search.y + 11.0,
+            index: SEARCH_ICON,
+        });
         interface_text(
             items,
-            l.search.x + 16.0,
+            l.search.x + 32.0,
             l.search.y + 10.0,
             12.0,
             if p.search.is_empty() {
@@ -699,18 +724,18 @@ impl Panel {
                 &p.search
             },
             0x393735,
-            l.search.w - 32.0,
+            l.search.w - 48.0,
         );
         if p.search_focus && !p.search.is_empty() {
             set_caret(items, &self.text_cursor);
         }
         items.push(Item::Rect(RectItem {
             radius: 14.0,
-            border_w: 1.0,
-            border_color: hex_color(0x2e2e2e),
+            border_w: 2.0,
+            border_color: hex_color(0x787878),
             ..RectItem::new(l.list, hex_color(0x121212))
         }));
-        items.push(Item::Clip(Some(l.list)));
+        items.push(Item::Clip(Some(l.list_content())));
         let visible = self.catalog_visible();
         for (n, &i) in visible.iter().enumerate() {
             let row = self.catalog_row(n, vp);
@@ -719,12 +744,19 @@ impl Panel {
             }
             let chosen = i == self.selected;
             items.push(Item::Rect(RectItem {
-                radius: if chosen { 7.0 } else { 0.0 },
+                radius: 7.0,
                 border_w: if chosen { 2.0 } else { 0.0 },
                 border_color: hex_color(SOURCE_RING),
-                ..RectItem::new(row, hex_color(if chosen { 0x030303 } else { 0x090909 }))
+                ..RectItem::new(
+                    row,
+                    if chosen {
+                        hex_color(0x030303)
+                    } else {
+                        [0.0; 4]
+                    },
+                )
             }));
-            if chosen {
+            {
                 items.push(Item::FrameIcon {
                     x: row.x + 10.0,
                     y: row.y + 8.0,
@@ -747,16 +779,6 @@ impl Panel {
                     &category_label(&self.categories[i]),
                     hex_color(0xff8d28),
                     row.w - 50.0,
-                );
-            } else {
-                text(
-                    items,
-                    row.x + 12.0,
-                    row.y + 8.0,
-                    12.0,
-                    &self.descriptors[i].name,
-                    hex_color(0x909090),
-                    row.w - 20.0,
                 );
             }
         }
@@ -1073,6 +1095,7 @@ fn interface_center(items: &mut Vec<Item>, r: RectPx, label: &str, size: f32, co
 #[cfg(test)]
 mod tests {
     use super::*;
+
     struct Example(&'static str);
     impl abner_processor_api::Factory for Example {
         fn descriptor(&self) -> Descriptor {

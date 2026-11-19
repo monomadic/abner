@@ -626,3 +626,12 @@ editors remain available after adding a processor.
 
 Native release window captures inspected at 1280×800 logical pixels using a
 synthetic clip. See `docs/validation/add-processor-dialog.md` for checks and limits.
+
+The dialog refresh later on 2026-11-20 adopts the new search SVG (`687:7381`),
+260px search field with a 2px orange focus border, fixed 42px catalog rows with
+icons and categories in every state, the 291px list viewport, and the outlined
+close button. Search text selection retains the focus border. The design's
+“Research build” sample label is not shown: the generic processor API exposes
+no build-status metadata. Descriptions continue to come from the factory.
+The native release capture confirms the focus border and updated layout; all
+45 processor tests pass.
