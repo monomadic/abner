@@ -1,5 +1,19 @@
 # abner — history
 
+## 2026-11-20 — Review previews during background renders
+
+Selecting a retained render now resolves its pixels across the active and saved
+preview caches, including when spatial inputs have since changed. Selection,
+timeline marks and looping use the same frames. Render history also records the
+output rate so review does not wait for the worker to release the registry.
+Overlapping output from a new job preserves older renders within the shared cache
+budget, and completion only starts playback when that job is still selected. The
+running render itself can be selected to review output already received.
+
+Regression coverage holds the registry lock while clicking saved and running
+renders, delivers overlapping output with unchanged and changed spatial inputs,
+checks uploaded pixels and verifies completion does not take over the selection.
+
 ## 2026-11-20 — Scope render history to the focused source
 
 The Process page now lists only renders owned by its focused source. Counts,

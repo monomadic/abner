@@ -164,12 +164,14 @@ const RENDER_PITCH: f32 = 48.0;
 /// One Render press, kept in the renders pane: where it was made and the
 /// whole chain as it stood, so a click puts the page back there. Its frames
 /// stay in the preview cache, tagged with `id`; a render whose frames have
-/// all been evicted or replaced leaves the list, unless it is running or
+/// all been evicted leaves the list, unless it is running or
 /// waiting in the queue.
 struct Render {
     id: u64,
     /// The first rendered frame's time (the playhead until one arrives).
     time: f64,
+    /// Playback rate is available even while the worker owns the registry.
+    rate: f64,
     /// Every processor in chain order: id, enabled, settings.
     stages: Vec<(String, bool, Value)>,
     focus: String,
@@ -1491,6 +1493,7 @@ impl Panel {
         let old = std::mem::replace(&mut self.frames_key, key.clone());
         let frames = std::mem::take(&mut self.frames);
         if old != key {
+            self.current = None;
             if !frames.is_empty() {
                 self.stash.retain(|(k, _)| *k != old);
                 self.stash.push((old, frames));
@@ -1621,7 +1624,7 @@ impl Panel {
     /// Markers select their exact cached timestamp; the rest of the track
     /// seeks on the output frame grid, never the container's keyframe grid.
     fn timeline_time(&self, x: f32, timeline: RectPx) -> f64 {
-        self.frames.iter()
+        self.viewing_frames().iter()
             .map(|f| (f, (timeline.x + timeline.w * (f.pts / self.duration.max(0.001)) as f32 - x).abs()))
             .filter(|(_, distance)| *distance <= 4.0)
             .min_by(|a, b| a.1.total_cmp(&b.1))
@@ -1873,15 +1876,26 @@ impl Panel {
     pub fn source_seek(&self, t: f64) -> f64 {
         (self.source_frame(t) - 0.5 / self.fps).max(0.0)
     }
+    /// A history selection can outlive changes to spatial inputs. Review its
+    /// retained pixels without relabelling them as output of the current inputs.
+    fn viewing_frames(&self) -> &[Preview] {
+        if let Some(id) = self.current
+            && !self.frames.iter().any(|f| f.render == id)
+            && let Some((_, frames)) = self.stash.iter().find(|(_, frames)| frames.iter().any(|f| f.render == id))
+        {
+            return frames;
+        }
+        &self.frames
+    }
     /// The rendered frame on screen at the playhead: the output frame whose
     /// span holds it (a tenth of a frame early, so grid rounding can't fall
     /// into the previous frame's span).
     fn shown(&self) -> Option<&Preview> {
         let lead = 0.1 / self.rate;
-        self.frames
-            .iter()
-            .rev()
-            .find(|f| f.pts - lead <= self.time && self.time < f.pts + f.duration - lead)
+        let frames = self.viewing_frames();
+        let covers = |f: &&Preview| f.pts - lead <= self.time && self.time < f.pts + f.duration - lead;
+        frames.iter().rev().filter(covers).find(|f| Some(f.render) == self.current)
+            .or_else(|| frames.iter().rev().find(covers))
     }
     fn jump(&mut self, next: bool) {
         let tolerance = 0.5 / self.rate.max(1.0);
@@ -1897,9 +1911,9 @@ impl Panel {
     /// frame's time and last frame's end.
     fn spans(&self) -> Vec<(u64, f64, f64)> {
         let mut out: Vec<(u64, f64, f64)> = Vec::new();
-        for f in &self.frames {
-            match out.last_mut() {
-                Some((id, _, end)) if *id == f.render => *end = f.pts + f.duration,
+        for f in self.viewing_frames() {
+            match out.iter_mut().find(|(id, _, _)| *id == f.render) {
+                Some((_, _, end)) => *end = f.pts + f.duration,
                 _ => out.push((f.render, f.pts, f.pts + f.duration)),
             }
         }
@@ -1918,7 +1932,7 @@ impl Panel {
             return None;
         }
         let id = self.current?;
-        if self.frames.iter().filter(|f| f.render == id).count() < 2 {
+        if self.viewing_frames().iter().filter(|f| f.render == id).count() < 2 {
             return None;
         }
         let (_, a, b) = self.spans().into_iter().find(|s| s.0 == id)?;
@@ -1946,6 +1960,7 @@ impl Panel {
         self.renders.push(Render {
             id,
             time,
+            rate: self.rate,
             stages: self.descriptors.iter().enumerate().filter(|(i, _)| self.added[*i])
                 .map(|(i, d)| (d.id.clone(), self.enabled[i], self.saved[i].clone())).collect(),
             focus: self.descriptors.get(self.selected).map_or_else(String::new, |d| d.id.clone()),
@@ -1970,7 +1985,7 @@ impl Panel {
         self.stash.retain(|(_, frames)| !frames.is_empty());
     }
     /// Count each render's surviving frames; one with none left (evicted
-    /// from the cache, or rendered over) leaves the list.
+    /// from the cache) leaves the list.
     fn prune_renders(&mut self) {
         let mut counts: BTreeMap<u64, usize> = BTreeMap::new();
         for f in self.frames.iter().chain(self.stash.iter().flat_map(|(_, f)| f)) {
@@ -1984,7 +1999,7 @@ impl Panel {
         });
         if let Some(id) = self.current
             && live != Some(id)
-            && !self.frames.iter().any(|f| f.render == id)
+            && !counts.contains_key(&id)
         {
             self.current = None;
         }
@@ -2010,11 +2025,8 @@ impl Panel {
     /// the playhead. Its frames come back with the chain.
     fn open_render(&mut self, id: u64) {
         let Some(r) = self.visible_renders().find(|r| r.id == id) else { return };
-        if self.busy && self.rendering == id {
-            return;
-        }
-        let (stages, focus, time, many) =
-            (r.stages.clone(), r.focus.clone(), r.time, r.frames > 1);
+        let (stages, focus, time, rate, many) =
+            (r.stages.clone(), r.focus.clone(), r.time, r.rate, r.frames > 1);
         self.added.fill(false);
         self.enabled.fill(false);
         self.reorder(&stages.iter().map(|s| s.0.clone()).collect::<Vec<_>>());
@@ -2034,14 +2046,19 @@ impl Panel {
             self.list_scroll = 0.0;
         }
         self.select(at);
+        self.rate = rate;
+        self.retimed = !same_rate(rational(rate), rational(self.fps));
+        self.rate_key.clear();
         self.current = Some(id);
+        self.autoplay = None;
+        self.seek = None;
         self.show_rendered = true;
         if many && self.loop_preview && self.playback {
             self.autoplay = Some(time);
         } else {
             self.seek = Some(time);
         }
-        self.status = if !self.frames.iter().any(|f| f.render == id) {
+        self.status = if !self.viewing_frames().iter().any(|f| f.render == id) {
             "Settings restored · the inputs changed since this render, so render again to see it".into()
         } else {
             format!("Render at {} restored", fmt_time(time))
@@ -3116,7 +3133,7 @@ impl Panel {
                             });
                             // Newest last, so the budget takes other chains first.
                             let mut entry = self.stash.remove(at);
-                            entry.1.retain(|old| (old.pts - f.pts).abs() > 0.5 * f.duration);
+                            entry.1.retain(|old| old.render != f.render || (old.pts - f.pts).abs() > 0.5 * f.duration);
                             let needed = f.before.len() + f.after.len();
                             while !entry.1.is_empty() && Self::frame_bytes(&entry.1) + needed > self.budget {
                                 entry.1.remove(0);
@@ -3130,7 +3147,7 @@ impl Panel {
                             continue;
                         }
                         self.frames
-                            .retain(|old| (old.pts - f.pts).abs() > 0.5 * f.duration);
+                            .retain(|old| old.render != f.render || (old.pts - f.pts).abs() > 0.5 * f.duration);
                         let needed = f.before.len() + f.after.len();
                         Self::trim_stash(&mut self.stash, Self::frame_bytes(&self.frames) + needed, self.budget);
                         while !self.frames.is_empty()
@@ -3182,7 +3199,7 @@ impl Panel {
                             // More than one frame, with Loop on: play it.
                             let id = self.rendering;
                             let mut mine = self.frames.iter().filter(|f| f.render == id);
-                            if self.open && self.loop_preview && let (Some(first), Some(_)) = (mine.next(), mine.next()) {
+                            if self.open && self.current == Some(id) && self.loop_preview && let (Some(first), Some(_)) = (mine.next(), mine.next()) {
                                 self.autoplay = Some(first.pts);
                                 self.show_rendered = true;
                             }
@@ -3652,7 +3669,7 @@ impl Panel {
         for &(id, from, to) in &spans {
             let (x, end) = (at(from), at(to));
             let colour = if self.current == Some(id) { hex_color(0x2b8cf0) } else { BLUE };
-            let single = self.frames.iter().filter(|f| f.render == id).take(2).count() < 2;
+            let single = self.viewing_frames().iter().filter(|f| f.render == id).take(2).count() < 2;
             let mark = if single || end - x < 4.0 {
                 RectPx { x: x - 2.0, y: t.y + 6.0, w: 4.0, h: 16.0 }
             } else {
@@ -4387,6 +4404,82 @@ mod tests {
         let request = p.worker.as_ref().unwrap().mailbox.0.lock().unwrap().pending.take().unwrap();
         assert_eq!((request.generation, request.target), (p.generation, Some(0.0)),
             "it is submitted again as it was first asked for");
+    }
+    #[test]
+    fn saved_previews_remain_viewable_while_another_render_runs() {
+        let fixture = crate::native_decode_tests::Fixture::new();
+        let info = crate::probe::probe(&fixture.path).unwrap();
+        for changed_inputs in [false, true] {
+            let mut p = populated(registry());
+            p.enter();
+            p.toggle_enabled(0);
+            let (tx,rx) = mpsc::sync_channel(8);
+            p.worker = Some(Worker {
+                active: Arc::new(Mutex::new(Vec::new())),
+                mailbox: Arc::new((Mutex::new(Mailbox { pending:None,stop:false }),Condvar::new())),
+                rx, live:LiveProgress::default(),
+            });
+            let mut uploads=vec![];
+            p.tick(&info,0.,None,&mut uploads,1);
+            p.rate=24.;
+            p.begin_render(1.,"5 frames");
+            let saved=p.rendering;
+            for at in [1.,1.+1./24.] {
+                let mut frame=mark(at);
+                frame.render=saved;
+                frame.after=Arc::new(vec![17;16]);
+                p.frames.push(frame);
+            }
+            p.prune_renders();
+            if changed_inputs {
+                p.set_binding("example.buffered".into(),"mask".into(),abner_processor_api::SpatialBinding {
+                    revision:1,..Default::default()
+                });
+            }
+            p.rate=60.;
+            p.begin_render(1.,"5 frames");
+            let running=p.rendering;
+            p.busy=true;
+            p.loop_preview=true;
+            p.playback=false;
+            let token=p.cancel.clone();
+            let generation=p.generation;
+            // Match the real worker holding the registry for the whole render.
+            let registry=p.registry.clone();
+            let _locked=registry.lock().unwrap();
+            let row=p.render_row(1,(1280.,800.));
+            p.click(row.x+8.,row.y+8.,(1280.,800.));
+            assert_eq!(p.current,Some(saved));
+            assert_eq!(p.rate,24.,"history restores its rate without waiting for the worker");
+            let at=p.take_seek().unwrap();
+            p.tick(&info,at,None,&mut uploads,1);
+            assert_eq!(p.shown().unwrap().render,saved);
+            assert_eq!(uploads.last().unwrap().buf.as_ref(),&vec![17;16]);
+            assert!(p.loop_range().is_some());
+            // Even overlapping output must not replace the selected render.
+            for at in [1.,1.+1./24.] {
+                let mut frame=mark(at);
+                frame.after=Arc::new(vec![99;16]);
+                tx.send(Event::Frame(generation,frame)).unwrap();
+            }
+            p.tick(&info,at,None,&mut uploads,1);
+            assert_eq!(p.current,Some(saved));
+            assert_eq!(p.shown().unwrap().after.as_ref(),&vec![17;16]);
+            assert!(p.busy && token.check().is_ok());
+            // The running row itself can be opened once it has output.
+            let row=p.render_row(0,(1280.,800.));
+            p.click(row.x+8.,row.y+8.,(1280.,800.));
+            let at=p.take_seek().unwrap();
+            p.tick(&info,at,None,&mut uploads,1);
+            assert_eq!(p.shown().unwrap().render,running);
+            p.open_render(saved);
+            let at=p.take_seek().unwrap();
+            tx.send(Event::Done(generation,Ok(()))).unwrap();
+            p.tick(&info,at,None,&mut uploads,1);
+            assert_eq!(p.current,Some(saved));
+            assert_eq!(p.shown().unwrap().render,saved);
+            assert!(p.take_autoplay().is_none(),"completion must not take over review");
+        }
     }
     #[test]
     fn a_render_in_flight_survives_changes_and_leaving_the_page() {
@@ -5451,8 +5544,8 @@ mod tests {
         panel.enter();
         assert_eq!(
             panel.frames.len(),
-            2,
-            "changing workspace must preserve valid marks"
+            3,
+            "changing workspace preserves old and new renders at overlapping timestamps"
         );
     }
     struct Named(&'static str);
