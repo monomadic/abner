@@ -10,6 +10,7 @@ pub fn handle(registry: &Registry) -> anyhow::Result<bool> {
                 .map(|d| {
                     let f = registry.get(&d.id).map_err(anyhow::Error::msg)?;
                     let mut v = serde_json::to_value(&d)?;
+                    v["description"] = serde_json::Value::String(f.description().to_owned());
                     v["categories"] = serde_json::to_value(f.categories())?;
                     v["capabilities"] = serde_json::to_value(f.capabilities())?;
                     Ok(v)

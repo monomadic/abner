@@ -346,6 +346,19 @@ pub trait Factory: Send {
         Ok(input)
     }
 
+    /// Human-readable description of this processor. Empty when unspecified.
+    fn description(&self) -> &str {
+        ""
+    }
+
+    /// Optional display-only build status, for example "Research build" or "Beta".
+    /// None (the default) leaves the host's status label hidden. This is not a
+    /// capability, execution restriction, or quality certification. Keep it cheap
+    /// and side-effect free; hosts may read it while registering the catalog.
+    fn build_status(&self) -> Option<&str> {
+        None
+    }
+
     fn descriptor(&self) -> Descriptor;
     fn create(
         &self,
@@ -394,6 +407,7 @@ mod tests {
     }
     #[test]
     fn duplicate_registration_is_rejected_without_replacing() {
+        assert_eq!(Example.build_status(), None);
         let mut r = Registry::default();
         r.register(Box::new(Example)).unwrap();
         assert!(r.register(Box::new(Example)).is_err());

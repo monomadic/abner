@@ -128,6 +128,7 @@ impl SyncTable {
     }
 
     /// Closest indexed keyframe; ties prefer the earlier frame.
+    #[cfg(test)]
     pub(crate) fn nearest(&self, t: f64) -> f64 {
         let before = self.before(t);
         match self.at_or_after(t) {
@@ -431,7 +432,7 @@ fn fused_decimate_rgba(frame: &VideoFrame, n: usize, out: &mut Vec<u8>) -> Optio
                 &up[(oy / 2) * cw..(oy / 2) * cw + cw],
                 &vp[(oy / 2) * cw..(oy / 2) * cw + cw],
             );
-            for (ox, o) in row.chunks_exact_mut(4).enumerate() {
+            for (ox, o) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 let yy = (yr[ox] as i64 - off_y) * ky;
                 let u = ur[ox / 2] as i64 - off_c;
                 let v = vr[ox / 2] as i64 - off_c;
@@ -449,7 +450,7 @@ fn fused_decimate_rgba(frame: &VideoFrame, n: usize, out: &mut Vec<u8>) -> Optio
                 &yp[(oy * 2 + 1) * w..(oy * 2 + 1) * w + ow * 2],
             );
             let (ur, vr) = (&up[oy * cw..oy * cw + ow], &vp[oy * cw..oy * cw + ow]);
-            for (ox, o) in row.chunks_exact_mut(4).enumerate() {
+            for (ox, o) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 let ysum = y0[ox * 2] as i64
                     + y0[ox * 2 + 1] as i64
                     + y1[ox * 2] as i64
@@ -474,7 +475,7 @@ fn fused_decimate_rgba(frame: &VideoFrame, n: usize, out: &mut Vec<u8>) -> Optio
         let vrows: Vec<&[u8]> = (oy * m..oy * m + m)
             .map(|y| &vp[y * cw..y * cw + ow * m])
             .collect();
-        for (ox, o) in row.chunks_exact_mut(4).enumerate() {
+        for (ox, o) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let mut ysum = 0i64;
             for r in &yrows {
                 ysum += r[ox * n..ox * n + n].iter().map(|&v| v as i64).sum::<i64>();

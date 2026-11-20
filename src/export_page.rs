@@ -48,7 +48,6 @@ pub(crate) enum Action {
     Container(Container),
     Export,
     EditFilename,
-    EditBitrate,
     OpenExport(usize),
     RevealDirectory,
     Cancel,
@@ -214,6 +213,7 @@ impl Drop for Page {
         self.cancel();
     }
 }
+const CANVAS_RADIUS: f32 = 10.;
 #[derive(Clone, Copy)]
 pub(crate) struct Layout {
     pub sidebar: RectPx,
@@ -230,11 +230,13 @@ impl Layout {
         let sidebar = RectPx { x: 0., y: crate::app::HEADER_H,
             w: side, h: footer_y - crate::app::HEADER_H };
         let attachment_h = (vp.1 * 0.325).clamp(176., 260.);
-        let canvas = Canvas::layout(RectPx{x:side,y:sidebar.y,w:vp.0-side,h:footer_y-sidebar.y},true,
+        // Figma 621:8921: no bar; the picture meets the header and the
+        // attachment runs transport, review track, then the job card.
+        let canvas = Canvas::layout(RectPx{x:side,y:sidebar.y,w:vp.0-side,h:footer_y-sidebar.y},false,
             Some(TimelineAttachment{x:side,width:vp.0-side,transport_height:attachment_h,lanes_height:0.}));
         let transport=canvas.timeline.unwrap().transport;
         let video=canvas.r;
-        let seek = RectPx { x: transport.x + 38., y: footer_y - 24.,
+        let seek = RectPx { x: transport.x + 38., y: transport.y + 66.,
             w: (transport.w - 76.).max(80.), h: 4. };
 
         Self {
@@ -266,7 +268,8 @@ impl SettingsLayout {
     }
 }
 impl Layout {
-    fn job_card(&self)->RectPx { RectPx{x:self.transport.x+16.,y:self.transport.y+16.,w:self.transport.w-32.,h:(self.transport.h-112.).max(76.)} }
+    /// Under the transport row and the review track, 16px from the attachment's edges.
+    fn job_card(&self)->RectPx { RectPx{x:self.transport.x+16.,y:self.transport.y+84.,w:self.transport.w-32.,h:(self.transport.h-100.).max(76.)} }
 }
 fn surface(items:&mut Vec<Item>,r:RectPx,color:u32,radius:f32) { surface_alpha(items,r,hex_color(color),radius); }
 fn surface_alpha(items:&mut Vec<Item>,r:RectPx,color:[f32;4],radius:f32) {
@@ -391,6 +394,19 @@ impl Page {
         self.filename_cursor.insert(value, &filtered, usize::MAX);
         true
     }
+    /// A press on the filename field: the caret goes under the pointer and
+    /// a drag from here selects.
+    pub(crate) fn press_text(&mut self, x: f32) {
+        if self.filename_edit.is_some() { self.filename_cursor.press(x); }
+    }
+    pub(crate) fn drag_text(&mut self, x: f32) -> bool {
+        self.editing_filename() && self.filename_cursor.drag(x)
+    }
+    pub(crate) fn release_text(&mut self) { self.filename_cursor.release(); }
+    pub(crate) fn text_layout(&mut self, layout: crate::text_edit::FieldLayout) -> bool {
+        self.filename_cursor.layout(layout) && self.editing_filename()
+    }
+    pub(crate) fn next_blink(&self) -> std::time::Instant { self.filename_cursor.next_blink() }
     pub(crate) fn edit_text(&mut self, edit: Edit) -> bool {
         if !self.editing_filename() { return false; }
         if matches!(edit, Edit::Paste) {
@@ -644,8 +660,8 @@ impl Page {
         }
     }
     fn poll_current(&mut self, uploads: &mut Vec<Upload>, slot: usize) {
-        if let Some(job) = &self.job {
-            if let Some(frame) = job
+        if let Some(job) = &self.job
+            && let Some(frame) = job
                 .latest
                 .lock()
                 .unwrap()
@@ -675,7 +691,6 @@ impl Page {
                 }
                 .into();
             }
-        }
         let result = self.job.as_ref().and_then(|j| match j.done.try_recv() {
             Ok(r) => Some(r),
             Err(mpsc::TryRecvError::Disconnected) => Some(Err("Export worker stopped".into())),
@@ -842,7 +857,6 @@ impl Page {
             (RectPx{x: settings.directory.x+settings.directory.w-38.,w:38.,..settings.directory}, "Change directory", false, Action::ChooseDirectory),
             (RectPx{w:settings.directory.w-38.,..settings.directory}, "", false, Action::RevealDirectory),
             (settings.export, "Export", false, Action::Export),
-            (l.canvas.button_bar.unwrap().primary_rect(148.), "Export", false, Action::Export),
         ];
         let cy = l.seek.y - 50.;
         // The time/follow row collapses gracefully while retaining all five transport controls.
@@ -886,7 +900,7 @@ impl Page {
             .map(|(.., a)| a)
     }
     pub fn apply(&mut self, a: Action) -> Option<PathBuf> {
-        if !matches!(a, Action::EditFilename | Action::EditBitrate) && !self.finish_filename() { return None; }
+        if !matches!(a, Action::EditFilename) && !self.finish_filename() { return None; }
         match a {
             Action::OpenExport(index) => {
                 if index < self.history.len() {
@@ -897,11 +911,6 @@ impl Page {
                 self.original = false;
                 self.dirty = true;
                 self.open_output();
-            }
-            Action::EditBitrate => {
-                self.bitrate_edit = Some(self.bitrate_mbps.to_string());
-                self.filename_cursor = Cursor::default();
-                self.filename_cursor.apply(self.bitrate_edit.as_mut().unwrap(), Edit::SelectAll);
             }
             Action::EditFilename => {
                 if self.filename_edit.is_none() {
@@ -972,6 +981,8 @@ impl Page {
     pub(crate) fn base_rect(&self,vp:(f32,f32),show_ui:bool,info:&VideoInfo)->RectPx {
         Self::canvas(vp,show_ui).fit_inset(self.display_dims(info),if !show_ui {0.}else if vp.0<900. {16.}else{24.})
     }
+    // Keep the explicit geometry/pipeline inputs at this boundary.
+    #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &self,
         items: &mut Vec<Item>,
@@ -1021,11 +1032,10 @@ impl Page {
         let settings = self.settings(l);
         let ink = hex_color(0xf4f3ed);
         let dim = hex_color(0xc6c8c0);
-        let blue = hex_color(0x0059ff);
         surface(items,l.sidebar,0x050505,0.);
-        surface(items,l.transport,0x1d1b1b,0.);
-        l.canvas.ground(items);
-        l.canvas.button_bar.unwrap().draw(items);
+        surface(items,l.transport,0x000000,0.);
+        let corners=[CANVAS_RADIUS,CANVAS_RADIUS,0.,0.];
+        l.canvas.ground_radii(items,corners);
         let current = self.current();
         let idx = if current.is_some() && !self.original { slot } else { source };
         let picture = crate::canvas::zoomed(self.base_rect(vp,show_ui,info),view.0,view.1);
@@ -1034,7 +1044,7 @@ impl Page {
         if self.original && current.is_some_and(|f| (f.source_pts-shown_pts).abs()>0.51/info.fps.max(1.)) {
             export_label(items,l.video,"Seeking matching original…",12.,dim,false,Align::Center);
         } else { items.push(Item::Video{a:idx,b:idx,r:picture,uv:[0.,0.,1.,1.],mode:VideoMode::Tex,p0:0.,p1:0.}); }
-        l.canvas.recess(items);
+        l.canvas.recess_radii(items,corners);
         items.push(Item::Clip(None));
         export_label(items,RectPx{x:16.,y:l.sidebar.y+8.,w:settings.width,h:22.},"Export Settings",13.,hex_color(0xc8c8c8),true,Align::Left);
         let thumb=RectPx{x:16.,y:l.sidebar.y+38.,w:72.,h:40.5};
@@ -1047,16 +1057,18 @@ impl Page {
         for (title,y) in [("Codec",settings.codec-15.),("Container",settings.container-15.),("Filename",settings.filename.y-18.),("Directory",settings.directory.y-18.)] {
             export_label(items,RectPx{x:16.,y,w:settings.width,h:12.},title,8.,hex_color(0xc8c8c8),true,Align::Left);
         }
-        let field = |items:&mut Vec<Item>,r:RectPx,fill:u32,shadow:bool| {
-            let mut s=figleaf::Shape::rect(figleaf::Rect::new(r.x,r.y,r.w,r.h)).radius(6.)
-                .fill(hex_color(fill)).stroke(1.,hex_color(0x5d5e5d),figleaf::StrokeAlign::Inside);
-            if shadow { s=s.shadow(figleaf::Shadow::inner([0.,0.,0.,1.],[0.,3.],9.)); }
-            items.push(Item::Shape(s));
+        // Figma 547:5962 / 547:5966: light recessed fields with dark type.
+        // The edge is the frame's white @ 62% over the fill, baked opaque.
+        let field_ink = hex_color(0x222422);
+        let field = |items:&mut Vec<Item>,r:RectPx| {
+            items.push(Item::Shape(figleaf::Shape::rect(figleaf::Rect::new(r.x,r.y,r.w,r.h)).radius(7.)
+                .fill(hex_color(0x9fa89f)).stroke(1.,hex_color(0xdbdedb),figleaf::StrokeAlign::Inside)
+                .shadow(figleaf::Shadow::inner([0.,0.,0.,0.45],[0.,2.],6.))));
         };
-        field(items,settings.filename,0x222422,true);
-        field(items,settings.directory,0x050505,false);
-        export_label(items,RectPx{x:settings.directory.x+10.,w:settings.directory.w-52.,..settings.directory},
-            &self.directory().map(|p|p.display().to_string()).unwrap_or_default(),11.,ink,true,Align::Left);
+        field(items,settings.filename);
+        field(items,settings.directory);
+        export_label(items,RectPx{x:settings.directory.x+12.,w:settings.directory.w-54.,..settings.directory},
+            &self.directory().map(|p|p.display().to_string()).unwrap_or_default(),11.,field_ink,true,Align::Left);
         let queue=self.queue_rect(vp);
         if self.record.is_some() || !self.history.is_empty() {
             surface(items,queue,0x0f0f0f,0.);
@@ -1119,7 +1131,7 @@ impl Page {
             };
             match a {
                 Action::ChooseDirectory=>{
-                    items.push(Item::Shape(figleaf::Shape::rect(figleaf::Rect::new(r.x,r.y,r.w,r.h)).radii([0.,6.,6.,0.]).fill(hex_color(if hovered{0x484948}else{0x343534}))));
+                    items.push(Item::Shape(figleaf::Shape::rect(figleaf::Rect::new(r.x,r.y,r.w,r.h)).radii([0.,7.,7.,0.]).fill(hex_color(if hovered{0x484948}else{0x343534}))));
                     items.push(Item::FrameIcon{x:r.x+(r.w-20.)/2.,y:r.y+(r.h-20.)/2.,index:6});
                 }
                 Action::RevealDirectory=>{},
@@ -1140,12 +1152,14 @@ impl Page {
                         surface(items,r,0x168be0,17.);
                         for x in [r.x+12.,r.x+20.] {surface(items,RectPx{x,y:r.y+10.,w:3.,h:14.},0xffffff,0.);}
                     }
-                    if disabled {surface_alpha(items,r,[0.1,0.1,0.1,0.65],0.);}
+                    // A veil of the attachment's own black dims a dead control.
+                    if disabled {surface_alpha(items,r,[0.,0.,0.,0.65],if a==Action::Play{17.}else{0.});}
                 }
                 Action::EditFilename=>{
                     let value=self.filename_edit.clone().unwrap_or_else(||self.destination_name());
-                    items.push(Item::Text(TextItem{regular:true,valign:VAlign::Middle,caret:self.filename_edit.as_ref().map(|s|self.filename_cursor.position(s)),caret_visible:!self.filename_cursor.selected(),max_width:Some(r.w-24.),
-                        ..TextItem::new(r.x+12.,r.y+r.h/2.,11.,if self.filename_cursor.selected(){blue}else{ink},value)}));
+                    items.push(Item::Text(TextItem{regular:true,valign:VAlign::Middle,max_width:Some(r.w-24.),
+                        ..TextItem::new(r.x+12.,r.y+r.h/2.,11.,field_ink,value)}));
+                    if self.filename_edit.is_some() && let Some(Item::Text(text)) = items.last_mut() { self.filename_cursor.show(text); }
                 }
                 Action::OpenExport(index)=>{
                     surface(items,r,if selected{0x19334b}else if hovered{0x303438}else{0x171c21},6.);
@@ -1233,7 +1247,7 @@ mod tests {
                 return Err("non-contiguous timing; create a new session at cuts or seeks".into());
             }
             self.next_time = Some((f.pts + f.duration, f.time_base));
-            for p in f.pixels.chunks_exact_mut(3) {
+            for p in f.pixels.as_chunks_mut::<3>().0.iter_mut() {
                 p.copy_from_slice(&[65535, 0, 0]);
             }
             if self.double {
@@ -1286,9 +1300,9 @@ mod tests {
     fn bitrate_input_defaults_validates_and_preserves_last_valid_value() {
         let mut p = Page::default(); p.open = true;
         assert_eq!(p.bitrate_mbps, 40);
-        p.apply(Action::EditBitrate); p.text_input("65");
+        p.bitrate_edit = Some(p.bitrate_mbps.to_string()); p.filename_cursor.apply(p.bitrate_edit.as_mut().unwrap(), Edit::SelectAll); p.text_input("65");
         assert!(p.finish_filename()); assert_eq!(p.bitrate_mbps, 65);
-        p.apply(Action::EditBitrate); p.text_input("0");
+        p.bitrate_edit = Some(p.bitrate_mbps.to_string()); p.filename_cursor.apply(p.bitrate_edit.as_mut().unwrap(), Edit::SelectAll); p.text_input("0");
         assert!(!p.finish_filename()); assert_eq!(p.bitrate_mbps, 65);
         p.key(Key::Escape); assert!(!p.editing_filename());
     }
@@ -1469,11 +1483,14 @@ mod tests {
         let p = Page::default();
         for vp in [(720.,480.),(900.,600.),(1280.,800.),(1440.,900.)] {
             let l=Layout::new(vp);
-            assert_eq!(l.video.y,crate::app::HEADER_H+ButtonBar::HEIGHT);
-            assert_eq!(p.actions(vp).iter().filter(|(..,a)|*a==Action::Export).count(),2);
+            assert_eq!(l.video.y,crate::app::HEADER_H);
+            assert!(l.canvas.button_bar.is_none());
+            assert_eq!(p.actions(vp).iter().filter(|(..,a)|*a==Action::Export).count(),1);
             let actions=p.actions(vp);
             let play=actions.iter().find(|(..,a)|*a==Action::Play).unwrap().0;
-            assert!(play.y >= l.job_card().y+l.job_card().h, "card must clear transport");
+            let card=l.job_card();
+            assert!(play.y+play.h <= l.seek.y && l.seek.y+l.seek.h+12. <= card.y, "transport, track, then card");
+            assert!(card.y+card.h <= l.footer.y, "card inside the attachment at {vp:?}");
             for (i,(r,_,_,a)) in actions.iter().enumerate() {
                 assert!(r.x>=0. && r.x+r.w<=vp.0+0.1,"{a:?} at {vp:?}");
                 assert!(r.y>=crate::app::HEADER_H && r.y+r.h<=l.footer.y,"{a:?} at {vp:?}");
@@ -1496,13 +1513,13 @@ mod tests {
             let actions=p.actions(vp);
             let play=actions.iter().find(|(..,a)|*a==Action::Play).unwrap().0;
             let l=Layout::new(vp);
-            assert!(play.y >= l.job_card().y+l.job_card().h, "card must clear transport");
+            assert!(play.y+play.h <= l.job_card().y, "card sits under the transport");
             let reveal=actions.iter().find(|(..,a)|*a==Action::Reveal).unwrap();
             assert!(hit(l.job_card(),reveal.0.x,reveal.0.y));
             let card=l.job_card();
             assert!(reveal.0.y+reveal.0.h <= card.y+card.h-if card.h<110.{32.}else{42.});
             assert_eq!(p.click(vp,reveal.0.x+1.,reveal.0.y+1.),Some(Action::Reveal));
-            assert_eq!(actions.iter().filter(|(..,a)|*a==Action::Export).count(),2);
+            assert_eq!(actions.iter().filter(|(..,a)|*a==Action::Export).count(),1);
         }
         assert_eq!(p.apply(Action::Reveal),p.destination);
     }

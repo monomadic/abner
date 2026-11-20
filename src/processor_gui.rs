@@ -1,11 +1,13 @@
 //! Runtime-schema controls and cancellable, bounded display previews.
 //! No processor identity or implementation belongs in this module.
+mod picker;
+use picker::Picker;
 use crate::canvas::{Canvas, ButtonBar, TimelineAttachment};
 use abner_processor_api::{VideoFrame, FramePixels, PixelFormat};
 use crate::{
     app::{
         ACCENT, CUT_HEADER_BLUE, CUT_STATUS_H, DETAIL_SLIDE_S, HEADER_H, INSPECTOR_BG,
-        INSPECTOR_PATH, Icon, Key, MONO_ADV, RAIL_ACTIONS_H, RAIL_FOOTER_H, RAIL_GRIP_H, RAIL_HEAD_H,
+        INSPECTOR_PATH, Icon, Key, MONO_ADV, RAIL_FOOTER_H, RAIL_GRIP_H, RAIL_HEAD_H,
         RAIL_INSPECTOR_H, SOURCE_BORDER, SOURCE_INK, SOURCE_RING,
         SOURCE_SUBTLE, SOURCE_SURFACE, WORKSPACE_DIM, WORKSPACE_MUTED,
         WORKSPACE_PANEL, WORKSPACE_RULE, WORKSPACE_TEXT, draw_cut_footer_button,
@@ -34,7 +36,6 @@ use std::{
 /// `processors.preview_cache_mb`'s default, for a `Panel` nobody configured.
 pub const DEFAULT_PREVIEW_BYTES: usize = 1024 * 1024 * 1024;
 const FRAMES: usize = 24;
-const DIM: [f32; 4] = [0.43, 0.43, 0.43, 1.0];
 const BLUE: [f32; 4] = [0.04, 0.33, 0.7, 1.0];
 /// Compact processor rows (Figma rail): 30px rows on a 3px gap, inside a
 /// rounded group box with 10px padding, under the category chips.
@@ -43,11 +44,14 @@ const ROW_H: f32 = 30.0;
 const GROUP_PAD: f32 = 10.0;
 /// Category chips: 18px pills, wrapping on a 24px pitch from the rail's
 /// 13px gutter; mono 10px labels, never narrower than ALL's 62px pill.
-const CHIP_TOP: f32 = 67.0;
-const CHIP_H: f32 = 18.0;
-const CHIP_PITCH: f32 = 24.0;
-const CHIP_PX: f32 = 10.0;
-const CHIP_TRACK: f32 = 0.4;
+/// The rail's auto-layout padding in the Process frame: every section is
+/// inset this far from the rail's edges.
+const RAIL_PAD_X: f32 = 10.0;
+const RAIL_PAD_Y: f32 = 14.0;
+/// The Move up / down strip: 27px buttons on 6px of padding.
+const ACTIONS_H: f32 = 39.0;
+/// The canvas's corner radius; the bar under the picture carries the lower pair.
+const CANVAS_RADIUS: f32 = 10.0;
 /// The host's own setting in a processor's settings object: how much to
 /// shrink the frame before the stage (1 = off; 2 and 4 pick the stage's 2x /
 /// 4x model, declared through `Factory::scales`). Stripped before the plugin
@@ -147,18 +151,26 @@ const LENGTHS: [(&str, &str, u32, u32); 4] = [
     ("5s", "5 seconds", 0, 5),
 ];
 /// The renders pane: a heading strip, then 44px rows on a 48px pitch.
+/// The info pane under the settings: icon, name and categories, four rows
+/// and the registry ID. A description adds a blank line and three of text.
+const INFO_H: f32 = 220.0;
+const INFO_DESCRIPTION_H: f32 = 56.0;
+/// The default processor icon's index among the renderer's bundled SVGs.
+const PROCESSOR_ICON: usize = 12;
 const RENDER_HEAD: f32 = 34.0;
 const RENDER_ROW: f32 = 44.0;
 const RENDER_PITCH: f32 = 48.0;
 /// One Render press, kept in the renders pane: where it was made and the
 /// whole chain as it stood, so a click puts the page back there. Its frames
 /// stay in the preview cache, tagged with `id`; a render whose frames have
-/// all been evicted or replaced leaves the list, unless it is running or
+/// all been evicted leaves the list, unless it is running or
 /// waiting in the queue.
 struct Render {
     id: u64,
     /// The first rendered frame's time (the playhead until one arrives).
     time: f64,
+    /// Playback rate is available even while the worker owns the registry.
+    rate: f64,
     /// Every processor in chain order: id, enabled, settings.
     stages: Vec<(String, bool, Value)>,
     focus: String,
@@ -1129,19 +1141,26 @@ pub struct Panel {
     source_bindings: BTreeMap<usize,abner_processor_api::ChainBindings>,
     pub editor_request: Option<(String,String,bool)>,
     pub active_editor: Option<(String,String,bool)>,
+    /// The app's embedded mask/crop editor is up: its bar covers the
+    /// viewer's top strip, so the picture fits below it (`picture_area`).
+    pub editor_bar: bool,
     preset_dir: Option<std::path::PathBuf>,
     user_presets: BTreeMap<String,std::path::PathBuf>,
     preset_name: Option<String>,
-    caret_at: Instant,
     /// Shared with the worker (locked for a whole render), so the page can
     /// ask the chain's output rate without waiting on one, and Export can
     /// hand the same registry to its own job.
     registry: Arc<Mutex<Registry>>,
     pub open: bool,
     descriptors: Vec<Descriptor>,
+    descriptions: BTreeMap<String, String>,
+    build_statuses: BTreeMap<String, String>,
     selected: usize,
     saved: Vec<Value>,
     enabled: Vec<bool>,
+    /// Membership is independent of bypass: the installed catalog starts outside the chain.
+    added: Vec<bool>,
+    picker: Option<Picker>,
     switch_slides: Vec<Option<SwitchSlide>>,
     supported: Vec<bool>,
     capabilities: Vec<Capabilities>,
@@ -1241,25 +1260,26 @@ pub struct Panel {
     expected: usize,
     /// A finished or reopened multi-frame render: the app seeks here and plays.
     autoplay: Option<f64>,
-    /// A reopened render from another source: the app focuses that source.
-    pub(crate) source_request: Option<usize>,
     /// Snapshot thumbnails for the renderer's atlas, drained by the app.
     pub(crate) thumb_uploads: Vec<ThumbUpload>,
 }
 impl Default for Panel {
     fn default() -> Self {
         Self {
-            input_owner:usize::MAX, declarations: BTreeMap::new(), inputs: Default::default(), source_bindings: BTreeMap::new(), editor_request: None, active_editor:None,
+            input_owner:usize::MAX, declarations: BTreeMap::new(), inputs: Default::default(), source_bindings: BTreeMap::new(), editor_request: None, active_editor:None, editor_bar:false,
             preset_dir: None,
             user_presets: BTreeMap::new(),
             preset_name: None,
-            caret_at: Instant::now(),
             registry: Arc::new(Mutex::new(Registry::default())),
             open: false,
             descriptors: vec![],
+            descriptions: BTreeMap::new(),
+            build_statuses: BTreeMap::new(),
             selected: 0,
             saved: vec![],
             enabled: vec![],
+            added: vec![],
+            picker: None,
             switch_slides: vec![],
             supported: vec![],
             capabilities: vec![],
@@ -1329,7 +1349,6 @@ impl Default for Panel {
             loop_preview: false,
             expected: 1,
             autoplay: None,
-            source_request: None,
             thumb_uploads: vec![],
         }
     }
@@ -1378,6 +1397,14 @@ impl Panel {
         let enabled = vec![false; descriptors.len()];
         let declarations=descriptors.iter().map(|d|(d.id.clone(),registry.get(&d.id).unwrap().spatial_inputs())).collect();
         let scales: Vec<Vec<ScaleOption>> = descriptors.iter().map(|d| registry.get(&d.id).unwrap().scales()).collect();
+        let descriptions = descriptors.iter().filter_map(|d| {
+            let description = registry.get(&d.id).ok()?.description().trim();
+            (!description.is_empty()).then(|| (d.id.clone(), description.to_owned()))
+        }).collect();
+        let build_statuses = descriptors.iter().filter_map(|d| {
+            let status = registry.get(&d.id).ok()?.build_status()?.trim();
+            (!status.is_empty()).then(|| (d.id.clone(), status.to_owned()))
+        }).collect();
         let registry = Arc::new(Mutex::new(registry));
         let worker = (!descriptors.is_empty()).then(|| Worker::new(registry.clone()));
         let mut s = Self::default();
@@ -1386,8 +1413,11 @@ impl Panel {
         s.declarations = declarations;
         s.registry = registry;
         s.descriptors = descriptors;
+        s.descriptions = descriptions;
+        s.build_statuses = build_statuses;
         s.saved = saved;
         s.enabled = enabled;
+        s.added = vec![false; s.descriptors.len()];
         s.switch_slides = vec![None; s.descriptors.len()];
         s.supported = supported;
         s.capabilities = capabilities;
@@ -1412,7 +1442,7 @@ impl Panel {
         // Keep discovery overrides available to presets/CLI, but out of the UI.
         let schema = &self.descriptors[index].settings_schema;
         self.fields.retain(|f| !matches!(schema["properties"][&f.key]["format"].as_str(), Some("file-path" | "directory-path")));
-        if let Some(inputs)=self.declarations.get(&self.descriptors[index].id) {
+        if self.picker.is_none() && let Some(inputs)=self.declarations.get(&self.descriptors[index].id) {
             use abner_processor_api::SpatialInputKind as K;
             for d in inputs {
                 let tools: &[bool]=match d.kind {K::Image|K::Region=>&[true],K::Mask=>&[false],K::MaskedImage=>&[true,false]};
@@ -1449,6 +1479,7 @@ impl Panel {
     /// for, and its frames land under that chain's key (`render_key`). Only
     /// Cancel, deleting it, or another Render press stops it.
     fn changed(&mut self) {
+        if self.picker.is_some() { return; }
         if !self.busy {
             self.feedback = None;
             self.render_result = None;
@@ -1464,6 +1495,7 @@ impl Panel {
         let old = std::mem::replace(&mut self.frames_key, key.clone());
         let frames = std::mem::take(&mut self.frames);
         if old != key {
+            self.current = None;
             if !frames.is_empty() {
                 self.stash.retain(|(k, _)| *k != old);
                 self.stash.push((old, frames));
@@ -1478,7 +1510,9 @@ impl Panel {
         if self.busy {
             return;
         }
-        self.status = if self.frames.is_empty() {
+        self.status = if !self.added.iter().any(|v| *v) {
+            "Add a processor to start.".into()
+        } else if self.frames.is_empty() {
             "Render the current frame to inspect the enabled chain.".into()
         } else {
             format!("{} rendered frames kept for this chain", self.frames.len())
@@ -1516,6 +1550,7 @@ impl Panel {
         }
     }
     fn toggle(&mut self) {
+        self.cancel_picker();
         self.card_drag = None;
         self.card_slides.clear();
         self.dragging = None;
@@ -1542,6 +1577,7 @@ impl Panel {
         self.select(index);
         // Naming it on the command line is the opt-in.
         self.enabled[index] = true;
+        self.added[index] = true;
         for (k, v) in settings.as_object().unwrap() {
             self.settings[k] = v.clone();
         }
@@ -1549,30 +1585,38 @@ impl Panel {
         self.changed();
         Ok(())
     }
+    /// The frame's layout of the focused field; true when a waiting press
+    /// moved the caret and another frame should show it.
+    pub(crate) fn text_layout(&mut self, layout: crate::text_edit::FieldLayout) -> bool {
+        self.text_cursor.layout(layout) && self.editing_text()
+    }
+    pub(crate) fn next_blink(&self) -> Instant { self.text_cursor.next_blink() }
     pub(crate) fn editing_text(&self) -> bool {
-        self.open && (self.preset_name.is_some() || self.editing.is_some())
+        self.open && (self.preset_name.is_some() || self.editing.is_some() || self.search_focused())
     }
     pub(crate) fn edit_text(&mut self, edit: crate::text_edit::Edit) -> bool {
         if !self.editing_text() { return false; }
-        self.caret_at = Instant::now();
         if matches!(edit, crate::text_edit::Edit::Paste) {
             if let Some(text) = crate::open::paste_text() { self.text_input(&text); }
         } else {
-            let value = self.preset_name.as_mut().or_else(|| self.editing.as_mut().map(|(_, value)| value)).unwrap();
+            let value = if self.search_focused() { &mut self.picker.as_mut().unwrap().search } else { self.preset_name.as_mut().or_else(|| self.editing.as_mut().map(|(_, value)| value)).unwrap() };
             self.text_cursor.apply(value, edit);
+            if self.search_focused() { self.search_changed(); }
         }
         true
     }
     pub fn text_input(&mut self, text: &str) -> bool {
         if !self.editing_text() { return false; }
-        self.caret_at = Instant::now();
-        let (value, max_bytes) = if let Some(value) = &mut self.preset_name {
+        let (value, max_bytes) = if self.search_focused() {
+            (&mut self.picker.as_mut().unwrap().search, 256)
+        } else if let Some(value) = &mut self.preset_name {
             (value, 160)
         } else {
             (&mut self.editing.as_mut().unwrap().1, usize::MAX)
         };
         let filtered: String = text.chars().filter(|c| !c.is_control()).collect();
         self.text_cursor.insert(value, &filtered, max_bytes);
+        if self.search_focused() { self.search_changed(); }
         true
     }
     fn pointer_time(&self, x: f32, timeline: RectPx) -> f64 {
@@ -1582,7 +1626,7 @@ impl Panel {
     /// Markers select their exact cached timestamp; the rest of the track
     /// seeks on the output frame grid, never the container's keyframe grid.
     fn timeline_time(&self, x: f32, timeline: RectPx) -> f64 {
-        self.frames.iter()
+        self.viewing_frames().iter()
             .map(|f| (f, (timeline.x + timeline.w * (f.pts / self.duration.max(0.001)) as f32 - x).abs()))
             .filter(|(_, distance)| *distance <= 4.0)
             .min_by(|a, b| a.1.total_cmp(&b.1))
@@ -1594,6 +1638,9 @@ impl Panel {
             return false;
         }
         self.cursor = (x, y);
+        if self.editing_text() && self.text_cursor.drag(x) {
+            return true;
+        }
         if let Some(mut drag) = self.card_drag {
             drag.active |= (x - drag.origin.0).hypot(y - drag.origin.1) >= 4.0;
             drag.viewport = vp;
@@ -1616,7 +1663,7 @@ impl Panel {
             return true;
         }
         if self.scrubbing {
-            let t = Self::timeline(vp);
+            let t = self.timeline(vp);
             self.seek = Some(self.timeline_time(x, t));
             return true;
         }
@@ -1632,10 +1679,11 @@ impl Panel {
             }
             return true;
         }
-        hit(Self::bounds(vp), x, y)
+        self.modal_open() || hit(Self::bounds(vp), x, y)
     }
     pub(crate) fn scrubbing(&self) -> bool { self.open && self.scrubbing }
     pub fn release(&mut self) -> bool {
+        self.text_cursor.release();
         if self.card_drag.is_some() {
             self.finish_card_drag(true);
             return true;
@@ -1660,6 +1708,7 @@ impl Panel {
         self.switch_slides[index].map_or(f32::from(self.enabled[index]), |s| s.position(self.enabled[index], now))
     }
     fn toggle_enabled(&mut self, index: usize) {
+        self.added[index] = true;
         let now = Instant::now();
         let from = self.switch_position(index, now);
         self.enabled[index] = !self.enabled[index];
@@ -1687,7 +1736,10 @@ impl Panel {
     pub(crate) fn input_owner(&mut self,id:usize) {
         if self.input_owner!=id {
             self.source_bindings.insert(self.input_owner,std::mem::take(&mut self.inputs.bindings));
-            self.inputs.bindings=self.source_bindings.remove(&id).unwrap_or_default();self.input_owner=id;self.changed();
+            self.inputs.bindings=self.source_bindings.remove(&id).unwrap_or_default();self.input_owner=id;
+            self.renders_scroll=0.;
+            self.current=None;
+            self.changed();
         }
     }
     pub(crate) fn job_inputs(&self)->crate::spatial::JobInputs {self.inputs.clone()}
@@ -1726,6 +1778,7 @@ impl Panel {
         self.render_queued = true;
     }
     fn request_preview(&mut self) {
+        if self.picker.is_some() { return; }
         self.render_segment = false;
         if self.span_frames() > 1 {
             self.loop_preview = true;
@@ -1825,15 +1878,26 @@ impl Panel {
     pub fn source_seek(&self, t: f64) -> f64 {
         (self.source_frame(t) - 0.5 / self.fps).max(0.0)
     }
+    /// A history selection can outlive changes to spatial inputs. Review its
+    /// retained pixels without relabelling them as output of the current inputs.
+    fn viewing_frames(&self) -> &[Preview] {
+        if let Some(id) = self.current
+            && !self.frames.iter().any(|f| f.render == id)
+            && let Some((_, frames)) = self.stash.iter().find(|(_, frames)| frames.iter().any(|f| f.render == id))
+        {
+            return frames;
+        }
+        &self.frames
+    }
     /// The rendered frame on screen at the playhead: the output frame whose
     /// span holds it (a tenth of a frame early, so grid rounding can't fall
     /// into the previous frame's span).
     fn shown(&self) -> Option<&Preview> {
         let lead = 0.1 / self.rate;
-        self.frames
-            .iter()
-            .rev()
-            .find(|f| f.pts - lead <= self.time && self.time < f.pts + f.duration - lead)
+        let frames = self.viewing_frames();
+        let covers = |f: &&Preview| f.pts - lead <= self.time && self.time < f.pts + f.duration - lead;
+        frames.iter().rev().filter(covers).find(|f| Some(f.render) == self.current)
+            .or_else(|| frames.iter().rev().find(covers))
     }
     fn jump(&mut self, next: bool) {
         let tolerance = 0.5 / self.rate.max(1.0);
@@ -1849,9 +1913,9 @@ impl Panel {
     /// frame's time and last frame's end.
     fn spans(&self) -> Vec<(u64, f64, f64)> {
         let mut out: Vec<(u64, f64, f64)> = Vec::new();
-        for f in &self.frames {
-            match out.last_mut() {
-                Some((id, _, end)) if *id == f.render => *end = f.pts + f.duration,
+        for f in self.viewing_frames() {
+            match out.iter_mut().find(|(id, _, _)| *id == f.render) {
+                Some((_, _, end)) => *end = f.pts + f.duration,
                 _ => out.push((f.render, f.pts, f.pts + f.duration)),
             }
         }
@@ -1870,7 +1934,7 @@ impl Panel {
             return None;
         }
         let id = self.current?;
-        if self.frames.iter().filter(|f| f.render == id).count() < 2 {
+        if self.viewing_frames().iter().filter(|f| f.render == id).count() < 2 {
             return None;
         }
         let (_, a, b) = self.spans().into_iter().find(|s| s.0 == id)?;
@@ -1893,12 +1957,13 @@ impl Panel {
         let slot = (0..RENDER_THUMBS).find(|s| !self.renders.iter().any(|r| r.slot == *s)).unwrap_or(0);
         let id = self.next_render;
         self.next_render += 1;
-        let names: Vec<&str> = self.descriptors.iter().enumerate().take(self.selected + 1)
+        let names: Vec<&str> = self.descriptors.iter().enumerate().take(self.chain_focus() + 1)
             .filter(|(i, _)| self.enabled[*i]).map(|(_, d)| d.name.as_str()).collect();
         self.renders.push(Render {
             id,
             time,
-            stages: self.descriptors.iter().enumerate()
+            rate: self.rate,
+            stages: self.descriptors.iter().enumerate().filter(|(i, _)| self.added[*i])
                 .map(|(i, d)| (d.id.clone(), self.enabled[i], self.saved[i].clone())).collect(),
             focus: self.descriptors.get(self.selected).map_or_else(String::new, |d| d.id.clone()),
             owner: self.input_owner,
@@ -1922,7 +1987,7 @@ impl Panel {
         self.stash.retain(|(_, frames)| !frames.is_empty());
     }
     /// Count each render's surviving frames; one with none left (evicted
-    /// from the cache, or rendered over) leaves the list.
+    /// from the cache) leaves the list.
     fn prune_renders(&mut self) {
         let mut counts: BTreeMap<u64, usize> = BTreeMap::new();
         for f in self.frames.iter().chain(self.stash.iter().flat_map(|(_, f)| f)) {
@@ -1936,7 +2001,7 @@ impl Panel {
         });
         if let Some(id) = self.current
             && live != Some(id)
-            && !self.frames.iter().any(|f| f.render == id)
+            && !counts.contains_key(&id)
         {
             self.current = None;
         }
@@ -1953,20 +2018,24 @@ impl Panel {
         }
         self.status = "Render deleted".into();
     }
+    /// History belongs to the focused source, just like its preview cache.
+    fn visible_renders(&self) -> impl DoubleEndedIterator<Item = &Render> {
+        self.renders.iter().filter(|r| r.owner == self.input_owner)
+    }
     /// Put the page back where a render was made: the chain's order, which
     /// stages were on, every setting, the focused processor, the source and
     /// the playhead. Its frames come back with the chain.
     fn open_render(&mut self, id: u64) {
-        let Some(r) = self.renders.iter().find(|r| r.id == id) else { return };
-        if self.busy && self.rendering == id {
-            return;
-        }
-        let (stages, focus, time, owner, many) =
-            (r.stages.clone(), r.focus.clone(), r.time, r.owner, r.frames > 1);
+        let Some(r) = self.visible_renders().find(|r| r.id == id) else { return };
+        let (stages, focus, time, rate, many) =
+            (r.stages.clone(), r.focus.clone(), r.time, r.rate, r.frames > 1);
+        self.added.fill(false);
+        self.enabled.fill(false);
         self.reorder(&stages.iter().map(|s| s.0.clone()).collect::<Vec<_>>());
         let now = Instant::now();
         for (stage, on, settings) in stages {
             let Some(i) = self.descriptors.iter().position(|d| d.id == stage) else { continue };
+            self.added[i] = true;
             if self.enabled[i] != on {
                 self.switch_slides[i] = Some(SwitchSlide { from: self.switch_position(i, now), at: now });
                 self.enabled[i] = on;
@@ -1979,18 +2048,19 @@ impl Panel {
             self.list_scroll = 0.0;
         }
         self.select(at);
+        self.rate = rate;
+        self.retimed = !same_rate(rational(rate), rational(self.fps));
+        self.rate_key.clear();
         self.current = Some(id);
+        self.autoplay = None;
+        self.seek = None;
         self.show_rendered = true;
-        let here = owner == self.input_owner;
-        if !here {
-            self.source_request = Some(owner);
-        }
         if many && self.loop_preview && self.playback {
             self.autoplay = Some(time);
         } else {
             self.seek = Some(time);
         }
-        self.status = if here && !self.frames.iter().any(|f| f.render == id) {
+        self.status = if !self.viewing_frames().iter().any(|f| f.render == id) {
             "Settings restored · the inputs changed since this render, so render again to see it".into()
         } else {
             format!("Render at {} restored", fmt_time(time))
@@ -1998,20 +2068,20 @@ impl Panel {
     }
     /// ` walks the renders pane downwards (older), ~ upwards; both wrap.
     fn cycle_render(&mut self, dir: isize) {
-        if self.renders.is_empty() {
-            self.status = "No renders yet · R renders at the playhead".into();
+        let ids: Vec<_> = self.visible_renders().map(|r| r.id).collect();
+        if ids.is_empty() {
+            self.status = "No renders for this source yet · R renders at the playhead".into();
             return;
         }
-        let n = self.renders.len() as isize;
-        let at = self.current.and_then(|id| self.renders.iter().position(|r| r.id == id));
+        let n = ids.len() as isize;
+        let at = self.current.and_then(|id| ids.iter().position(|r| *r == id));
         let next = match at {
             Some(i) => (i as isize - dir).rem_euclid(n),
             None if dir > 0 => n - 1,
             None => 0,
         } as usize;
-        let id = self.renders[next].id;
-        self.open_render(id);
-        let row = (self.renders.len() - 1 - next) as f32 * RENDER_PITCH;
+        self.open_render(ids[next]);
+        let row = (ids.len() - 1 - next) as f32 * RENDER_PITCH;
         let view = RAIL_INSPECTOR_H - RENDER_HEAD;
         self.renders_scroll = self.renders_scroll.clamp((row + RENDER_ROW - view).max(0.0), row);
     }
@@ -2035,6 +2105,7 @@ impl Panel {
         permute(&mut self.descriptors, &to);
         permute(&mut self.saved, &to);
         permute(&mut self.enabled, &to);
+        permute(&mut self.added, &to);
         permute(&mut self.switch_slides, &to);
         permute(&mut self.supported, &to);
         permute(&mut self.capabilities, &to);
@@ -2050,7 +2121,7 @@ impl Panel {
     /// chain up to the selected one the preview shows.
     pub(crate) fn export_setup(&self) -> (Arc<Mutex<Registry>>, Vec<(String, Value)>) {
         let chain = self.descriptors.iter().enumerate().filter(|(i, _)| self.enabled[*i])
-            .map(|(i,d)| (d.id.clone(), if i == self.selected { self.settings.clone() } else { self.saved[i].clone() })).collect();
+            .map(|(i,d)| (d.id.clone(), if i == self.selected && self.picker.is_none() { self.settings.clone() } else { self.saved[i].clone() })).collect();
         (self.registry.clone(), chain)
     }
 
@@ -2058,7 +2129,7 @@ impl Panel {
         self.descriptors
             .iter()
             .enumerate()
-            .take(self.selected + 1)
+            .take(self.chain_focus() + 1)
             .filter(|(i, _)| self.enabled[*i])
             .map(|(i, d)| (d.id.clone(), self.saved[i].clone()))
             .collect()
@@ -2087,6 +2158,7 @@ impl Panel {
         shift(&mut self.descriptors, from, to);
         shift(&mut self.saved, from, to);
         shift(&mut self.enabled, from, to);
+        shift(&mut self.added, from, to);
         shift(&mut self.switch_slides, from, to);
         shift(&mut self.supported, from, to);
         shift(&mut self.capabilities, from, to);
@@ -2097,7 +2169,7 @@ impl Panel {
     /// Descriptor indices the category filter shows, in chain order.
     fn visible(&self) -> Vec<usize> {
         (0..self.descriptors.len())
-            .filter(|i| self.filter.as_ref().is_none_or(|f| self.categories[*i].contains(f)))
+            .filter(|i| self.added[*i])
             .collect()
     }
     /// Every category some processor declares, in the API's order.
@@ -2109,39 +2181,20 @@ impl Panel {
     }
     /// The chip row (ALL, then each category), wrapped to the rail's width:
     /// one geometry for drawing and hit testing.
+    #[cfg(test)]
     fn chips(&self, vp: (f32, f32)) -> Vec<(RectPx, Option<Category>, String)> {
-        if self.descriptors.is_empty() {
-            return Vec::new();
-        }
-        let (x0, x1) = (13.0, Self::left(vp) - 13.0);
-        let (mut x, mut y) = (x0, HEADER_H + CHIP_TOP);
-        std::iter::once(None)
-            .chain(self.chip_categories().into_iter().map(Some))
-            .map(|c| {
-                let label = c.as_ref().map_or("ALL".to_string(), |c| c.label().to_uppercase());
-                let n = label.chars().count() as f32;
-                let w = (n * (CHIP_PX * MONO_ADV + CHIP_TRACK) + 20.0).max(62.0).min(x1 - x0);
-                if x > x0 && x + w > x1 {
-                    x = x0;
-                    y += CHIP_PITCH;
-                }
-                let r = RectPx { x, y, w, h: CHIP_H };
-                x += w + 2.0;
-                (r, c, label)
-            })
-            .collect()
+        self.picker_chips(vp)
     }
     fn set_filter(&mut self, filter: Option<Category>) {
         self.filter = filter;
-        self.list_scroll = 0.0;
-        if let Some(&first) = self.visible().first()
-            && !self.visible().contains(&self.selected)
+        if let Some(p) = &mut self.picker { p.list_scroll = 0.0; }
+        if let Some(&first) = self.catalog_visible().first()
+            && !self.catalog_visible().contains(&self.selected)
         {
-            self.select(first);
+            self.pick_candidate(first);
         }
     }
     pub fn key(&mut self, key: Key) -> bool {
-        self.caret_at = Instant::now();
         if matches!(key, Key::Escape) && self.card_drag.is_some() {
             self.finish_card_drag(false);
             return true;
@@ -2203,7 +2256,10 @@ impl Panel {
         if !self.open {
             return false;
         }
+        if self.picker.is_some() { return self.picker_key(key); }
         match key {
+            Key::Char('a' | 'A') => { self.open_picker(); true }
+            Key::Backspace => { self.remove_selected(); true }
             Key::Tab => {
                 if self.shown().is_some() {
                     self.show_rendered = !self.show_rendered;
@@ -2216,11 +2272,11 @@ impl Panel {
                 self.toggle_play = true;
                 true
             }
-            Key::KeyLeft => {
+            Key::PreviousKeyframe => {
                 self.jump(false);
                 true
             }
-            Key::KeyRight => {
+            Key::NextKeyframe => {
                 self.jump(true);
                 true
             }
@@ -2285,7 +2341,8 @@ impl Panel {
     }
     /// The rounded box the rows sit in starts 14px under the last chip row.
     fn group_top(&self, vp: (f32, f32)) -> f32 {
-        self.chips(vp).last().map_or(HEADER_H + RAIL_HEAD_H, |(r, ..)| r.y + r.h + 14.0)
+        let _ = vp;
+        HEADER_H + 46.0
     }
     fn list_top(&self, vp: (f32, f32)) -> f32 {
         self.group_top(vp) + GROUP_PAD
@@ -2293,25 +2350,36 @@ impl Panel {
     /// The grip strip and the visible part of the focused inspector, as
     /// the Sources rail lays them out: above the Move up / down row, and
     /// only when the list keeps room for one card and its footer line.
+    /// Where the Move up / down strip starts, above the rail's bottom padding.
+    fn actions_top(vp: (f32, f32)) -> f32 {
+        Self::bottom(vp) - RAIL_PAD_Y - ACTIONS_H
+    }
     fn detail(&self, vp: (f32, f32)) -> (RectPx, RectPx) {
         let l = Self::left(vp);
-        let bottom = Self::bottom(vp) - RAIL_ACTIONS_H;
-        let none = RectPx { x: 0.0, y: bottom, w: l, h: 0.0 };
+        if !self.added.iter().any(|x| *x) {
+            let bottom = Self::bottom(vp) - 20.0;
+            let height = (vp.1 * 0.335).clamp(110.0, 268.0) * self.detail_slide();
+            let pane = RectPx { x:15.0, y:bottom-height, w:l-30.0, h:height };
+            return (RectPx { y:pane.y-RAIL_GRIP_H, h:RAIL_GRIP_H, ..pane }, pane);
+        }
+        let bottom = Self::actions_top(vp);
+        let (x, w) = (RAIL_PAD_X, l - 2.0 * RAIL_PAD_X);
+        let none = RectPx { x, y: bottom, w, h: 0.0 };
         let needed = CARD_PITCH + RAIL_FOOTER_H + RAIL_GRIP_H + RAIL_INSPECTOR_H;
-        if self.descriptors.is_empty() || bottom - self.list_top(vp) < needed {
+        if bottom - self.list_top(vp) < needed {
             return (none, none);
         }
         let t = self.detail_slide();
         let shown = (RAIL_INSPECTOR_H * t * t * (3.0 - 2.0 * t)).round();
-        let inspector = RectPx { x: 0.0, y: bottom - shown, w: l, h: shown };
-        let grip = RectPx { x: 0.0, y: inspector.y - RAIL_GRIP_H, w: l, h: RAIL_GRIP_H };
+        let inspector = RectPx { x, y: bottom - shown, w, h: shown };
+        let grip = RectPx { x, y: inspector.y - RAIL_GRIP_H, w, h: RAIL_GRIP_H };
         (grip, inspector)
     }
     fn list(&self, vp: (f32, f32)) -> RectPx {
         let (grip, _) = self.detail(vp);
         let y = self.list_top(vp);
-        let end = if grip.h > 0.0 { grip.y } else { Self::bottom(vp) - RAIL_ACTIONS_H };
-        RectPx { x: 0.0, y, w: Self::left(vp), h: (end - RAIL_FOOTER_H - GROUP_PAD - y).max(CARD_PITCH) }
+        let end = if grip.h > 0.0 { grip.y } else { Self::actions_top(vp) };
+        RectPx { x: 0.0, y, w: Self::left(vp), h: (end - RAIL_FOOTER_H - GROUP_PAD - y - if self.added.iter().any(|v| *v) { 44.0 } else { 0.0 }).max(CARD_PITCH) }
     }
     /// Processor `i`'s row; a row the filter hides has no area.
     fn card(&self, i: usize, vp: (f32, f32)) -> RectPx {
@@ -2319,9 +2387,9 @@ impl Panel {
             return RectPx { x: 0.0, y: -1e4, w: 0.0, h: 0.0 };
         };
         RectPx {
-            x: 13.0 + GROUP_PAD,
+            x: RAIL_PAD_X + 1.0 + GROUP_PAD,
             y: self.list_top(vp) + at as f32 * CARD_PITCH - self.list_scroll,
-            w: Self::left(vp) - 2.0 * (13.0 + GROUP_PAD),
+            w: Self::left(vp) - 2.0 * (RAIL_PAD_X + 1.0 + GROUP_PAD),
             h: ROW_H,
         }
     }
@@ -2377,6 +2445,25 @@ impl Panel {
                 .and_then(|d| self.card_slides.get(&d.id))
                 .is_some_and(|s| s.from != (0.0, 0.0) && s.at.elapsed().as_secs_f32() < CARD_SLIDE_S))
     }
+    fn missing_mask(&self, i: usize) -> Option<&str> {
+        use abner_processor_api::SpatialInputKind as K;
+        let id = &self.descriptors[i].id;
+        self.declarations.get(id)?.iter().find(|d| d.required
+            && matches!(d.kind, K::Mask | K::MaskedImage)
+            && !self.binding(id, &d.key).is_some_and(|b| b.mask.is_some()))
+            .map(|d| d.key.as_str())
+    }
+    /// Whether the stage declares a required mask at all; with `missing_mask`
+    /// this picks the row's alert triangle (unset) or tick (applied).
+    fn requires_mask(&self, i: usize) -> bool {
+        use abner_processor_api::SpatialInputKind as K;
+        self.declarations.get(&self.descriptors[i].id)
+            .is_some_and(|ds| ds.iter().any(|d| d.required && matches!(d.kind, K::Mask | K::MaskedImage)))
+    }
+    fn mask_warning(&self, i: usize, vp: (f32, f32)) -> RectPx {
+        let c = self.card(i, vp);
+        RectPx { x: c.x + c.w - 70., y: c.y + (c.h - 16.) / 2., w: 16., h: 16. }
+    }
     fn draw_processor_card(&self, items: &mut Vec<Item>, i: usize, c: RectPx, floating: bool) {
         let active = i == self.selected;
         let hover = self.card_drag.is_none() && hit(c, self.cursor.0, self.cursor.1);
@@ -2390,7 +2477,10 @@ impl Panel {
             ..RectItem::new(c, hex_color(if floating { 0x232323 } else if hover && !active { 0x0c0c0c } else { 0x030303 })) }));
         let switch = RectPx { x: c.x + c.w - 46.0, y: c.y + (c.h - 18.0) / 2.0, w: 34.0, h: 18.0 };
         let tx = c.x + 13.0;
-        items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(switch.x - tx - 10.0),
+        let badge = self.requires_mask(i);
+        if badge { items.push(Item::FrameIcon { x:c.x+c.w-70., y:c.y+(c.h-16.)/2.,
+            index: if self.missing_mask(i).is_some() { 14 } else { 15 } }); }
+        items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(switch.x - tx - if badge { 32.0 } else { 10.0 }),
             ..TextItem::new(tx, c.y + c.h / 2.0, 12.0,
                 hex_color(if self.enabled[i] || active { 0xe6e6e6 } else { 0x8c8c8c }), self.descriptors[i].name.as_str()) }));
         draw_rail_switch(items, switch, self.switch_position(i, Instant::now()));
@@ -2401,61 +2491,78 @@ impl Panel {
         RectPx { x: r.x + r.w - 46.0, y: r.y + (r.h - 18.0) / 2.0, w: 34.0, h: 18.0 }
     }
     fn move_button(vp: (f32, f32), down: bool) -> RectPx {
-        let w = (Self::left(vp) - 32.0) / 2.0;
-        RectPx { x: if down { 20.0 + w } else { 12.0 }, y: Self::bottom(vp) - 34.0, w, h: 28.0 }
+        let x = RAIL_PAD_X + 12.0;
+        let w = (Self::left(vp) - 2.0 * x - 9.0) / 2.0;
+        RectPx { x: if down { x + w + 9.0 } else { x }, y: Self::actions_top(vp) + 6.0, w, h: 27.0 }
     }
-    fn right(vp: (f32, f32)) -> f32 {
-        (vp.0 * 0.25).clamp(200.0, 310.0)
+    fn right(&self, vp: (f32, f32)) -> f32 {
+        if self.added.iter().any(|v| *v) { (vp.0 * 0.25).clamp(200.0, 310.0) } else { 0.0 }
     }
-    fn canvas_layout(vp:(f32,f32)) -> Canvas {
+    fn canvas_layout(&self, vp:(f32,f32)) -> Canvas {
         let x=Self::left(vp);
-        let width=(vp.0-x-Self::right(vp)).max(1.);
+        let width=(vp.0-x-self.right(vp)).max(1.);
         Canvas::layout(RectPx{x,y:HEADER_H,w:width,h:(Self::bottom(vp)-HEADER_H).max(0.)},true,
-            Some(TimelineAttachment{x,width,transport_height:165.,lanes_height:0.}))
+            Some(TimelineAttachment{x,width,transport_height:165.,lanes_height:0.})).bar_below()
     }
-    pub(crate) fn viewer(vp: (f32, f32)) -> RectPx { Self::canvas_layout(vp).r }
-    /// The Source | Rendered switch at the viewer's top-right, level with
-    /// the format summary. Tab flips the same flag; the zoom is shared, so both sides
+    pub(crate) fn viewer(&self, vp: (f32, f32)) -> RectPx { self.canvas_layout(vp).r }
+    /// The part of the viewer the picture fits into: all of it, or below the
+    /// embedded editor's bar while one is up, so a tall picture's top crop
+    /// handles never sit under Save / Apply.
+    pub(crate) fn picture_area(&self, vp: (f32, f32)) -> RectPx {
+        let v = self.viewer(vp);
+        if !self.editor_bar { return v; }
+        let top = (HEADER_H + ButtonBar::HEIGHT).min(v.y + v.h);
+        if top <= v.y { return v; }
+        RectPx { y: top, h: v.h - (top - v.y), ..v }
+    }
+    /// The Source | Rendered switch at the right end of the bar under the
+    /// picture, level with the format summary. Tab flips the same flag; the zoom is shared, so both sides
     /// show the same region of the picture.
-    fn compare_switch(vp: (f32, f32)) -> RectPx {
-        Self::canvas_layout(vp).button_bar.unwrap().trailing(168.)
+    fn compare_switch(&self, vp: (f32, f32)) -> RectPx {
+        self.canvas_layout(vp).button_bar.unwrap().trailing(168.)
     }
-    fn compare_half(vp: (f32, f32), rendered: bool) -> RectPx {
-        let s = Self::compare_switch(vp);
+    fn compare_half(&self, vp: (f32, f32), rendered: bool) -> RectPx {
+        let s = self.compare_switch(vp);
         let width=(s.w-ButtonBar::GAP)/2.;
         RectPx { x:s.x+if rendered {width+ButtonBar::GAP}else{0.},w:width,..s }
     }
     fn draw_compare_switch(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
         let available = self.shown().is_some();
         for (rendered, label) in [(false, "Source"), (true, "Rendered")] {
-            let button = Self::compare_half(vp, rendered);
+            let button = self.compare_half(vp, rendered);
             ButtonBar::button(items, button, label,
                 self.show_rendered == rendered, hit(button, self.cursor.0, self.cursor.1), !available);
         }
     }
-    fn progress_panel(vp: (f32, f32)) -> RectPx {
-        let (l, r) = (Self::left(vp), Self::right(vp));
+    fn progress_panel(&self, vp: (f32, f32)) -> RectPx {
+        let (l, r) = (Self::left(vp), self.right(vp));
         RectPx { x: l + 16.0, y: Self::bottom(vp) - 79.0,
             w: (vp.0 - l - r - 32.0).max(1.0), h: 67.0 }
     }
-    fn progress_button(vp: (f32, f32)) -> RectPx {
-        let r = Self::progress_panel(vp);
+    fn progress_button(&self, vp: (f32, f32)) -> RectPx {
+        let r = self.progress_panel(vp);
         RectPx { x: r.x + r.w - 103.0, y: r.y + 5.0, w: 91.0, h: 22.0 }
     }
-    fn length_button(vp: (f32, f32), i: usize) -> RectPx {
-        let b = Self::progress_button(vp);
+    fn length_button(&self, vp: (f32, f32), i: usize) -> RectPx {
+        let b = self.progress_button(vp);
         RectPx { x: b.x - 10.0 - (LENGTHS.len() - i) as f32 * 34.0, w: 34.0, ..b }
     }
-    fn loop_button(vp: (f32, f32)) -> RectPx {
-        let first = Self::length_button(vp, 0);
+    fn loop_button(&self, vp: (f32, f32)) -> RectPx {
+        let first = self.length_button(vp, 0);
         RectPx { x: first.x - 58.0, w: 50.0, ..first }
     }
     /// The focused processor's facts, pinned under its settings; dropped
     /// when the column is too short to keep a few settings above it.
-    fn info(vp: (f32, f32)) -> RectPx {
-        let w = Self::right(vp);
+    fn info_description(&self) -> Option<&str> {
+        let descriptor = self.descriptors.get(self.selected)?;
+        self.descriptions.get(&descriptor.id).map(String::as_str)
+    }
+
+    fn info(&self, vp: (f32, f32)) -> RectPx {
+        let w = self.right(vp);
         let bottom = Self::bottom(vp);
-        let h = if bottom - HEADER_H - 158.0 - RAIL_INSPECTOR_H < 96.0 { 0.0 } else { RAIL_INSPECTOR_H };
+        let height = INFO_H + self.info_description().map_or(0.0, |_| INFO_DESCRIPTION_H);
+        let h = if bottom - HEADER_H - 158.0 - height < 96.0 { 0.0 } else { height };
         RectPx { x: vp.0 - w, y: bottom - h, w, h }
     }
     /// The renders pane's rows, under its heading strip.
@@ -2466,34 +2573,35 @@ impl Panel {
     /// Row `n` of the pane, newest render first.
     fn render_row(&self, n: usize, vp: (f32, f32)) -> RectPx {
         let list = self.renders_list(vp);
-        RectPx { x: 10.0, y: list.y + n as f32 * RENDER_PITCH - self.renders_scroll, w: list.w - 20.0, h: RENDER_ROW }
+        RectPx { x: list.x + 10.0, y: list.y + n as f32 * RENDER_PITCH - self.renders_scroll, w: list.w - 20.0, h: RENDER_ROW }
     }
     fn render_delete(row: RectPx) -> RectPx {
         RectPx { x: row.x + row.w - 28.0, y: row.y + (row.h - 22.0) / 2.0, w: 22.0, h: 22.0 }
     }
-    pub(crate) fn timeline(vp: (f32, f32)) -> RectPx {
-        let last = Self::transport(vp, 4);
+    pub(crate) fn timeline(&self, vp: (f32, f32)) -> RectPx {
+        let last = self.transport(vp, 4);
         let x = last.x + last.w + 16.0;
-        RectPx { x, y: Self::transport_y(vp) + 1.0,
-            w: (vp.0 - Self::right(vp) - 16.0 - x).max(1.0), h: 28.0 }
+        RectPx { x, y: self.transport_y(vp) + 1.0,
+            w: (vp.0 - self.right(vp) - 16.0 - x).max(1.0), h: 28.0 }
     }
-    fn transport_y(vp: (f32, f32)) -> f32 {
-        Self::canvas_layout(vp).timeline.unwrap().transport.y + 20.0
+    fn transport_y(&self, vp: (f32, f32)) -> f32 {
+        self.canvas_layout(vp).timeline.unwrap().transport.y + 20.0
     }
     /// The Timeline's transport spacing: 24px glyph buttons on a 31px
     /// pitch, 36px either side of the 34px play disc.
-    fn transport(vp: (f32, f32), i: usize) -> RectPx {
+    fn transport(&self, vp: (f32, f32), i: usize) -> RectPx {
         let (x, w) = [(0.0, 24.0), (31.0, 24.0), (62.0, 34.0), (103.0, 24.0), (134.0, 24.0)][i];
-        RectPx { x: Self::left(vp) + 16.0 + x, y: Self::transport_y(vp), w, h: 30.0 }
+        RectPx { x: Self::left(vp) + 16.0 + x, y: self.transport_y(vp), w, h: 30.0 }
     }
     fn settings_switch(vp: (f32, f32)) -> RectPx {
         RectPx { x: vp.0 - 78.0, y: HEADER_H + 20.0, w: 61.0, h: 27.0 }
     }
     /// Preset controls use the same bounds for drawing and pointer input.
-    fn preset_buttons(vp: (f32, f32)) -> [RectPx; 5] {
-        let x = vp.0 - Self::right(vp) + 16.;
+    fn preset_buttons(&self, vp: (f32, f32)) -> [RectPx; 5] {
+        if self.picker.is_some() { return self.picker_layout(vp).presets(); }
+        let x = vp.0 - self.right(vp) + 16.;
         let y = HEADER_H + 100.;
-        let w = Self::right(vp) - 32.;
+        let w = self.right(vp) - 32.;
         let name = (w - 128.).max(40.);
         let widths = [name, 18., 18., 34., 42.];
         let mut at = x;
@@ -2623,14 +2731,12 @@ impl Panel {
         self.changed();
     }
     fn draw_settings(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
-        let x = vp.0 - Self::right(vp) + 16.0;
-        let w = Self::right(vp) - 32.0;
+        let x = vp.0 - self.right(vp) + 16.0;
+        let w = self.right(vp) - 32.0;
         let top = HEADER_H;
         let ink = hex_color(0xe6e6e6);
         let muted = hex_color(0xa3a5a8);
         let dim = hex_color(0x777b82);
-        let blue = hex_color(0x007be5);
-        let caret = self.caret_at.elapsed().as_millis() % 1000 < 500;
         text(items, x, top + 20.0, 9.0, "PROCESSOR SETTINGS", dim, w - 70.0);
         let Some(d) = self.descriptors.get(self.selected) else { return; };
         text(items, x, top + 40.0, 15.0, &d.name, ink, w);
@@ -2642,80 +2748,336 @@ impl Panel {
         let name=self.preset_name.as_deref();
         let preset = name.unwrap_or_else(||d.presets.get(self.preset).map_or("Default", |p| p.name.as_str()));
         let custom=d.presets.get(self.preset).is_some_and(|p|self.user_presets.contains_key(&p.id));
-        for (index,(r, label)) in Self::preset_buttons(vp).into_iter().zip([preset, "‹", "›", "Save", "Delete"]).enumerate() {
+        for (index,(r, label)) in self.preset_buttons(vp).into_iter().zip([preset, "‹", "›", "Save", "Delete"]).enumerate() {
             items.push(Item::Rect(RectItem { radius: 6.0, border_w: 1.0, border_color: hex_color(0x303234), ..RectItem::new(r, hex_color(0x0a0a0a)) }));
             ui_label(items, r.x + r.w / 2.0, r.y + r.h / 2.0, 10.0, if index==4&&!custom {dim} else {muted}, label, Align::Center, r.w - 4.0);
-            if index == 0 && name.is_some() { set_caret(items, &self.text_cursor, caret); }
+            if index == 0 && name.is_some() { set_caret(items, &self.text_cursor); }
         }
         items.push(Item::Rect(RectItem::new(RectPx { x, y: top + 136.0, w, h: 1.0 }, hex_color(0x303234))));
-        let clip = RectPx { x: x - 16.0, y: top + 158.0, w: Self::right(vp), h: (Self::info(vp).y - top - 158.0).max(1.0) };
+        let clip = RectPx { x: x - 16.0, y: top + 158.0, w: self.right(vp), h: (self.info(vp).y - top - 158.0).max(1.0) };
+        self.draw_fields(items, vp, clip);
+        self.draw_info(items, vp);
+    }
+    fn draw_fields(&self, items: &mut Vec<Item>, vp: (f32, f32), clip: RectPx) {
+        use figleaf::StrokeAlign;
+        use picker::{field_title, picker_text, ui_shape};
+
+        let Some(d) = self.descriptors.get(self.selected) else {
+            return;
+        };
+        let ink = hex_color(0xe6e6e6);
+        let blue = hex_color(0x007be5);
         items.push(Item::Clip(Some(clip)));
         for (i, f) in self.fields.iter().enumerate() {
-            let row = self.row(i, vp);
-            if row.y + row.h < clip.y || row.y > clip.y + clip.h { continue; }
-            if matches!(f.kind,Kind::Spatial{..}) && row.w<122. {
-                let (label,kind)=f.title.rsplit_once(" (").unwrap_or((&f.title,""));
-                text(items,row.x,row.y,11.,label,ink,row.w);
-                text(items,row.x,row.y+12.,11.,&format!("({kind}"),ink,row.w);
-            } else if !matches!(f.kind,Kind::Number{..}|Kind::Bool) { text(items, row.x, row.y, 11.0, &f.title, ink, row.w); }
+            let row = if self.picker.is_some() {
+                self.picker_row_in(i, clip)
+            } else {
+                self.row(i, vp)
+            };
+            if row.y + row.h < clip.y || row.y > clip.y + clip.h {
+                continue;
+            }
+            if matches!(f.kind, Kind::Spatial { .. }) && row.w < 122. {
+                let (label, kind) = f.title.rsplit_once(" (").unwrap_or((&f.title, ""));
+                picker_text(items, row.x, row.y, 11., label, ink, row.w);
+                picker_text(
+                    items,
+                    row.x,
+                    row.y + 12.,
+                    11.,
+                    &format!("({kind}"),
+                    ink,
+                    row.w,
+                );
+            } else if !matches!(f.kind, Kind::Number { .. } | Kind::Bool) {
+                picker_text(
+                    items,
+                    row.x,
+                    row.y + if self.picker.is_some() { 4.0 } else { 0.0 },
+                    11.0,
+                    &f.title,
+                    ink,
+                    if self.picker.is_some() {
+                        row.w - 52.0
+                    } else {
+                        row.w
+                    },
+                );
+            }
             let value = &self.settings[&f.key];
             let editing = self.editing.as_ref().filter(|(n, _)| *n == i);
-            let shown = if let Kind::Spatial{key,crop}=&f.kind {
-                let configured=self.binding(&self.descriptors[self.selected].id,key).is_some_and(|b| if *crop {b.crop.is_some()}else{b.mask.is_some()});
-                if configured {"Edit…".into()} else {"Choose…".into()}
-            } else { editing.map_or_else(|| if value.is_null() { "Automatic".into() } else { f.shown(value) }, |(_, s)| s.clone()) };
-            if let Kind::Number { min, max, .. } = f.kind {
-                let value_rect=slider_value(row);
-                let hovered=hit(row,self.cursor.0,self.cursor.1);
-                let focused=editing.is_some();
-                items.push(Item::Text(TextItem{valign:VAlign::Middle,max_width:Some((row.w-48.).max(1.)),..TextItem::new(row.x,row.y+10.,11.,ink,&f.title)}));
-                items.push(Item::Rect(RectItem{radius:4.,border_w:if focused||!hovered{1.}else{0.},border_color:if focused{blue}else{hex_color(0x4e4e4e)},
-                    ..RectItem::new(value_rect,hex_color(if focused||hovered{0x1a1a1a}else{0x0a0a0a}))}));
-                ui_label(items,value_rect.x+value_rect.w/2.,row.y+10.,10.,ink,&shown,Align::Center,value_rect.w-4.);
-                if focused {set_caret(items, &self.text_cursor, caret);}
-                let amount=((value.as_f64().unwrap_or(min)-min)/(max-min)).clamp(0.,1.) as f32;
-                let track=RectPx{x:row.x,y:row.y+26.,w:row.w,h:4.};
-                items.push(Item::Rect(RectItem{radius:2.,..RectItem::new(track,hex_color(0x303234))}));
-                let cx=track.x+track.w*amount;
-                if hovered||focused||self.dragging==Some(i) {
-                    items.push(Item::Rect(RectItem{radius:10.,..RectItem::new(RectPx{x:cx-10.,y:row.y+18.,w:20.,h:20.},blue)}));
+            let shown = if let Kind::Spatial { key, crop } = &f.kind {
+                let configured = self
+                    .binding(&self.descriptors[self.selected].id, key)
+                    .is_some_and(|b| {
+                        if *crop {
+                            b.crop.is_some()
+                        } else {
+                            b.mask.is_some()
+                        }
+                    });
+                if configured {
+                    "Edit…".into()
+                } else {
+                    "Choose…".into()
                 }
-                items.push(Item::Rect(RectItem{radius:2.,..RectItem::new(RectPx{w:track.w*amount,..track},blue)}));
-                items.push(Item::Rect(RectItem{radius:6.,..RectItem::new(RectPx{x:cx-6.,y:row.y+22.,w:12.,h:12.},ink)}));
+            } else {
+                editing.map_or_else(
+                    || {
+                        if value.is_null() {
+                            "Automatic".into()
+                        } else {
+                            f.shown(value)
+                        }
+                    },
+                    |(_, s)| s.clone(),
+                )
+            };
+            if let Kind::Number { min, max, .. } = f.kind {
+                let value_rect = slider_value(row);
+                let hovered = hit(row, self.cursor.0, self.cursor.1);
+                let focused = editing.is_some();
+                field_title(items, row, &f.title, ink);
+                let mut value_box = ui_shape(
+                    value_rect,
+                    hex_color(if focused || hovered {
+                        0x1a1a1a
+                    } else {
+                        0x0a0a0a
+                    }),
+                )
+                .radius(4.0);
+                if focused || !hovered {
+                    value_box = value_box.stroke(
+                        1.0,
+                        if focused { blue } else { hex_color(0x4e4e4e) },
+                        StrokeAlign::Inside,
+                    );
+                }
+                items.push(Item::Shape(value_box));
+                self.draw_field_value(items, value_rect, &shown, ink, 2.0, focused);
+                let amount =
+                    ((value.as_f64().unwrap_or(min) - min) / (max - min)).clamp(0., 1.) as f32;
+                let track = RectPx {
+                    x: row.x,
+                    y: row.y + 26.,
+                    w: row.w,
+                    h: 4.,
+                };
+                items.push(Item::Shape(
+                    ui_shape(track, hex_color(0x303234)).radius(2.0),
+                ));
+                let cx = track.x + track.w * amount;
+                if hovered || focused || self.dragging == Some(i) {
+                    items.push(Item::Shape(
+                        ui_shape(
+                            RectPx {
+                                x: cx - 10.0,
+                                y: row.y + 18.0,
+                                w: 20.0,
+                                h: 20.0,
+                            },
+                            blue,
+                        )
+                        .radius(10.0),
+                    ));
+                }
+                if amount > 0.0 {
+                    items.push(Item::Shape(
+                        ui_shape(
+                            RectPx {
+                                w: track.w * amount,
+                                ..track
+                            },
+                            blue,
+                        )
+                        .radius(2.0),
+                    ));
+                }
+                items.push(Item::Shape(
+                    ui_shape(
+                        RectPx {
+                            x: cx - 6.0,
+                            y: row.y + 22.0,
+                            w: 12.0,
+                            h: 12.0,
+                        },
+                        ink,
+                    )
+                    .radius(6.0),
+                ));
             } else if let Kind::Spatial { key, crop } = &f.kind {
                 let r = spatial_button(row);
-                let hovered=hit(r,self.cursor.0,self.cursor.1);
-                let active=self.active_editor.as_ref().is_some_and(|(id,input,is_crop)|id==&d.id && input==key && is_crop==crop);
-                let binding = self.binding(&d.id,key);
-                let configured = binding.as_ref().is_some_and(|b| if *crop { b.crop.is_some() } else { b.mask.is_some() });
-                items.push(Item::Rect(RectItem { radius:6.,border_w:1.,border_color:hex_color(if active{0xff8800}else{0x303234}),..RectItem::new(r,hex_color(if hovered {0x1a1a1a}else{0x0a0a0a})) }));
-                let thumb=RectPx{x:r.x+4.,y:r.y+4.,w:r.w-8.,h:54.};
+                let hovered = hit(r, self.cursor.0, self.cursor.1);
+                let active = self
+                    .active_editor
+                    .as_ref()
+                    .is_some_and(|(id, input, is_crop)| {
+                        id == &d.id && input == key && is_crop == crop
+                    });
+                let binding = self.binding(&d.id, key);
+                let configured = binding.as_ref().is_some_and(|b| {
+                    if *crop {
+                        b.crop.is_some()
+                    } else {
+                        b.mask.is_some()
+                    }
+                });
+                items.push(Item::Shape(
+                    ui_shape(r, hex_color(if hovered { 0x1a1a1a } else { 0x0a0a0a }))
+                        .radius(6.0)
+                        .stroke(
+                            1.0,
+                            hex_color(if active { 0xff8800 } else { 0x303234 }),
+                            StrokeAlign::Inside,
+                        ),
+                ));
+                let thumb = RectPx {
+                    x: r.x + 4.,
+                    y: r.y + 4.,
+                    w: r.w - 8.,
+                    h: 54.,
+                };
                 if configured {
                     let uv = if *crop {
-                        let b=binding.as_ref().unwrap();let [x,y,w,h]=b.crop.unwrap();
-                        [x as f32/b.dimensions[0].max(1) as f32,y as f32/b.dimensions[1].max(1) as f32,(x+w) as f32/b.dimensions[0].max(1) as f32,(y+h) as f32/b.dimensions[1].max(1) as f32]
-                    } else {[0.,0.,1.,1.]};
-                    items.push(Item::Video{a:self.source,b:self.source,r:thumb,uv,mode:VideoMode::Tex,p0:0.,p1:0.});
-                    if !crop {let b=binding.as_ref().unwrap();if let Some(mask)=&b.mask {draw_mask_preview(items,thumb,b.dimensions,mask);}}
-                    if hovered {items.push(Item::Rect(RectItem::new(thumb,[1.,1.,1.,0.025])));}
-                } else {items.push(Item::Rect(RectItem::new(thumb,hex_color(if hovered {0x353535}else{0x232323}))));}
-                items.push(Item::Rect(RectItem{radius:6.,..RectItem::new(RectPx{x:thumb.x+(thumb.w-40.)/2.,y:thumb.y+7.,w:40.,h:40.},[0.,0.,0.,0.7])}));
-                items.push(Item::FrameIcon{x:thumb.x+(thumb.w-20.)/2.,y:thumb.y+17.,index:if *crop {5}else{4}});
-            } else if matches!(f.kind,Kind::Bool) {
-                items.push(Item::Text(TextItem{valign:VAlign::Middle,max_width:Some((row.w-48.).max(1.)),..TextItem::new(row.x,row.y+10.,11.,ink,&f.title)}));
-                let on=value.as_bool().unwrap_or(false);
-                draw_rail_switch(items,RectPx{x:row.x+row.w-32.,y:row.y+2.,w:32.,h:16.},if on{1.}else{0.});
+                        let b = binding.as_ref().unwrap();
+                        let [x, y, w, h] = b.crop.unwrap();
+                        [
+                            x as f32 / b.dimensions[0].max(1) as f32,
+                            y as f32 / b.dimensions[1].max(1) as f32,
+                            (x + w) as f32 / b.dimensions[0].max(1) as f32,
+                            (y + h) as f32 / b.dimensions[1].max(1) as f32,
+                        ]
+                    } else {
+                        [0., 0., 1., 1.]
+                    };
+                    items.push(Item::Video {
+                        a: self.source,
+                        b: self.source,
+                        r: thumb,
+                        uv,
+                        mode: VideoMode::Tex,
+                        p0: 0.,
+                        p1: 0.,
+                    });
+                    if !crop {
+                        let b = binding.as_ref().unwrap();
+                        if let Some(mask) = &b.mask {
+                            draw_mask_preview(items, thumb, b.dimensions, mask);
+                        }
+                    }
+                    if hovered {
+                        items.push(Item::Shape(ui_shape(thumb, [1., 1., 1., 0.025])));
+                    }
+                } else {
+                    items.push(Item::Shape(ui_shape(
+                        thumb,
+                        hex_color(if hovered { 0x353535 } else { 0x232323 }),
+                    )));
+                }
+                let icon_plate = RectPx {
+                    x: thumb.x + (thumb.w - 40.0) / 2.0,
+                    y: thumb.y + 7.0,
+                    w: 40.0,
+                    h: 40.0,
+                };
+                items.push(Item::Shape(
+                    ui_shape(icon_plate, [0.0, 0.0, 0.0, 0.7]).radius(6.0),
+                ));
+                items.push(Item::FrameIcon {
+                    x: thumb.x + (thumb.w - 20.) / 2.,
+                    y: thumb.y + 17.,
+                    index: if *crop { 5 } else { 4 },
+                });
+                if !crop && f.required {
+                    items.push(Item::FrameIcon {
+                        x: thumb.x + thumb.w - 18.,
+                        y: thumb.y + 2.,
+                        index: if configured { 15 } else { 14 },
+                    });
+                }
+            } else if matches!(f.kind, Kind::Bool) {
+                field_title(items, row, &f.title, ink);
+                let on = value.as_bool().unwrap_or(false);
+                draw_rail_switch(
+                    items,
+                    RectPx {
+                        x: row.x + row.w - 32.,
+                        y: row.y + 2.,
+                        w: 32.,
+                        h: 16.,
+                    },
+                    if on { 1. } else { 0. },
+                );
             } else {
-                let r = RectPx { x: row.x, y: row.y + 16.0, w: row.w, h: 20.0 };
-                let hovered=hit(r,self.cursor.0,self.cursor.1);
-                items.push(Item::Rect(RectItem { radius: 4.0, border_w: 1.0, border_color: if editing.is_some(){blue}else{hex_color(0x303234)}, ..RectItem::new(r, hex_color(if hovered||editing.is_some(){0x1a1a1a}else{0x0a0a0a})) }));
-                ui_label(items, r.x + r.w / 2.0, r.y + r.h / 2.0, 10.0, ink, &shown, Align::Center, r.w - 12.0);
-                if editing.is_some() { set_caret(items, &self.text_cursor, caret); }
+                let r = if self.picker.is_some() {
+                    slider_value(row)
+                } else {
+                    RectPx {
+                        x: row.x,
+                        y: row.y + 16.0,
+                        w: row.w,
+                        h: 20.0,
+                    }
+                };
+                let hovered = hit(r, self.cursor.0, self.cursor.1);
+                let focused = editing.is_some();
+                items.push(Item::Shape(
+                    ui_shape(
+                        r,
+                        hex_color(if hovered || focused {
+                            0x1a1a1a
+                        } else {
+                            0x0a0a0a
+                        }),
+                    )
+                    .radius(4.0)
+                    .stroke(
+                        1.0,
+                        if focused { blue } else { hex_color(0x303234) },
+                        StrokeAlign::Inside,
+                    ),
+                ));
+                self.draw_field_value(items, r, &shown, ink, 6.0, focused);
             }
         }
         items.push(Item::Clip(None));
-        self.draw_info(items, vp);
+
         self.draw_tooltip(items, vp, clip);
+    }
+    fn draw_field_value(
+        &self,
+        items: &mut Vec<Item>,
+        r: RectPx,
+        value: &str,
+        ink: [f32; 4],
+        pad: f32,
+        editing: bool,
+    ) {
+        if editing {
+            ui_label(
+                items,
+                r.x + r.w / 2.0,
+                r.y + r.h / 2.0,
+                10.0,
+                ink,
+                value,
+                Align::Center,
+                r.w - 2.0 * pad,
+            );
+            set_caret(items, &self.text_cursor);
+        } else {
+            picker::field_label(
+                items,
+                RectPx {
+                    x: r.x + pad,
+                    w: r.w - 2.0 * pad,
+                    ..r
+                },
+                value,
+                ink,
+            );
+        }
     }
     fn spatial_count(&self) -> usize {
         self.fields.iter().take_while(|f|matches!(f.kind,Kind::Spatial{..})).count()
@@ -2733,21 +3095,23 @@ impl Panel {
         spatial.div_ceil(2) as f32*104.+(spatial..self.fields.len()).map(|i|self.field_pitch(i)).sum::<f32>()
     }
     fn row(&self, i: usize, vp: (f32, f32)) -> RectPx {
+        if self.picker.is_some() { return self.picker_row(i, vp); }
         let r = Self::bounds(vp);
         let spatial=self.spatial_count();
-        let width=Self::right(vp)-32.;
+        let width=self.right(vp)-32.;
         let paired=i<spatial;
         let column=if paired {i%2}else{0};
         let offset=if paired {(i/2) as f32*104.}else{spatial.div_ceil(2) as f32*104.+(spatial..i).map(|j|self.field_pitch(j)).sum::<f32>()};
         let w=if paired {(width-12.)/2.}else{width};
         RectPx {
-            x: vp.0 - Self::right(vp) + 16.0 + column as f32*(w+12.),
+            x: vp.0 - self.right(vp) + 16.0 + column as f32*(w+12.),
             y: r.y + 164.0 + offset - self.scroll,
             w,
             h: if matches!(self.fields[i].kind,Kind::Spatial{..}){96.}else{36.},
         }
     }
     pub fn scroll(&mut self, dy: f32, cursor: (f32, f32), vp: (f32, f32)) -> bool {
+        if self.modal_open() { self.picker_scroll(dy, cursor, vp); return true; }
         let r = Self::bounds(vp);
         if self.open && hit(r, cursor.0, cursor.1) {
             if cursor.0 < Self::left(vp) {
@@ -2755,7 +3119,7 @@ impl Panel {
                 if hit(renders, cursor.0, cursor.1) {
                     self.renders_scroll = (self.renders_scroll - dy).clamp(
                         0.0,
-                        (self.renders.len() as f32 * RENDER_PITCH - 4.0 - renders.h).max(0.0),
+                        (self.visible_renders().count() as f32 * RENDER_PITCH - 4.0 - renders.h).max(0.0),
                     );
                     return true;
                 }
@@ -2767,25 +3131,26 @@ impl Panel {
                 if self.card_drag.is_some() { self.pointer(cursor.0, cursor.1, vp); }
                 return true;
             }
-            if cursor.0 < vp.0 - Self::right(vp) {
+            if cursor.0 < vp.0 - self.right(vp) {
                 // Over the canvas the app pans a zoomed picture, as on the
                 // timeline; the rest of the middle column swallows it.
-                return !hit(Self::viewer(vp), cursor.0, cursor.1);
+                return !hit(self.viewer(vp), cursor.0, cursor.1);
             }
             self.scroll = (self.scroll - dy).clamp(
                 0.0,
-                (self.settings_height() - (Self::info(vp).y - 210.0)).max(0.0),
+                (self.settings_height() - (self.info(vp).y - 210.0)).max(0.0),
             );
             return true;
         }
         false
     }
     pub fn click(&mut self, x: f32, y: f32, vp: (f32, f32)) -> bool {
-        self.caret_at = Instant::now();
         if !self.open {
             return false;
         }
         self.card_drag = None;
+        if self.modal_open() { return self.picker_click(x, y, vp); }
+        if hit(self.add_button(vp), x, y) { self.open_picker(); return true; }
         let r = Self::bounds(vp);
         if !hit(r, x, y) {
             return false;
@@ -2798,20 +3163,20 @@ impl Panel {
             }
             return true;
         }
-        if let Some(i) = (0..LENGTHS.len()).find(|i| hit(Self::length_button(vp, *i), x, y)) {
+        if let Some(i) = (0..LENGTHS.len()).find(|i| hit(self.length_button(vp, *i), x, y)) {
             self.length = i;
             return true;
         }
-        if hit(Self::loop_button(vp), x, y) {
+        if hit(self.loop_button(vp), x, y) {
             self.loop_preview = !self.loop_preview;
             return true;
         }
-        if hit(Self::progress_button(vp), x, y) {
+        if hit(self.progress_button(vp), x, y) {
             if self.busy { self.cancel_preview(); } else { self.request_preview(); }
             return true;
         }
-        if self.shown().is_some() && hit(Self::compare_switch(vp), x, y) {
-            self.show_rendered = hit(Self::compare_half(vp, true), x, y);
+        if self.shown().is_some() && hit(self.compare_switch(vp), x, y) {
+            self.show_rendered = hit(self.compare_half(vp, true), x, y);
             return true;
         }
         if x < Self::left(vp) {
@@ -2822,8 +3187,8 @@ impl Panel {
             } else if hit(renders, x, y) {
                 let n = ((y - renders.y + self.renders_scroll) / RENDER_PITCH) as usize;
                 let row = self.render_row(n, vp);
-                if n < self.renders.len() && hit(row, x, y) {
-                    let id = self.renders[self.renders.len() - 1 - n].id;
+                let id = self.visible_renders().rev().nth(n).map(|r| r.id);
+                if let Some(id) = id && hit(row, x, y) {
                     if hit(Self::render_delete(row), x, y) {
                         self.delete_render(id);
                     } else {
@@ -2834,12 +3199,14 @@ impl Panel {
                 self.move_selected(-1);
             } else if hit(Self::move_button(vp, true), x, y) {
                 self.move_selected(1);
-            } else if let Some((_, c, _)) = self.chips(vp).into_iter().find(|(r, ..)| hit(*r, x, y)) {
-                self.set_filter(c);
+
             } else if hit(self.list(vp), x, y) {
                 let row = ((y - self.list_top(vp) + self.list_scroll) / CARD_PITCH) as usize;
                 if let Some(&index) = self.visible().get(row) && hit(self.card(index, vp), x, y) {
-                    if hit(self.card_switch(index, vp), x, y) {
+                    if hit(self.mask_warning(index, vp), x, y) && self.missing_mask(index).is_some() {
+                        self.select(index);
+                        self.editor_request = Some((self.descriptors[index].id.clone(), self.missing_mask(index).unwrap().into(), false));
+                    } else if hit(self.card_switch(index, vp), x, y) {
                         self.toggle_enabled(index);
                     } else {
                         if index != self.selected { self.select(index); }
@@ -2854,7 +3221,7 @@ impl Panel {
             return true;
         }
         for i in 0..5 {
-            if hit(Self::transport(vp, i), x, y) {
+            if hit(self.transport(vp, i), x, y) {
                 match i {
                     0 => self.jump(false),
                     1 => self.step(-1),
@@ -2865,7 +3232,7 @@ impl Panel {
                 return true;
             }
         }
-        let timeline = Self::timeline(vp);
+        let timeline = self.timeline(vp);
         if hit(timeline, x, y) {
             self.scrubbing = true;
             self.seek = Some(self.timeline_time(x, timeline));
@@ -2875,19 +3242,22 @@ impl Panel {
             self.toggle_enabled(self.selected);
             return true;
         }
-        if let Some(button) = Self::preset_buttons(vp).iter().position(|r| hit(*r, x, y))
+        self.settings_click(x, y, vp)
+    }
+    fn settings_click(&mut self, x: f32, y: f32, vp: (f32, f32)) -> bool {
+        if let Some(button) = self.preset_buttons(vp).iter().position(|r| hit(*r, x, y))
             && !self.descriptors.is_empty()
         {
             match button {
                 3=>self.save_preset(),
                 4=>self.delete_preset(),
-                0 if self.preset_name.is_some()=>self.text_cursor=Default::default(),
+                0 if self.preset_name.is_some()=>self.text_cursor.press(x),
                 1|2=>{let count=self.descriptors[self.selected].presets.len()+1;let at=if self.preset<count-1{self.preset+1}else{0};let next=if button==1{(at+count-1)%count}else{(at+1)%count};self.preset=if next==0{usize::MAX}else{next-1};self.apply_preset();},
                 _=>{}
             }
             return true;
         }
-        if y < Self::info(vp).y && y >= HEADER_H + 158.0 {
+        if hit(self.fields_clip(vp), x, y) {
             self.preset_name=None;
             for i in 0..self.fields.len() {
                 let row = self.row(i, vp);
@@ -2895,9 +3265,15 @@ impl Panel {
                     continue;
                 }
                 let f = &self.fields[i];
+                // A press in the field being edited places the caret; it
+                // must not restart the edit from the stored value.
+                let focused = self.editing.as_ref().is_some_and(|(n, _)| *n == i);
                 if matches!(f.kind, Kind::Number { .. }) && hit(slider_value(row),x,y) {
-                    self.text_cursor = Default::default();
-                    self.editing = Some((i, self.settings[&f.key].to_string()));
+                    if !focused {
+                        self.text_cursor = Default::default();
+                        self.editing = Some((i, self.settings[&f.key].to_string()));
+                    }
+                    self.text_cursor.press(x);
                     return true;
                 }
                 match &f.kind {
@@ -2918,8 +3294,13 @@ impl Panel {
                         self.settings[&f.key] =
                             json!(!self.settings[&f.key].as_bool().unwrap_or(false))
                     }
+                    Kind::Text if focused => {
+                        self.text_cursor.press(x);
+                        return true;
+                    }
                     Kind::Text => {
                         self.text_cursor = Default::default();
+                        self.text_cursor.press(x);
                         self.editing = Some((
                             i,
                             self.settings[&f.key]
@@ -2937,7 +3318,7 @@ impl Panel {
                     }
                     Kind::Spatial{key,crop} => {
                         if !hit(spatial_button(row),x,y) {return true;}
-                        if self.enabled.iter().take(self.selected).any(|e|*e) {self.status="Move this processor first to edit its spatial inputs".into();return true;}
+                        if let Some(p) = self.picker.as_mut() { p.message="Add this processor, then choose its spatial inputs.".into(); return true; }
                         self.editor_request=Some((self.descriptors[self.selected].id.clone(),key.clone(),*crop));return true;
                     }
                     Kind::Unsupported => {
@@ -3018,7 +3399,7 @@ impl Panel {
                             });
                             // Newest last, so the budget takes other chains first.
                             let mut entry = self.stash.remove(at);
-                            entry.1.retain(|old| (old.pts - f.pts).abs() > 0.5 * f.duration);
+                            entry.1.retain(|old| old.render != f.render || (old.pts - f.pts).abs() > 0.5 * f.duration);
                             let needed = f.before.len() + f.after.len();
                             while !entry.1.is_empty() && Self::frame_bytes(&entry.1) + needed > self.budget {
                                 entry.1.remove(0);
@@ -3032,7 +3413,7 @@ impl Panel {
                             continue;
                         }
                         self.frames
-                            .retain(|old| (old.pts - f.pts).abs() > 0.5 * f.duration);
+                            .retain(|old| old.render != f.render || (old.pts - f.pts).abs() > 0.5 * f.duration);
                         let needed = f.before.len() + f.after.len();
                         Self::trim_stash(&mut self.stash, Self::frame_bytes(&self.frames) + needed, self.budget);
                         while !self.frames.is_empty()
@@ -3084,7 +3465,7 @@ impl Panel {
                             // More than one frame, with Loop on: play it.
                             let id = self.rendering;
                             let mut mine = self.frames.iter().filter(|f| f.render == id);
-                            if self.open && self.loop_preview && let (Some(first), Some(_)) = (mine.next(), mine.next()) {
+                            if self.open && self.current == Some(id) && self.loop_preview && let (Some(first), Some(_)) = (mine.next(), mine.next()) {
                                 self.autoplay = Some(first.pts);
                                 self.show_rendered = true;
                             }
@@ -3135,7 +3516,7 @@ impl Panel {
             self.request_preview();
         }
         self.update_rate(info);
-        if self.dirty.is_some() && self.editing.is_none() && self.preset_name.is_none() {
+        if self.picker.is_none() && self.dirty.is_some() && self.editing.is_none() && self.preset_name.is_none() {
             self.dirty = None;
             let chain = self.chain();
             if chain.is_empty() && !self.descriptors.is_empty() {
@@ -3144,7 +3525,7 @@ impl Panel {
                 .descriptors
                 .iter()
                 .enumerate()
-                .take(self.selected + 1)
+                .take(self.chain_focus() + 1)
                 .any(|(i, _)| self.enabled[i] && !self.supported[i])
             {
                 self.status = "An enabled processor does not support frame previews.".into();
@@ -3201,6 +3582,7 @@ impl Panel {
     /// orange on the focused one, then the folding focused inspector and the
     /// Move up / down row in the Duplicate / Add files strip.
     fn draw_rail(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
+        if !self.added.iter().any(|x| *x) { self.draw_empty_chain(items, vp); return; }
         let l = Self::left(vp);
         let ink = hex_color(0xe6e6e6);
         let secondary = hex_color(0xa3a5a8);
@@ -3214,42 +3596,27 @@ impl Panel {
             RectPx { x: l - 1.0, y: HEADER_H, w: 1.0, h: Self::bottom(vp) - HEADER_H },
             WORKSPACE_RULE,
         )));
-        let (hx, hy) = (14.0, HEADER_H + RAIL_HEAD_H / 2.0);
+        let (hx, hy) = (RAIL_PAD_X + 14.0, HEADER_H + RAIL_PAD_Y + RAIL_HEAD_H / 2.0);
         items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(l - 110.0),
             ..TextItem::new(hx, hy, 13.0, ink, "Processors") }));
         items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(40.0),
-            ..TextItem::new(hx + 11.0 * 13.0 * MONO_ADV, hy, 13.0, secondary, self.descriptors.len().to_string()) }));
+            ..TextItem::new(hx + 11.0 * 13.0 * MONO_ADV, hy, 13.0, secondary, self.added.iter().filter(|v| **v).count().to_string()) }));
         let on = self.enabled.iter().filter(|e| **e).count();
         if !self.descriptors.is_empty() {
             items.push(Item::Text(TextItem { regular: true, align: Align::Right, valign: VAlign::Middle, max_width: Some(70.0),
-                ..TextItem::new(l - 14.0, hy, 11.0, if on > 0 { hex_color(CUT_HEADER_BLUE) } else { subtle }, format!("{on} ACTIVE")) }));
-        }
-        let chips = self.chips(vp);
-        if let Some((first, ..)) = chips.first() {
-            items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, tracking: 0.5,
-                ..TextItem::new(14.0, first.y - 14.0, 10.0, subtle, "CATEGORY") }));
-        }
-        for (r, c, label) in &chips {
-            let picked = *c == self.filter;
-            let colour = if picked { ink } else if over(*r) { hex_color(0xc8c8c8) } else { secondary };
-            if picked {
-                items.push(Item::Rect(RectItem { radius: CHIP_H / 2.0, border_w: 1.0,
-                    border_color: hex_color(SOURCE_RING), ..RectItem::new(*r, hex_color(0x1a1a1a)) }));
-            }
-            items.push(Item::Text(TextItem { regular: true, align: Align::Center, valign: VAlign::Middle,
-                tracking: CHIP_TRACK, max_width: Some(r.w - 8.0),
-                ..TextItem::new(r.x + r.w / 2.0, r.y + r.h / 2.0, CHIP_PX, colour, label.as_str()) }));
+                ..TextItem::new(l - RAIL_PAD_X - 14.0, hy, 11.0, if on > 0 { hex_color(CUT_HEADER_BLUE) } else { subtle }, format!("{on} ACTIVE")) }));
         }
         let list = self.list(vp);
         let visible = self.visible();
         if !visible.is_empty() {
-            // The group box hugs its rows, and stops at the list's end.
+            // The group contains the visible rows and the Add Processor footer.
             let top = self.group_top(vp);
-            let rows = visible.len() as f32 * CARD_PITCH - 3.0;
-            let h = (rows.min(list.h) + 2.0 * GROUP_PAD).max(0.0);
+            let add = self.add_button(vp);
+            let h = add.y + add.h + GROUP_PAD - top;
             items.push(Item::Rect(RectItem { radius: 14.0, border_w: 1.0, border_color: hex_color(0x2e2e2e),
-                ..RectItem::new(RectPx { x: 13.0, y: top, w: l - 26.0, h }, hex_color(0x121212)) }));
+                ..RectItem::new(RectPx { x: RAIL_PAD_X, y: top, w: l - 2.0 * RAIL_PAD_X, h }, hex_color(0x121212)) }));
         }
+        self.draw_add_button(items, vp);
         items.push(Item::Clip(Some(list)));
         let now = Instant::now();
         for &i in &visible {
@@ -3259,14 +3626,15 @@ impl Panel {
             self.draw_processor_card(items, i, c, false);
         }
         items.push(Item::Clip(None));
-        let footer = if self.descriptors.is_empty() { "No processors in this build" } else { "Drag processors to reorder" };
-        items.push(Item::Text(TextItem { interface: true, valign: VAlign::Middle, max_width: Some(l - 24.0),
-            ..TextItem::new(12.0, list.y + list.h + 16.0, 11.0, subtle, footer) }));
+        if self.descriptors.is_empty() {
+            items.push(Item::Text(TextItem { interface: true, valign: VAlign::Middle, max_width: Some(l - 2.0 * RAIL_PAD_X - 24.0),
+                ..TextItem::new(RAIL_PAD_X + 12.0, list.y + list.h + 16.0, 11.0, subtle, "No processors in this build") }));
+        }
         self.draw_renders(items, vp);
         for down in [false, true] {
             let b = Self::move_button(vp, down);
             let hover = over(b) && !self.descriptors.is_empty();
-            items.push(Item::Rect(RectItem { radius: 8.0, border_w: 1.0,
+            items.push(Item::Rect(RectItem { radius: 6.0, border_w: 1.0,
                 border_color: hex_color(SOURCE_BORDER), ..RectItem::new(b, hex_color(SOURCE_SURFACE)) }));
             items.push(Item::Text(TextItem { interface: true, align: Align::Center, valign: VAlign::Middle, max_width: Some(b.w - 8.0),
                 ..TextItem::new(b.x + b.w / 2.0, b.y + b.h / 2.0, 11.0, if hover { WORKSPACE_TEXT } else { WORKSPACE_DIM },
@@ -3287,22 +3655,22 @@ impl Panel {
             let over = |r: RectPx| hit(r, self.cursor.0, self.cursor.1);
             // Full layout anchored at the top, clipped while it folds.
             items.push(Item::Clip(Some(pane)));
-            items.push(Item::Rect(RectItem::new(RectPx { h: RAIL_INSPECTOR_H, ..pane }, hex_color(INSPECTOR_BG))));
+            items.push(Item::Rect(RectItem::new(RectPx { h: pane.h.max(RAIL_INSPECTOR_H), ..pane }, hex_color(INSPECTOR_BG))));
             let hy = pane.y + RENDER_HEAD / 2.0 + 2.0;
             items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(l - 110.0),
-                ..TextItem::new(16.0, hy, 13.0, hex_color(SOURCE_INK), "Renders") }));
+                ..TextItem::new(pane.x + 16.0, hy, 13.0, hex_color(SOURCE_INK), "Renders") }));
             items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(40.0),
-                ..TextItem::new(16.0 + 8.0 * 13.0 * MONO_ADV, hy, 13.0, hex_color(0xa3a5a8), self.renders.len().to_string()) }));
+                ..TextItem::new(pane.x + 16.0 + 8.0 * 13.0 * MONO_ADV, hy, 13.0, hex_color(0xa3a5a8), self.visible_renders().count().to_string()) }));
             items.push(Item::Text(TextItem { regular: true, align: Align::Right, valign: VAlign::Middle, max_width: Some(70.0),
-                ..TextItem::new(l - 16.0, hy, 10.0, WORKSPACE_DIM, "` cycles") }));
+                ..TextItem::new(pane.x + pane.w - 16.0, hy, 10.0, WORKSPACE_DIM, "` cycles") }));
             let list = self.renders_list(vp);
             items.push(Item::Clip(Some(list)));
-            if self.renders.is_empty() {
-                items.push(Item::Text(TextItem { regular: true, wrap: Some(l - 32.0),
-                    ..TextItem::new(16.0, list.y + 6.0, 11.0, WORKSPACE_DIM,
-                        "Nothing rendered yet. Every render is kept here: click one to return to its frame, chain and settings.") }));
+            if self.visible_renders().next().is_none() {
+                items.push(Item::Text(TextItem { regular: true, wrap: Some(pane.w - 32.0),
+                    ..TextItem::new(pane.x + 16.0, list.y + 6.0, 11.0, WORKSPACE_DIM,
+                        "Nothing rendered for this source yet. Click a render to return to its frame, chain and settings.") }));
             }
-            for (n, r) in self.renders.iter().rev().enumerate() {
+            for (n, r) in self.visible_renders().rev().enumerate() {
                 let row = self.render_row(n, vp);
                 if row.y + row.h < list.y || row.y > list.y + list.h {
                     continue;
@@ -3379,14 +3747,14 @@ impl Panel {
             }
             items.push(Item::Clip(None));
         }
-        draw_rail_grip(items, grip, l, hit(grip, self.cursor.0, self.cursor.1));
+        draw_rail_grip(items, grip, grip.w, hit(grip, self.cursor.0, self.cursor.1));
     }
     /// Focused inspector (278:609), for the focused processor, under its
     /// settings in the right column: the name as the title row, five mono
     /// rows between solid hairlines (categories first) and the registry ID
     /// where Sources puts the path.
     fn draw_info(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
-        let pane = Self::info(vp);
+        let pane = self.info(vp);
         if pane.h <= 0.0 || self.descriptors.is_empty() {
             return;
         }
@@ -3397,33 +3765,53 @@ impl Panel {
         items.push(Item::Clip(Some(pane)));
         items.push(Item::Rect(RectItem::new(pane, hex_color(INSPECTOR_BG))));
         items.push(Item::Rect(RectItem::new(RectPx { h: 1.0, ..pane }, hex_color(0x303234))));
-        // The chain position as a round badge, the Sources keycap's place.
-        let badge = RectPx { x: x0, y: y + 16.0, w: 24.0, h: 24.0 };
-        items.push(Item::Rect(RectItem { radius: 12.0, ..RectItem::new(badge, hex_color(0xb4b4b8)) }));
-        items.push(Item::Text(TextItem { inspector: 2, align: Align::Center, valign: VAlign::Middle, max_width: Some(22.0),
-            ..TextItem::new(badge.x + 12.0, badge.y + 12.0, 14.0, hex_color(0x161616), (i + 1).to_string()) }));
-        items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(pane.w - 80.0),
-            ..TextItem::new(x0 + 32.0, y + 28.0, 13.0, hex_color(SOURCE_INK), d.name.as_str()) }));
-        for ry in [y + 49.0, y + 178.0] {
+        // The default processor icon where the chain-position badge was: no
+        // processor supplies its own yet. The SVG carries the tile's outline.
+        let tile = RectPx { x: x0, y: y + 17.0, w: 24.0, h: 24.0 };
+        items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(tile, hex_color(0x1c1d1c)) }));
+        items.push(Item::FrameIcon { x: tile.x, y: tile.y, index: PROCESSOR_ICON });
+        let text_x = x0 + 32.0;
+        items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(x1 - text_x),
+            ..TextItem::new(text_x, y + 28.0, 13.0, hex_color(SOURCE_INK), d.name.as_str()) }));
+        // The categories lead the description, in the focus colour.
+        let category = category_label(&self.categories[i]);
+        items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(x1 - text_x),
+            ..TextItem::new(text_x, y + 46.0, 11.0, hex_color(0xff8d28), category.as_str()) }));
+        let description_height = if let Some(description) = self.info_description() {
+            let area = RectPx { x: text_x, y: y + 67.0, w: (x1 - text_x).max(1.0), h: 42.0 };
+            items.push(Item::Clip(Some(area)));
+            items.push(Item::Text(TextItem {
+                inspector: 1,
+                wrap: Some(area.w),
+                ..TextItem::new(area.x, area.y, 11.0, hex_color(0xa3a5a8), description)
+            }));
+            items.push(Item::Clip(Some(pane)));
+            INFO_DESCRIPTION_H
+        } else {
+            0.0
+        };
+        let y = y + description_height;
+        for ry in [y + 67.0, y + 182.0] {
             items.push(Item::Rect(RectItem::new(
                 RectPx { x: x0, y: ry, w: x1 - x0, h: 1.0 }, hex_color(0x303234))));
         }
         let settings = format!("{} fields · {} presets", self.fields.len(), d.presets.len());
+        // Rows sit under the name, past the icon; the input shape is already
+        // in the settings header's summary line.
         for (k, (key, value)) in [
-            ("Category", category_label(&self.categories[i])),
+            ("Category", category),
             ("Role", role_label(c).to_string()),
-            ("Input", input_label(c)),
             ("Preview", if self.supported[i] { "Frame preview".into() } else { "Not supported".into() }),
             ("Settings", settings),
         ].into_iter().enumerate() {
-            let ry = y + 68.5 + k as f32 * 23.0;
+            let ry = y + 92.5 + k as f32 * 24.0;
             items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(78.0),
-                ..TextItem::new(x0, ry, 11.0, WORKSPACE_DIM, key) }));
-            items.push(Item::Text(TextItem { regular: true, align: Align::Right, valign: VAlign::Middle, max_width: Some(pane.w - 110.0),
-                ..TextItem::new(x1, ry, 11.0, hex_color(0xa3a5a8), value) }));
+                ..TextItem::new(x0 + 31.0, ry, 11.0, WORKSPACE_DIM, key) }));
+            items.push(Item::Text(TextItem { regular: true, align: Align::Right, valign: VAlign::Middle, max_width: Some(pane.w - 141.0),
+                ..TextItem::new(x1, ry, 10.0, hex_color(0xc8c8c8), value) }));
         }
         items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(pane.w - 32.0),
-            ..TextItem::new(x0, y + 195.0, 10.0, hex_color(INSPECTOR_PATH), d.id.as_str()) }));
+            ..TextItem::new(x0, y + 200.0, 10.0, hex_color(INSPECTOR_PATH), d.id.as_str()) }));
         items.push(Item::Clip(None));
     }
     /// Use the dimensions and fit of the image actually displayed, including
@@ -3434,7 +3822,7 @@ impl Panel {
         let dims = (dims[0], dims[1]);
         if dims.0 == 0 || dims.1 == 0 { return None; }
         let base = if show_ui {
-            Canvas::new(Self::viewer(vp)).fit(dims)
+            Canvas::new(self.picture_area(vp)).fit(dims)
         } else {
             crate::app::App::fit_rect(dims, RectPx { x: 0.0, y: 0.0, w: vp.0, h: vp.1 })
         };
@@ -3462,7 +3850,7 @@ impl Panel {
             return;
         }
         let r = Self::bounds(vp);
-        let right = vp.0 - Self::right(vp);
+        let right = vp.0 - self.right(vp);
         items.push(Item::Clip(Some(r)));
         items.push(Item::Rect(RectItem::new(r, [0.012, 0.012, 0.012, 1.0])));
         items.push(Item::Rect(RectItem::new(
@@ -3475,7 +3863,7 @@ impl Panel {
             hex_color(0x0f0f0f),
         )));
         self.draw_rail(items, vp);
-        let v = Self::viewer(vp);
+        let v = self.viewer(vp);
         let cached = self.shown().filter(|_| self.show_rendered);
         let dims = cached.map_or(self.source_dims, |f| f.output);
         let source = if cached.is_some() {
@@ -3483,10 +3871,11 @@ impl Panel {
         } else {
             self.source
         };
-        let board = Self::canvas_layout(vp);
-        board.ground(items);
+        let board = self.canvas_layout(vp);
+        let top = [CANVAS_RADIUS, CANVAS_RADIUS, 0.0, 0.0];
+        board.ground_radii(items, top);
         board.clip(items);
-        let picture = board.picture((dims[0], dims[1]), view);
+        let picture = Canvas::new(self.picture_area(vp)).picture((dims[0], dims[1]), view);
         Canvas::lift(items, picture);
         items.push(Item::Video {
             a: source,
@@ -3497,10 +3886,10 @@ impl Panel {
             p0: 0.0,
             p1: 0.0,
         });
-        board.recess(items);
+        board.recess_radii(items, top);
         items.push(Item::Clip(Some(r)));
         let header = board.button_bar.unwrap().r;
-        board.button_bar.unwrap().draw(items);
+        board.button_bar.unwrap().draw_radii(items, [0.0, 0.0, CANVAS_RADIUS, CANVAS_RADIUS]);
         let resolution = |dims: [u32; 2]| match dims {
             [3840, 2160] | [4096, 2160] => "4k".to_owned(),
             [7680, 4320] => "8k".to_owned(),
@@ -3528,13 +3917,14 @@ impl Panel {
             }
         });
         ui_label(items, v.x + 12.0, header.y + header.h / 2.0, 10.0,
-            hex_color(0xa3a5a8), &format!("{} → {output}{note}", describe(self.source_dims)),
-            Align::Left, (Self::compare_switch(vp).x - v.x - 24.0).max(1.0));
+            hex_color(0xa3a5a8), format!("{} → {output}{note}", describe(self.source_dims)),
+            Align::Left, (self.compare_switch(vp).x - v.x - 24.0).max(1.0));
         self.draw_compare_switch(items, vp);
         items.push(Item::Clip(Some(r)));
         self.draw_progress(items, vp);
+        if !self.added.iter().any(|v| *v) { items.push(Item::Rect(RectItem::new(self.progress_panel(vp), [0.0, 0.0, 0.0, 0.72]))); }
         self.draw_transport(items, vp);
-        let t = Self::timeline(vp);
+        let t = self.timeline(vp);
         let track = RectPx { y: t.y + 12.0, h: 4.0, ..t };
         items.push(Item::Rect(RectItem { radius: 2.0, ..RectItem::new(track, TRACK) }));
         let fraction = (self.time / self.duration.max(0.001)).clamp(0.0, 1.0) as f32;
@@ -3546,7 +3936,7 @@ impl Panel {
         for &(id, from, to) in &spans {
             let (x, end) = (at(from), at(to));
             let colour = if self.current == Some(id) { hex_color(0x2b8cf0) } else { BLUE };
-            let single = self.frames.iter().filter(|f| f.render == id).take(2).count() < 2;
+            let single = self.viewing_frames().iter().filter(|f| f.render == id).take(2).count() < 2;
             let mark = if single || end - x < 4.0 {
                 RectPx { x: x - 2.0, y: t.y + 6.0, w: 4.0, h: 16.0 }
             } else {
@@ -3584,7 +3974,7 @@ impl Panel {
             format!("frame {} · {} rendered", (self.time * self.rate).round() as i64, spans.len()),
             Align::Right, t.w * 0.45);
         self.draw_footer(items, vp);
-        self.draw_settings(items, vp);
+        if self.right(vp) > 0.0 && self.picker.is_none() { self.draw_settings(items, vp); }
         if self.floating_card() {
             items.push(Item::Clip(None));
             self.draw_processor_card(items, self.selected,
@@ -3615,7 +4005,7 @@ impl Panel {
             Some(tip.map_or_else(||bounds.clone(),|tip|format!("{tip}\n\n{bounds}")))
         }else{tip};
         let Some(tip)=tip else{return;};
-        let right = vp.0 - Self::right(vp);
+        let right = if self.picker.is_some() { self.picker_layout(vp).settings.x } else { vp.0 - self.right(vp) };
         let wrap = (right - Self::left(vp) - 40.0).clamp(120.0, 300.0);
         let row = self.row(i, vp);
         items.push(Item::Text(TextItem {
@@ -3727,7 +4117,7 @@ impl Panel {
     }
 
     fn draw_progress(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
-        let r = Self::progress_panel(vp);
+        let r = self.progress_panel(vp);
         let ink = hex_color(0xededed);
         let secondary = hex_color(0xa4a7ad);
         let accent = hex_color(CUT_HEADER_BLUE);
@@ -3774,22 +4164,22 @@ impl Panel {
             format!("{title} · {:.1}s", elapsed.as_secs_f64())
         } else { title.into() };
         ui_label(items, r.x + 12.0, r.y + 16.0, 11.0, ink, &heading, Align::Left,
-            (Self::loop_button(vp).x - r.x - 24.0).max(1.0));
+            (self.loop_button(vp).x - r.x - 24.0).max(1.0));
         // How much one press renders from the playhead, and whether a
         // stretch then plays in a loop.
         let over = |b: RectPx| hit(b, self.cursor.0, self.cursor.1);
         let inset = |b: RectPx| RectPx { x: b.x + 1.0, w: b.w - 2.0, ..b };
-        let looped = Self::loop_button(vp);
+        let looped = self.loop_button(vp);
         if looped.x > r.x + 8.0 {
             ButtonBar::button(items, inset(looped), "Loop", self.loop_preview, over(looped), false);
             for (i, (label, ..)) in LENGTHS.iter().enumerate() {
-                let b = Self::length_button(vp, i);
+                let b = self.length_button(vp, i);
                 ButtonBar::button(items, inset(b), label, self.length == i, over(b), false);
             }
         }
         // The panel's primary action: a filled blue button that lifts under
         // the pointer; while rendering it turns into an amber-outlined Cancel.
-        let control = Self::progress_button(vp);
+        let control = self.progress_button(vp);
         let hover = hit(control, self.cursor.0, self.cursor.1);
         let (fill, border, control_ink) = if self.busy {
             (hex_color(if hover { 0x2a2219 } else { 0x1a1612 }), hex_color(RENDERING), hex_color(RENDERING))
@@ -3868,8 +4258,8 @@ impl Panel {
     }
     fn draw_transport(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
         const NAMES: [&str; 5] = ["Prev rendered", "Frame back", "Play", "Frame on", "Next rendered"];
-        for i in 0..5 {
-            let b = Self::transport(vp, i);
+        for (i, name) in NAMES.iter().enumerate() {
+            let b = self.transport(vp, i);
             // Bare glyphs, as the reference draws them: no box, the hover
             // lifts the ink to white and names the control beneath.
             let hover = hit(b, self.cursor.0, self.cursor.1);
@@ -3899,12 +4289,12 @@ impl Panel {
                 _ => draw_icon(items, Icon::KeyFwd, cx, cy, ink),
             }
             if hover {
-                let name = if i == 2 && self.playback { "Pause" } else { NAMES[i] };
+                let name = if i == 2 && self.playback { "Pause" } else { name };
                 // Under the row from its left edge: the buttons sit too close
                 // to the time readout for a label centred on each.
-                let x = Self::transport(vp, 0).x;
+                let x = self.transport(vp, 0).x;
                 ui_label(items, x, b.y + b.h + 9.0, 10.0, WORKSPACE_DIM, name, Align::Left,
-                    (Self::timeline(vp).x - x - 10.0).max(1.0));
+                    (self.timeline(vp).x - x - 10.0).max(1.0));
             }
         }
     }
@@ -3925,12 +4315,12 @@ impl Panel {
             "R",
             false,
             hit(b, self.cursor.0, self.cursor.1),
-            false,
+            !self.modifies_video(),
         );
         // Export and the build stamp are `App::draw_footer_end`'s, painted after.
         let span = Self::segment_button(vp);
         draw_cut_footer_button(items, span, "Render segment", "⇧R", false,
-            hit(span, self.cursor.0, self.cursor.1), false);
+            hit(span, self.cursor.0, self.cursor.1), !self.modifies_video());
         let export = footer_export_rect(vp, span.x + span.w + 8.0);
         let hint = "[ ] source   + duplicate   ← → frame   ` renders   native 8-bit SDR";
         let hint_w = if vp.0 >= 1220.0 + status_build_width() { 400.0 } else { 0.0 };
@@ -3953,12 +4343,26 @@ fn text(items: &mut Vec<Item>, x: f32, y: f32, size: f32, s: &str, color: [f32; 
     items.push(Item::Text(t));
 }
 
+
+/// Attach to the label so placement uses the renderer's font metrics.
+fn set_caret(items: &mut [Item], cursor: &crate::text_edit::Cursor) {
+    if let Some(Item::Text(text)) = items.last_mut() {
+        cursor.show(text);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Existing interaction tests exercise an already assembled, bypassed chain.
+    fn populated(registry: Registry) -> Panel {
+        let mut p = Panel::new(registry);
+        p.added.fill(true);
+        p
+    }
     #[test]
     fn switches_reverse_without_jumping_and_stop_redrawing() {
-        let mut p = Panel::new(registry());
+        let mut p = populated(registry());
         p.enter();
         let vp = (1280.0, 800.0);
         let card = p.card_switch(0, vp);
@@ -3984,7 +4388,7 @@ mod tests {
     }
     #[test]
     fn switching_a_stage_off_and_on_keeps_its_rendered_frames() {
-        let mut p = Panel::new(registry());
+        let mut p = populated(registry());
         p.enter();
         p.toggle_enabled(0);
         p.frames = vec![mark(0.0), mark(1.0)];
@@ -4014,7 +4418,7 @@ mod tests {
         let mut r = Registry::default();
         r.register(Box::new(Named("example.a"))).unwrap();
         r.register(Box::new(Named("example.b"))).unwrap();
-        let mut p = Panel::new(r);
+        let mut p = populated(r);
         p.enter();
         // What the worker's frames do on arrival: stamped with the render.
         let deliver = |p: &mut Panel, from: f64, n: usize| {
@@ -4074,6 +4478,60 @@ mod tests {
         assert!(p.renders.is_empty());
     }
     #[test]
+    fn render_history_only_lists_and_opens_the_focused_source() {
+        let mut registry = Registry::default();
+        registry.register(Box::new(Named("example.a"))).unwrap();
+        let mut p = populated(registry);
+        p.enter();
+        p.toggle_enabled(0);
+        let render = |p: &mut Panel, owner, time| {
+            p.input_owner(owner);
+            p.begin_render(time, "frame");
+            let id = p.rendering;
+            let mut frame = mark(time);
+            frame.render = id;
+            p.frames.push(frame);
+            p.prune_renders();
+            id
+        };
+        let first = render(&mut p, 10, 1.);
+        let second = render(&mut p, 20, 2.);
+        let third = render(&mut p, 10, 3.);
+        assert_eq!(p.visible_renders().map(|r|r.id).collect::<Vec<_>>(),[first,third]);
+        p.cycle_render(1);
+        assert_eq!(p.current,Some(first));
+        p.cycle_render(1);
+        assert_eq!(p.current,Some(third));
+        p.renders_scroll=100.;
+        p.input_owner(20);
+        assert_eq!(p.renders_scroll,0.);
+        assert!(p.current.is_none());
+        p.open_render(first);
+        assert!(p.current.is_none(),"stale foreign IDs cannot reopen a source");
+        p.cycle_render(1);
+        assert_eq!(p.current,Some(second));
+        p.time=p.take_seek().unwrap();
+        assert_eq!(p.shown().unwrap().render,second,"refocusing restores cached pixels");
+        let vp=(1280.,800.);
+        let row=p.render_row(0,vp);
+        p.click(row.x+8.,row.y+8.,vp);
+        assert_eq!(p.current,Some(second),"clicks use filtered row indices");
+        let bin=Panel::render_delete(row);
+        p.click(bin.x+2.,bin.y+2.,vp);
+        assert!(p.visible_renders().next().is_none());
+        assert_eq!(p.renders.len(),2,"deleting a visible row preserves other sources");
+        p.input_owner(30);
+        p.cycle_render(1);
+        assert!(p.current.is_none());
+        let mut items=vec![];
+        p.draw_renders(&mut items,vp);
+        assert!(items.iter().any(|i|matches!(i,Item::Text(t) if t.text.starts_with("Nothing rendered for this source"))));
+        p.input_owner(10);
+        p.open_render(first);
+        p.time=p.take_seek().unwrap();
+        assert_eq!(p.shown().unwrap().render,first);
+    }
+    #[test]
     fn actual_zoom_matches_displayed_upscaled_pixels() {
         let mut panel = Panel::default();
         panel.open = true;
@@ -4107,7 +4565,7 @@ mod tests {
 
     #[test]
     fn fullscreen_preview_covers_header_and_omits_panel_controls() {
-        let mut panel = Panel::new(Registry::default());
+        let mut panel = populated(Registry::default());
         panel.open = true;
         panel.source_dims = [720, 720];
         panel.source = 2;
@@ -4154,7 +4612,7 @@ mod tests {
         p.rate = 60.0;
         p.frames = vec![mark(5.123), mark(40.127)];
         let vp = (1280.0, 800.0);
-        let track = Panel::timeline(vp);
+        let track = p.timeline(vp);
         let x = |time: f64| track.x + track.w * (time / p.duration) as f32;
         let (gap, marker, drag) = (x(20.0), x(40.127), x(30.0));
         let y = track.y + 12.0;
@@ -4224,6 +4682,82 @@ mod tests {
             "it is submitted again as it was first asked for");
     }
     #[test]
+    fn saved_previews_remain_viewable_while_another_render_runs() {
+        let fixture = crate::native_decode_tests::Fixture::new();
+        let info = crate::probe::probe(&fixture.path).unwrap();
+        for changed_inputs in [false, true] {
+            let mut p = populated(registry());
+            p.enter();
+            p.toggle_enabled(0);
+            let (tx,rx) = mpsc::sync_channel(8);
+            p.worker = Some(Worker {
+                active: Arc::new(Mutex::new(Vec::new())),
+                mailbox: Arc::new((Mutex::new(Mailbox { pending:None,stop:false }),Condvar::new())),
+                rx, live:LiveProgress::default(),
+            });
+            let mut uploads=vec![];
+            p.tick(&info,0.,None,&mut uploads,1);
+            p.rate=24.;
+            p.begin_render(1.,"5 frames");
+            let saved=p.rendering;
+            for at in [1.,1.+1./24.] {
+                let mut frame=mark(at);
+                frame.render=saved;
+                frame.after=Arc::new(vec![17;16]);
+                p.frames.push(frame);
+            }
+            p.prune_renders();
+            if changed_inputs {
+                p.set_binding("example.buffered".into(),"mask".into(),abner_processor_api::SpatialBinding {
+                    revision:1,..Default::default()
+                });
+            }
+            p.rate=60.;
+            p.begin_render(1.,"5 frames");
+            let running=p.rendering;
+            p.busy=true;
+            p.loop_preview=true;
+            p.playback=false;
+            let token=p.cancel.clone();
+            let generation=p.generation;
+            // Match the real worker holding the registry for the whole render.
+            let registry=p.registry.clone();
+            let _locked=registry.lock().unwrap();
+            let row=p.render_row(1,(1280.,800.));
+            p.click(row.x+8.,row.y+8.,(1280.,800.));
+            assert_eq!(p.current,Some(saved));
+            assert_eq!(p.rate,24.,"history restores its rate without waiting for the worker");
+            let at=p.take_seek().unwrap();
+            p.tick(&info,at,None,&mut uploads,1);
+            assert_eq!(p.shown().unwrap().render,saved);
+            assert_eq!(uploads.last().unwrap().buf.as_ref(),&vec![17;16]);
+            assert!(p.loop_range().is_some());
+            // Even overlapping output must not replace the selected render.
+            for at in [1.,1.+1./24.] {
+                let mut frame=mark(at);
+                frame.after=Arc::new(vec![99;16]);
+                tx.send(Event::Frame(generation,frame)).unwrap();
+            }
+            p.tick(&info,at,None,&mut uploads,1);
+            assert_eq!(p.current,Some(saved));
+            assert_eq!(p.shown().unwrap().after.as_ref(),&vec![17;16]);
+            assert!(p.busy && token.check().is_ok());
+            // The running row itself can be opened once it has output.
+            let row=p.render_row(0,(1280.,800.));
+            p.click(row.x+8.,row.y+8.,(1280.,800.));
+            let at=p.take_seek().unwrap();
+            p.tick(&info,at,None,&mut uploads,1);
+            assert_eq!(p.shown().unwrap().render,running);
+            p.open_render(saved);
+            let at=p.take_seek().unwrap();
+            tx.send(Event::Done(generation,Ok(()))).unwrap();
+            p.tick(&info,at,None,&mut uploads,1);
+            assert_eq!(p.current,Some(saved));
+            assert_eq!(p.shown().unwrap().render,saved);
+            assert!(p.take_autoplay().is_none(),"completion must not take over review");
+        }
+    }
+    #[test]
     fn a_render_in_flight_survives_changes_and_leaving_the_page() {
         let mut p = Panel::default();
         p.enter();
@@ -4256,14 +4790,14 @@ mod tests {
         assert!(p.seek.is_none(), "A/B does not seek or switch sources");
         let vp = (1280.0, 800.0);
         // The on-canvas switch sets the same flag as Tab.
-        let source = Panel::compare_half(vp, false);
+        let source = p.compare_half(vp, false);
         assert!(p.click(source.x + 5.0, source.y + 5.0, vp));
         assert!(!p.show_rendered);
-        let rendered = Panel::compare_half(vp, true);
+        let rendered = p.compare_half(vp, true);
         assert!(p.click(rendered.x + 5.0, rendered.y + 5.0, vp));
         assert!(p.show_rendered);
         assert!(p.seek.is_none() && p.dirty.is_none(), "the switch neither seeks nor renders");
-        let button = Panel::progress_button(vp);
+        let button = p.progress_button(vp);
         p.click(button.x + 5.0, button.y + 5.0, vp);
         assert!(p.dirty.is_some(), "the panel's Render button requests a preview");
         p.busy = true;
@@ -4280,7 +4814,7 @@ mod tests {
     }
     #[test]
     fn total_bar_folds_frame_steps_and_phase_progress_stays_detail() {
-        let mut p = Panel::new(Registry::default());
+        let mut p = populated(Registry::default());
         let feedback = |frame: Option<(u64, u64)>, phase: Option<u64>| StageFeedback {
             name: "Wonder".into(), index: 0, count: 1,
             progress: Progress { phase: "Tiles".into(), completed: 12, total: phase },
@@ -4444,7 +4978,7 @@ mod tests {
         }
         let mut registry = Registry::default();
         registry.register(Box::new(WholeClip)).unwrap();
-        let p = Panel::new(registry);
+        let p = populated(registry);
         assert!(!p.supported[0]);
         assert_eq!(
             capability_label(p.capabilities[0]),
@@ -4468,7 +5002,7 @@ mod tests {
         let mut r = Registry::default();
         r.register(Box::new(Tagged("example.a", vec![Category::Upscaling, Category::Denoising, Category::Upscaling]))).unwrap();
         r.register(Box::new(Tagged("example.b", vec![]))).unwrap();
-        let mut p = Panel::new(r);
+        let mut p = populated(r);
         p.enter();
         // Sorted, deduplicated, and labelled; none declared reads as such.
         assert_eq!(category_label(&p.categories[0]), "Upscaling · Denoising");
@@ -4509,46 +5043,33 @@ mod tests {
         r.register(Box::new(Tagged("example.b", vec![Category::Interpolation]))).unwrap();
         r.register(Box::new(Tagged("example.c", vec![Category::Denoising]))).unwrap();
         let mut p = Panel::new(r);
-        p.enter();
-        let vp = (1280.0, 900.0);
+        p.open_picker();
+        let vp = (1280.0, 800.0);
         let chips = p.chips(vp);
-        let labels: Vec<_> = chips.iter().map(|(_, _, l)| l.as_str()).collect();
-        assert_eq!(labels, ["ALL", "INTERPOLATION", "DENOISING"], "ALL, then the categories present, in API order");
-        p.select(1);
-        // Picking a chip that hides the focused row focuses the first row it shows.
+        assert_eq!(chips.iter().map(|(_,_,l)|l.as_str()).collect::<Vec<_>>(), ["ALL", "INTERPOLATION", "DENOISING"]);
+        p.pick_candidate(1);
         let (chip, ..) = chips[2];
         p.click(chip.x + chip.w / 2.0, chip.y + chip.h / 2.0, vp);
         assert_eq!(p.filter, Some(Category::Denoising));
-        assert_eq!(p.visible(), [0, 2]);
+        assert_eq!(p.catalog_visible(), [0,2]);
         assert_eq!(p.selected, 0);
-        assert_eq!(p.card(1, vp).h, 0.0, "a hidden row has no area");
-        let second = p.card(2, vp);
-        assert_eq!(second.y, p.card(0, vp).y + CARD_PITCH, "visible rows close up");
-        p.click(second.x + 20.0, second.y + 10.0, vp);
+        assert!(p.visible().is_empty(), "filtering the catalog never populates the chain");
+        let second = p.catalog_row(1, p.picker_layout(vp).list);
+        p.click(second.x+20.0,second.y+10.0,vp);
         assert_eq!(p.selected, 2);
-        // Moving steps over the hidden row, which keeps its place.
-        p.move_selected(-1);
-        let ids: Vec<_> = p.descriptors.iter().map(|d| d.id.as_str()).collect();
-        assert_eq!(ids, ["example.c", "example.a", "example.b"]);
-        assert_eq!(p.selected, 0);
-        let (all, ..) = p.chips(vp)[0];
-        p.click(all.x + 5.0, all.y + 5.0, vp);
-        assert_eq!(p.visible(), [0, 1, 2]);
-        p.set_filter(Some(Category::Denoising));
-        let first = p.card(0, vp);
-        let second = p.card(1, vp);
-        p.click(first.x + 20.0, first.y + 10.0, vp);
-        p.pointer(second.x + 20.0, second.y + second.h - 1.0, vp);
-        p.release();
-        let ids: Vec<_> = p.descriptors.iter().map(|d| d.id.as_str()).collect();
-        assert_eq!(ids, ["example.a", "example.c", "example.b"]);
+        let (all, ..)=p.chips(vp)[0];
+        p.click(all.x+5.0,all.y+5.0,vp);
+        assert_eq!(p.catalog_visible(), [0,1,2]);
+        p.cancel_picker();
+        assert_eq!(p.selected,0);
     }
+
     #[test]
     fn processor_drag_commits_on_drop_and_preserves_stage_state() {
         let mut registry = Registry::default();
         registry.register(Box::new(BufferedFactory)).unwrap();
         registry.register(Box::new(ScalingFactory)).unwrap();
-        let mut p = Panel::new(registry);
+        let mut p = populated(registry);
         p.enter();
         p.toggle_enabled(0);
         p.toggle_enabled(1);
@@ -4601,7 +5122,7 @@ mod tests {
         let mut registry = Registry::default();
         registry.register(Box::new(BufferedFactory)).unwrap();
         registry.register(Box::new(ScalingFactory)).unwrap();
-        let mut p = Panel::new(registry);
+        let mut p = populated(registry);
         p.enter();
         let vp = (1280.0, 900.0);
         let first = p.card(0, vp);
@@ -4671,7 +5192,7 @@ mod tests {
             assert!(left.x+left.w<=right.x);
             assert!(right.x+right.w<=width-16.);
             assert!(left.y+left.h<next.y && right.y+right.h<next.y);
-            assert_eq!(next.w,Panel::right(vp)-32.);
+            assert_eq!(next.w,p.right(vp)-32.);
         }
         assert_eq!(p.settings_rows(),2);
     }
@@ -4697,6 +5218,7 @@ mod tests {
         p.descriptors[0].settings_schema["properties"]["model"] = json!({"type":"string","format":"file-path","default":"automatic"});
         p.saved = vec![defaults(&fields(&p.descriptors[0].settings_schema))];
         p.enabled = vec![false];
+        p.added = vec![true];
         p.supported = vec![true];
         p.declarations.insert("example.buffered".into(),vec![abner_processor_api::SpatialInputDescriptor {
             key:"mask".into(),title:"Removal mask".into(),kind:abner_processor_api::SpatialInputKind::Mask,required:true,
@@ -4705,12 +5227,18 @@ mod tests {
         assert!(matches!(p.fields[0].kind,Kind::Spatial{crop:false,..}));
         assert!(!p.fields.iter().any(|f| f.key=="model"));
         assert_eq!(p.settings["model"],"automatic");
+        assert_eq!(p.missing_mask(0),Some("mask"));
+        p.open_picker();
+        assert!(!p.fields.iter().any(|f|matches!(f.kind,Kind::Spatial{..})));
+        p.cancel_picker();
+        assert!(matches!(p.fields[0].kind,Kind::Spatial{crop:false,..}));
         assert!(p.editor_request.is_none());
         p.open = true;
         let row = p.row(0,(1280.,800.));
         p.click(row.x+10.,row.y+35.,(1280.,800.));
         assert_eq!(p.editor_request.take(),Some(("example.buffered".into(),"mask".into(),false)));
         p.set_binding("example.buffered".into(),"mask".into(),abner_processor_api::SpatialBinding {mask:Some(Arc::new(vec![255])),..Default::default()});
+        assert!(p.missing_mask(0).is_none());
         p.select(0);
         assert!(p.editor_request.is_none());
     }
@@ -4831,7 +5359,7 @@ mod tests {
     }
     #[test]
     fn downsize_row_appears_only_for_declared_scales_and_stays_out_of_plugin_settings() {
-        let mut panel = Panel::new(registry());
+        let mut panel = populated(registry());
         panel.open = true;
         let scaling = panel.descriptors.iter().position(|d| d.id == "example.scaling").unwrap();
         let buffered = panel.descriptors.iter().position(|d| d.id == "example.buffered").unwrap();
@@ -4856,7 +5384,7 @@ mod tests {
     }
     #[test]
     fn gui_controls_edit_runtime_settings_without_cancelling() {
-        let mut panel = Panel::new(registry());
+        let mut panel = populated(registry());
         panel.open = true;
         let vp = (1280.0, 900.0);
         let i = panel
@@ -5209,7 +5737,7 @@ mod tests {
         transport.duration = info.duration;
         transport.rate = info.fps;
         transport.time = 0.0;
-        let track = Panel::timeline((1280.0, 900.0));
+        let track = transport.timeline((1280.0, 900.0));
         let expected = (info.duration * 0.6 * info.fps).floor() / info.fps;
         assert_eq!(transport.pointer_time(track.x + track.w * 0.6, track), expected);
         transport.step(1);
@@ -5292,8 +5820,8 @@ mod tests {
         panel.enter();
         assert_eq!(
             panel.frames.len(),
-            2,
-            "changing workspace must preserve valid marks"
+            3,
+            "changing workspace preserves old and new renders at overlapping timestamps"
         );
     }
     struct Named(&'static str);
@@ -5472,7 +6000,7 @@ mod tests {
 
         // The page steps and shows frames at the OUTPUT rate, and seeks the
         // players to the original at or before the playhead.
-        let mut p = Panel::new(reg);
+        let mut p = populated(reg);
         p.open = true;
         let mut uploads = vec![];
         p.tick(&info, 0.0, None, &mut uploads, 1);
@@ -5545,7 +6073,7 @@ mod tests {
         let mut r = Registry::default();
         r.register(Box::new(Named("example.a"))).unwrap();
         r.register(Box::new(Named("example.b"))).unwrap();
-        let mut p = Panel::new(r);
+        let mut p = populated(r);
         // Plugins start bypassed; nothing runs until it is ticked.
         assert_eq!(p.enabled, [false, false]);
         assert!(p.chain().is_empty());
@@ -5659,23 +6187,25 @@ mod tests {
     }
     #[test]
     fn process_canvas_meets_columns_and_header() {
+        let p = Panel::default();
         for vp in [(720.0, 480.0), (1280.0, 900.0), (1920.0, 1080.0)] {
-            let canvas = Panel::viewer(vp);
+            let canvas = p.viewer(vp);
             assert_eq!(canvas.x, Panel::left(vp));
-            assert_eq!(canvas.x + canvas.w, vp.0 - Panel::right(vp));
-            assert_eq!(canvas.y, HEADER_H + ButtonBar::HEIGHT);
-            let bar=Panel::canvas_layout(vp).button_bar.unwrap();
+            assert_eq!(canvas.x + canvas.w, vp.0 - p.right(vp));
+            assert_eq!(canvas.y, HEADER_H);
+            let bar=p.canvas_layout(vp).button_bar.unwrap();
+            assert_eq!(bar.r.y, canvas.y + canvas.h);
             for rendered in [false,true] {
-                let button=Panel::compare_half(vp,rendered);
+                let button=p.compare_half(vp,rendered);
                 assert_eq!(button.y,bar.content().y);
                 assert_eq!(button.h,bar.content().h);
                 assert!(button.x>=bar.content().x && button.x+button.w<=bar.content().x+bar.content().w);
             }
-            assert!(canvas.y + canvas.h < Panel::transport_y(vp));
-            let first = Panel::transport(vp, 0);
-            let last = Panel::transport(vp, 4);
-            let track = Panel::timeline(vp);
-            let info = Panel::progress_panel(vp);
+            assert!(canvas.y + canvas.h < p.transport_y(vp));
+            let first = p.transport(vp, 0);
+            let last = p.transport(vp, 4);
+            let track = p.timeline(vp);
+            let info = p.progress_panel(vp);
             assert!(first.x >= canvas.x);
             assert!(last.x + last.w < track.x);
             assert!((track.y - first.y).abs() <= 1.0);
@@ -5690,8 +6220,8 @@ mod tests {
         let root=std::env::temp_dir().join(format!("abner-preset-panel-{}",std::process::id()));
         let _=std::fs::remove_dir_all(&root);
         let vp=(1280.,900.);
-        let click=|panel:&mut Panel,index:usize|{let r=Panel::preset_buttons(vp)[index];assert!(panel.click(r.x+r.w/2.,r.y+r.h/2.,vp));};
-        let mut panel=Panel::with_presets(registry(),Some(root.clone()));panel.open=true;
+        let click=|panel:&mut Panel,index:usize|{let r=panel.preset_buttons(vp)[index];assert!(panel.click(r.x+r.w/2.,r.y+r.h/2.,vp));};
+        let mut panel=Panel::with_presets(registry(),Some(root.clone()));panel.open=true;panel.added.fill(true);
         panel.settings["strength"]=json!(0.75);
         click(&mut panel,3);assert_eq!(panel.preset_name.as_deref(),Some("Custom 1"));
         panel.text_input(" extended");assert_eq!(panel.preset_name.as_deref(),Some("Custom 1 extended"));
@@ -5701,7 +6231,7 @@ mod tests {
         panel.edit_text(crate::text_edit::Edit::SelectAll);panel.text_input("Soft restoration");panel.key(Key::Enter);
         assert!(panel.preset_name.is_none());assert_eq!(panel.user_presets.len(),1);
         let file=panel.user_presets.values().next().unwrap().clone();assert!(file.is_file());
-        let mut reloaded=Panel::with_presets(registry(),Some(root.clone()));reloaded.open=true;
+        let mut reloaded=Panel::with_presets(registry(),Some(root.clone()));reloaded.open=true;reloaded.added.fill(true);
         assert_eq!(reloaded.settings["strength"],json!(0.5));
         click(&mut reloaded,2);assert_eq!(reloaded.settings["strength"],json!(0.75));assert!(!reloaded.enabled[0]);
         reloaded.settings["strength"]=json!(0.9);click(&mut reloaded,3);reloaded.key(Key::Enter);
@@ -5709,16 +6239,8 @@ mod tests {
         click(&mut reloaded,4);assert!(!file.exists());assert_eq!(reloaded.settings["strength"],json!(0.5));
         reloaded.descriptors[0].presets.push(abner_processor_api::Preset{id:"builtin".into(),name:"Built-in".into(),settings:json!({"strength":0.25})});
         click(&mut reloaded,2);click(&mut reloaded,4);assert_eq!(reloaded.descriptors[0].presets.len(),1);assert!(reloaded.status.contains("Built-in presets cannot"));
-        for vp in [(720.,480.),(1280.,800.),(1440.,900.)]{let rects=Panel::preset_buttons(vp);for pair in rects.windows(2){assert!(pair[0].x+pair[0].w<=pair[1].x);}assert!(rects[4].x+rects[4].w<=vp.0-15.);}
+        for vp in [(720.,480.),(1280.,800.),(1440.,900.)]{let rects=reloaded.preset_buttons(vp);for pair in rects.windows(2){assert!(pair[0].x+pair[0].w<=pair[1].x);}assert!(rects[4].x+rects[4].w<=vp.0-15.);}
         std::fs::remove_dir_all(root).unwrap();
     }
 
-}
-
-/// Attach to the label so placement uses the renderer's font metrics.
-fn set_caret(items: &mut [Item], cursor: &crate::text_edit::Cursor, visible: bool) {
-    if let Some(Item::Text(text)) = items.last_mut() {
-        text.caret = Some(cursor.position(&text.text));
-        text.caret_visible = visible && !cursor.selected();
-    }
 }

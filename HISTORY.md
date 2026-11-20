@@ -1,5 +1,211 @@
 # abner — history
 
+## 2026-11-20 — Task 11: strict lint and full-suite cleanup
+
+Completed **11**, the Clippy housekeeping task, across all host targets. Removed
+unused UI helpers and the unconnected bitrate action, simplified expressions and
+iteration, named complex types, boxed the large subtitle-entry enum variant, and
+moved test modules after production items. Existing geometry/pipeline boundaries
+retain narrowly scoped argument-count allowances.
+
+Updated UI regression assertions for embedded Process editors, temporary tabs
+sharing the header, and label-width portrait cards. The rubber-band test now waits
+for waveform completion and seeds a deterministic audio lane, then checks both
+video and audio picks. The README, spatial-input contract and agent notes now
+describe the current processor picker, required masks, source-scoped render history,
+background review, native processing and export behavior.
+
+Validation: **284 tests passed, 4 intentionally ignored** with native encoder access;
+`cargo clippy --all-targets -- -D warnings` and doc-tests pass. See
+[the validation record](docs/validation/tests-and-clippy.md).
+
+## 2026-11-20 — Smooth Sources scrolling
+
+The Sources rail now follows logical-pixel wheel and trackpad deltas instead of
+jumping one card per event. Partially visible cards and collapsed keycaps share
+the same scroll geometry for drawing and clicks. Keyboard selection reveals the
+whole selected item, and scrolling clamps to the content after layout changes.
+
+Validation covers fractional scrolling, partial-row clicks, both scroll limits,
+and keyboard reachability at multiple window sizes. The source-filtered suite
+passed 28 tests; the card-width assertion in `source_edge_drag_resizes_cards_without_selecting_or_seeking`
+also fails identically with the unchanged `app.rs`.
+
+## 2026-11-20 — Review previews during background renders
+
+Selecting a retained render now resolves its pixels across the active and saved
+preview caches, including when spatial inputs have since changed. Selection,
+timeline marks and looping use the same frames. Render history also records the
+output rate so review does not wait for the worker to release the registry.
+Overlapping output from a new job preserves older renders within the shared cache
+budget, and completion only starts playback when that job is still selected. The
+running render itself can be selected to review output already received.
+
+Regression coverage holds the registry lock while clicking saved and running
+renders, delivers overlapping output with unchanged and changed spatial inputs,
+checks uploaded pixels and verifies completion does not take over the selection.
+
+## 2026-11-20 — Scope render history to the focused source
+
+The Process page now lists only renders owned by its focused source. Counts,
+scroll bounds, row clicks, deletion and keyboard cycling use that same filtered
+list. Switching sources resets the history selection and scroll; retained previews
+remain cached and reappear when their source is focused again. Foreign render IDs
+cannot switch files through history. This avoids reopening an old source from a
+stale global render row without its preview.
+
+Validation: processor-panel tests cover interleaved source histories, cycling,
+clicking and deleting filtered rows, empty sources and cached-preview restoration.
+
+## 2026-11-20 — Required processor masks
+
+Spatial inputs are edited after adding a processor, so Add Processor no longer
+shows their inactive controls. Missing required masks show the requested warning
+symbol beside the processor name and on the mask tile; either opens the editor,
+and applying the mask clears both indicators. Editing is allowed for later stages
+(the existing first-stage restriction still applies when rendering spatial inputs).
+Adding without reordering also rebuilds the inspector to restore its spatial controls.
+
+Validated with 47 processor-panel tests, the add/click/apply editor regression,
+and SVG atlas checks.
+
+## 2026-11-20 — Fit clips and open Finder files separately
+
+New clips and workspace changes fit the image to the canvas with a 24-point
+margin at the nearest edge. Hidden Sources controls no longer leak Remove or
+Duplicate tooltips into the Process and Export workspaces.
+
+Finder opens now start separate processes after the initial launch document.
+Use `--reuse-window` or `[window] reuse_window = true` to append them to the
+receiving window instead; `--new-window` overrides that preference. The in-app
+file picker and file drops continue to add sources to their existing window.
+Validation is recorded in `docs/validation/canvas-and-finder.md`.
+
+## 2026-11-20 — Build a processor chain from an empty list
+
+Process starts with an empty chain and an Add Processor button. The dialog
+browses the installed catalog on the left, with editable settings, presets and
+metadata on the right, including optional processor-supplied build status.
+Search and category filters narrow the catalog; Add
+appends the configured processor, while Cancel leaves the chain unchanged.
+Render history restores chain membership as well as settings and bypass state.
+The empty canvas expands into the space normally occupied by the inspector.
+
+The updated Figma frames are `655:6349` and `655:6576`; implementation and
+validation details are in `docs/validation/add-processor-dialog.md`.
+
+## 2026-11-20 — Text fields take the pointer
+
+A click in a focused field puts the caret under the pointer, a drag selects,
+a double-click takes the word and a triple-click the whole field (a drag on
+from either extends by the same unit). The selection is white type on
+`#0059ff`, and the caret blinks on the half second in every field (the Export
+filename's never did), with `redraw_at` waking the loop at the next change.
+
+`text_edit::Cursor` owns all of it: the selection is an anchor beside the
+caret, edits act on the range, and the blink restarts at each edit. The
+renderer owns the font, so picking does not estimate glyph positions: each
+frame the renderer hands back the focused field's `FieldLayout` (the window x
+of every grapheme boundary) and the cursor resolves presses against it. A
+click that focuses a field arrives before that field has been laid out, so the
+press waits one frame, during which the field draws from its start, as it
+stood unfocused under the pointer. The field's scroll is now kept between
+frames and moves only to keep the caret in view; it used to pin the caret to
+the right edge, which would slide the text out from under a click.
+
+Unit-tested in `text_edit`. In a window capture only the single click and the
+drag highlight were seen; the white selected type, the multi-clicks and the
+blink were not captured (the test window was covered and occluded windows do
+not redraw).
+
+## 2026-11-17 — Export follows its re-edited Figma canvas
+
+The Export frame's canvas side (`621:8921`) was redone in Figma. The page no
+longer has a top bar or its second Export button (the sidebar's remains), the
+picture meets the header on a rounded canvas, and the bottom panel is black
+with the transport and review track above the job card instead of below it.
+Verified in a targeted window capture; the Export layout tests assert the new
+order and that the card stays inside the panel from 720×480 up.
+
+The Filename and Directory fields then took the frame's light grey-green
+fill with dark type; they had stayed dark since the first round trip.
+
+## 2026-11-17 — Timeline follows its edited Figma frame
+
+The Timeline frame (`612:5851`) was edited in Figma after its export and the
+page now matches it. The picture meets the header on a 10px-radius canvas and
+the button bar ("Crop clip") sits under it with the lower corners, as on
+Process. The transport is reordered: step controls, the clock, the split tool,
+then at the right the zoom slider and "Snap to Keyframes" with a plain 32×16
+orange switch (the bordered box and keyframe glyph are gone). The lanes were
+replaced in Figma by the library lanes component, which the app already
+implements, so they are unchanged. Verified in a targeted window capture
+against the frame; `canvas_bar_metrics_match_across_all_pages` and the toolbar
+overlap test cover the new geometry.
+
+A second edit the same day made the page black: the Timeline header, sources
+rail and inspector share one black ground, the hairlines under the header and
+beside the rail and inspector are gone, the canvas's rounded corners cut into
+black, and the lanes ground is #161515. The black header with no line under
+it then went to Sources, Process and Export as well; their rails and panes
+keep their colours.
+
+## 2026-11-17 — Show Sources Render on the default Timeline page
+
+The first Sources Render action was omitted by the Timeline control builder's
+early return, so opening a single file hid it. The Timeline Sources pane now
+adds and paints Render above its transport, reserving space above the button
+for cards and the inspector. Eligibility and copying use the same action as
+the Sources page. Verified in a targeted native window capture; the build and
+four Render tests pass, including the single-file startup, drawing and click path.
+
+## 2026-11-17 — Sources Render stream copy
+
+The Sources action area offers **Render** only after a background native packet
+check confirms the selected source's kept ranges can be copied. Pixel edits,
+enabled processing, pending timeline analysis and non-keyframe cuts hide it.
+The button uses the existing native export path with the current cuts and
+chapters, independent of the Export page's encoding preset. It writes beside
+the original as `name.render.ext` (then `name.render-2.ext`, and so on), publishes
+only a completed file without replacing existing files, and adds/selects the
+result in the same window while retaining all original sources. A running copy
+disables repeat clicks; failures appear in the status line without adding a source.
+The extra action row reserves its own space, including at compact rail widths.
+
+Validation: `cargo build --bin abner` and all three new source-render tests pass
+(eligibility/compact layout, packet-identical trimmed copy/additive loading and
+filename collisions, error handling). The broader library run passed 255 tests;
+three documented UI failures remain (titlebar, workspace selection, source-edge
+drag). The HEVC pipeline test passed when rerun with hardware-encoder access.
+Native Sources-row visual verification was blocked by window-automation timeouts.
+
+
+## 2026-11-17 — Process canvas: bar under a rounded picture, inset rail
+
+The Process page follows the rest of the edited Figma frame (Signal 590:5862).
+The canvas is a rounded document: the picture meets the header and the
+ButtonBar (format summary, Source | Rendered) sits under it, carrying the
+lower corners (`Canvas::bar_below`, `ButtonBar::draw_radii`). The frame's bar
+is the shared component with placeholder labels, so no new actions came with
+it. The rail's sections are inset by the frame's padding (`RAIL_PAD_X`,
+`RAIL_PAD_Y`), Renders pane and Move up / down included. Sources, Timeline and
+Export keep the bar on top; `canvas_bar_metrics_match_across_all_pages` now
+says so.
+
+## 2026-11-16 — Process info pane: default icon, categories, no chain badge
+
+The Process page's info pane follows the edited Figma frame (Signal 594:6111).
+The chain-position badge is replaced by a default processor icon, an SVG in
+the icon atlas; the categories lead in orange under the name, above the
+description when one is declared; the rows are indented past the icon and the
+Input row is gone (the settings header already shows it). The pane has its own
+heights (`INFO_H`, `INFO_DESCRIPTION_H`) instead of borrowing the Sources
+inspector's.
+
+Validation: native build, 1280×800 captures with and without a description.
+`cargo test`: 253 pass; three `app::tests` (titlebar, header selection, source
+edge drag) fail with and without this change.
+
 ## 2026-11-17 — Two-level processor progress (total + frame)
 
 A Wonder frame (30–130 s) left the Process panel at "100% of stage" for

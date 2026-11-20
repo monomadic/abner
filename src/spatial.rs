@@ -77,7 +77,7 @@ pub(crate) fn crop_rgba(
         width: w as usize,
         height: h as usize,
         pixels: rgba
-            .chunks_exact(4)
+            .as_chunks::<4>().0.iter()
             .flat_map(|p| [p[0] as u16 * 257, p[1] as u16 * 257, p[2] as u16 * 257])
             .collect(),
         pts: (t * 1e6).round() as i64,
@@ -87,7 +87,7 @@ pub(crate) fn crop_rgba(
     apply_crop(&mut f, crops);
     std::sync::Arc::new(
         f.pixels
-            .chunks_exact(3)
+            .as_chunks::<3>().0.iter()
             .flat_map(|p| {
                 [
                     (p[0] / 257) as u8,
@@ -98,6 +98,26 @@ pub(crate) fn crop_rgba(
             })
             .collect(),
     )
+}
+
+
+impl JobInputs {
+    pub fn validate_geometry(&self, width: u32, height: u32) -> Result<(), String> {
+        for c in &self.crops {
+            let r = c.crop;
+            if ![r.x, r.y, r.w, r.h].iter().all(|v| v.is_finite())
+                || r.x < 0.
+                || r.y < 0.
+                || r.w < 1.
+                || r.h < 1.
+                || r.x + r.w > width as f32
+                || r.y + r.h > height as f32
+            {
+                return Err("A saved crop no longer fits the source; edit it again".into());
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -133,24 +153,5 @@ mod tests {
         assert_eq!(&f.pixels[0..3], &[0, 0, 0]);
         assert_eq!(&f.pixels[3..9], &before[3..9]);
         assert_eq!(&f.pixels[9..12], &[0, 0, 0]);
-    }
-}
-
-impl JobInputs {
-    pub fn validate_geometry(&self, width: u32, height: u32) -> Result<(), String> {
-        for c in &self.crops {
-            let r = c.crop;
-            if ![r.x, r.y, r.w, r.h].iter().all(|v| v.is_finite())
-                || r.x < 0.
-                || r.y < 0.
-                || r.w < 1.
-                || r.h < 1.
-                || r.x + r.w > width as f32
-                || r.y + r.h > height as f32
-            {
-                return Err("A saved crop no longer fits the source; edit it again".into());
-            }
-        }
-        Ok(())
     }
 }

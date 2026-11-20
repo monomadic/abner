@@ -11,6 +11,7 @@ use std::time::Instant;
 use winit::window::Window;
 
 use crate::text::{ATLAS, TextCtx};
+use crate::text_edit::FieldLayout;
 use crate::recent::{self, THUMB_H, THUMB_W};
 
 const MIP_LEVELS: u32 = 4;
@@ -127,7 +128,7 @@ fn decode_logo() -> Logo {
 }
 
 // Original Figma card-instance exports, including their intrinsic view boxes.
-const FRAME_ICON_SVGS: [&[u8]; 12] = [
+const FRAME_ICON_SVGS: [&[u8]; 16] = [
     include_bytes!("../assets/frame-icons/key.svg"), include_bytes!("../assets/frame-icons/i.svg"),
     include_bytes!("../assets/frame-icons/p.svg"), include_bytes!("../assets/frame-icons/b.svg"),
     include_bytes!("../assets/spatial-icons/mask.svg"), include_bytes!("../assets/spatial-icons/crop.svg"),
@@ -137,6 +138,12 @@ const FRAME_ICON_SVGS: [&[u8]; 12] = [
     include_bytes!("../assets/export-icons/play.svg"),
     include_bytes!("../assets/export-icons/next-frame.svg"),
     include_bytes!("../assets/export-icons/next-keyframe.svg"),
+    // The default processor icon (Process info pane), tile outline included.
+    include_bytes!("../assets/process-icons/processor.svg"),
+    include_bytes!("../assets/process-icons/search.svg"),
+    // 14: a required mask is missing (alert triangle); 15: it is applied (tick).
+    include_bytes!("../assets/process-icons/required-mask.svg"),
+    include_bytes!("../assets/process-icons/mask-ready.svg"),
 ];
 /// The Process page's render snapshots: `RENDER_THUMBS` atlas cells after the
 /// frame icons, so the recent row and the timeline strip never share them.
@@ -156,7 +163,7 @@ fn frame_icon_pixels(index: usize) -> Vec<u8> {
     resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(ICON_SCALE, ICON_SCALE), &mut pix.as_mut());
     // resvg returns premultiplied sRGB; the texture pipeline expects straight alpha.
     let mut rgba = pix.data().to_vec();
-    for p in rgba.chunks_exact_mut(4) {
+    for p in rgba.as_chunks_mut::<4>().0.iter_mut() {
         if p[3] > 0 { for c in 0..3 { p[c] = ((p[c] as u32 * 255 + p[3] as u32 / 2) / p[3] as u32).min(255) as u8; } }
     }
     rgba
@@ -350,6 +357,8 @@ pub struct TextItem {
     /// UTF-8 byte offset of the caret in a focused single-line field.
     pub caret: Option<usize>,
     pub caret_visible: bool,
+    /// Selected UTF-8 byte range of that field, highlighted behind the text.
+    pub selection: Option<(usize, usize)>,
     /// Maximum logical width, ellipsized using the renderer's font metrics.
     pub max_width: Option<f32>,
     /// Word-wrap into lines no wider than this (logical px), measured by the
@@ -374,6 +383,7 @@ impl TextItem {
             tooltip:false,
             caret: None,
             caret_visible: false,
+            selection: None,
             max_width: None,
             wrap: None,
         }
@@ -474,6 +484,8 @@ struct Uniforms {
     plate: [f32; 4],
 }
 
+type DrawBatch = ((usize, usize), Option<[u32; 4]>, std::ops::Range<u32>);
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Instance {
@@ -496,7 +508,15 @@ struct VideoTex {
     dirty: bool,
 }
 
+/// The selection highlight behind a focused field's text, #0059ff (sRGB,
+/// like every UI colour); the glyphs over it are drawn white.
+const SELECTION: [f32; 4] = [0.0, 0.349, 1.0, 1.0];
+
 pub struct Gpu {
+    /// The focused field as laid out by the last `render`; empty without one.
+    field: FieldLayout,
+    /// That field's anchor and horizontal scroll, kept between frames.
+    field_scroll: Option<([f32; 2], f32)>,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -529,7 +549,7 @@ pub struct Gpu {
     /// rows of `ATLAS_COLS` — bound in every group like the plate, so mode 14
     /// needs no batch key.
     thumbs: VideoTex,
-    frame_icon_sizes: [(f32, f32); 12],
+    frame_icon_sizes: [(f32, f32); FRAME_ICON_SVGS.len()],
     mask_tex: wgpu::Texture,
     mask_view: wgpu::TextureView,
     mask_version: Option<(u64, u64)>,
@@ -843,6 +863,8 @@ impl Gpu {
         .expect("figleaf header and interface fonts must load");
 
         let mut gpu = Self {
+            field: FieldLayout::default(),
+            field_scroll: None,
             surface,
             device,
             queue,
@@ -1187,7 +1209,14 @@ impl Gpu {
         );
     }
 
+    /// Where the caret can sit in the field the last `render` drew focused.
+    pub fn take_field(&mut self) -> FieldLayout {
+        std::mem::take(&mut self.field)
+    }
+
     pub fn render(&mut self, desc: &FrameDesc, viewport: (f32, f32)) {
+        self.field = FieldLayout::default();
+        let kept_scroll = self.field_scroll.take();
         for up in &desc.uploads {
             // Preview slots follow source slots and can change dimensions.
             if up.idx >= self.videos.len() || self.videos[up.idx].tex.width() != up.w || self.videos[up.idx].tex.height() != up.h {
@@ -1231,9 +1260,9 @@ impl Gpu {
 
         // Build instances + draw batches (bind-group key per range).
         let mut data: Vec<Instance> = Vec::new();
-        let mut batches: Vec<((usize, usize), Option<[u32; 4]>, std::ops::Range<u32>)> = Vec::new();
+        let mut batches: Vec<DrawBatch> = Vec::new();
         let push = |data: &mut Vec<Instance>,
-                        batches: &mut Vec<((usize, usize), Option<[u32; 4]>, std::ops::Range<u32>)>,
+                        batches: &mut Vec<DrawBatch>,
                         clip: Option<[u32; 4]>,
                         key: Option<(usize, usize)>,
                         inst: Instance| {
@@ -1544,9 +1573,13 @@ impl Gpu {
                         VAlign::Middle => t.y - th / 2.0,
                         VAlign::Bottom => t.y - th,
                     };
-                    let caret_width = t.caret.and_then(|at| t.text.get(..at)).map_or(tw, |prefix| {
-                        self.text.layout(prefix, t.px * scale, t.tracking * scale).w / scale
-                    });
+                    // A focused field: the pen position of every grapheme
+                    // boundary places the caret and the selection, and goes
+                    // back to the app for pointer picking.
+                    let stops = t.caret.map(|_| self.text.stops(&t.text, t.px * scale, t.tracking * scale));
+                    let stop = |at: usize| stops.iter().flatten().find(|s| s.0 >= at).map_or(tw, |s| s.1 / scale);
+                    let caret_width = t.caret.map_or(tw, stop);
+                    let mut span = (x0, x0 + tw);
                     let mut clip = clip;
                     if let Some(width) = t.max_width.filter(|_| t.caret.is_some()) {
                         let left = match t.align {
@@ -1555,9 +1588,16 @@ impl Gpu {
                             Align::Right => t.x - width,
                         };
                         if tw + 2.0 > width {
-                            let scroll = (caret_width + 2.0 - width).clamp(0.0, tw + 2.0 - width);
+                            // The text stays where it was scrolled to and only
+                            // moves to keep the caret in view: a click must not
+                            // slide the text out from under the pointer.
+                            let kept = kept_scroll.filter(|(at, _)| *at == [t.x, t.y]).map_or(0.0, |(_, s)| s);
+                            let scroll = kept.max(caret_width + 2.0 - width).min(caret_width)
+                                .clamp(0.0, tw + 2.0 - width);
                             x0 = left - scroll;
+                            self.field_scroll = Some(([t.x, t.y], scroll));
                         }
+                        span = (left, left + width);
                         let [x, _, w, _] = scissor(RectPx { x: left, y: 0., w: width, h: 0. },
                             scale, self.config.width, self.config.height);
                         let [cx, cy, cw, ch] = clip.unwrap_or([0, 0, self.config.width, self.config.height]);
@@ -1595,20 +1635,41 @@ impl Gpu {
                             ..Default::default()
                         }));
                     }
+                    if let Some((from, to)) = t.selection.filter(|_| t.caret.is_some()) {
+                        let (from, to) = (stop(from), stop(to));
+                        push(&mut data, &mut batches, clip, None, rect_inst(&RectItem::new(
+                            RectPx { x: x0 + from, y: y0 - 1.0, w: to - from + 1.0, h: th.max(t.px) + 2.0 },
+                            SELECTION,
+                        )));
+                    }
+                    if let Some(stops) = &stops {
+                        self.field = FieldLayout {
+                            text: t.text.clone(),
+                            stops: stops.iter().map(|s| (s.0, x0 + s.1 / scale)).collect(),
+                            left: span.0,
+                            right: span.1,
+                        };
+                    }
                     if t.caret.is_some() && t.caret_visible {
                         push(&mut data, &mut batches, clip, None, rect_inst(&RectItem::new(
                             RectPx { x: ((x0 + caret_width + 1.0) * scale).round() / scale,
                                 y: y0, w: 1.0 / scale, h: th.max(t.px) }, t.color,
                         )));
                     }
+                    // Selected glyphs invert to white: a glyph is selected
+                    // when its centre sits inside the highlight.
+                    let lit = t.selection.filter(|_| t.caret.is_some())
+                        .map(|(from, to)| (stop(from) * scale, stop(to) * scale));
                     for (n, line) in laid.iter().enumerate() {
                         let ly = y0 + lead * n as f32;
                         for q in &line.quads {
+                            let mid = q.x + q.w / 2.0;
+                            let color = if lit.is_some_and(|(from, to)| mid >= from && mid < to) { [1.0; 4] } else { t.color };
                             push(&mut data, &mut batches, clip, None, Instance {
                                 pos: [((x0 * scale + q.x).round()) / scale, ((ly * scale + q.y).round()) / scale],
                                 size: [q.w / scale, q.h / scale],
                                 uv: q.uv,
-                                color: t.color,
+                                color,
                                 mode: 6.0,
                                 p0: 0.0,
                                 p1: 0.0,
@@ -1793,17 +1854,17 @@ mod frame_icon_tests {
         for i in [4,5] {
             let tree=frame_icon_tree(i);
             assert_eq!((tree.size().width(),tree.size().height()),(20.,20.));
-            assert!(frame_icon_pixels(i).chunks_exact(4).any(|p|p[3]>200));
+            assert!(frame_icon_pixels(i).as_chunks::<4>().0.iter().any(|p|p[3]>200));
             assert!((recent::ATLAS+i)/recent::ATLAS_COLS<THUMB_ROWS);
         }
     }
     #[test]
     fn export_svg_controls_fit_the_atlas_at_their_figma_sizes() {
-        for (i,size) in [(6,(20.,20.)),(7,(34.,24.)),(8,(34.,24.)),(9,(34.,34.)),(10,(34.,24.)),(11,(34.,24.))] {
+        for (i,size) in [(14,(16.,16.)),(15,(16.,16.)),(6,(20.,20.)),(7,(34.,24.)),(8,(34.,24.)),(9,(34.,34.)),(10,(34.,24.)),(11,(34.,24.))] {
             let tree=frame_icon_tree(i);
             assert_eq!((tree.size().width(),tree.size().height()),size);
             assert!(size.0*ICON_SCALE<THUMB_W as f32 && size.1*ICON_SCALE<THUMB_H as f32);
-            assert!(frame_icon_pixels(i).chunks_exact(4).any(|p|p[3]>0));
+            assert!(frame_icon_pixels(i).as_chunks::<4>().0.iter().any(|p|p[3]>0));
         }
     }
     #[test]
@@ -1814,9 +1875,9 @@ mod frame_icon_tests {
             assert!(tree.size().width()*ICON_SCALE < THUMB_W as f32);
             assert!(tree.size().height()*ICON_SCALE < THUMB_H as f32);
             let pixels = frame_icon_pixels(i);
-            assert!(pixels.chunks_exact(4).any(|p| p[3] > 200));
-            assert!(pixels.chunks_exact(4).any(|p| p[3] > 0 && p[3] < 255));
-            assert!(pixels.chunks_exact(4).filter(|p| p[3] == 255).all(|p| p[..3] == [27,31,34]));
+            assert!(pixels.as_chunks::<4>().0.iter().any(|p| p[3] > 200));
+            assert!(pixels.as_chunks::<4>().0.iter().any(|p| p[3] > 0 && p[3] < 255));
+            assert!(pixels.as_chunks::<4>().0.iter().filter(|p| p[3] == 255).all(|p| p[..3] == [27,31,34]));
             assert!(!images.contains(&pixels));
             images.push(pixels);
         }

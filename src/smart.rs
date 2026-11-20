@@ -58,7 +58,7 @@ mod tests {
     fn hashes(path: &Path, audio: bool) -> Vec<String> {
         let out = Command::new("ffmpeg").args(["-v", "error", "-i"]).arg(path).args(["-map", if audio { "0:a:0" } else { "0:v:0" }, "-f", "framemd5", "-"]).output().unwrap();
         assert!(out.status.success());
-        String::from_utf8_lossy(&out.stdout).lines().filter(|l| !l.starts_with('#')).map(|l| l.split(',').last().unwrap().trim().to_string()).collect()
+        String::from_utf8_lossy(&out.stdout).lines().filter(|l| !l.starts_with('#')).map(|l| l.split(',').next_back().unwrap().trim().to_string()).collect()
     }
     fn packet_hashes(path: &Path) -> Vec<String> {
         // Concat injects parameter sets at keyframes. Compare coded picture
@@ -68,7 +68,7 @@ mod tests {
                 "-f", "framehash", "-hash", "sha256", "-"]).output().unwrap();
         assert!(out.status.success());
         String::from_utf8_lossy(&out.stdout).lines().filter(|l| !l.starts_with('#'))
-            .map(|l| l.split(',').last().unwrap().trim().to_owned()).collect()
+            .map(|l| l.split(',').next_back().unwrap().trim().to_owned()).collect()
     }
     #[test]
     fn only_requested_gops_change_and_audio_and_frame_timing_survive() {

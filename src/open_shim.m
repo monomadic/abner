@@ -126,11 +126,12 @@ void ab_reveal_in_finder(const char *path) {
     [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:@[url]];
 }
 
-// `from_os` is 1 for a Finder Open With / double-click (replaces the set),
+// `from_os`: 2 for the initial launch document, 1 for a later Finder open,
 // 0 for the in-app picker (adds sources).
 typedef void (*AbOpenCallback)(const char *path, int from_os);
 
 static AbOpenCallback ab_open_cb = NULL;
+static BOOL ab_finished_launching = NO;
 
 static void ab_application_open_urls(id self, SEL _cmd, NSApplication *application,
                                      NSArray<NSURL *> *urls) {
@@ -143,7 +144,7 @@ static void ab_application_open_urls(id self, SEL _cmd, NSApplication *applicati
         }
         const char *path = url.fileSystemRepresentation;
         if (path != NULL && ab_open_cb != NULL) {
-            ab_open_cb(path, 1);
+            ab_open_cb(path, ab_finished_launching ? 1 : 2);
         }
     }
 }
@@ -155,6 +156,11 @@ static void ab_application_open_urls(id self, SEL _cmd, NSApplication *applicati
 // own — our callback will never fire; the Rust side logs it).
 int ab_install_open_handler(AbOpenCallback cb) {
     ab_open_cb = cb;
+    [[NSNotificationCenter defaultCenter] addObserverForName:NSApplicationDidFinishLaunchingNotification
+        object:NSApp queue:nil usingBlock:^(NSNotification *note) {
+            (void)note;
+            ab_finished_launching = YES;
+        }];
     id delegate = [[NSApplication sharedApplication] delegate];
     if (delegate == nil) {
         return 0;

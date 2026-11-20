@@ -81,6 +81,9 @@ processor previews:
                                     must not exist) at once, with the
                                     --processor chain and default settings
   --process                         open the Process workspace
+  --add-processor                   open the Add Processor dialog
+  --reuse-window                    receive subsequent Finder opens in this window
+  --new-window                      open subsequent Finder files in separate processes
   R                                 preview current frame in Process
   Tab                               flip the Process canvas between source and rendered
   Shift-Left / Shift-Right           previous / next rendered frame
@@ -128,8 +131,8 @@ keys:
   Cmd-O        add files
   Cmd-W        close the focused clip (on the empty window: quit)
   Cmd-Delete   close the focused clip
-  Q            quit
-  Esc          leave fullscreen, else quit
+  Cmd-Q        quit (config keys.quit)
+  Esc          leave fullscreen
 ";
 
 /// Start the host with built-in and externally composed processor factories.
@@ -156,6 +159,7 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
     }
     let mut mode: Option<app::Mode> = None;
     let mut config_path: Option<PathBuf> = None;
+    let mut reuse_window = None;
     let mut mask_mode = false;
     let mut processor = None;
     let mut process_workspace = false;
@@ -163,6 +167,7 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
     let mut export_run: Option<PathBuf> = None;
     let mut processor_settings = serde_json::json!({});
     let mut processor_render = false;
+    let mut add_processor = false;
     // The Sources sidebar hidden, as the header toggle leaves it: for captures.
     let mut no_sources = false;
     let mut sources_width: Option<f32> = None;
@@ -176,11 +181,14 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
     let mut paths: Vec<PathBuf> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
-        if a == "--export" { export_workspace=true; }
+        if a == "--reuse-window" { reuse_window = Some(true); }
+        else if a == "--new-window" { reuse_window = Some(false); }
+        else if a == "--export" { export_workspace=true; }
         else if a == "--export-run" {
             let out = it.next().ok_or_else(|| anyhow::anyhow!("--export-run needs an output path"))?;
             export_run = Some(std::path::absolute(out)?);
         }
+        else if a == "--add-processor" { add_processor = true; process_workspace = true; }
         else if a == "--process" {
             process_workspace = true;
         } else if a == "--processor" {
@@ -253,9 +261,10 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
     }
     // Before anything else touches the disk or opens a window: a broken
     // config refuses to start, naming the file and the key.
+    let mut child_config = None;
     let mut config = match config::Config::load(config_path.as_deref()) {
         Ok((c, used)) => {
-            if let Some(p) = used { log::info!("config {}", p.display()); }
+            if let Some(p) = used { log::info!("config {}", p.display()); child_config = Some(std::path::absolute(p)?); }
             c
         }
         Err(e) => {
@@ -264,6 +273,7 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
         }
     };
     if let Some(m) = mode { config.playback.view = m; }
+    if let Some(reuse) = reuse_window { config.window.reuse_window = reuse; }
     // Zero paths (bundle double-click / bare `abner`) opens the launch
     // window; one path fills slot A and plays alone — the same state a
     // single dropped file produces.
@@ -314,6 +324,7 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
             .map_err(anyhow::Error::msg)?;
         if processor_render { app.render_processor_frame(); }
     }
+    if add_processor { app.open_processor_picker(); }
     if export_workspace || export_run.is_some() { app.select_workspace_mode(5); }
     // The same press as the page's Export button, to a file named up front:
     // the processor chain set up above, the whole clip, the page's default
@@ -332,6 +343,7 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
     }
 
     let mut runner = Runner {
+        finder: open::FinderLauncher::new(config.window.reuse_window, child_config)?,
         app,
         title,
         window_size: (config.window.width, config.window.height),
@@ -373,7 +385,7 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
 /// `in,out[,in,out…]` in seconds, for `--cut`.
 fn parse_times(s: &str) -> Option<Vec<f64>> {
     let v: Vec<f64> = s.split(',').map(|p| p.trim().parse().ok()).collect::<Option<_>>()?;
-    (v.len() >= 2 && v.len() % 2 == 0 && v.iter().all(|t| t.is_finite() && *t >= 0.0)).then_some(v)
+    (v.len() >= 2 && v.len().is_multiple_of(2) && v.iter().all(|t| t.is_finite() && *t >= 0.0)).then_some(v)
 }
 
 /// `x,y,w,h` in image pixels, for `--crop`.
@@ -491,6 +503,7 @@ fn titlebar_click_interval() -> std::time::Duration {
 }
 
 struct Runner {
+    finder: open::FinderLauncher,
     header_click: HeaderClick,
     app: App,
     title: String,
@@ -616,6 +629,15 @@ impl Runner {
                     if let Err(err) = std::process::Command::new(opener).arg(&path).spawn() {
                         log::warn!("could not open {}: {err}", path.display());
                     }
+                }
+                Cmd::AddRendered(path) => {
+                    let count = self.app.videos.len();
+                    self.files_dropped(vec![path.clone()], false);
+                    if self.app.videos.len() == count {
+                        self.app.notify(format!("Rendered {}, but could not open its preview", path.display()));
+                    }
+                    self.animating = true;
+                    if let Some(w) = &self.window { w.request_redraw(); }
                 }
                 Cmd::Reveal(path) => open::reveal(&path),
                 Cmd::Quit => event_loop.exit(),
@@ -915,6 +937,12 @@ impl ApplicationHandler for Runner {
                     return;
                 }
                 let key = match &event.logical_key {
+                    // A ⌘-chord a `[keys]` binding names (keys.quit = "cmd+q").
+                    WinitKey::Character(s)
+                        if self.mods.super_key() && s.chars().next().and_then(|c| self.app.bound_cmd(c)).is_some() =>
+                    {
+                        s.chars().next().and_then(|c| self.app.bound_cmd(c))
+                    }
                     WinitKey::Character(s) if self.mods.super_key() && s.eq_ignore_ascii_case("d") => Some(Key::DuplicateSources),
                     WinitKey::Character(s) if self.mods.super_key() && s.eq_ignore_ascii_case("o") => Some(Key::OpenFiles),
                     // ⌘W closes the focused clip, like a document window.
@@ -958,8 +986,10 @@ impl ApplicationHandler for Runner {
                         Some(Key::SaveProject)
                     }
                     // ⇧ + arrow: cut mode's keyframe step (a plain arrow elsewhere).
-                    WinitKey::Named(NamedKey::ArrowLeft) if self.mods.shift_key() => Some(Key::KeyLeft),
-                    WinitKey::Named(NamedKey::ArrowRight) if self.mods.shift_key() => Some(Key::KeyRight),
+                    WinitKey::Named(NamedKey::ArrowLeft) if self.mods.shift_key() => Some(Key::PreviousKeyframe),
+                    WinitKey::Named(NamedKey::ArrowRight) if self.mods.shift_key() => Some(Key::NextKeyframe),
+                    WinitKey::Named(NamedKey::ArrowUp) => Some(Key::Up),
+                    WinitKey::Named(NamedKey::ArrowDown) => Some(Key::Down),
                     WinitKey::Named(NamedKey::ArrowLeft) => Some(Key::Left),
                     WinitKey::Named(NamedKey::ArrowRight) => Some(Key::Right),
                     WinitKey::Named(NamedKey::Enter) => Some(Key::Enter),
@@ -1065,6 +1095,11 @@ impl ApplicationHandler for Runner {
                 gpu.render(&desc, vp);
                 self.animating = desc.animating;
                 self.redraw_at = desc.redraw_at;
+                // The frame laid the focused field out: a click that was
+                // waiting for that has its caret now, one frame late.
+                if self.app.text_layout(gpu.take_field()) {
+                    self.animating = true;
+                }
                 if desc.plate.is_some() {
                     // The first backdrop frame resized the plate.
                     self.app.set_plate(gpu.plate_size(), gpu.plate_horizon());
@@ -1107,22 +1142,23 @@ impl ApplicationHandler for Runner {
                 w.request_redraw();
             }
         }
-        // Files opened through Finder (Open With / double-click) REPLACE the
-        // open set: opening a file means "show me this". The in-app "Add
-        // sources" picker shares the queue but always adds. Neither reads ⌘.
         let opened = open::drain();
-        let any = !opened.replace.is_empty() || !opened.add.is_empty();
+        let any = !opened.initial.is_empty() || !opened.replace.is_empty() || !opened.add.is_empty();
+        // A cold launch receives its initial document before AppKit finishes
+        // launching. Later Finder events use the configured process policy.
+        if !opened.initial.is_empty() { self.files_dropped(opened.initial, false); }
         if !opened.replace.is_empty() {
-            self.files_dropped(opened.replace, true);
+            if self.finder.reuse_window {
+                self.files_dropped(opened.replace, false);
+            } else {
+                self.finder.launch(opened.replace, self.notify.clone());
+            }
         }
-        if !opened.add.is_empty() {
-            self.files_dropped(opened.add, false);
-        }
+        if !opened.add.is_empty() { self.files_dropped(opened.add, false); }
+        for error in open::take_launch_errors() { self.app.notify(error); }
         if any {
             self.animating = true;
-            if let Some(w) = &self.window {
-                w.request_redraw();
-            }
+            if let Some(w) = &self.window { w.request_redraw(); }
         }
         if let Some(mode) = open::take_view_request() {
             self.app.select_workspace_mode(mode);

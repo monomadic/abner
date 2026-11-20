@@ -124,6 +124,8 @@ impl Task {
     pub fn expired(&self) -> bool {
         self.started.elapsed() > self.timeout
     }
+    // Keep the explicit geometry/pipeline inputs at this boundary.
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         info: VideoInfo,
         source: usize,
@@ -215,6 +217,8 @@ fn region_mask(w:usize,h:usize,region:[usize;4],opacity:&[f32],confidence:&[f32]
     pixels
 }
 
+// Keep the explicit geometry/pipeline inputs at this boundary.
+#[allow(clippy::too_many_arguments)]
 fn analyze(
     path: PathBuf,
     w: u32,
@@ -301,7 +305,7 @@ mod tests {
     fn explicit_detection_range_samples_only_its_frames_and_clamps_handles() {
         let range=Range{start:12.,end:18.};let times=range.samples(100.,30.).unwrap();
         assert_eq!(times.len(),64);assert_eq!(times[0],12.);assert_eq!(*times.last().unwrap(),18.);
-        assert!(times.iter().all(|&t|t>=12.&&t<=18.));
+        assert!(times.iter().all(|&t|(12. ..=18.).contains(&t)));
         let mut selected=range;selected.set_edge(false,90.,100.,30.);
         assert!(selected.end-selected.start>=6./30.-1e-9);
         selected.set_edge(true,0.,100.,30.);assert!(selected.end>selected.start);
@@ -322,7 +326,7 @@ mod tests {
     fn region_detection_only_marks_pixels_inside_the_processing_region() {
         let region = detection_region(Some([3,2,99,2]),8,6).unwrap();
         assert_eq!(region,[3,2,5,2]);
-        let pixels = region_mask(8,6,region,&vec![1.;10],&vec![1.;10]);
+        let pixels = region_mask(8,6,region,&[1.; 10],&[1.; 10]);
         for y in 0..6 { for x in 0..8 {
             assert_eq!(pixels[y*8+x],if (2..4).contains(&y) && x>=3 {255}else{0});
         }}
@@ -339,7 +343,7 @@ mod tests {
         for at in [0., 9.99, 99.] {
             let t = sample_times(at, 10., 30.).unwrap();
             assert!(t.windows(2).all(|w| w[1] > w[0]));
-            assert!(t.iter().all(|&t| t >= 0. && t < 10.));
+            assert!(t.iter().all(|&t| (0. ..10.).contains(&t)));
         }
         assert!(sample_times(0., 0.1, 30.).is_err());
         assert!(sample_times(0., f64::NAN, 30.).is_err());

@@ -3,6 +3,7 @@
 //! - lift: stroke-shaped areas uniformly lighter (or darker) than their
 //!   surroundings in the temporal median;
 //! - attenuation: grain and flicker are damped under a translucent overlay.
+//!
 //! Busy texture fakes lift but not attenuation; dark static objects fake
 //! attenuation but not lift. Together the cues may be weak; alone, attenuation
 //! must be strong, and lift counts only where there is no flicker to measure.

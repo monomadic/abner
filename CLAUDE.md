@@ -144,7 +144,9 @@ from one to the other, keeping its number.
   atlas (binding 8, mode 14) holds the frames. See HISTORY 2026-09-30 and 2026-10-20.
 - `src/app.rs` — master clock, modes, input, UI overlay. **Zoom** is photo-style: one
   shared `(zoom, center)` where `center` is the content point (0..1) held mid-view —
-  every video applies it to its own fit rect, so pan/zoom position stays synced across
+  the default fit leaves a 24-point margin at the nearest canvas edge. New clips
+  and workspace changes reset the view to fit. Every video applies the shared
+  transform to its own fit rect, so pan/zoom position stays synced across
   streams and side-by-side cells; pinch anchors on the pointer (solve for the content
   point under the cursor, keep it there), `clamp_center` pins the view inside the
   content, Z resets. ⌘0 (`Key::ActualSize`, `actual_size`) sets the zoom that shows the
@@ -194,7 +196,7 @@ from one to the other, keeping its number.
   ends in an **Export** button (`footer_export`, `Action::Export` → `App::export`, the
   File > Export path; dead when `can_export()` is false), drawn like cut mode's
   Split / Join / Delete / Save / Render footer buttons (`draw_cut_footer_button`); the Process
-  page paints it after its own footer (`draw_footer_end`). The rail is 280px (210 below 900px wide), the minimum window is 720×480, and
+  page paints it after its own footer (`draw_footer_end`). The rail opens at 180px (`SOURCES_DEFAULT_W`, the narrowest Overlay-stage width; it was 280 until 2026-11-18, and the Process and Export side columns still use `rail_full_width`, 280 / 210 below 900px wide), the minimum window is 720×480, and
   the rail's focused inspector exists only when the rail has room for one source
   card + footer + grip + inspector above its end (`Workspace::detail`) — the list
   never shrinks below a card, and cut mode's rail ends at the transport, so a
@@ -431,6 +433,46 @@ under the bar for 10–11px mono). The lower bar (#e71b24) was `ACCENT_B`, slot 
 colour on the old launch zones; it went with them. The launch window's wordmark is the logo IMAGE, not type — it already carries
 the "VIDEO QUALITY TESTING TOOLKIT" line that used to be a second text run.
 
+### Drawing Figma controls with figleaf
+
+Controls designed in Figma are drawn with the figleaf library (`../figleaf`, a
+path dependency; its README's "Using figleaf in an app" is the guide), not as
+more `Item::Rect`s. The shared surfaces already are: `src/canvas.rs` (grounds,
+button bar), the rail and Process switches, the Export page. Reach for it
+when the design has what a rect only approximates: an OUTSIDE stroke, an inner
+shadow, a gradient, round-capped lines, a text effect.
+
+- **In the draw list:** `Item::Shape(figleaf::Shape)` and
+  `Item::Label(figleaf::Text)` are painted in list order and respect
+  `Item::Clip`. `render.rs` owns the figleaf renderer and its CoreText fonts;
+  font slot 0 is the bundled header face, 1 is SF Pro Medium (wght 510, bundled
+  fallback); read the `figleaf header and interface fonts` block there for the
+  rest before relying on a slot.
+- **Whole pieces: the Figma plugin.** `../figleaf/plugin` shows Rust for a
+  selected frame (Figma Desktop: Plugins → Development → figleaf — Rust). An
+  agent cannot click it: ask the owner to run it and paste the result, or read
+  the values with `use_figma` and write the calls by hand, as figleaf's
+  `examples/abner_button_bar.rs` does. Put exported code in its own module,
+  regenerate rather than hand-edit it, and place it with
+  `Canvas::append_at(piece, [x, y])` (it always draws at the origin).
+- **No adapter from an exported `Canvas` to `Item`s yet.** Write one small
+  function (loop `canvas.items()`, push `Item::Shape` / `Item::Label` clones)
+  and reuse it, not a copy per call site. `Composite` and `Masked` items
+  (opacity groups, blend modes, blurs, masks) have no `Item`: refuse them or
+  hand-write that piece. Exported `fonts` indices must be mapped to the slots
+  above.
+- **Blending:** the surface is sRGB with premultiplied alpha and figleaf
+  blends translucent colours in linear light. Opaque colours copy from Figma
+  1:1; translucent black is corrected by figleaf; write any other translucent
+  fill as the opaque colour it makes on its ground, as the rail switch and the
+  button bar do.
+- **Layout:** figleaf's solver is fine for one control's own row (the embedded
+  editor's button row); hit targets are its solved rectangles. Everything else
+  stays explicit geometry shared by drawing and hit testing.
+- **Check it:** look at the running window beside Figma's export of the frame,
+  and read the log for `figleaf left out item` lines; nothing is dropped
+  silently. Do not call it Figma-accurate until that comparison was made.
+
 ## Rules
 
 - `cargo test` generates tiny ffmpeg test clips; the suite covers master-clock
@@ -472,12 +514,15 @@ the "VIDEO QUALITY TESTING TOOLKIT" line that used to be a second text run.
   compiled by `build.rs`): LaunchServices delivers opened files as an Apple Event, never
   argv, and winit 0.30 panics if its `NSApplicationDelegate` is replaced, so the shim
   grafts `application:openURLs:` onto winit's delegate class before the run loop starts.
-  Opened paths drain in `about_to_wait` (`open::Opened`): a Finder Open With /
-  double-click REPLACES the open set (`files_dropped(paths, true)`), while the in-app
-  "Add sources" picker, which shares the queue, always adds; neither reads ⌘. A window
+  Opened paths drain in `about_to_wait` (`open::Opened`): AppKit launch completion
+  separates the initial document from later Finder events. Later events spawn
+  the same executable with the same config on a worker thread by default.
+  `--reuse-window` or `[window] reuse_window = true` opts into appending to the
+  receiving window; `--new-window` overrides the config. The initial document
+  and in-app "Add sources" picker load locally; neither reads ⌘. A window
   drop onto the sources rail (`App::over_sources`, pointer read from AppKit by
   `Runner::drop_point` — winit gives no cursor during an inbound drag) adds;
-  anywhere else it replaces the set, like a Finder open. No modifier is read. **The native menus** (File · View · Frame) are the same
+  anywhere else it also retains existing sources. No modifier is read. **The native menus** (File · View · Frame) are the same
   shim: `ab_sync_menus` builds them once and re-derives every item's enabled/checked
   state from `App` on each `about_to_wait` (never from clicks); a pick queues an
   `open::MenuAction` (File) or a view request, applied on the loop. Frame > Copy Frame
@@ -552,21 +597,25 @@ verified against ffmpeg's own scale to within an LSB or two; its parity test
 needs `full_chroma_inp`, since swscale otherwise halves RGB chroma on the way
 in. The before stays the untouched source; the caption says "input downsized".
 Refused with spatial inputs.
-**Renders pane** (2026-11-13): the Process rail's folding pane lists every Render
-press (`Render`, newest first) with an atlas thumbnail (`RENDER_THUMB_SLOT`, cells
-after the frame icons); the processor inspector moved under the settings
-(`draw_info`). Frames stay in the preview cache stamped with `Preview::render`, so
-a render whose frames were evicted or rendered over leaves the list
-(`prune_renders`). A click (`open_render`) restores chain order, switches, settings,
-focus, source and playhead; the bin deletes; `` ` `` / `~` cycle. A render in
-flight is never cancelled by a change to the chain, the source or the page: its
-frames land under the chain key it was pressed with (`render_key`). A Render press
-while one runs takes the worker (`preempt`); the interrupted `Job` waits in
-`Panel::queue`, newest first, and is submitted again from its start. Only Cancel,
-the bin or closing the last clip removes one. The 1f · 5f · 1s ·
-5s buttons beside Render pick the length: more than one frame is ONE render and
-one seekbar block (`spans`), requested as a start/end stream, and switches Loop on
-— the app plays `loop_range` (`take_autoplay`, the wrap in `tick`, `sync_jumps`).
+**Renders pane** (2026-11-20): the Process rail lists retained renders for the
+focused source only (`visible_renders`), newest first, with atlas thumbnails.
+Counts, scroll bounds, clicks, deletion and keyboard cycling share that filter.
+`open_render` restores chain order, switches, settings, focus, playhead and output
+rate; it cannot switch source files. `viewing_frames` resolves selected pixels in
+the active cache or stash, so earlier spatial inputs remain reviewable during a
+new job. Output at overlapping timestamps keeps separate render IDs within the
+shared cache budget. Fully evicted renders leave the list (`prune_renders`).
+Changing settings clears the review selection but does not cancel running work.
+A job keeps its input snapshot and publishes under `render_key`. Another Render
+press preempts it and queues it to restart; Cancel, deletion or abandoning the
+source set stops work. The running row can show already-delivered frames.
+Completion autoplays only if that render is still selected. The 1f · 5f · 1s · 5s
+buttons choose preview length; Render segment runs to the segment/cache limit.
+`loop_range` and timeline marks use the same selected cache as the displayed image.
+Add Processor omits spatial controls until the processor is added. Missing required
+masks show 􀇾 on the processor row and mask tile; either opens the embedded editor,
+and Apply clears both warnings. Later stages can edit source-based inputs, but
+rendering spatial bindings still requires the first enabled stage.
 The generic API lives in `crates/processor-api`; processor implementations are
 maintained independently. **`cargo build-with-plugins`** (alias → the committed,
 generic helper `tools/build-with-plugins`) is the sanctioned way to compose them
@@ -590,8 +639,9 @@ expected to understand video compression.
 
 ## Export queue and incoming sources (2026-11-15)
 
-Incoming Finder/external opens and all file drops retain the existing source list
-and select the first arrival; the former replace route no longer clears sources.
+Finder opens use the process policy described above. When reuse is enabled,
+Finder opens retain the existing source list and select the first arrival. File
+drops and the in-app picker always retain sources in their receiving window.
 Source thumbnails offer Figleaf Duplicate/Remove buttons on hover.
 `export_page::Page` retains per-job snapshots in its session queue across source
 changes; one worker runs at a time, and completed outputs have their own Player

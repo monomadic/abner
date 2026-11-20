@@ -15,6 +15,9 @@
 # refuses to start and says which file and key.
 
 [window]
+# Finder opens start a separate process. Opt in to add them to this window.
+# --reuse-window / --new-window override this setting for the running process.
+reuse_window = false
 # Initial window size in logical points (minimum 720×480).
 width = 1280
 height = 800
@@ -55,7 +58,10 @@ brush_size = 64.0
 preview_cache_mb = 1024
 
 [keys]
-# A key name (tab, enter, space, backspace) or a single character.
+# A key name (tab, enter, space, backspace), a single character, or a
+# ⌘-chord written cmd+<character>.
+# Quit the app.
+quit = "cmd+q"
 # Flip to the next source video.
 next_source = "tab"
 # Show the current video alone, fullscreen: the workspace shell hides and

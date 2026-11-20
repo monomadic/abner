@@ -71,25 +71,24 @@ impl Canvas {
                 w: bounds.w,
                 h: (end - bounds.y - bar_h).max(0.),
             },
-            button_bar: show_bar.then(|| ButtonBar {
+            button_bar: show_bar.then_some(ButtonBar {
                 r: RectPx { h: bar_h, ..bounds },
             }),
             timeline,
         }
     }
-    /// Preserve the document-style fit used by Timeline and Process.
+    /// The same solve with the bar attached under the video instead of over
+    /// it (Process: the picture meets the header, its controls sit below).
+    pub fn bar_below(mut self) -> Self {
+        if let Some(bar) = &mut self.button_bar {
+            self.r.y = bar.r.y;
+            bar.r.y = self.r.y + self.r.h;
+        }
+        self
+    }
+    /// Fit to the available canvas with a small, viewport-independent margin.
     pub fn fit(&self, dims: (u32, u32)) -> RectPx {
-        let c = self.r;
-        let (dx, dy) = (c.w * 188. / 1140., c.h * 76.5 / 583.);
-        fit_rect(
-            dims,
-            RectPx {
-                x: c.x + dx,
-                y: c.y + dy,
-                w: c.w - 2. * dx,
-                h: c.h - 2. * dy,
-            },
-        )
+        self.fit_inset(dims, 24.0)
     }
     pub fn fit_inset(&self, dims: (u32, u32), inset: f32) -> RectPx {
         let c = self.r;
@@ -108,8 +107,12 @@ impl Canvas {
         zoomed(self.fit(dims), view.0, view.1)
     }
     pub fn ground(&self, items: &mut Vec<Item>) {
+        self.ground_radii(items, [0.; 4]);
+    }
+    /// Corner radii clockwise from the top left.
+    pub fn ground_radii(&self, items: &mut Vec<Item>, radii: [f32; 4]) {
         items.push(Item::Shape(
-            Shape::rect(rect(self.r)).fill(hex_color(0x1d1b1b)),
+            Shape::rect(rect(self.r)).radii(radii).fill(hex_color(0x1d1b1b)),
         ));
     }
     pub fn clip(&self, items: &mut Vec<Item>) {
@@ -121,8 +124,13 @@ impl Canvas {
         ));
     }
     pub fn recess(&self, items: &mut Vec<Item>) {
+        self.recess_radii(items, [0.; 4]);
+    }
+    pub fn recess_radii(&self, items: &mut Vec<Item>, radii: [f32; 4]) {
         items.push(Item::Shape(
-            Shape::rect(rect(self.r)).shadow(Shadow::inner([0., 0., 0., 0.28], [0., 0.], 16.)),
+            Shape::rect(rect(self.r))
+                .radii(radii)
+                .shadow(Shadow::inner([0., 0., 0., 0.28], [0., 0.], 16.)),
         ));
     }
 }
@@ -155,7 +163,6 @@ impl ButtonBar {
     pub const PADDING_Y: f32 = 6.0;
     pub const GAP: f32 = 4.0;
     pub const GROUP_GAP: f32 = 8.0;
-    const PRIMARY_HEIGHT: f32 = 32.0;
 
     pub fn at(x: f32, y: f32, width: f32) -> Self {
         Self {
@@ -189,22 +196,20 @@ impl ButtonBar {
         let content = self.content();
         self.control(content.x + content.w - width, width)
     }
-    pub fn primary_rect(&self, width: f32) -> RectPx {
-        let height = Self::PRIMARY_HEIGHT.min(self.r.h.max(0.));
-        RectPx {
-            y: self.r.y + (self.r.h - height) / 2.,
-            h: height,
-            ..self.trailing(width)
-        }
-    }
-
     pub fn draw(&self, items: &mut Vec<Item>) {
+        self.draw_radii(items, [4.0, 4.0, 0.0, 0.0]);
+    }
+    /// The bar with its own corner radii (clockwise from the top left); the
+    /// bottom hairline stops short of rounded bottom corners.
+    pub fn draw_radii(&self, items: &mut Vec<Item>, radii: [f32; 4]) {
         let r = self.r;
         use figleaf::{Rect, Shadow, Shape};
-        let frame = Shape::rect(Rect::new(r.x, r.y, r.w, r.h)).radii([4.0, 4.0, 0.0, 0.0]);
+        let frame = Shape::rect(Rect::new(r.x, r.y, r.w, r.h)).radii(radii);
         items.push(Item::Shape(frame.clone().fill(hex_color(0x3b3b3a))));
+        let inset = radii[2].max(radii[3]);
         items.push(Item::Shape(
-            Shape::rect(Rect::new(r.x, r.y + r.h - 1.0, r.w, 1.0)).fill(hex_color(0x585454)),
+            Shape::rect(Rect::new(r.x + inset, r.y + r.h - 1.0, (r.w - 2.0 * inset).max(0.0), 1.0))
+                .fill(hex_color(0x585454)),
         ));
         // The shadow falls over the stroke, as Figma paints it.
         items.push(Item::Shape(frame.shadow(Shadow::inner(
@@ -363,6 +368,17 @@ impl ButtonBar {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn default_fit_reaches_a_canvas_edge_with_a_small_margin() {
+        let c = Canvas::new(RectPx { x: 280.0, y: 44.0, w: 900.0, h: 600.0 });
+        for dims in [(1920, 1080), (1080, 1920), (640, 480), (4000, 600)] {
+            let r = c.fit(dims);
+            let dx = r.x - c.r.x;
+            let dy = r.y - c.r.y;
+            assert!((dx.min(dy) - 24.0).abs() < 0.01);
+            assert!((r.w / r.h - dims.0 as f32 / dims.1 as f32).abs() < 0.001);
+        }
+    }
     #[test]
     fn attachments_reserve_space_and_timeline_can_span_columns() {
         let bounds = RectPx {

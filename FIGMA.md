@@ -30,7 +30,11 @@ rebuilt every frame in `src/app.rs` and drawn by a single wgpu pipeline
 - `get_design_context` output (React + Tailwind) is **a spec to read, never
   code to paste**. Translate it into `Item`s.
 - A Figma *component* maps to a **builder function** in `app.rs`, not a class.
-- Figma *auto-layout* has no runtime equivalent: layout is explicit geometry,
+- Controls drawn with figleaf (see CLAUDE.md, "Drawing Figma controls with
+  figleaf") may use its layout solver and, where the owner can run it, its
+  Figma plugin's exported Rust; read that section before hand-translating a
+  control into `Item::Rect`s.
+- Otherwise Figma *auto-layout* has no runtime equivalent: layout is explicit geometry,
   computed once in `Workspace::new` / `controls()` and shared by drawing AND
   hit testing. Read the resolved x/y/w/h from Figma, then express them the way
   the code already does (offsets from `rail`, `HEADER_H`, etc.), not as magic
@@ -493,3 +497,145 @@ controls visit the oldest/latest buffered preview. Tab still switches the source
 comparison. The design omits the former bitrate field; the existing HEVC target
 and export pipeline are retained. The bottom attachment adapts down to 720×480,
 hiding the secondary subtitle/timecode where needed to keep controls separate.
+
+**Canvas side re-edited (2026-11-17, `Canvas / Export` 621:8921):** the Button
+Bar is hidden, so the page has no bar and one Export button (the sidebar's);
+the picture meets the header on a 10px-radius canvas (top corners); the bottom
+attachment is black and runs the transport row, the 4px review track 66px
+down, then the job card from 84px down to 16px above the status line
+(`Layout::seek`, `Layout::job_card`). The frame draws the card 11px lower
+(95px); the app keeps 84 so the card's text fits the 176px attachment of a
+minimum window. Dead step controls dim under a black veil, not the old grey.
+The card keeps its opaque fills (the frame's #1b1919 @ 46% and white @ 12%
+read too bright in linear blending).
+The Filename and Directory fields follow 547:5962 / 547:5966: #9fa89f fill,
+7px radius, #222422 type, an inner shadow, and the frame's white @ 62% edge
+baked opaque (#dbdedb) over the fill.
+
+### Process screen export (2026-11-16)
+
+The native Process page is `590:5862`, "Process / Native app · Ready", on
+**04 · Screens** in the Signal file (`oDvZ81OLuzewiI2oLcqeVU`), below the
+native Export frame `548:5796`. It was rebuilt as editable layers from a
+1280×800 window capture (`--process` on two test clips: first processor
+focused, nothing enabled, no renders). The frame is nested auto layout
+(header / body / status vertically; rail, canvas and inspector across the
+body, each a vertical stack), so its spacing is padding and gaps chosen to
+land within a pixel or two of the capture, not the app's own rectangles.
+Only the switch housings, icon vectors and slider/seek tracks stay
+absolutely positioned.
+The header is an instance of `Header / mode + session` 77:778 in Night mode
+with Process selected; it keeps that component's 45px height and tab styling.
+Rail rows, settings fields and inspector rows are instances of three local
+components beside the frame: `Process / Processor row` 590:5863,
+`Process / Settings field` 590:5867 and `Process / Info row` 590:5871.
+Colours are bound to Signal variables only where the hex matched exactly.
+The canvas picture is an image fill of the test pattern.
+
+### Process info pane (2026-11-16)
+
+`draw_info` follows the edited `Processor info` 594:6111 in that frame. The
+round chain-position badge is gone; a 24px default processor icon takes its
+place (`assets/process-icons/processor.svg`, the tile outline and chip glyph
+exported from 598:5986, drawn through the icon atlas over a #1c1d1c tile).
+The categories sit under the name in #ff8d28, then a blank line and the
+wrapped description when the processor declares one. Four rows follow on a
+24px pitch, labels indented 31px past the icon and values at 10px #c8c8c8;
+the Input row is hidden in the design and dropped from the code, since the
+settings header already carries the input shape. `INFO_H` 220 and
+`INFO_DESCRIPTION_H` 56 are the pane's two heights. The pane keeps its native
+310px width (the frame's column is 290). The name stays in the header face and
+the description in the inspector face, not the frame's JetBrains Mono Bold /
+Regular. The description copy in the frame is placeholder text.
+
+### Process canvas and rail (2026-11-17)
+
+The frame's `Document` 595:6384 and inset rail are implemented. The canvas
+has a 10px corner radius (`CANVAS_RADIUS`) and its ButtonBar sits UNDER the
+picture (`Canvas::bar_below`), carrying the lower corners; the picture meets
+the header. The bar in the frame is the shared Button Bar component with its
+default labels (16:9 / 1080p / Reset / Save ProRes) — content belongs to the
+page, so the code keeps the format summary and the Source | Rendered switch
+there. The bar keeps the shared 40px height (the frame's instance is 35) and
+the ground stays #1d1b1b. A picture zoomed past the viewport is clipped
+square: there is no rounded clip. The rail follows the frame's auto-layout
+padding: every section is inset 10px (`RAIL_PAD_X`) and the column 14px top
+and bottom (`RAIL_PAD_Y`); the processor box and renders pane are 260px wide
+in a 280px rail, chips wrap between 23px and 16px from the edges, and the
+Move up / down buttons are 27px tall with a 9px gap in a 39px strip
+(`ACTIONS_H`). The grip keeps the Sources rail's 14px strip (9 in the frame).
+
+### Timeline screen export (2026-11-17)
+
+The native Timeline page is `612:5851`, "Timeline / Native app · Ready", on
+**04 · Screens** in the Signal file (`oDvZ81OLuzewiI2oLcqeVU`), below the
+Process frame and its components. It was rebuilt as editable layers from a
+1280×800 window capture (`--cut 6,9` on a 20 s test clip with sound: one clip,
+a selection whose out snapped from 9 s to the 10 s keyframe, the playhead on
+the in point, and the inspector on Info, which is now its default tab).
+The frame is nested auto layout: header / body / transport / lanes / status
+vertically; the sources rail, canvas and inspector across the body; each lane
+a row of gutter + track; the ruler, the picture clip's GOP cells and the sound
+clip's peaks are rows of equal fills. Spacing is padding and gaps chosen to
+land within a pixel or two of the capture, not the app's own rectangles.
+Only what rides OVER the layout is absolutely positioned: the frame badge on
+the canvas, the zoom thumb, and in the lanes the in / out markers, the dashed
+"as asked" line and the playhead (itself a vertical stack: pin, stem, chip).
+The header is a copy of the Process frame's `Header / mode + session` instance
+with the selected-tab overrides moved to Timeline. Inspector rows and the
+status-line buttons are instances of local components under the frame:
+`Timeline / Footer button` 612:5839 (Label, Key), `Timeline / Info row`
+612:5843 (Label, Value) and the set `Timeline / Info section header` 613:5921
+(Title; Kind = Picture / Sound / Keyframes picks the icon).
+Colours are bound to Signal variables only where the hex matched exactly
+(blue, the Night canvas, raised and transport-bar surfaces). The canvas and
+thumbnail pictures reuse the Process frame's test-pattern image fill.
+Not carried over: the diagonal hatching on GOP cells whose thumbnails have not
+loaded (flat `CUT_FILM` cells), the Split button's glyph, and the exact
+waveform. The icons are redrawn as vectors; the app draws them from rects and
+triangles, so there is no source SVG to import.
+
+**Edited in Figma the same day and implemented** (`612:5851` re-read): the
+canvas (`617:8883`) is a 10px-radius panel whose picture meets the header and
+whose `Button Bar` instance sits UNDER it with the lower corners, as on
+Process (`Canvas::bar_below`, `CANVAS_RADIUS`); the transport runs steps ·
+clock · split tool · spacer · zoom · divider · "Snap to Keyframes" with a
+32×16 switch (`617:8899`: `SOURCE_RING` orange under a 1px white edge, no box,
+no keyframe glyph) ending 16px from the right (`cut_snap_rect`); the divider
+before the zoom is hidden. The bar's labels (16:9 · 1080p · Reset · Save
+ProRes) are the component's defaults, so the app keeps its own "Crop clip".
+The lanes are now an unmodified instance of the library component
+`Abner / Timeline / Lanes` (`117:4432`), whose row offsets are `cut_lanes`'s
+own; its sample content (chapters, cuts, captions) is not this capture's
+state. One known difference is left alone: the component draws the playhead's
+timecode chip in the chapter row, the app in the tick row under the lanes.
+A later edit made the page black: the frame (#010101), the header and the
+inspector fill #000000, the header's bottom hairline and the inspector's edge
+are gone, and the lanes instance takes a #161515 ground (`CUT_TL`). In the
+app the Timeline header, rail and inspector are one black ground with no
+rules, and the clear behind the canvas's rounded corners is black.
+
+
+### Empty processor chain and Add Processor dialog — 2026-11-20
+
+Refreshed Signal frames `655:6349` and `655:6576` (dialog `655:6669`) before
+implementation. The chain begins empty; the installed catalog lives in a modal
+with full-width category tabs, a searchable left list, and settings plus metadata
+on the right. The 880×640 reference geometry adapts to smaller windows. The
+empty state hides the inspector and keeps the render-history panel below the
+Add Processor card. Runtime descriptors supply every processor name, category,
+setting and metadata value. Draft settings stay separate from the live chain
+until Add; Cancel restores the previous selection. Existing spatial input
+editors remain available after adding a processor.
+
+Native release window captures inspected at 1280×800 logical pixels using a
+synthetic clip. See `docs/validation/add-processor-dialog.md` for checks and limits.
+
+The dialog refresh later on 2026-11-20 adopts the new search SVG (`687:7381`),
+260px search field with a 2px orange focus border, fixed 42px catalog rows with
+icons and categories in every state, the 291px list viewport, and the outlined
+close button. Search text selection retains the focus border. Optional `Factory::build_status` metadata supplies the orange build-status
+label below the processor ID. Missing or blank values hide the label without
+leaving a gap; descriptions continue to come from the factory.
+The native release capture confirms the focus border and updated layout; all
+45 processor tests pass.

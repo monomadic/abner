@@ -49,6 +49,8 @@ pub enum Key {
     Char(char),
     Left,
     Right,
+    Up,
+    Down,
     Enter,
     Space,
     Escape,
@@ -69,8 +71,8 @@ pub enum Key {
     /// ⌘S: save timeline edits beside the source clip.
     SaveProject,
     /// ⇧← / ⇧→: cut mode's previous / next keyframe. Plain arrows elsewhere.
-    KeyLeft,
-    KeyRight,
+    PreviousKeyframe,
+    NextKeyframe,
     /// ⌃⇧[ / ⌃⇧]: the previous / next header tab, in the header's order
     /// (Sources · Timeline · Process · Crop · Mask), stopping at the ends.
     PrevMode,
@@ -78,6 +80,10 @@ pub enum Key {
     /// ⌘0: show the focused video at its original size (one video pixel
     /// per screen pixel).
     ActualSize,
+    /// ⌘ plus a character with no fixed meaning. lib.rs produces it only
+    /// for a chord a `[keys]` binding names (`quit = "cmd+q"`); every other
+    /// ⌘-chord still falls through as its bare key.
+    Cmd(char),
 }
 
 #[derive(Debug, Clone)]
@@ -91,6 +97,7 @@ pub enum Cmd {
     /// runner loads it through the drop path, so it is recorded again.
     OpenRecent(usize),
     OpenFiles,
+    AddRendered(std::path::PathBuf),
     OpenDirectory(std::path::PathBuf),
     /// File > Reveal in Finder: select this clip in a Finder window.
     Reveal(std::path::PathBuf),
@@ -181,6 +188,15 @@ pub struct Video {
     pub last_frame: Option<std::sync::Arc<Vec<u8>>>,
 }
 
+struct SourceCopyCheck {
+    path: std::path::PathBuf,
+    keeps: Vec<(f64, f64)>,
+    result: Option<std::sync::mpsc::Receiver<bool>>,
+    ready: bool,
+}
+
+type FramePngResult = Result<(Vec<u8>, u32, u32), String>;
+
 pub struct App {
     editor: Option<crate::spatial::Editor>,
     detection_range:Option<crate::watermark::Range>,
@@ -192,9 +208,11 @@ pub struct App {
     detection_area_visible:bool,
     processors: crate::processor_gui::Panel,
     export_page: crate::export_page::Page,
+    source_copy_check: Option<SourceCopyCheck>,
+    source_render: Option<std::sync::mpsc::Receiver<Result<std::path::PathBuf, String>>>,
     pub videos: Vec<Video>,
     active: usize,
-    source_scroll: usize,
+    source_scroll: f32,
     source_width: Option<f32>,
     /// An edge drag: the pointer's offset from the panel's edge, and the
     /// width it started at (restored if the drag ends collapsed).
@@ -224,7 +242,7 @@ pub struct App {
     /// Frame > Copy Frame as PNG: the encode runs on a worker; the runner
     /// takes the bytes (`take_frame_png`) and puts them on the pasteboard,
     /// which only it can reach.
-    frame_copy: Option<std::sync::mpsc::Receiver<Result<(Vec<u8>, u32, u32), String>>>,
+    frame_copy: Option<std::sync::mpsc::Receiver<FramePngResult>>,
     /// A transient line for the status bar (`notify`), shown for `NOTICE_S`.
     notice: Option<(String, Instant)>,
     /// The crop marquee (`C`), in the ACTIVE video's image pixels. While
@@ -248,7 +266,8 @@ pub struct App {
     /// A lone clip opens on the timeline (main.rs turns this on; tests leave
     /// it off so Sources stays the layout they exercise).
     cut_default: bool,
-    /// The inspector's tab (0 chapters, 1 streams) and its chapter view.
+    /// The inspector's tab (0 chapters, 1 info — the default — 2 subtitles,
+    /// 3 segments) and its chapter view.
     cut_tab: usize,
     /// Only discrete seeks/framesteps adopt a decoded timestamp; pointer seeks stay pinned.
     adopt_seek: bool,
@@ -686,7 +705,7 @@ fn fit_cell(buf: &[u8], w: u32, h: u32) -> Vec<u8> {
     let (cw, ch) = (recent::THUMB_W as usize, recent::THUMB_H as usize);
     let (w, h) = (w as usize, h as usize);
     let mut out = vec![0u8; cw * ch * 4];
-    for px in out.chunks_exact_mut(4) { px[3] = 255; }
+    for px in out.as_chunks_mut::<4>().0.iter_mut() { px[3] = 255; }
     if w != cw || buf.len() < w * h * 4 { return out; }
     let shift = (h as isize - ch as isize) / 2;
     for y in 0..ch {
@@ -728,6 +747,8 @@ impl App {
             detection_area:None, detection_area_visible:false,
             processors: crate::processor_gui::Panel::default(),
             export_page: crate::export_page::Page::default(),
+            source_render: None,
+            source_copy_check: None,
             masks: (0..videos.len()).map(|_| None).collect(),
             mask_mode: false,
             brush_diameter: cfg.mask.brush_size,
@@ -750,7 +771,7 @@ impl App {
             cut_mode: false,
             cut_default: false,
             cut_drag: None,
-            cut_tab: 0,
+            cut_tab: 1,
             adopt_seek: false,
             cut_scrub_press: None,
             cut_hover_at: None,
@@ -777,7 +798,7 @@ impl App {
             cut_boot: Vec::new(),
             videos,
             active: 0,
-            source_scroll: 0,
+            source_scroll: 0.0,
             source_width: None,
             source_resize: None,
             source_copy_drag: None,
@@ -826,13 +847,22 @@ impl App {
         }
     }
 
-    fn begin_editor(&mut self, crop:bool, plugin:Option<(String,String)>) {
+    fn begin_editor(&mut self, crop:bool, plugin:Option<(String,String)>) { self.begin_editor_for(crop,plugin,false) }
+    /// The sources rail's crop button: the marquee for that SOURCE on any
+    /// page, the timeline included (where `C` crops the picked clip).
+    fn crop_source(&mut self, idx:usize) {
+        if self.crop.is_some() && self.editor.as_ref().is_some_and(|e|e.source==idx && matches!(e.owner,crate::spatial::Owner::Source)) {return}
+        if self.editor.is_some() { self.finish_editor(false); }
+        self.select(idx);
+        self.begin_editor_for(true,None,true);
+    }
+    fn begin_editor_for(&mut self, crop:bool, plugin:Option<(String,String)>, source_only:bool) {
         if !self.ready() {return}
         if self.editor.is_some() { self.finish_editor(false); }
         self.processors.input_owner(self.videos[self.active].spatial_id);
         let return_mode=self.workspace_mode();
         let owner=if let Some((id,key))=plugin { crate::spatial::Owner::Plugin{id,key} }
-            else if self.cut_mode && crop {
+            else if self.cut_mode && crop && !source_only {
                 let segment=self.cut.as_ref().and_then(|c| c.segments().into_iter().find(|s|!s.cut &&
                     if self.cut_picks.len()==1 { let p=self.cut_picks[0]; (s.start-p.0).abs()<1e-6 && (s.end-p.1).abs()<1e-6 }
                     else { self.cut_picks.is_empty() && self.t>=s.start&&self.t<s.end }));
@@ -873,7 +903,9 @@ impl App {
         self.masks[e.source]=e.original_mask;
         if apply {match e.owner {
             crate::spatial::Owner::Source=>{
-                if let Some(c)=self.crop {self.videos[e.source].input_crop=if c==Crop::full(self.videos[e.source].info.width,self.videos[e.source].info.height){None}else{Some(c)};if !matches!(self.mode,Mode::Overlay|Mode::SideBySide){self.mode=Mode::Overlay;}}
+                if let Some(c)=self.crop {self.videos[e.source].input_crop=if c==Crop::full(self.videos[e.source].info.width,self.videos[e.source].info.height){None}else{Some(c)};if !matches!(self.mode,Mode::Overlay|Mode::SideBySide){self.mode=Mode::Overlay;}
+                    // An open timeline with no crop of its own takes the source's.
+                    if self.cut_video==e.source {let c=self.videos[e.source].input_crop;if let Some(t)=self.cut.as_mut(){t.inherit_crop(c);}}}
                 else {self.masks[e.source]=draft;}
             }
             crate::spatial::Owner::Timeline{start,end}=>{if let (Some(c),Some(t))=(self.crop,self.cut.as_mut()){t.set_crop(start,end,c);}}
@@ -1004,7 +1036,7 @@ impl App {
             let c=self.editor_processing_region().map(|[x,y,w,h]|Crop{x:x as f32,y:y as f32,w:w as f32,h:h as f32}).unwrap_or_else(||self.full_crop());
             self.detection_area=Some(c);
         }
-        self.detection_area_visible=!self.detection_area_visible;
+        self.detection_area_visible= !self.detection_area_visible;
         self.painting=false;self.stroke_last=None;self.crop_drag=None;
     }
     fn detection_search_region(&self) -> Option<[usize;4]> {
@@ -1190,7 +1222,7 @@ impl App {
         if index!=self.detection_samples {self.watermark_task=None;self.mask_status.clear();self.detection_samples=index;}
     }
     fn toggle_detection_panel(&mut self) {
-        self.detection_panel=!self.detection_panel;
+        self.detection_panel= !self.detection_panel;
         if !self.detection_panel {self.detection_area_visible=false;self.crop_drag=None;}
     }
     fn detection_press(&mut self,x:f32,y:f32)->bool {
@@ -1255,7 +1287,7 @@ impl App {
         if !self.ready() || !self.mask_mode || self.crop.is_some() {return;}
         self.playing=false;self.mouse_up();self.ensure_mask();self.detection_area_visible=false;
         let v=&self.videos[self.active];let mask=self.masks[self.active].as_ref().unwrap();
-        match crate::watermark::Task::spawn(v.info.clone(),v.spatial_id,mask.id,mask.revision,self.detection_search_region(),self.detection_range.unwrap_or_else(||crate::watermark::Range{start:0.,end:v.info.duration}),self.detection_area.is_some(),self.detection_sample_count()) {
+        match crate::watermark::Task::spawn(v.info.clone(),v.spatial_id,mask.id,mask.revision,self.detection_search_region(),self.detection_range.unwrap_or(crate::watermark::Range{start:0.,end:v.info.duration}),self.detection_area.is_some(),self.detection_sample_count()) {
             Ok(task)=>{self.mask_status=task.status();self.watermark_task=Some(task);}
             Err(e)=>self.mask_status=e,
         }
@@ -1327,7 +1359,7 @@ impl App {
     }
     /// A finished stroke becomes one undo step, if it painted anything.
     fn control_dead(&self,action:&Action)->bool {
-        matches!(action,Action::UndoMask)&&!self.can_undo_mask()||matches!(action,Action::RedoMask)&&!self.can_redo_mask()
+        matches!(action, Action::RenderSource) && self.source_render.is_some() || matches!(action,Action::UndoMask)&&!self.can_undo_mask()||matches!(action,Action::RedoMask)&&!self.can_redo_mask()
     }
     fn commit_stroke(&mut self) {
         let Some((id,revision,previous))=self.stroke_before.take() else{return;};
@@ -1606,7 +1638,6 @@ impl App {
 
 
     /// A backdrop frame goes back to its decoder's pool.
-
     /// Advance the backdrop's clock and take the frame now due, spawning
     /// the decoder on the launch window's first frame.
     fn tick_backdrop(&mut self, dt: f32) -> Option<Upload> {
@@ -1705,7 +1736,7 @@ impl App {
         self.cut_restore = None;
         self.cut_mode = false;
         self.source_status.clear();
-        self.source_scroll = 0;
+        self.source_scroll = 0.0;
         for v in &mut self.videos {
             v.player.seek(0.0, true);
             v.pending = false;
@@ -1866,6 +1897,83 @@ impl App {
         self.export_page.set_copy_unavailable(reason);
     }
 
+    fn source_keeps(&self) -> Vec<(f64, f64)> {
+        self.cut.as_ref().filter(|_| self.active == self.cut_video)
+            .map(|c| c.keeps()).unwrap_or_else(|| vec![(0., self.videos[self.active].info.duration)])
+    }
+
+    fn poll_source_copy_check(&mut self) {
+        if !self.ready() { self.source_copy_check = None; return; }
+        let path = &self.videos[self.active].info.path;
+        let keeps = self.source_keeps();
+        if self.source_copy_check.as_ref().is_none_or(|c| c.path != *path || c.keeps != keeps) {
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.source_copy_check = Some(SourceCopyCheck { path: path.clone(), keeps: keeps.clone(), result: Some(rx), ready: false });
+            let path = path.clone();
+            std::thread::spawn(move || { let _ = tx.send(crate::media_io::can_copy(&path, &keeps).is_ok()); });
+        }
+        let check = self.source_copy_check.as_mut().unwrap();
+        if let Some(rx) = &check.result {
+            match rx.try_recv() {
+                Ok(ready) => { check.ready = ready; check.result = None; }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => { check.result = None; }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+    }
+
+    /// This action always copies packets, independently of the Export preset.
+    fn can_render_source(&self) -> bool {
+        self.ready() && self.source_copy_check.as_ref().is_some_and(|c|
+            c.ready && c.path == self.videos[self.active].info.path && c.keeps == self.source_keeps())
+            && self.crop.is_none() && !self.processors.modifies_video()
+            && self.crop_schedule().is_empty()
+            && self.videos[self.active].info.path.extension().is_some_and(|ext|
+                ["mp4", "m4v", "mov", "mkv", "webm"].iter().any(|e| ext.eq_ignore_ascii_case(e)))
+            && self.cut.as_ref().filter(|_| self.active == self.cut_video)
+                .is_none_or(|c| c.copy_ready() && c.segments().iter().any(|s| !s.cut))
+    }
+
+    fn render_source(&mut self) {
+        if !self.can_render_source() || self.source_render.is_some() { return; }
+        let info = self.videos[self.active].info.clone();
+        let cut = self.cut.as_ref().filter(|_| self.active == self.cut_video);
+        let keeps = self.source_keeps();
+        let chapters = cut.map(|c| c.chapters.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.source_render = Some(rx);
+        self.notify("Rendering stream copy…".into());
+        std::thread::spawn(move || {
+            let result = (|| {
+                let chapters = match chapters {
+                    Some(chapters) => chapters,
+                    None => crate::media_metadata::timeline(&info.path)?
+                        .map(|t| t.chapters).unwrap_or_default(),
+                };
+                crate::media_io::render_copy(&info.path, &keeps,
+                    &crate::cut::output_chapters(&chapters, &keeps)).map_err(|e| e.to_string())
+            })();
+            let _ = tx.send(result);
+        });
+    }
+
+    fn poll_source_render(&mut self) {
+        let Some(rx) = &self.source_render else { return; };
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("worker stopped".into()),
+        };
+        self.source_render = None;
+        match result {
+            Ok(path) => {
+                self.notify(format!("Rendered {}", path.display()));
+                self.cmds.push(Cmd::AddRendered(path));
+            }
+            Err(error) => self.notify(format!("Render failed: {error}")),
+        }
+    }
+
     /// `--export-run OUT`: where the Export press writes, without a panel.
     pub fn set_export_destination(&mut self, path: std::path::PathBuf) -> Result<(), String> {
         self.export_page.set_destination(path)
@@ -1917,7 +2025,7 @@ impl App {
     }
 
     /// The finished PNG from `copy_frame`, once; the runner owns the pasteboard.
-    pub fn take_frame_png(&mut self) -> Option<Result<(Vec<u8>, u32, u32), String>> {
+    pub fn take_frame_png(&mut self) -> Option<FramePngResult> {
         let receiver = self.frame_copy.as_ref()?;
         let result = match receiver.try_recv() {
             Ok(r) => r,
@@ -2089,6 +2197,7 @@ impl App {
         self.playing = false;
         Ok(())
     }
+    pub(crate) fn open_processor_picker(&mut self) { self.select_workspace_mode(4); self.processors.open_picker(); }
     /// `--processor-render`: what the panel's Render button does, for captures.
     pub fn render_processor_frame(&mut self) {
         self.processors.render_frame();
@@ -2111,14 +2220,6 @@ impl App {
         }
         if std::mem::take(&mut self.processors.toggle_play) {
             self.playing = !self.playing;
-        }
-        // A reopened render from another source: focus that source first;
-        // the panel's next tick brings the render's frames back with it.
-        if let Some(owner) = self.processors.source_request.take()
-            && let Some(i) = self.videos.iter().position(|v| v.spatial_id == owner)
-            && i != self.active
-        {
-            self.select(i);
         }
         if let Some(t) = self.processors.take_seek() {
             self.playing = false;
@@ -2143,6 +2244,14 @@ impl App {
     pub(crate) fn editing_text(&self) -> bool {
         if self.export_page.open { self.export_page.editing_filename() } else { self.processors.editing_text() }
     }
+    /// Hand the focused field's layout from the frame just drawn to its
+    /// cursor. True when that placed a waiting click: draw again.
+    pub(crate) fn text_layout(&mut self, layout: crate::text_edit::FieldLayout) -> bool {
+        if self.export_page.open { self.export_page.text_layout(layout) } else { self.processors.text_layout(layout) }
+    }
+    fn next_blink(&self) -> Option<Instant> {
+        self.editing_text().then(|| if self.export_page.open { self.export_page.next_blink() } else { self.processors.next_blink() })
+    }
     pub(crate) fn edit_text(&mut self, edit: crate::text_edit::Edit) -> bool {
         if self.export_page.open { self.export_page.edit_text(edit) } else { self.processors.edit_text(edit) }
     }
@@ -2154,7 +2263,15 @@ impl App {
         self.processors.set_budget(self.preview_bytes);
     }
 
+    /// The bindable ⌘-chord for `c`, if a `[keys]` binding names one.
+    pub fn bound_cmd(&self, c: char) -> Option<Key> {
+        let k = Key::Cmd(c.to_ascii_lowercase());
+        (k == self.keys.quit).then_some(k)
+    }
+
     pub fn key(&mut self, mut k: Key) {
+        if k == self.keys.quit { self.cmds.push(Cmd::Quit); return; }
+        if self.processors.modal_open() { self.processors.key(k); return; }
         if self.export_page.editing_filename() && self.export_page.key(k) { return; }
         if self.editor.is_some() {
             if k==Key::Escape {self.finish_editor(false);return}
@@ -2215,12 +2332,9 @@ impl App {
                     if self.fullscreen {
                         self.fullscreen = false;
                         self.cmds.push(Cmd::ToggleFullscreen);
-                    } else {
-                        self.cmds.push(Cmd::Quit);
                     }
                 }
                 Key::Char(c) => match c.to_ascii_lowercase() {
-                    'q' => self.cmds.push(Cmd::Quit),
                     'f' => {
                         self.fullscreen = !self.fullscreen;
                         self.cmds.push(Cmd::ToggleFullscreen);
@@ -2249,7 +2363,7 @@ impl App {
             return;
         }
         if !self.cut_mode {
-            k = match k { Key::KeyLeft => Key::Left, Key::KeyRight => Key::Right, k => k };
+            k = match k { Key::PreviousKeyframe => Key::Left, Key::NextKeyframe => Key::Right, k => k };
         }
         if !self.mask_mode && matches!(k, Key::Char('t' | 'T')) {
             self.set_cut_mode(!self.cut_mode);
@@ -2304,12 +2418,10 @@ impl App {
                     self.fullscreen = false;
                     self.show_ui = true;
                     self.cmds.push(Cmd::ToggleFullscreen);
-                } else {
-                    self.cmds.push(Cmd::Quit);
                 }
             }
             Key::Backspace => self.speed = 1.0,
-            Key::Close | Key::ActualSize | Key::CmdDigit(_) | Key::Undo | Key::Redo | Key::Render | Key::SaveProject | Key::KeyLeft | Key::KeyRight | Key::DuplicateSources | Key::OpenFiles | Key::PrevMode | Key::NextMode => {} // handled above
+            Key::Up | Key::Down | Key::Close | Key::ActualSize | Key::CmdDigit(_) | Key::Undo | Key::Redo | Key::Render | Key::SaveProject | Key::PreviousKeyframe | Key::NextKeyframe | Key::DuplicateSources | Key::OpenFiles | Key::PrevMode | Key::NextMode | Key::Cmd(_) => {} // handled above
             Key::Char('V') => self.mode = self.mode.cycle(-1),
             Key::Char(c @ '1'..='9') => {
                 let idx = c as usize - '1' as usize;
@@ -2318,7 +2430,6 @@ impl App {
                 }
             }
             Key::Char(c) => match c.to_ascii_lowercase() {
-                'q' => self.cmds.push(Cmd::Quit),
                 'f' => {
                     self.fullscreen = !self.fullscreen;
                     self.cmds.push(Cmd::ToggleFullscreen);
@@ -2375,12 +2486,13 @@ impl App {
     }
 
     fn reveal_source(&mut self) {
-        if self.active < self.source_first() {
-            self.source_scroll = self.active;
-        }
-        while self.active >= self.source_first() + self.source_capacity() {
-            self.source_scroll += 1;
-        }
+        let top = self.source_offset(self.active);
+        let bottom = top + self.source_stride(self.active);
+        let height = self.workspace().list.h;
+        let scroll = self.source_scroll_offset();
+        self.source_scroll = if top < scroll { top }
+            else if bottom > scroll + height { bottom - height }
+            else { scroll }.clamp(0.0, self.source_scroll_max());
     }
 
     pub fn cursor_moved(&mut self, x: f32, y: f32) {
@@ -2402,7 +2514,7 @@ impl App {
             self.cursor_inside = true;
             return;
         }
-        if self.export_page.open { self.cursor=(x,y);self.cursor_inside=true;return; }
+        if self.export_page.open { self.cursor=(x,y);self.cursor_inside=true;self.export_page.drag_text(x);return; }
         if self.show_ui && !(self.mask_mode && (self.painting || self.crop_drag.is_some() || contains(self.canvas(), x, y))) && self.processors.pointer(x, y, self.vp) {
             self.cursor = (x, y);
             self.apply_processor_transport();
@@ -2451,6 +2563,7 @@ impl App {
         self.cursor = (x, y);
     }
 
+    #[cfg(test)]
     pub fn mouse_down_with_alt(&mut self, x: f32, y: f32, alt: bool) {
         self.mouse_down_with_mods(x, y, alt, false, false);
     }
@@ -2481,16 +2594,16 @@ impl App {
     pub fn mouse_released(&mut self) {
         let copy = self.source_copy_drag.take();
         self.mouse_up();
-        if let Some((idx, _, _, true)) = copy {
-            if self.cursor_inside && self.show_ui && !self.cut_mode && !self.mask_mode
+        if let Some((idx, _, _, true)) = copy
+            && self.cursor_inside && self.show_ui && !self.cut_mode && !self.mask_mode
                 && contains(self.workspace().list, self.cursor.0, self.cursor.1) && idx < self.videos.len() {
                 let at = self.source_drop_index(self.cursor.1);
                 self.duplicate_source(idx, at);
             }
-        }
     }
 
     pub fn mouse_down(&mut self, x: f32, y: f32) {
+        if self.processors.modal_open() { self.processors.click(x, y, self.vp); return; }
         if self.detection_press(x,y) {return;}
 
         if self.source_resize_hit(x, y) {
@@ -2505,7 +2618,10 @@ impl App {
             if action != Some(crate::export_page::Action::EditFilename) && !self.export_page.finish_filename() { return; }
             if y < HEADER_H {
                 if let Some(control) = self.mode_selector().controls().into_iter().find(|c| c.contains(x,y)) { self.activate(control.action); }
-            } else if let Some(action) = action { self.export_action(action); }
+            } else if let Some(action) = action {
+                self.export_action(action);
+                if action == crate::export_page::Action::EditFilename { self.export_page.press_text(x); }
+            }
             return;
         }
         if self.show_ui && self.ready() && self.processors.open && contains(self.footer_export(), x, y) {
@@ -2548,10 +2664,13 @@ impl App {
                 for idx in first..(first + self.source_capacity()).min(self.videos.len()) {
                     if contains(self.source_card(idx), x, y) {
                         if !self.workspace().mini {
-                            for (button, remove) in self.source_hover_buttons(idx) {
+                            for (button, action) in self.source_hover_buttons(idx) {
                                 if contains(button,x,y) {
-                                    if remove { self.select(idx); self.close_active(); }
-                                    else { self.duplicate_source(idx,idx+1); }
+                                    match action {
+                                        SourceAction::Remove => { self.select(idx); self.close_active(); }
+                                        SourceAction::Duplicate => self.duplicate_source(idx,idx+1),
+                                        SourceAction::Crop => self.crop_source(idx),
+                                    }
                                     return;
                                 }
                             }
@@ -2570,9 +2689,8 @@ impl App {
                 if contains(self.btn_play(), x, y) { self.playing = !self.playing; return; }
                 if contains(self.btn_next(), x, y) { self.step(1); return; }
             }
-            if self.cut_mode {
-                if self.cut_press(x, y) { return; }
-            }
+            if self.cut_mode
+                && self.cut_press(x, y) { return; }
             let s = self.seek_rect(self.vp);
             if !self.cut_mode && contains(RectPx { x: s.x - 6.0, y: s.y - SEEK_GRAB, w: s.w + 12.0, h: s.h + 2.0 * SEEK_GRAB }, x, y) {
                 self.scrubbing = true;
@@ -2621,11 +2739,11 @@ impl App {
     }
 
     pub fn mouse_up(&mut self) {
+        self.export_page.release_text();
         self.detection_drag=None;self.detection_samples_drag=false;
         // Dragged shut: the toggle reopens the rail at the width it had.
-        if let Some((_, from)) = self.source_resize.take() {
-            if !self.show_sources { self.source_width = Some(from); }
-        }
+        if let Some((_, from)) = self.source_resize.take()
+            && !self.show_sources { self.source_width = Some(from); }
         if self.processors.release() {
             // While dragging, coalesce to let useful decodes finish. On release,
             // the final target owns the decoder immediately: do not wait for
@@ -2691,7 +2809,8 @@ impl App {
     }
 
     pub fn scroll(&mut self, dx: f32, dy: f32) {
-        if self.export_page.open { if self.export_page.scroll(dy,self.cursor,self.vp) { return; } if self.ready() { self.pan_canvas(dx,dy); } return; }
+        if self.export_page.open { if self.export_page.scroll(dy,self.cursor,self.vp) { return; }
+            if self.ready() { self.pan_canvas(dx,dy); } return; }
         if self.show_ui && self.processors.scroll(dy, self.cursor, self.vp) { return; }
         self.stroke_last = None;
         if !self.ready() { return; }
@@ -2718,9 +2837,7 @@ impl App {
             return;
         }
         if self.show_ui && contains(self.workspace().list, self.cursor.0, self.cursor.1) {
-            let first = self.source_first();
-            self.source_scroll = if dy < 0.0 { (first + 1).min(self.videos.len().saturating_sub(1)) }
-                else if dy > 0.0 { first.saturating_sub(1) } else { first };
+            self.source_scroll = (self.source_scroll_offset() - dy).clamp(0.0, self.source_scroll_max());
             return;
         }
         self.pan_canvas(dx, dy);
@@ -2741,6 +2858,7 @@ impl App {
     /// sits under it stays put, and every stream shares the resulting
     /// center. Positive delta = fingers spreading = zoom in.
     pub fn pinch(&mut self, delta: f32) {
+        if self.processors.modal_open() { return; }
         self.stroke_last = None;
         if self.ready() && !self.export_page.open && !self.processors.open && self.cut_mode && self.show_ui && self.cut_over_panel() {
             let lane = self.cut_lanes().video;
@@ -2753,8 +2871,11 @@ impl App {
         let (cx, cy) = self.cursor;
         let base = self.gesture_base(cx, cy);
         let old = self.zoom;
-        // Below fit only if ⌘0 already put it there (a small window).
-        let new = (old * (1.0 + delta)).clamp(old.min(1.0), 32.0);
+        // Below fit only if ⌘0 already put it there (a small window), or by
+        // CROP_ZOOM_OUT with the marquee up, so a handle at the picture's edge
+        // can always be pulled clear of whatever sits next to it.
+        let floor = if self.crop.is_some() { CROP_ZOOM_OUT } else { 1.0 };
+        let new = (old * (1.0 + delta)).clamp(old.min(floor), 32.0);
         if (new - old).abs() < 1e-5 {
             return;
         }
@@ -2843,6 +2964,9 @@ impl App {
         if self.mask_mode && self.crop.is_none() && self.detection_panel && self.show_ui {
             let reserved=132f32.min((cell.h-80.).max(0.));cell.y+=reserved;cell.h-=reserved;
         }
+        // The Process viewer meets the header and the embedded editor's bar
+        // covers its top strip; the panel owns where the picture fits.
+        if self.processors.open && self.show_ui { cell=self.processors.picture_area(self.vp); }
         let frame=if (self.processors.open || self.cut_mode) && self.show_ui {Canvas::new(cell).fit(dims)}
             else {Self::fit_rect(dims, inset_rect(cell, if self.show_ui { 24.0 } else { 0.0 }))};
         if self.applied_crop(idx).is_some(){Self::fit_rect(self.image_dims(idx),frame)}else{frame}
@@ -2853,7 +2977,7 @@ impl App {
     /// the workspace canvas otherwise.
     fn canvas(&self) -> RectPx {
         if self.export_page.open { return crate::export_page::Page::canvas(self.vp,self.show_ui).r; }
-        if self.processors.open && self.show_ui { crate::processor_gui::Panel::viewer(self.vp) } else { self.workspace().canvas }
+        if self.processors.open && self.show_ui { self.processors.viewer(self.vp) } else { self.workspace().canvas }
     }
 
     /// Zoom and pan as the processors viewer draws them.
@@ -2901,6 +3025,8 @@ impl App {
             }
             self.frame_detail_boot = false;
         }
+        self.poll_source_copy_check();
+        self.poll_source_render();
         self.poll_watermark();
         self.keep_chapter_visible();
         self.tick_cut_thumbs(dt);
@@ -2949,7 +3075,7 @@ impl App {
             }
             // Thumbnail workers still out: look again soon even without a
             // moving floor to pace the loop.
-            if self.recent.pending() || self.export_page.has_jobs() {
+            if self.recent.pending() || self.export_page.has_jobs() || self.source_render.is_some() {
                 let soon = Instant::now() + std::time::Duration::from_millis(100);
                 desc.redraw_at = Some(desc.redraw_at.map_or(soon, |t| t.min(soon)));
             }
@@ -3006,6 +3132,11 @@ impl App {
         let capture = self.mask_mode;
         let editor_crops=if self.editor.as_ref().is_some_and(|e|matches!(e.owner,crate::spatial::Owner::Plugin{..})) {self.crop_schedule()}else{Vec::new()};
         let live_scrub = self.processors.scrubbing();
+        // A trim is made by eye, so an edge drag shows each frame that lands
+        // on the way, like a processor scrub, instead of waiting for the
+        // pointer to rest: a right edge's seeks are cold (nothing decodes
+        // ahead into removed material), so they queue behind one another.
+        let edge_drag = matches!(self.cut_drag, Some(CutDrag::Edge(_)));
         let superseded_seek = self.queued_seek.is_some();
         let mut adopt = None;
         let shown: Vec<bool> = (0..self.videos.len()).map(|i| self.on_screen(i)).collect();
@@ -3027,7 +3158,7 @@ impl App {
             // During a processor drag, show completed exact frames as they
             // arrive while the decoder follows the newest target. The pointer
             // still owns the clock; other seek paths suppress old landings.
-            let got = if superseded_seek && !live_scrub {
+            let got = if superseded_seek && !live_scrub && !edge_drag {
                 None
             } else if v.pending {
                 let g = v.player.take_next();
@@ -3047,7 +3178,7 @@ impl App {
             }
             if let Some((pts, mut buf)) = got {
                 if i==active && !editor_crops.is_empty() {buf=crate::spatial::crop_rgba(&buf,v.player.w,v.player.h,pts,&editor_crops);}
-                if was_pending && self.adopt_seek && i == active && !self.playing {
+                if was_pending && self.adopt_seek && i == active && !self.playing && !superseded_seek {
                     adopt = Some(pts);
                 }
                 v.shown_pts = pts;
@@ -3063,14 +3194,13 @@ impl App {
                 }
             }
         }
-        if let Some(p) = &mut self.split_preview {
-            if p.waiting && let Some((pts, buf)) = p.player.take_next() {
+        if let Some(p) = &mut self.split_preview
+            && p.waiting && let Some((pts, buf)) = p.player.take_next() {
                 p.waiting = false;
                 p.shown = true;
                 p.shown_pts = pts;
                 uploads.push(Upload { idx: p.idx, w: p.player.w, h: p.player.h, buf });
             }
-        }
         // Adopt once for a discrete seek/framestep. Pointer seeks retain
         // the requested clock even when decoding lands on a nearby frame.
         if !self.playing && let Some(pts) = adopt {
@@ -3098,11 +3228,9 @@ impl App {
         self.rail_slide = toward(self.rail_slide, self.show_sources);
         self.side_slide = toward(self.side_slide, self.show_inspector);
         let step = dt / DETAIL_SLIDE_S;
-        let toward = |cur: f32, shown: bool| {
-            let target = if shown { 1.0 } else { 0.0 };
-            if cur < target { (cur + step).min(target) } else { (cur - step).max(target) }
-        };
-        self.detail_slide = toward(self.detail_slide, self.show_detail);
+        let target = if self.show_detail { 1.0 } else { 0.0 };
+        self.detail_slide = if self.detail_slide < target { (self.detail_slide + step).min(target) } else { (self.detail_slide - step).max(target) };
+        self.source_scroll = self.source_scroll_offset();
         self.tick_cut_hot(dt);
 
         // ---- draw list ----
@@ -3121,8 +3249,10 @@ impl App {
         let mode = if self.single() { Mode::Overlay } else { self.shown_mode() };
         let canvas = self.workspace().canvas;
         let board = Canvas::new(canvas);
+        // Timeline's picture meets the header on a rounded canvas, its bar below.
+        let corners = if self.cut_mode { [CANVAS_RADIUS, CANVAS_RADIUS, 0.0, 0.0] } else { [0.0; 4] };
         if self.show_ui {
-            board.ground(&mut items);
+            board.ground_radii(&mut items, corners);
         }
         board.clip(&mut items);
         // Keep the lifted picture attached to its zoomed bounds, while the
@@ -3192,7 +3322,7 @@ impl App {
         if self.cut_mode && self.show_ui {
             self.build_cut_chips(&mut items);
         }
-        if self.show_ui { board.recess(&mut items); }
+        if self.show_ui { board.recess_radii(&mut items, corners); }
         items.push(Item::Clip(None));
         if self.show_ui {
             if self.cut_mode {
@@ -3225,6 +3355,7 @@ impl App {
         let preview_end = segment.map(|s| s.end);
         self.processors.input_owner(self.videos[self.active].spatial_id);
         self.processors.set_crops(self.crop_schedule());
+        self.processors.editor_bar = self.mask_mode;
         self.processors.source(
             self.active,
             [
@@ -3254,12 +3385,11 @@ impl App {
             Canvas::lift(&mut items, picture);
             items.push(Item::Video { a:self.active, b:self.active, r:picture, uv:[0.,0.,1.,1.], mode:VideoMode::Tex, p0:0., p1:0. });
             self.build_mask_layer(&mut items);
-            if self.crop.is_none() {
-                if let Some(region) = self.editor_processing_region() {
+            if self.crop.is_none()
+                && let Some(region) = self.editor_processing_region() {
                     let v = &self.videos[self.active];
                     crate::processor_gui::draw_region_preview(&mut items,picture,[v.info.width as usize,v.info.height as usize],region);
                 }
-            }
             let mode_label = if self.crop.is_some() { "Processing region mode" } else { "Mask mode" };
             let label_y = (picture.y - 18.).max(canvas.y + 18.).min(canvas.y + canvas.h - 18.);
             ui_label(&mut items,canvas.x+canvas.w/2.,label_y,13.,WORKSPACE_TEXT,mode_label,Align::Center,canvas.w-24.);
@@ -3277,7 +3407,7 @@ impl App {
             items.push(Item::Clip(None));
         }
         if self.show_ui {self.draw_detection_range(&mut items);}
-        if self.processors.open && self.show_ui { self.draw_footer_end(&mut items, vp); }
+        if self.processors.open && self.show_ui { self.draw_footer_end(&mut items, vp); self.processors.draw_picker(&mut items, vp); }
 
         if self.ready() { self.export_page.reset_source(&self.videos[self.active].info); }
         self.export_page.poll(&mut uploads, n + 1);
@@ -3287,21 +3417,21 @@ impl App {
             items.clear();
             self.export_page.draw(&mut items,vp,self.active,n+1,&self.videos[self.active].info,self.cursor,self.videos[self.active].shown_pts,self.show_ui,self.view());
             if self.show_ui {
-            items.push(Item::Rect(RectItem::new(RectPx{x:0.,y:0.,w:vp.0,h:HEADER_H},WORKSPACE_PANEL)));
-            items.push(Item::Rect(RectItem::new(RectPx { x: 0., y: HEADER_H - 1., w: vp.0, h: 1. }, WORKSPACE_RULE)));
+            items.push(Item::Rect(RectItem::new(RectPx{x:0.,y:0.,w:vp.0,h:HEADER_H},hex_color(0x000000))));
             self.mode_selector().draw(&mut items,self.cursor,self.cursor_inside);
             let (text, lamp) = self.encode_status();
             draw_status_chip(&mut items, self.status_chip(), lamp, text, WORKSPACE_TEXT);
             }
         }
-        let animating = self.export_page.has_jobs() || self.export_page.playing() || self.processors.animating()
+        let animating = self.source_copy_check.as_ref().is_some_and(|c| c.result.is_some()) || self.source_render.is_some() || self.export_page.has_jobs() || self.export_page.playing() || self.processors.animating()
             || self.playing
             || !self.started
             || self.cut_thumb.play.is_some()
             || self.cut_hot_animating()
             || self.rail_sliding();
         FrameDesc {
-            clear: FRAME_BG,
+            // Timeline's page is black, so the canvas's rounded corners cut into black.
+            clear: if self.cut_mode && self.show_ui { [0.0, 0.0, 0.0, 1.0] } else { FRAME_BG },
             uploads,
             plate: None,
             thumbs: {
@@ -3316,8 +3446,10 @@ impl App {
             } else if live_scrub && self.queued_seek.is_some() {
                 Some(self.processor_scrub_changed + PROCESSOR_SCRUB_DWELL)
             } else {
-                Some(Instant::now() + std::time::Duration::from_millis(
-                    if self.split_preview.as_ref().is_some_and(|p| p.waiting) { 16 } else { 100 }))
+                let idle = Instant::now() + std::time::Duration::from_millis(
+                    if self.split_preview.as_ref().is_some_and(|p| p.waiting) { 16 } else { 100 });
+                // A focused field's caret changes on the half second.
+                Some(self.next_blink().map_or(idle, |blink| blink.min(idle)))
             },
         }
     }
@@ -3330,7 +3462,7 @@ impl App {
         let lift = if self.show_ui && self.cut_mode {
             self.frame_detail_extra() + if self.cut_encode_rail() { 26.0 } else { 0.0 }
         } else { 0.0 };
-        Workspace::new(self.vp, self.show_ui, self.cut_mode, lift, self.rail_slide, self.side_slide, self.detail_slide, self.source_width)
+        Workspace::new(self.vp, self.show_ui, self.cut_mode, lift, self.rail_slide, self.side_slide, self.detail_slide, self.source_width, self.can_render_source() && !self.mask_mode)
     }
 
     fn cut_frame_cells(&self) -> bool {
@@ -3433,20 +3565,26 @@ impl App {
 
     fn source_thumb_height(&self, index: usize) -> f32 {
         let width = (self.workspace().panel - 32.0).max(1.0);
-        let info = &self.videos[index].info;
+        let (iw, ih) = self.source_dims(index);
         // A portrait clip stops at a 4:3 card's height: `source_thumb`
         // centres the narrower preview and `source_card` hugs it, so it
         // doesn't fill the rail on its own.
-        (width * info.height.max(1) as f32 / info.width.max(1) as f32)
+        (width * ih / iw)
             .min(width * PORTRAIT_THUMB_MAX)
             .min((self.workspace().list.h - self.source_chrome()).max(1.0))
     }
 
+    /// The picture a source card shows: the clip, or its crop once it has one.
+    fn source_dims(&self, index: usize) -> (f32, f32) {
+        let v = &self.videos[index];
+        v.input_crop.map_or((v.info.width.max(1) as f32, v.info.height.max(1) as f32), |c| (c.w.max(1.0), c.h.max(1.0)))
+    }
+
     fn source_thumb(&self, index: usize) -> RectPx {
         let r = self.source_row(index);
-        let info = &self.videos[index].info;
+        let (iw, ih) = self.source_dims(index);
         let h = self.source_thumb_height(index);
-        let w = h * info.width.max(1) as f32 / info.height.max(1) as f32;
+        let w = h * iw / ih;
         RectPx { x: r.x + (r.w - w) / 2.0, y: r.y + 4.0, w, h }
     }
 
@@ -3454,15 +3592,30 @@ impl App {
         self.source_thumb_height(index) + self.source_chrome()
     }
 
+    fn source_stride(&self, index: usize) -> f32 {
+        if self.workspace().mini { RAIL_MINI_PITCH } else { self.source_pitch(index) }
+    }
+
+    fn source_offset(&self, index: usize) -> f32 {
+        (0..index).map(|i| self.source_stride(i)).sum()
+    }
+
+    fn source_scroll_max(&self) -> f32 {
+        (self.source_offset(self.videos.len()) - self.workspace().list.h).max(0.0)
+    }
+
+    fn source_scroll_offset(&self) -> f32 {
+        self.source_scroll.clamp(0.0, self.source_scroll_max())
+    }
+
     fn source_capacity(&self) -> usize {
-        let l = self.workspace();
-        if l.mini { return (l.list.h / RAIL_MINI_PITCH).floor().max(1.0) as usize; }
-        let first = self.source_scroll.min(self.videos.len().saturating_sub(1));
-        let mut height = 0.0;
+        let bottom = self.source_scroll_offset() + self.workspace().list.h;
+        let first = self.source_first();
+        let mut y = self.source_offset(first);
         let mut count = 0;
         for i in first..self.videos.len() {
-            if count > 0 && height + self.source_pitch(i) > l.list.h { break; }
-            height += self.source_pitch(i);
+            if y >= bottom { break; }
+            y += self.source_stride(i);
             count += 1;
         }
         count.max(1)
@@ -3471,17 +3624,27 @@ impl App {
     /// The collapsed rail's keycap for the `k`th visible clip.
     fn mini_row(&self, k: usize) -> RectPx {
         let l = self.workspace();
-        RectPx { x: (RAIL_MINI_W - 32.0) / 2.0, y: l.list.y + k as f32 * RAIL_MINI_PITCH, w: 32.0, h: 32.0 }
+        let partial = self.source_scroll_offset() - self.source_offset(self.source_first());
+        RectPx { x: (RAIL_MINI_W - 32.0) / 2.0,
+            y: l.list.y + k as f32 * RAIL_MINI_PITCH - partial,
+            w: 32.0, h: 32.0 }
     }
 
     fn source_first(&self) -> usize {
-        self.source_scroll.min(self.videos.len().saturating_sub(1))
+        let scroll = self.source_scroll_offset();
+        let mut bottom = 0.0;
+        for i in 0..self.videos.len() {
+            bottom += self.source_stride(i);
+            if bottom > scroll { return i; }
+        }
+        self.videos.len().saturating_sub(1)
     }
 
     fn source_row(&self, index: usize) -> RectPx {
         let l = self.workspace();
         if l.mini { return self.mini_row(index - self.source_first()); }
-        RectPx { x: l.list.x + 12.0, y: l.list.y + (self.source_first()..index).map(|i| self.source_pitch(i)).sum::<f32>(),
+        RectPx { x: l.list.x + 12.0,
+            y: l.list.y + self.source_offset(index) - self.source_scroll_offset(),
             w: l.panel - 24.0, h: self.source_pitch(index) - 12.0 }
     }
 
@@ -3523,7 +3686,8 @@ impl App {
 
     fn controls(&self) -> Vec<Control> {
         let l = self.workspace();
-        let bar = ButtonBar::at(l.canvas.x, HEADER_H, l.canvas.w);
+        // Timeline keeps its bar under the picture; the other pages over it.
+        let bar = l.surface.button_bar.filter(|_| self.cut_mode).unwrap_or(ButtonBar::at(l.canvas.x, HEADER_H, l.canvas.w));
         let mut out = self.mode_selector().controls();
         out.push(Control { hint: "⌘E", ..Control::new(self.footer_export(), "Export", false, Action::Export) });
         if self.processors.open || self.export_page.open {
@@ -3544,6 +3708,11 @@ impl App {
                 self.show_detail,
                 Action::ToggleDetail,
             ));
+        }
+        if l.panel > 0.0 && !self.mask_mode && self.can_render_source() {
+            let y = if self.cut_mode { l.transport.y - 34. } else { self.vp.1 - STATUS_H - 68. };
+            out.push(Control::new(RectPx { x: l.list.x + 12., y,
+                w: l.panel - 24., h: 28. }, "Render", false, Action::RenderSource));
         }
         if self.cut_mode {
             out.push(Control::new(bar.control(bar.content().x,92.),"Crop clip",false,Action::LaunchEditor(true)));
@@ -3665,6 +3834,10 @@ impl App {
 
     fn activate(&mut self, action: Action) {
         self.mouse_up();
+        if matches!(action, Action::Tool(mode) if mode != self.workspace_mode()) {
+            self.zoom = 1.0;
+            self.center = (0.5, 0.5);
+        }
         match action {
             Action::LaunchEditor(crop)=>{self.begin_editor(crop,None);return}
             Action::ResetEdit=>{self.watermark_task=None;self.clear_mask_history();if self.crop.is_some(){self.crop=Some(self.full_crop())}else{let v=&self.videos[self.active];self.masks[self.active]=Some(Mask::new(v.info.width,v.info.height));}return}
@@ -3715,6 +3888,7 @@ impl App {
                 }
             }
             Action::LaunchEditor(_) | Action::ResetEdit | Action::ApplyEdit | Action::CancelEdit => unreachable!(),
+            Action::RenderSource => self.render_source(),
             Action::Duplicate => self.duplicate_sources(),
             Action::OpenFiles => self.cmds.push(Cmd::OpenFiles),
             Action::ToggleSources => self.show_sources = !self.show_sources,
@@ -3911,13 +4085,13 @@ impl App {
         let l = self.workspace();
         let panel = WORKSPACE_PANEL;
         // Opaque shell surfaces keep zoomed footage out of the interface.
-        for r in [RectPx { x: 0.0, y: 0.0, w: vp.0, h: HEADER_H },
-            RectPx { x: 0.0, y: HEADER_H, w: l.rail, h: vp.1 - HEADER_H - STATUS_H },
+        for r in [RectPx { x: 0.0, y: HEADER_H, w: l.rail, h: vp.1 - HEADER_H - STATUS_H },
             l.transport] {
             items.push(Item::Rect(RectItem::new(r, panel)));
         }
-        for r in [RectPx { x: 0.0, y: HEADER_H - 1.0, w: vp.0, h: 1.0 },
-            RectPx { x: l.rail - 1.0, y: HEADER_H, w: 1.0, h: vp.1 - HEADER_H - STATUS_H },
+        // The header is black with no line under it on every page (Figma 612:5852).
+        items.push(Item::Rect(RectItem::new(RectPx { x: 0.0, y: 0.0, w: vp.0, h: HEADER_H }, hex_color(0x000000))));
+        for r in [RectPx { x: l.rail - 1.0, y: HEADER_H, w: 1.0, h: vp.1 - HEADER_H - STATUS_H },
             RectPx { x: l.rail, y: l.canvas.y - 1.0, w: l.canvas.w, h: 1.0 },
             RectPx { x: l.rail, y: l.transport.y, w: l.canvas.w, h: 1.0 }] {
             items.push(Item::Rect(RectItem::new(r, WORKSPACE_RULE)));
@@ -3939,7 +4113,7 @@ impl App {
                 control.draw(items, hovered, disabled);
                 continue;
             }
-            if matches!(control.action, Action::Duplicate | Action::OpenFiles) {
+            if matches!(control.action, Action::Duplicate | Action::OpenFiles | Action::RenderSource) {
                 items.push(Item::Rect(RectItem { radius: 8.0, border_w: 1.0,
                     border_color: hex_color(SOURCE_BORDER), ..RectItem::new(control.r, hex_color(SOURCE_SURFACE)) }));
             }
@@ -4041,13 +4215,14 @@ impl App {
     /// focused clip and on a navy surface otherwise. The hover checkbox,
     /// the shared/linked chip and the footer line are the app's batch
     /// affordances, kept where the design leaves room for them.
-    fn source_hover_buttons(&self, index: usize) -> [(RectPx, bool); 2] {
+    fn source_hover_buttons(&self, index: usize) -> [(RectPx, SourceAction); 3] {
         let thumb = self.source_thumb(index);
-        [(RectPx { x: thumb.x + thumb.w - 56., y: thumb.y + 6., w: 24., h: 24. }, false),
-         (RectPx { x: thumb.x + thumb.w - 28., y: thumb.y + 6., w: 24., h: 24. }, true)]
+        let at = |dx: f32| RectPx { x: thumb.x + thumb.w - dx, y: thumb.y + 6., w: 24., h: 24. };
+        [(at(56.), SourceAction::Duplicate), (at(28.), SourceAction::Remove), (at(84.), SourceAction::Crop)]
     }
 
     fn build_sources(&self, items: &mut Vec<Item>) {
+        if self.processors.open || self.export_page.open { return; }
         let l = self.workspace();
         if l.rail <= 0.0 { return; }
         let ink = hex_color(SOURCE_INK);
@@ -4074,7 +4249,7 @@ impl App {
             let fade = |c: [f32; 4]| [c[0], c[1], c[2], c[3] * alpha];
             let column = RectPx { x: 0.0, y: l.list.y, w: RAIL_MINI_W, h: l.list.h };
             items.push(Item::Clip(Some(column)));
-            let capacity = (column.h / RAIL_MINI_PITCH).floor().max(1.0) as usize;
+            let capacity = (column.h / RAIL_MINI_PITCH).ceil().max(1.0) as usize + 1;
             for (k, i) in (first..(first + capacity).min(self.videos.len())).enumerate() {
                 let r = self.mini_row(k);
                 let active = i == self.active;
@@ -4096,7 +4271,8 @@ impl App {
         // for even that it reaches past what is under it (cut mode's
         // transport, Input's status line): clip to the rail's real end
         // and drop the footer line when there is no room for it.
-        let end = if self.cut_mode { l.transport.y } else { self.vp.1 - STATUS_H };
+        let end = if self.cut_mode { l.transport.y - if self.can_render_source() { 40. } else { 0. } }
+            else { self.vp.1 - STATUS_H };
         let visible = RectPx { x: 0.0, y: l.list.y, w: l.rail, h: l.list.h.min(end - l.list.y).max(0.0) };
         items.push(Item::Clip(Some(visible)));
         for i in first..(first + self.source_capacity()).min(self.videos.len()) {
@@ -4118,8 +4294,9 @@ impl App {
             let quad = thumb;
             items.push(Item::Rect(RectItem { radius: 6.0, ..RectItem::new(quad, WORKSPACE_PANEL) }));
             if v.delivered {
-                items.push(Item::Video { a: i, b: i, r: quad, uv: [0.0, 0.0, 1.0, 1.0],
-                    mode: VideoMode::Tex, p0: 6.0, p1: 0.0 });
+                let (w, h) = (v.info.width.max(1) as f32, v.info.height.max(1) as f32);
+                let uv = v.input_crop.map_or([0.0, 0.0, 1.0, 1.0], |c| [c.x / w, c.y / h, (c.x + c.w) / w, (c.y + c.h) / h]);
+                items.push(Item::Video { a: i, b: i, r: quad, uv, mode: VideoMode::Tex, p0: 6.0, p1: 0.0 });
             }
             // Overlaid, a dark strip across the preview's foot carries the
             // label: clipped flat on top, the preview's rounding below.
@@ -4162,21 +4339,35 @@ impl App {
             if v.player.failed() {
                 ui_label(items, thumb.x + 8.0, thumb.y + 52.0, 11.0, ERR, "DECODE FAILED", Align::Left, thumb.w - 16.0);
             }
-            if hover && !l.mini {
-                for (button, remove) in self.source_hover_buttons(i) {
-                    ButtonBar::button(items, button, if remove { "×" } else { "" }, false,
-                        contains(button,self.cursor.0,self.cursor.1), false);
-                    if !remove {
-                        for (dx,dy) in [(6.,6.),(9.,9.)] {
+            // The actions come up on hover; Crop stays lit on a cropped
+            // source, so the card says its picture is not the whole frame.
+            let cropped = v.input_crop.is_some();
+            if !l.mini && (hover || (cropped && !compact)) {
+                for (button, action) in self.source_hover_buttons(i) {
+                    if !hover && action != SourceAction::Crop { continue; }
+                    let over = hover && contains(button,self.cursor.0,self.cursor.1);
+                    ButtonBar::button(items, button, if action == SourceAction::Remove { "×" } else { "" },
+                        action == SourceAction::Crop && cropped, over, false);
+                    match action {
+                        SourceAction::Duplicate => for (dx,dy) in [(6.,6.),(9.,9.)] {
                             items.push(Item::Shape(figleaf::Shape::rect(figleaf::Rect::new(button.x+dx,button.y+dy,9.,9.))
                                 .radius(1.).fill(hex_color(0x514f4f)).stroke(1.,hex_color(0xe0dedb),figleaf::StrokeAlign::Inside)));
                         }
+                        // Two overlapping corners, the crop tool's mark.
+                        SourceAction::Crop => for (dx,dy,w,h) in [(8.,5.,1.5,12.5),(8.,16.,11.,1.5),(5.,7.5,11.,1.5),(14.5,7.5,1.5,11.5)] {
+                            items.push(Item::Rect(RectItem::new(RectPx { x: button.x+dx, y: button.y+dy, w, h },
+                                hex_color(if cropped { 0xffffff } else { 0xe0dedb }))));
+                        }
+                        SourceAction::Remove => {}
                     }
-                    if contains(button,self.cursor.0,self.cursor.1) {
+                    if over {
                         items.push(Item::Text(TextItem { tooltip:true, align:Align::Right, valign:VAlign::Middle,
                             bg:Some(TextBg { radius:5.,pad_x:8.,pad_y:5.,..TextBg::new(hex_color(0x26282b)) }),
-                            ..TextItem::new(button.x+button.w,button.y+button.h+15.,10.5,ink,
-                                if remove { "Remove source" } else { "Duplicate source" }) }));
+                            ..TextItem::new(button.x+button.w,button.y+button.h+15.,10.5,ink, match action {
+                                SourceAction::Remove => "Remove source",
+                                SourceAction::Duplicate => "Duplicate source",
+                                SourceAction::Crop => if cropped { "Edit crop" } else { "Crop source" },
+                            }) }));
                     }
                 }
             }
@@ -4822,7 +5013,7 @@ impl App {
         let Some(cut) = self.cut.as_mut().filter(|c| !c.scanning()) else { return };
         let ranges = std::mem::take(&mut self.cut_boot);
         let pairs = ranges.len() / 2;
-        for (i, pair) in ranges.chunks_exact(2).enumerate() {
+        for (i, pair) in ranges.as_chunks::<2>().0.iter().enumerate() {
             cut.set_in(pair[0]);
             cut.set_out(pair[1]);
             if i + 1 < pairs { cut.cut_selection(); }
@@ -4889,8 +5080,8 @@ impl App {
             // The design's arrows: a frame, and with shift a keyframe.
             Key::Left => { self.step(-1); return true; }
             Key::Right => { self.step(1); return true; }
-            Key::KeyLeft | Key::KeyRight => {
-                let dir = if k == Key::KeyRight { 1 } else { -1 };
+            Key::PreviousKeyframe | Key::NextKeyframe => {
+                let dir = if k == Key::NextKeyframe { 1 } else { -1 };
                 let to = self.cut.as_ref().map(|c| c.key_step(t, dir)).unwrap_or(t);
                 let end = if self.wrap.is_finite() { (self.wrap - 0.05).max(0.0) } else { f64::MAX };
                 self.playing = false;
@@ -4987,9 +5178,8 @@ impl App {
                     // The same range picked on both rows is one cut.
                     let mut ranges: Vec<(f64, f64)> = Vec::new();
                     for (a, b, _) in picks {
-                        if self.cut_gop || cut.segments().iter().any(|s| !s.cut && (s.start - a).abs() < 1e-6 && (s.end - b).abs() < 1e-6) {
-                            if !ranges.iter().any(|r| (r.0 - a).abs() < 1e-6 && (r.1 - b).abs() < 1e-6) { ranges.push((a, b)); }
-                        }
+                        if (self.cut_gop || cut.segments().iter().any(|s| !s.cut && (s.start - a).abs() < 1e-6 && (s.end - b).abs() < 1e-6))
+                            && !ranges.iter().any(|r| (r.0 - a).abs() < 1e-6 && (r.1 - b).abs() < 1e-6) { ranges.push((a, b)); }
                     }
                     if ranges.is_empty() { return; }
                     // A picked piece is already bounded by edits; don't expand it
@@ -5007,7 +5197,6 @@ impl App {
                     }
                     cut.snap = snap;
                     cut.status = if ranges.len() == 1 { format!("Cut {total:.2} s") } else { format!("Cut {} clips, {total:.2} s", ranges.len()) };
-                    return;
                 }
             }
             CutAction::Apply => {
@@ -5101,20 +5290,10 @@ impl App {
             push(RectPx { x: self.cut_clock_x() + offset, y: bar.y + 5.0, w: width, h: 16.0 },
                 label, self.cut_frames == frames, CutAction::TimeDisplay(frames), "`");
         }
-        let mut x = self.cut_tools_x();
         let keyframe = cut.snap == Snap::Keyframe;
-        for (label, action, hint) in [
-            ("Split tool", CutAction::ToggleSplit, "Esc to leave · S split"),
-            (if keyframe { "Snap to keyframes: on" } else { "Snap to keyframes: off" },
-                CutAction::Snap(if keyframe { Snap::Frame } else { Snap::Keyframe }), "K"),
-        ] {
-            // The snap control is the keyframe glyph and a switch.
-            // It carries its name when the toolbar has room before the clock.
-            let w = if !matches!(action, CutAction::Snap(_)) { 32.0 }
-                else if self.cut_clock_x() - x >= CUT_SNAP_LABEL_W + 16.0 { CUT_SNAP_LABEL_W } else { CUT_SNAP_W };
-            push(RectPx { x, y: cy - 16.0, w, h: 32.0 }, label, matches!(action, CutAction::Snap(_)) && keyframe, action, hint);
-            x += w + 6.0;
-        }
+        push(RectPx { x: self.cut_tools_x(), y: cy - 16.0, w: 32.0, h: 32.0 }, "Split tool", false, CutAction::ToggleSplit, "Esc to leave · S split");
+        push(self.cut_snap_rect(), if keyframe { "Snap to keyframes: on" } else { "Snap to keyframes: off" }, keyframe,
+            CutAction::Snap(if keyframe { Snap::Frame } else { Snap::Keyframe }), "K");
         push(self.cut_footer_split(), "Split", false, CutAction::Split, "S");
         push(self.cut_footer_join(), "Join", false, CutAction::Join, "J");
         push(self.cut_footer_delete(), "Delete", false, CutAction::DeletePicked, "⌫");
@@ -5127,9 +5306,18 @@ impl App {
         }
     }
 
-    /// Edit tools follow playback; the clock follows the edit buttons and the snap switch.
+    /// The split tool follows the clock.
     fn cut_tools_x(&self) -> f32 {
-        self.workspace().transport.x + 254.0
+        self.cut_clock_x() + 179.0
+    }
+
+    /// "Snap to Keyframes" and its switch end the toolbar; the label goes
+    /// when it would run into the split tool.
+    fn cut_snap_rect(&self) -> RectPx {
+        let bar = self.workspace().transport;
+        let end = bar.x + bar.w - 16.0;
+        let w = if end - CUT_SNAP_LABEL_W >= self.cut_tools_x() + 48.0 { CUT_SNAP_LABEL_W } else { CUT_SNAP_W };
+        RectPx { x: end - w, y: bar.y + bar.h / 2.0 - 16.0, w, h: 32.0 }
     }
 
     /// Split · Join · Delete · Save · Render, then Export. Under 900px wide the
@@ -5161,18 +5349,16 @@ impl App {
         Self::cut_footer_next(self.cut_footer_save())
     }
 
-    /// The clock is right-aligned beside zoom, or the right edge on narrow windows.
+    /// The clock follows the step controls.
     fn cut_clock_x(&self) -> f32 {
-        let bar = self.workspace().transport;
-        if bar.w >= 900.0 { self.cut_zoom_bar().x - 200.0 }
-        else { bar.x + bar.w - 180.0 }
+        self.workspace().transport.x + 278.0
     }
 
-    /// The zoom slider's track, at the toolbar's right.
+    /// The zoom slider's track, before the snap switch at the toolbar's right.
     fn cut_zoom_bar(&self) -> RectPx {
         let bar = self.workspace().transport;
         let width = if self.vp.0 < 900.0 { 60.0 } else { 110.0 };
-        RectPx { x: bar.x + bar.w - 40.0 - width, y: bar.y + bar.h / 2.0 - 1.5, w: width, h: 3.0 }
+        RectPx { x: self.cut_snap_rect().x - 59.0 - width, y: bar.y + bar.h / 2.0 - 1.5, w: width, h: 3.0 }
     }
 
     fn encode_button(r: RectPx) -> RectPx {
@@ -5278,9 +5464,8 @@ impl App {
         let target = if self.hidden { None } else { self.cut_razor() };
         let same_source = self.split_preview.as_ref().is_some_and(|p|
             p.idx == self.active && self.videos.get(p.idx).is_some_and(|v| v.info.path == p.path));
-        if (target.is_none() || !same_source) && let Some(p) = self.split_preview.take() {
-            if p.shown { self.restore_split_preview(p.idx, &p.path); }
-        }
+        if (target.is_none() || !same_source) && let Some(p) = self.split_preview.take()
+            && p.shown { self.restore_split_preview(p.idx, &p.path); }
         let Some(target) = target else { return };
         if self.split_preview.is_none() {
             let info = &self.videos[self.active].info;
@@ -5853,11 +6038,20 @@ impl App {
                 self.adopt_seek = false;
             },
             Some(CutDrag::Edge(edge)) => {
-                // The canvas follows the edge, so the trim is made by eye.
+                // The canvas follows the edge, so the trim is made by eye: a
+                // clip's left edge shows its first frame, and a right edge
+                // (removed material or the clip's end follows) its LAST one,
+                // the frame before the boundary, whose pts the clock adopts.
                 let now = cut.move_edge(edge, at);
                 self.cut_drag = Some(CutDrag::Edge(now));
-                self.seek_all(now.min(end), true);
-                self.adopt_seek = false;
+                let right = now > 1e-6 && (cut.skip(now).is_some() || now >= cut.duration - 1e-6);
+                if right {
+                    let last = (now - 1.0 / self.fps.max(1.0) - 1e-4).max(0.0);
+                    self.seek_all(last.min(end), true);
+                } else {
+                    self.seek_all(now.min(end), true);
+                    self.adopt_seek = false;
+                }
             }
             Some(CutDrag::Zoom) => {
                 // About the playhead when it is on screen, the middle if not.
@@ -6077,14 +6271,12 @@ impl App {
         let cut = self.cut.as_ref().unwrap();
         let rule = mix(0x050506, 0xffffff, 0.06);
         // Opaque shell surfaces, as in Input.
-        items.push(Item::Rect(RectItem::new(RectPx { x: 0.0, y: 0.0, w: vp.0, h: CUT_HEADER_H }, WORKSPACE_PANEL)));
-        items.push(Item::Rect(RectItem::new(l.side, hex_color(CUT_BG))));
-        items.push(Item::Rect(RectItem::new(RectPx { x: 0.0, y: CUT_HEADER_H, w: l.rail, h: l.transport.y - CUT_HEADER_H }, WORKSPACE_PANEL)));
-        for r in [RectPx { x: 0.0, y: CUT_HEADER_H - 1.0, w: vp.0, h: 1.0 },
-            RectPx { w: if l.side.w > 0.0 { 1.0 } else { 0.0 }, ..l.side },
-            RectPx { x: l.rail - 1.0, y: CUT_HEADER_H, w: if l.rail > 0.0 { 1.0 } else { 0.0 }, h: l.transport.y - CUT_HEADER_H }] {
-            items.push(Item::Rect(RectItem::new(r, rule)));
-        }
+        // Figma 612:5851: the header, the rail and the inspector are one
+        // black ground with no hairlines between them or under the header.
+        let black = hex_color(0x000000);
+        items.push(Item::Rect(RectItem::new(RectPx { x: 0.0, y: 0.0, w: vp.0, h: CUT_HEADER_H }, black)));
+        items.push(Item::Rect(RectItem::new(l.side, black)));
+        items.push(Item::Rect(RectItem::new(RectPx { x: 0.0, y: CUT_HEADER_H, w: l.rail, h: l.transport.y - CUT_HEADER_H }, black)));
         self.build_sources(items);
         self.build_inspector(items);
         // The transport and the lanes are opaque grounds painted AFTER
@@ -6095,11 +6287,11 @@ impl App {
             items.push(Item::Rect(RectItem::new(r, rule)));
         }
 
-        if let Some(bar) = l.surface.button_bar { bar.draw(items); }
+        if let Some(bar) = l.surface.button_bar { bar.draw_radii(items, [0.0, 0.0, CANVAS_RADIUS, CANVAS_RADIUS]); }
         // ---- Figma timeline header ----
         let controls = self.controls();
         self.build_cut_header(items);
-        for control in controls.iter().filter(|c|matches!(c.action,Action::LaunchEditor(_))) {
+        for control in controls.iter().filter(|c|matches!(c.action,Action::LaunchEditor(_) | Action::RenderSource)) {
             ButtonBar::button(items, control.r, &control.label, control.selected,
                 self.cursor_inside && contains(control.r,self.cursor.0,self.cursor.1), self.control_dead(&control.action));
         }
@@ -6124,7 +6316,7 @@ impl App {
             items.push(Item::Text(TextItem { valign: VAlign::Middle, tracking: -0.2,
                 ..TextItem::new(x, clock_y, clock_px, mix(CUT_BAR, 0xffffff, 0.3), format!("        {frames}")) }));
         }
-        for (offset, alpha) in [(13.0, 0.2), (231.0, 0.25), (x - bar.x - 12.0, 0.25)] {
+        for (offset, alpha) in [(13.0, 0.2), (238.0, 0.25), (x - bar.x + 157.0, 0.25), (self.cut_snap_rect().x - bar.x - 19.0, 0.25)] {
             items.push(Item::Rect(RectItem::new(RectPx { x: bar.x + offset, y: cy - 10.0, w: 1.0, h: 20.0 }, mix(CUT_BAR, 0xffffff, alpha))));
         }
         if bar.w >= 900.0 {
@@ -6132,7 +6324,6 @@ impl App {
             items.push(Item::Rect(RectItem { radius: 1.5, ..RectItem::new(zoom, mix(CUT_BAR, 0xffffff, 0.14)) }));
             let knob = zoom.x + zoom.w * cut.zoom_fraction(self.cut_lanes().video.w) as f32;
             items.push(Item::Rect(RectItem { radius: 5.5, ..RectItem::new(RectPx { x: knob - 5.5, y: cy - 5.5, w: 11.0, h: 11.0 }, hex_color(CUT_INK)) }));
-            items.push(Item::Rect(RectItem::new(RectPx { x: zoom.x - 39.0, y: cy - 10.0, w: 1.0, h: 20.0 }, mix(CUT_BAR, 0xffffff, 0.1))));
         }
 
         self.build_cut_inspector(items);
@@ -6179,29 +6370,22 @@ impl App {
                     &control.label, Align::Left, r.w);
             }
             CutAction::Snap(_) => {
-                // The keyframe glyph, then an iOS-style switch: knob left on a
-                // grey track = off, knob right on the keyframe green = on, the
-                // track outlined white like the rail's (`draw_rail_switch`).
-                // On: the orange selection ring. Off: the footer buttons' 1px grey
-                // edge (`draw_cut_footer_button`). The glyph takes the label's ink.
+                // Figma 617:8899: the label, then a 32x16 switch at the
+                // toolbar's end. On: the selection orange under a white edge,
+                // knob right; off: a grey track, knob left.
                 let on = cut.snap == Snap::Keyframe;
-                let (border_w, border) = if on { (2.0, SOURCE_RING) } else { (1.0, if hovered { 0x555555 } else { 0x303030 }) };
-                items.push(Item::Rect(RectItem { radius: 8.0, border_w, border_color: hex_color(border),
-                    ..RectItem::new(r, if hovered { mix(CUT_BAR, 0xffffff, 0.07) } else { [0.0; 4] }) }));
-                let ink = hex_color(if on || hovered { CUT_INK } else { 0xc8c8c8 });
-                draw_icon(items, Icon::SnapKeyframe, r.x + 16.0, cy, ink);
+                let ink = hex_color(if on || hovered { 0xf4f3ed } else { 0xc8c8c8 });
                 if r.w > CUT_SNAP_W {
-                    ui_label(items, r.x + 30.0, cy, 13.0, ink,
-                        "Snap to Keyframe", Align::Left, r.w - 30.0 - CUT_SWITCH_W - 12.0);
+                    ui_label(items, r.x, cy, 12.0, ink, "Snap to Keyframes", Align::Left, r.w - CUT_SWITCH_W - 8.0);
                 }
-                let track = RectPx { x: r.x + r.w - 6.0 - CUT_SWITCH_W, y: cy - CUT_SWITCH_H / 2.0, w: CUT_SWITCH_W, h: CUT_SWITCH_H };
-                items.push(Item::Rect(RectItem { radius: CUT_SWITCH_H / 2.0, border_w: 1.5,
+                let track = RectPx { x: r.x + r.w - CUT_SWITCH_W, y: cy - CUT_SWITCH_H / 2.0, w: CUT_SWITCH_W, h: CUT_SWITCH_H };
+                items.push(Item::Rect(RectItem { radius: CUT_SWITCH_H / 2.0, border_w: 1.0,
                     border_color: hex_color(if on { 0xffffff } else { 0xdcdcdc }),
-                    ..RectItem::new(track, if on { hex_color(FRAME_KEY) } else { hex_color(0x3a3a3c) }) }));
-                let d = CUT_SWITCH_H - 5.0;
-                let kx = if on { track.x + track.w - 2.5 - d } else { track.x + 2.5 };
+                    ..RectItem::new(track, hex_color(if on { SOURCE_RING } else { 0x3a3a3c })) }));
+                let d = CUT_SWITCH_H - 4.0;
+                let kx = if on { track.x + track.w - 2.0 - d } else { track.x + 2.0 };
                 items.push(Item::Rect(RectItem { radius: d / 2.0,
-                    ..RectItem::new(RectPx { x: kx, y: track.y + 2.5, w: d, h: d }, hex_color(0xffffff)) }));
+                    ..RectItem::new(RectPx { x: kx, y: track.y + 2.0, w: d, h: d }, hex_color(0xf4f3ed)) }));
             }
             // Only the footer carries Split now.
             CutAction::Split => draw_cut_footer_button(items, r, &control.label, control.hint, true, hovered, false),
@@ -6418,7 +6602,7 @@ impl App {
             let facts = &cut.facts;
             let rows = |r: &Vec<(&'static str, String)>| r.iter().map(|(k, v)| (k.to_string(), v.clone(), ink)).collect::<Vec<_>>();
             let v = &self.videos[self.active].info;
-            let video_title = if facts.video_title.is_empty() { v.codec.to_uppercase() } else { facts.video_title.to_uppercase().replace("·", "·") };
+            let video_title = if facts.video_title.is_empty() { v.codec.to_uppercase() } else { facts.video_title.to_uppercase() };
             let video_rows = if facts.video.is_empty() {
                 vec![("Size".into(), format!("{} × {}", v.width, v.height), ink), ("Rate".into(), format!("{:.3} fps", v.fps), ink)]
             } else { rows(&facts.video) };
@@ -7122,6 +7306,8 @@ pub(crate) fn draw_icon(items: &mut Vec<Item>, icon: Icon, cx: f32, cy: f32, col
 }
 
 /// The design's small-caps section label.
+// Keep the explicit geometry/pipeline inputs at this boundary.
+#[allow(clippy::too_many_arguments)]
 fn inspector_label(items: &mut Vec<Item>, x: f32, y: f32, px: f32, color: [f32; 4], text: impl Into<String>, align: Align, width: f32) {
     let mono = px == 10.0 || px == 15.0;
     items.push(Item::Text(TextItem { inspector: if mono { 0 } else if px == 12.0 { 2 } else { 1 }, header: mono,
@@ -7165,6 +7351,8 @@ fn wrap_text(text: &str, columns: usize) -> Vec<String> {
 }
 
 const CUT_TOOLBAR_H: f32 = 50.0;
+/// The Timeline canvas's corner radius (Process uses the same).
+const CANVAS_RADIUS: f32 = 10.0;
 /// Below this width cut mode keeps neither side column: the cut inspector
 /// goes and the source rail is the mini strip.
 const CUT_COLUMNS_MIN_W: f32 = 1000.0;
@@ -7196,7 +7384,7 @@ const CUT_TOOL_ON: u32 = 0x0b1926;
 /// The inspector's segmented controls: a hairlined housing on a near-black ground.
 const CUT_SEG_BG: u32 = 0x131313;
 const CUT_SEG_EDGE: u32 = 0x2d2d2d;
-const CUT_TL: u32 = 0x121212;
+const CUT_TL: u32 = 0x161515;
 /// The inspector's segment rows.
 const CUT_LANE: u32 = 0x151719;
 /// A kept piece of picture, and of sound (alternating, so neighbours part).
@@ -7260,13 +7448,15 @@ struct Workspace {
 impl Workspace {
     /// `lift` is how far cut mode's lanes grow upward past their base
     /// height (frame detail, the encode rail); everything above moves with it.
-    fn new(vp: (f32, f32), visible: bool, cut: bool, lift: f32, slide: f32, side_slide: f32, detail_slide: f32, source_width: Option<f32>) -> Self {
+    // Keep the explicit geometry/pipeline inputs at this boundary.
+    #[allow(clippy::too_many_arguments)]
+    fn new(vp: (f32, f32), visible: bool, cut: bool, lift: f32, slide: f32, side_slide: f32, detail_slide: f32, source_width: Option<f32>, render_source: bool) -> Self {
         let (w, h) = vp;
         let none = RectPx { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
         // `rail` is what the layout gives the panel this frame; `panel` is
         // the panel's own width, and its rects start at `rail - panel` so
         // a half-open rail is the right-hand part of a whole one.
-        let full = source_width.unwrap_or_else(|| rail_full_width(w)).clamp(RAIL_MIN_W, (w * 0.45).clamp(180.0, 480.0));
+        let full = source_width.unwrap_or(SOURCES_DEFAULT_W).clamp(RAIL_MIN_W, (w * 0.45).clamp(180.0, 480.0));
         // Cut mode under CUT_COLUMNS_MIN_W drops its right column; the
         // rail collapses to the mini strip at the same width, so the two
         // columns go together and the lanes keep their room.
@@ -7288,8 +7478,8 @@ impl Workspace {
             // Timeline Edit (12:2): the source rail, the canvas and the
             // inspector share the top; the transport and the lanes run the
             // full width underneath (compact lanes on short windows). The
-            // rail keeps its focused inspector; its action row stays in
-            // Sources, where Duplicate / Add files live.
+            // rail keeps its focused inspector and reserves a row for Render
+            // above the transport when the focused source can be copied.
             let lanes = if h >= CUT_FULL_MIN_H { CUT_TIMELINE_H } else { CUT_TIMELINE_COMPACT_H } + lift;
             // The inspector keeps its width and slides past the right edge;
             // `side_in` is the part still inside, which the canvas reclaims.
@@ -7297,11 +7487,11 @@ impl Workspace {
             let side_in = (side_w * ease(side_slide)).round();
             let side = if side_in > 0.0 { side_w } else { 0.0 };
             let surface = Canvas::layout(RectPx { x:rail, y:HEADER_H, w:(w-side_in-rail).max(1.), h:(h-CUT_STATUS_H-HEADER_H).max(0.) },
-                true, Some(TimelineAttachment { x:0.,width:w,transport_height:CUT_TOOLBAR_H,lanes_height:lanes }));
+                true, Some(TimelineAttachment { x:0.,width:w,transport_height:CUT_TOOLBAR_H,lanes_height:lanes })).bar_below();
             let attached = surface.timeline.unwrap();
             let transport_y = attached.transport.y;
             let top = (transport_y - CUT_HEADER_H).max(1.0);
-            let (grip, inspector) = Self::detail(ox, panel, h, list_y, transport_y, detail_slide);
+            let (grip, inspector) = Self::detail(ox, panel, h, list_y, transport_y - if render_source { 40. } else { 0. }, detail_slide);
             return Self {
                 rail, panel, mini, inspector, grip,
                 list: list_of(transport_y, grip.y),
@@ -7319,7 +7509,7 @@ impl Workspace {
         // footer line above the inspector and the Duplicate / Add files
         // buttons under it — are not in the design and take their own
         // strips, so nothing overlaps the inspector's path line.
-        let (grip, inspector) = Self::detail(ox, panel, h, list_y, h - STATUS_H - RAIL_ACTIONS_H, detail_slide);
+        let (grip, inspector) = Self::detail(ox, panel, h, list_y, h - STATUS_H - RAIL_ACTIONS_H - if render_source { 34. } else { 0. }, detail_slide);
         Self {
             rail, panel, mini, canvas, surface, inspector, grip, timeline: none, side: none,
             list: list_of(h - STATUS_H, grip.y),
@@ -7346,8 +7536,12 @@ impl Workspace {
     }
 }
 
+/// The buttons over a source card's preview.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum SourceAction { Duplicate, Remove, Crop }
+
 #[derive(Clone, Copy)]
-enum Action { LaunchEditor(bool), ResetEdit, ApplyEdit, CancelEdit, Duplicate, OpenFiles, ToggleSources, ToggleInspector, ToggleDetail, Tool(usize), View(Mode), Autodetect, DetectionArea, UndoMask, RedoMask, Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
+enum Action { LaunchEditor(bool), ResetEdit, ApplyEdit, CancelEdit, Duplicate, RenderSource, OpenFiles, ToggleSources, ToggleInspector, ToggleDetail, Tool(usize), View(Mode), Autodetect, DetectionArea, UndoMask, RedoMask, Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
 #[derive(Clone, Copy, PartialEq)]
 enum CutAction { TogglePosters, FrameChanges(bool), TimeDisplay(bool),
     // Set in / out: no key or button reaches these while the feature is disabled.
@@ -7362,6 +7556,8 @@ fn inset_rect(r: RectPx, pad: f32) -> RectPx {
     let pad = pad.min((r.w - 1.0).max(0.0) / 2.0).min((r.h - 1.0).max(0.0) / 2.0);
     RectPx { x: r.x + pad, y: r.y + pad, w: r.w - pad * 2.0, h: r.h - pad * 2.0 }
 }
+// Keep the explicit geometry/pipeline inputs at this boundary.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn ui_label(items: &mut Vec<Item>, x: f32, y: f32, px: f32, color: [f32; 4], text: impl Into<String>, align: Align, width: f32) {
     items.push(Item::Text(TextItem { interface: true, align, valign: VAlign::Middle, max_width: Some(width.max(0.0)),
         ..TextItem::new(x, y, px, color, text) }));
@@ -7467,6 +7663,9 @@ const SOURCE_OVERLAY_W: f32 = 260.0;
 /// Below this the cards drop the label: preview and keycap only, the
 /// heading drops its title, and the inspector and Duplicate go.
 const SOURCE_COMPACT_W: f32 = 180.0;
+/// The Sources rail's width until the user drags its edge: the narrowest that
+/// still keeps the cards' name strip, the heading and the inspector.
+const SOURCES_DEFAULT_W: f32 = SOURCE_COMPACT_W;
 /// Below this the focused preview washes out under a big slot number.
 const SOURCE_KEYCAP_W: f32 = 140.0;
 /// The narrowest the rail's panel can be dragged.
@@ -7508,12 +7707,12 @@ const RAIL_GRIP_DOT_FILL: u32 = 0x2a2a2a;
 /// card renders, #444444), and the keycap plate (white @ 0.5 in Figma;
 /// linear blending wants less).
 pub(crate) const SOURCE_RING: u32 = 0xff9d00;
-/// Cut mode's snap control: keyframe glyph + switch.
-const CUT_SNAP_W: f32 = 70.0;
-/// The same with its "Snap to Keyframe" label, when the toolbar has room.
-const CUT_SNAP_LABEL_W: f32 = 196.0;
-const CUT_SWITCH_W: f32 = 36.0;
-const CUT_SWITCH_H: f32 = 20.0;
+/// Cut mode's snap control: the switch alone.
+const CUT_SNAP_W: f32 = 32.0;
+/// The same with its "Snap to Keyframes" label, when the toolbar has room.
+const CUT_SNAP_LABEL_W: f32 = 154.0;
+const CUT_SWITCH_W: f32 = 32.0;
+const CUT_SWITCH_H: f32 = 16.0;
 pub(crate) const SOURCE_EDGE: u32 = 0x444444;
 pub(crate) const SOURCE_EDGE_HOVER: u32 = 0x5c5c5c;
 const SOURCE_KEYCAP: [f32; 4] = [1.0, 1.0, 1.0, 0.3];
@@ -7533,6 +7732,282 @@ pub(crate) const WORKSPACE_DIM: [f32; 4] = [0.57, 0.57, 0.57, 1.0];
 pub(crate) const WORKSPACE_MUTED: [f32; 4] = [0.43, 0.43, 0.43, 1.0];
 pub(crate) const WORKSPACE_RULE: [f32; 4] = [0.09, 0.09, 0.09, 1.0];
 const CONTROL_BG: [f32; 4] = [26.0 / 255.0, 26.0 / 255.0, 26.0 / 255.0, 1.0];
+
+
+// ---- 2a "Instrument HUD, remixed" palette ----
+/// Signal accent — the one hot colour in the design, and where the whole
+/// palette comes from: 2a's lime read as a different product next to the
+/// logo. This is the mark's upper bar (`assets/logo.png`, #006dcf) lifted
+/// to #1580de, the one deliberate departure from the file: the bar itself
+/// clears only ~4:1 against the HUD's black, which is under the bar for
+/// 10–11px mono. Side by side with the mark it still reads as the same
+/// blue; illegible status text would not.
+/// The crop marquee's ratio presets, `A` to step through: (the keycap's
+/// label, w/h). Image pixels are taken as square, like everywhere else.
+const ASPECTS: [(&str, Option<f32>); 6] = [
+    ("ratio free", None),
+    ("ratio 16:9", Some(16.0 / 9.0)),
+    ("ratio 9:16", Some(9.0 / 16.0)),
+    ("ratio 4:3", Some(4.0 / 3.0)),
+    ("ratio 1:1", Some(1.0)),
+    ("ratio 2.39:1", Some(2.39)),
+];
+
+pub(crate) const ACCENT: [f32; 4] = [0.082, 0.502, 0.871, 1.0];
+/// A rubber band smaller than this on both axes is still a click.
+const BAND_MIN: f32 = 4.0;
+/// Logical pixels on each side of the playhead that start scrubbing in vacant lanes.
+const PLAYHEAD_GRAB: f32 = 8.0;
+/// Frame background / ink on the accent (#050506). Opaque: the window
+/// no longer lets the desktop through.
+const FRAME_BG: [f32; 4] = [0.0196, 0.0196, 0.0235, 1.0];
+pub(crate) const FRAME_INK: [f32; 4] = [0.0196, 0.0196, 0.0235, 1.0];
+const ERR: [f32; 4] = [1.0, 0.35, 0.3, 1.0];
+pub(crate) const TRACK: [f32; 4] = [1.0, 1.0, 1.0, 0.14];
+const MASK_RED: [f32; 4] = [0.906, 0.106, 0.141, 1.0];
+
+// Launch window — the design system's `Splash` surface.
+const LAUNCH_BG: [f32; 4] = [0.027, 0.027, 0.035, 1.0];
+/// Smallest window that still gets the plate. Under it the vanishing
+/// point leaves the frame and the horizon stops reading, so the launch
+/// window falls back to the mark centred on the flat ground.
+const SPLASH_MIN_W: f32 = 900.0;
+const SPLASH_MIN_H: f32 = 520.0;
+/// Where the plate's horizon is driven to, down the window.
+const HORIZON_Y: f32 = 0.578;
+/// Clear space each side of the mark at the plate's size.
+const LOCKUP_CLEAR: f32 = 80.0;
+/// The lockup's width, as a fraction of the frame (the card's 61%).
+const LOCKUP_W: f32 = 0.61;
+/// The mark stands ON the line: its baseline sits this fraction of its
+/// own height above it — the card's 5px under a 130px lockup.
+const LOCKUP_LIFT: f32 = 0.04;
+/// Three stacked shadows, (dy, blur, alpha) in the card lockup's px: a
+/// tight contact shadow, a wider fall, and an ambient halo that
+/// separates the metal from the lit horizon. Tighter than the card's
+/// (6/9, 14/20, 0/16): at the card's drops the tagline's shadow parts
+/// from the tagline and reads as a second, blurred line of type. Alphas
+/// run above the card's for the linear-blending reason the scrims do.
+const SHADOW_PASSES: [(f32, f32, f32); 3] = [(2.0, 4.0, 0.80), (5.0, 10.0, 0.55), (0.0, 9.0, 0.65)];
+/// The floor projection: pinhole distance as a multiple of the mark's
+/// width, the floor's tilt from the screen plane, and how much light
+/// the floor gives back.
+const FLOOR_PERSP: f32 = 1.36;
+const FLOOR_TILT: f32 = std::f32::consts::FRAC_PI_3; // 60° — shallower than the card's 72°, so it runs further toward the viewer
+const FLOOR_ALPHA: f32 = 0.15;
+/// How far below the horizon the reflection starts, as a fraction of the
+/// mark's height — a gap of floor between the tagline and its mirror,
+/// so the two never read as one doubled line.
+const FLOOR_DROP: f32 = 0.10;
+/// The brand's `void` (#06070a): the ground every Splash layer darkens to.
+const VOID: [f32; 4] = [0.024, 0.027, 0.039, 1.0];
+/// Ground under the traffic lights and under the message.
+const SPLASH_SCRIM: [f32; 4] = [0.024, 0.027, 0.039, 0.80];
+/// The brand's `scanline` token is white at 0.07, composited in sRGB;
+/// blended in linear space that would glow, so it runs far lower here.
+const SCANLINE: [f32; 4] = [1.0, 1.0, 1.0, 0.012];
+/// How far the foot's last line sits off the bottom edge, as a fraction
+/// of the frame (the card's 41px of 400).
+const FOOT_BOTTOM: f32 = 0.10;
+/// The foot's height (rule, instruction, formats and the two steps
+/// between them) — what centres the lockup in the bare fallback.
+const FOOT_H: f32 = 51.0;
+/// The instruction (#c3ccd6), the design system's `ink-muted` for the
+/// labels, and the hairline above them (#616b7b at half).
+const INSTRUCTION: [f32; 4] = [0.765, 0.800, 0.839, 1.0];
+const INK_MUTED: [f32; 4] = [0.604, 0.651, 0.706, 1.0];
+const RULE: [f32; 4] = [0.380, 0.420, 0.482, 0.5];
+/// The logo's own blue and red (the brand's `blue` #00adfa and `red`
+/// #fc0a1c), for the ticks either side of the formats.
+const BRAND_BLUE: [f32; 4] = [0.0, 0.678, 0.980, 1.0];
+const BRAND_RED: [f32; 4] = [0.988, 0.039, 0.110, 1.0];
+/// The status lamp (`green` #16d97e) and its glow.
+const LAMP: [f32; 4] = [0.086, 0.851, 0.494, 1.0];
+const LAMP_GLOW: [f32; 4] = [0.086, 0.851, 0.494, 0.07];
+/// What the launch window says it opens.
+const FORMATS: &str = "MP4 · MOV · MKV · Y4M";
+/// The recent row (the Splash design's recent files): 16:9 tiles on the
+/// 4px grid, spaced well apart, `radius-8`.
+const TILE_W: f32 = 132.0;
+const TILE_H: f32 = 74.0;
+const TILE_GAP: f32 = 64.0;
+const TILE_R: f32 = 8.0;
+/// A group's stack: each card behind the front one sits `STACK_STEP` px
+/// higher and `STACK_INSET` px narrower a side. The row reserves the
+/// full rise above every tile, so the header never moves as groups
+/// come and go.
+/// The hovered tile's lift: how much it grows, and how long the ease takes.
+const TILE_LIFT: f32 = 0.08;
+const TILE_LIFT_S: f32 = 0.15;
+const STACK_STEP: f32 = 5.0;
+const STACK_INSET: f32 = 6.0;
+const STACK_RISE: f32 = STACK_STEP * (recent::STACK as f32 - 1.0);
+/// Header line, the step between the row's lines, the metadata line.
+const RECENT_HEAD: f32 = 14.0;
+const RECENT_STEP: f32 = 8.0;
+const RECENT_META: f32 = 16.0;
+/// Floor kept clear above the row (under the horizon) and below it
+/// (over the foot).
+const RECENT_CLEAR: f32 = 16.0;
+/// The tile's recessed ground (the brand's `well`, #04050a).
+const WELL: [f32; 4] = [0.016, 0.020, 0.039, 1.0];
+/// The bevel: white hairlines. The design's sRGB alphas (0.16 all round,
+/// 0.34 on top) are run lower here because blending is linear-space.
+const BEVEL: [f32; 4] = [1.0, 1.0, 1.0, 0.09];
+const BEVEL_LIT: [f32; 4] = [1.0, 1.0, 1.0, 0.20];
+/// The corner chips: `void` at 0.85 under `ink` (#e8edf2).
+const CHIP_BG: [f32; 4] = [0.016, 0.020, 0.039, 0.85];
+const CHIP_INK: [f32; 4] = [0.910, 0.929, 0.949, 1.0];
+/// The brand's `ink-faint` (#7a8694): the key hint beside the header.
+/// Version, git hash (`+dirty` with uncommitted edits) and build time, stamped by
+/// build.rs. The launch window prints it so a screenshot says which build it is.
+const BUILD: &str = env!("ABNER_BUILD");
+
+fn build_label(w: f32, h: f32) -> Item {
+    Item::Text(TextItem {
+        align: Align::Right,
+        valign: VAlign::Middle,
+        tracking: 0.4,
+        ..TextItem::new(w - 16.0, h - 14.0, 9.5, INK_FAINT, format!("build {BUILD}"))
+    })
+}
+
+const INK_FAINT: [f32; 4] = [0.478, 0.525, 0.580, 1.0];
+
+/// The same stamp at the right end of the workspace status line. Its own
+/// placement is measured by the renderer (one right-aligned run);
+/// `status_build_width` is the `MONO_ADV` estimate of the room it takes,
+/// plus its gap, so the hint beside it steps left.
+pub(crate) fn status_build_label(items: &mut Vec<Item>, vp: (f32, f32), cy: f32) {
+    items.push(Item::Text(TextItem { interface: true, align: Align::Right, valign: VAlign::Middle, tracking: 0.4,
+        ..TextItem::new(vp.0 - 16.0, cy, 9.5, INK_FAINT, format!("build {BUILD}")) }));
+}
+pub(crate) fn status_build_width() -> f32 {
+    (6 + BUILD.chars().count()) as f32 * 9.5 * MONO_ADV + 16.0
+}
+
+// Crop marquee. The dimmer runs high for the reason the HUD's panels do
+// (see shader.wgsl): linear-space blending means a modest alpha barely
+// touches bright footage, and this one has to read as "not exported".
+const CROP_DIM: [f32; 4] = [0.0, 0.0, 0.0, 0.95];
+/// Outside the search area while detection runs: dimmed, still readable
+/// (blending is linear, so this alpha leaves roughly a third of the picture).
+const SEARCH_DIM: [f32; 4] = [0.0, 0.0, 0.0, 0.88];
+const MASK_HISTORY: usize = 24;
+const CROP_LINE: [f32; 4] = [1.0, 1.0, 1.0, 0.95];
+const CROP_INK: [f32; 4] = [0.0, 0.0, 0.0, 0.75];
+const CROP_LINE_W: f32 = 1.5;
+const CROP_DASH: f32 = 7.0;
+const CROP_GAP: f32 = 5.0;
+const CROP_HANDLE: f32 = 9.0;
+/// How far below fit a pinch may go while the crop marquee is up.
+const CROP_ZOOM_OUT: f32 = 0.8;
+/// Half-size of a corner's grab square — a little wider than it is drawn.
+const CROP_GRAB: f32 = 11.0;
+/// The marquee's label chips (Figma: white @0.12, flat, 10px #d1d1d1). The
+/// alpha is the linear-space equivalent of the design's sRGB 0.12 — at 0.12
+/// here a white wash reads several times brighter than in the mock.
+const CROP_CHIP: [f32; 4] = [0.0, 0.0, 0.0, 0.8];
+/// The guide lines running out of each marquee side across the canvas.
+const CROP_GUIDE: [f32; 4] = [1.0, 1.0, 1.0, 0.22];
+const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(350);
+const CROP_CHIP_PAD: (f32, f32) = (10.0, 3.0);
+/// Screen size the marquee needs before the corner coordinates show, and
+/// before the size/ratio label in the middle does.
+const CROP_LABELS_MIN: (f32, f32) = (180.0, 72.0);
+const CROP_LABEL_MIN: (f32, f32) = (130.0, 24.0);
+
+
+/// Transport strip: 13px pad + 32px controls + 11px gap + the status line.
+const TRANSPORT_H: f32 = 60.0;
+/// Persistent footer for tool, selection, zoom, export results and shortcut hints.
+/// Every page's footer bar is the Timeline's height, so its buttons fit.
+const STATUS_H: f32 = CUT_STATUS_H;
+/// Timeline footer: 6px around its compact action buttons.
+pub(crate) const CUT_STATUS_H: f32 = 38.0;
+/// Extra grab margin above/below the 5px seek track.
+const SEEK_GRAB: f32 = 9.0;
+/// Advance width of the monospace UI font, in em — used only to step
+/// between right-aligned status segments and keycap chips, never to
+/// place a glyph (the renderer measures those exactly).
+pub(crate) const MONO_ADV: f32 = 0.60;
+
+/// Logical height of a standard macOS titlebar. The window has no visible
+/// bar (`set_titlebar_glass` makes it transparent and runs the content
+/// under it), but the traffic-light buttons still float in that strip, so
+/// launch content clears them. The loaded workspace uses HEADER_H instead.
+const TITLEBAR_H: f32 = 28.0;
+
+/// The ratio a crop is shown with: a locked preset by its own name, a free
+/// rect as its reduced ratio while that stays readable (640×360 → 16:9),
+/// otherwise as `n.nn:1`.
+fn ratio_label(w: u32, h: u32, preset: Option<&str>) -> String {
+    if let Some(name) = preset {
+        return name.trim_start_matches("ratio ").to_string();
+    }
+    let gcd = |mut a: u32, mut b: u32| { while b != 0 { (a, b) = (b, a % b); } a.max(1) };
+    let g = gcd(w, h);
+    let (rw, rh) = (w / g, h / g);
+    if rw <= 32 && rh <= 32 { format!("{rw}:{rh}") } else { format!("{:.2}:1", w as f32 / h.max(1) as f32) }
+}
+
+/// How long a `notify` line stays in the status bar.
+const NOTICE_S: f32 = 3.0;
+
+/// RGBA frame → RGB PNG bytes. A decoded video frame's alpha is always
+/// opaque, so the channel is dropped: a quarter smaller and no consumer
+/// gets to treat the picture as translucent.
+fn encode_png_rgb(rgba: &[u8], w: u32, h: u32) -> anyhow::Result<Vec<u8>> {
+    anyhow::ensure!(rgba.len() >= (w as usize) * (h as usize) * 4, "frame buffer is short");
+    let rgb: Vec<u8> = rgba.as_chunks::<4>().0.iter().take((w * h) as usize).flat_map(|p| [p[0], p[1], p[2]]).collect();
+    let mut out = Vec::new();
+    let mut encoder = png::Encoder::new(&mut out, w, h);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header()?;
+    writer.write_image_data(&rgb)?;
+    writer.finish()?;
+    Ok(out)
+}
+
+fn name_of(path: &std::path::Path) -> String {
+    path.file_name().unwrap_or_default().to_string_lossy().into_owned()
+}
+
+pub(crate) fn fmt_time(t: f64) -> String {
+    let t = t.max(0.0);
+    let m = (t / 60.0) as u64;
+    format!("{m:02}:{:06.3}", t - m as f64 * 60.0)
+}
+
+/// `HH:MM:SS:FF`, non-drop: the frame count over the rounded rate.
+fn fmt_tc(t: f64, fps: f64) -> String {
+    let base = fps.round().max(1.0) as u64;
+    let frames = (t.max(0.0) * fps).round() as u64;
+    let (s, f) = (frames / base, frames % base);
+    format!("{:02}:{:02}:{:02}:{f:02}", s / 3600, s / 60 % 60, s % 60)
+}
+
+fn fmt_hms(t: f64) -> String {
+    let s = t.max(0.0) as u64;
+    format!("{:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+}
+
+/// A length, as short as it reads: `0:20`, `37:38`, `1:02:10`.
+fn fmt_span(t: f64) -> String {
+    let s = t.max(0.0).round() as u64;
+    if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
+}
+
+fn fmt_size(b: u64) -> String {
+    const MIB: f64 = 1024.0 * 1024.0;
+    let b = b as f64;
+    if b >= 1024.0 * MIB {
+        format!("{:.2} GiB", b / (1024.0 * MIB))
+    } else {
+        format!("{:.1} MiB", b / MIB)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -7622,6 +8097,12 @@ mod tests {
                     presets: vec![],
                 }
             }
+            fn spatial_inputs(&self) -> Vec<abner_processor_api::SpatialInputDescriptor> {
+                vec![abner_processor_api::SpatialInputDescriptor {
+                    key: "input".into(), title: "Mask".into(),
+                    kind: abner_processor_api::SpatialInputKind::Mask, required: true,
+                }]
+            }
             fn create(&self, _: usize, _: usize, _: &Value) -> Result<Box<dyn Session>, String> {
                 unreachable!("editing a spatial input does not render")
             }
@@ -7633,6 +8114,22 @@ mod tests {
         registry.register(Box::new(TestProcessor)).unwrap();
         app.set_processors(registry);
         app.activate(Action::Tool(4));
+        app.open_processor_picker();
+        app.key(Key::Enter);
+        let frame = app.tick(0., (1280.,800.), 1.);
+        let warnings: Vec<_> = frame.items.iter().filter_map(|item| match item {
+            Item::FrameIcon{x,y,index:14} => Some((*x+8.,*y+8.)), _ => None,
+        }).collect();
+        assert_eq!(warnings.len(),2,"chain and required mask both warn");
+        app.mouse_down(warnings[1].0,warnings[1].1);
+        assert!(app.mask_mode,"clicking the required mask opens its editor");
+        app.key(Key::Escape);
+        app.mouse_down(warnings[0].0,warnings[0].1);
+        assert!(app.mask_mode,"clicking the chain warning opens its editor");
+        app.key(Key::Enter);
+        let frame = app.tick(0., (1280.,800.), 1.);
+        assert!(!frame.items.iter().any(|item|matches!(item,Item::FrameIcon{index:14,..})),"applying a mask clears both warnings");
+        assert_eq!(frame.items.iter().filter(|item|matches!(item,Item::FrameIcon{index:15,..})).count(),2,"both places tick once the mask is applied");
         let id = app.processors.focused_id().unwrap().to_owned();
         for crop in [false, true] {
             for open in [true, false] {
@@ -7820,6 +8317,7 @@ mod tests {
     fn source_edge_drag_resizes_cards_without_selecting_or_seeking() {
         let Some(clip) = test_clip() else { return };
         let mut app = mk_app(&clip, 3);
+        app.set_sources_width(280.0);
         app.tick(0.0, (1280.0, 1200.0), 2.0);
         let before = app.source_row(0);
         let t = app.t;
@@ -7837,7 +8335,8 @@ mod tests {
             assert!((thumb.w / thumb.h - w as f32 / h as f32).abs() < 1e-5);
             assert!(thumb.h <= (app.workspace().panel - 32.0) * PORTRAIT_THUMB_MAX + 0.001, "a portrait preview stops at 4:3");
             let card = app.source_card(0);
-            assert_eq!((card.x, card.w), (thumb.x - 4.0, thumb.w + 8.0), "the ring hugs the preview");
+            assert!(card.x <= thumb.x - 4.0 && card.x + card.w >= thumb.x + thumb.w + 4.0, "the card contains the preview rim");
+            assert!((card.x + card.w / 2.0 - thumb.x - thumb.w / 2.0).abs() < 0.001, "portrait previews stay centered in label-width cards");
             assert!(thumb.h + 69.0 <= app.workspace().list.h + 0.001);
         }
         app.mouse_down(200.0, HEADER_H + 20.0);
@@ -7852,7 +8351,7 @@ mod tests {
         let mut app = mk_app(&clip, 3);
         let vp = (1280.0, 1200.0);
         app.tick(0.0, vp, 2.0);
-        app.mouse_down(280.0, HEADER_H + 20.0);
+        app.mouse_down(SOURCES_DEFAULT_W, HEADER_H + 20.0);
         app.cursor_moved(40.0, HEADER_H + 20.0);
         assert!(!app.show_sources, "past the snap point the rail folds");
         app.cursor_moved(150.0, HEADER_H + 20.0);
@@ -7872,13 +8371,12 @@ mod tests {
         app.mouse_up();
         assert!(app.show_sources);
         app.tick(RAIL_SLIDE_S * 2.0, vp, 2.0);
-        assert_eq!(app.workspace().rail, 280.0);
+        assert_eq!(app.workspace().rail, SOURCES_DEFAULT_W);
     }
 
     #[test]
     fn recent_tile_lift_eases_toward_the_hovered_slot_and_settles() {
-        let mut row = super::RecentRow::default();
-        row.hover = Some(1);
+        let mut row = super::RecentRow { hover: Some(1), ..Default::default() };
         assert!(row.animate(super::TILE_LIFT_S / 2.0));
         assert!((row.lift[1] - 0.5).abs() < 1e-4);
         assert_eq!(row.lift[0], 0.0);
@@ -8054,13 +8552,15 @@ mod tests {
         let mut app = mk_app(&clip, 1);
         for from in 0..6 {
             for to in 0..6 {
+                app.select_workspace_mode(0);
                 app.select_workspace_mode(from);
                 app.select_workspace_mode(to);
-                assert_eq!(app.workspace_mode(), to, "{from} -> {to}");
+                let expected = if from == 4 && matches!(to, 1 | 2) { 4 } else { to };
+                assert_eq!(app.workspace_mode(), expected, "{from} -> {to}");
                 let selected: Vec<_> = app.mode_selector().controls().into_iter()
                     .filter(|c| c.selected).collect();
                 assert_eq!(selected.len(), 1);
-                assert!(matches!(selected[0].action, Action::Tool(mode) if mode == to));
+                assert!(matches!(selected[0].action, Action::Tool(mode) if mode == expected));
             }
         }
         app.select_workspace_mode(0);
@@ -8086,6 +8586,22 @@ mod tests {
         assert_eq!(app.workspace_mode(), 3);
         for _ in 0..6 { app.key(Key::NextMode); }
         assert_eq!(app.workspace_mode(), 5, "Export is the last tab");
+    }
+
+    #[test]
+    fn process_crop_editor_fits_below_its_bar_and_can_zoom_out() {
+        let Some(clip)=test_clip() else{return};let mut app=mk_app(&clip,1);
+        app.select_workspace_mode(4);
+        // A window whose height limits the fit, as a portrait clip does.
+        app.tick(0.,(1600.,700.),1.);
+        app.start_crop(None);app.tick(0.,(1600.,700.),1.);
+        assert!(app.processors.open&&app.crop.is_some());
+        let top=app.content_rect(app.active).y;
+        assert!(top>=HEADER_H+ButtonBar::HEIGHT,"the top handles clear the editor bar ({top})");
+        app.cursor=(800.,400.);app.pinch(-0.5);
+        assert!((app.zoom-CROP_ZOOM_OUT).abs()<1e-5,"the marquee may zoom out past fit");
+        app.crop=None;app.zoom=1.;app.pinch(-0.5);
+        assert_eq!(app.zoom,1.,"without it a pinch stops at fit");
     }
 
     #[test]
@@ -8180,6 +8696,28 @@ mod tests {
     }
 
     #[test]
+    fn process_and_export_do_not_emit_hidden_source_tooltips() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        app.tick(0.0, (1280.0, 800.0), 1.0);
+        let button = app.source_hover_buttons(0)[0].0;
+        app.cursor = (button.x + 12.0, button.y + 12.0);
+        app.cursor_inside = true;
+        let mut source_items = Vec::new();
+        app.build_sources(&mut source_items);
+        assert!(source_items.iter().any(|i| matches!(i, Item::Text(t) if t.tooltip && t.text == "Duplicate source")));
+        for mode in [4, 5] {
+            app.zoom = 2.0;
+            app.center = (0.7, 0.6);
+            app.activate(Action::Tool(mode));
+            assert_eq!(app.zoom, 1.0);
+            assert_eq!(app.center, (0.5, 0.5));
+            let mut items = Vec::new();
+            app.build_sources(&mut items);
+            assert!(items.is_empty());
+        }
+    }
+    #[test]
     fn source_hover_buttons_duplicate_and_remove_the_target_card() {
         let Some(clip) = test_clip() else { return; };
         let mut app = mk_app(&clip, 2); app.vp = (1280.,800.);
@@ -8191,6 +8729,29 @@ mod tests {
         let remove = app.source_hover_buttons(2)[1].0;
         app.mouse_down(remove.x+12.,remove.y+12.); app.mouse_up();
         assert_eq!(app.videos.len(),2); assert!(clip.exists());
+    }
+
+    #[test]
+    fn source_crop_button_crops_that_source_and_reshapes_its_thumb() {
+        let Some(clip) = test_clip() else { return; };
+        let mut app = mk_app(&clip, 2); app.vp = (1280.,1100.);
+        let before = app.source_thumb(1);
+        let crop = app.source_hover_buttons(1)[2].0;
+        app.mouse_down(crop.x+12.,crop.y+12.); app.mouse_up();
+        assert_eq!(app.active,1);
+        assert!(app.mask_mode && app.crop.is_some());
+        let (w,h) = (app.videos[1].info.width as f32, app.videos[1].info.height as f32);
+        app.crop = Some(Crop { x: 0., y: 0., w: h/2., h: h/2. });
+        app.finish_editor(true);
+        assert!(app.videos[1].input_crop.is_some() && app.videos[0].input_crop.is_none());
+        let after = app.source_thumb(1);
+        assert!((after.w/after.h-1.).abs()<1e-3, "the card takes the crop's shape");
+        assert!((before.w/before.h-w/h).abs()<1e-3);
+        // From the timeline it is still the source that is cropped.
+        app.set_cut_mode(true);
+        app.crop_source(1);
+        assert!(matches!(app.editor.as_ref().unwrap().owner, crate::spatial::Owner::Source));
+        assert_eq!(app.crop, app.videos[1].input_crop);
     }
 
     #[test]
@@ -8212,7 +8773,7 @@ mod tests {
         let Some(clip) = test_clip() else { return };
         let mut app = mk_app(&clip, 2);
         app.vp = (1280.0, 800.0);
-        // Six 110px tabs on a 5px gap end at 763; the strip past them is bare.
+        // Four permanent tabs; temporary editor tabs share the same header area.
         let tabs = app.header_tabs();
         assert_eq!((tabs.x, tabs.w, tabs.h), (78.0, 455.0, TAB_H));
         assert!(app.titlebar_background(800.0, 20.0));
@@ -8220,22 +8781,17 @@ mod tests {
         assert!(!app.titlebar_background(100.0, 20.0));
         assert!(app.titlebar_background(600.0, 20.0), "no permanent editor tab");
         assert!(!app.titlebar_background(700.0, HEADER_H));
-        let original = app.mode_selector().controls();
         for mode in [3, 4, 2, 1, 0] {
+            app.select_workspace_mode(0);
             app.activate(Action::Tool(mode));
             let controls = app.mode_selector().controls();
             assert_eq!(controls.len(), if matches!(mode,1|2){5}else{4});
             assert_eq!(controls.iter().filter(|c| c.selected).count(), 1);
-            for (before, after) in original.iter().zip(&controls) {
-                assert_eq!(
-                    (before.r.x, before.r.y, before.r.w, before.r.h),
-                    (after.r.x, after.r.y, after.r.w, after.r.h),
-                    "mode changes cannot move the shared selector"
-                );
-                assert_eq!(
-                    after.selected,
-                    matches!(after.action, Action::Tool(i) if i == mode)
-                );
+            let during = app.header_tabs();
+            assert_eq!((tabs.x,tabs.y,tabs.w,tabs.h),(during.x,during.y,during.w,during.h));
+            for control in &controls {
+                assert!(!app.titlebar_background(control.r.x + control.r.w/2.,control.r.y + control.r.h/2.));
+                assert_eq!(control.selected,matches!(control.action,Action::Tool(i) if i == mode));
             }
         }
         app.set_cut_mode(true);
@@ -8340,10 +8896,10 @@ mod tests {
         let mut app = mk_app(&clip, 2);
         app.vp = (1280.0, 800.0);
         let tabs = app.header_tabs();
-        assert_eq!(app.workspace().rail, 280.0);
+        assert_eq!(app.workspace().rail, SOURCES_DEFAULT_W);
         assert!(app.controls().iter().any(|c| matches!(c.action, Action::ToggleSources) && c.selected));
         let r = app.sidebar_toggle();
-        assert!(r.x + r.w <= 280.0 && r.y >= HEADER_H && r.y + r.h <= HEADER_H + RAIL_HEAD_H, "the toggle rides the rail's heading strip");
+        assert!(r.x + r.w <= SOURCES_DEFAULT_W && r.y >= HEADER_H && r.y + r.h <= HEADER_H + RAIL_HEAD_H, "the toggle rides the rail's heading strip");
         assert_eq!(tabs.x, 78.0, "the selector starts where the toggle used to");
         app.mouse_down(r.x + 16.0, r.y + 14.0);
         app.mouse_up();
@@ -8353,9 +8909,9 @@ mod tests {
         // and sit partly off-screen; settled, the rail is gone.
         app.tick(RAIL_SLIDE_S / 2.0, (1280.0, 800.0), 2.0);
         let mid = app.workspace();
-        assert!(mid.rail > 0.0 && mid.rail < 280.0, "{}", mid.rail);
-        assert_eq!((mid.panel, mid.canvas.x, mid.list.w), (280.0, mid.rail, 280.0));
-        assert_eq!(app.source_row(0).w, 256.0);
+        assert!(mid.rail > 0.0 && mid.rail < SOURCES_DEFAULT_W, "{}", mid.rail);
+        assert_eq!((mid.panel, mid.canvas.x, mid.list.w), (SOURCES_DEFAULT_W, mid.rail, SOURCES_DEFAULT_W));
+        assert_eq!(app.source_row(0).w, SOURCES_DEFAULT_W - 24.0);
         assert!(app.source_row(0).x < 12.0);
         let desc = app.tick(RAIL_SLIDE_S, (1280.0, 800.0), 2.0);
         assert!(!desc.animating || app.playing);
@@ -8364,7 +8920,7 @@ mod tests {
         // keycap per clip, the cards and their controls gone.
         assert!(l.mini);
         assert_eq!((l.rail, l.canvas.x, l.canvas.w, l.panel, l.inspector.h), (RAIL_MINI_W, RAIL_MINI_W, 1280.0 - RAIL_MINI_W, 0.0, 0.0));
-        assert!(app.controls().iter().all(|c| !matches!(c.action, Action::Duplicate | Action::OpenFiles)));
+        assert!(app.controls().iter().all(|c| !matches!(c.action, Action::Duplicate | Action::OpenFiles | Action::RenderSource)));
         assert!(app.controls().iter().any(|c| matches!(c.action, Action::ToggleSources) && !c.selected));
         let t = app.header_tabs();
         assert_eq!((t.x, t.y, t.w, t.h), (tabs.x, tabs.y, tabs.w, tabs.h));
@@ -8388,7 +8944,7 @@ mod tests {
         app.mouse_up();
         assert!(app.show_sources && app.mask_mode);
         app.tick(RAIL_SLIDE_S, (1280.0, 800.0), 2.0);
-        assert_eq!(app.workspace().rail, 280.0);
+        assert_eq!(app.workspace().rail, SOURCES_DEFAULT_W);
         // Timeline mode keeps the rail beside the video and a click there
         // re-cuts the chosen clip; the toggle hides it there too.
         app.key(Key::Char('m'));
@@ -8396,7 +8952,7 @@ mod tests {
         app.set_cut_mode(true);
         assert!(app.cut_mode);
         let l = app.workspace();
-        assert_eq!((l.rail, l.canvas.x, l.transport.x, l.timeline.x), (280.0, 280.0, 0.0, 0.0));
+        assert_eq!((l.rail, l.canvas.x, l.transport.x, l.timeline.x), (SOURCES_DEFAULT_W, SOURCES_DEFAULT_W, 0.0, 0.0));
         assert!(l.canvas.x + l.canvas.w <= l.side.x);
         let second = app.source_row(1);
         assert!(second.y + second.h <= l.list.y + l.list.h, "two cards fit at this height");
@@ -8429,7 +8985,7 @@ mod tests {
         app.tick(RAIL_SLIDE_S, (1280.0, 1100.0), 2.0);
         let l = app.workspace();
         assert!(!app.show_inspector && app.show_sources);
-        assert_eq!((l.side.w, l.canvas.x + l.canvas.w, l.rail), (0.0, 1280.0, 280.0));
+        assert_eq!((l.side.w, l.canvas.x + l.canvas.w, l.rail), (0.0, 1280.0, SOURCES_DEFAULT_W));
         app.mouse_down(t.x + 16.0, t.y + 14.0);
         app.mouse_up();
         app.tick(RAIL_SLIDE_S, (1280.0, 1100.0), 2.0);
@@ -8441,6 +8997,41 @@ mod tests {
         let info = &app.videos[0].info;
         assert!(((card.w - 8.0) / thumb_h - info.width as f32 / info.height as f32).abs() < 1e-5);
         assert_eq!(app.source_row(1).y - card.y, app.source_pitch(0));
+    }
+
+    #[test]
+    fn sources_scroll_by_pixels_and_hit_partially_visible_rows() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 12);
+        app.vp = (720.0, 480.0);
+        for expanded in [true, false] {
+            app.set_sources_visible(expanded);
+            app.source_scroll = 0.0;
+            let list = app.workspace().list;
+            app.cursor_moved(20.0, list.y + 12.0);
+            let before = app.source_row(0).y;
+            app.scroll(0.0, -7.5);
+            assert_eq!(app.source_first(), 0);
+            assert!((app.source_row(0).y - (before - 7.5)).abs() < 0.001);
+            app.scroll(0.0, -2.25);
+            assert!((app.source_scroll_offset() - 9.75).abs() < 0.001);
+
+            // The last visible row is included even when only its top fits.
+            let last = app.source_first() + app.source_capacity() - 1;
+            let row = app.source_card(last);
+            assert!(row.y < list.y + list.h);
+            app.mouse_down(row.x + row.w / 2.0, row.y + 1.0);
+            app.mouse_up();
+            assert_eq!(app.active, last);
+
+            app.cursor_moved(20.0, list.y + 12.0);
+            app.scroll(0.0, -100000.0);
+            assert_eq!(app.source_scroll_offset(), app.source_scroll_max());
+            let end = app.source_row(11);
+            assert!(end.y + end.h <= list.y + list.h + 0.001);
+            app.scroll(0.0, 100000.0);
+            assert_eq!(app.source_scroll_offset(), 0.0);
+        }
     }
 
     #[test]
@@ -8490,14 +9081,22 @@ mod tests {
     #[test]
     fn canvas_bar_metrics_match_across_all_pages() {
         for vp in [(720.,480.),(1280.,800.),(1920.,1080.)] {
-            let sources=Workspace::new(vp,true,false,0.,1.,1.,1.,None);
-            let timeline=Workspace::new(vp,true,true,0.,1.,1.,1.,None);
+            let sources=Workspace::new(vp,true,false,0.,1.,1.,1.,None,false);
+            let timeline=Workspace::new(vp,true,true,0.,1.,1.,1.,None,false);
             let export=crate::export_page::Layout::new(vp);
-            let process=crate::processor_gui::Panel::viewer(vp);
-            for viewport in [sources.canvas,timeline.canvas,export.video,process] {
-                assert_eq!(viewport.y,HEADER_H+ButtonBar::HEIGHT);
-            }
-            for bar in [sources.surface.button_bar.unwrap(),timeline.surface.button_bar.unwrap(),export.canvas.button_bar.unwrap()] {
+            let process=crate::processor_gui::Panel::default().viewer(vp);
+            assert_eq!(sources.canvas.y,HEADER_H+ButtonBar::HEIGHT);
+            // Export has no bar: its picture meets the header.
+            assert_eq!(export.video.y,HEADER_H);
+            assert!(export.canvas.button_bar.is_none());
+            // Process and Timeline keep the same bar under the picture, which meets the header.
+            assert_eq!(process.y,HEADER_H);
+            assert_eq!(timeline.canvas.y,HEADER_H);
+            let under=timeline.surface.button_bar.unwrap().r;
+            assert_eq!((under.y,under.h),(timeline.canvas.y+timeline.canvas.h,ButtonBar::HEIGHT));
+            assert_eq!(under.y+under.h,timeline.transport.y);
+            {
+                let bar = sources.surface.button_bar.unwrap();
                 assert_eq!(bar.r.h,ButtonBar::HEIGHT);
                 let control=bar.control(bar.content().x,60.);
                 assert_eq!(control.y,HEADER_H+ButtonBar::PADDING_Y);
@@ -8524,7 +9123,7 @@ mod tests {
         assert!(((pointer.1-picture.y)/picture.h-0.4).abs()<0.001);
         let zoom=app.zoom;
         let layout=crate::export_page::Layout::new(app.vp);
-        for r in [layout.canvas.button_bar.unwrap().r,layout.transport,layout.sidebar] {
+        for r in [layout.transport,layout.sidebar] {
             app.cursor_moved(r.x+10.,r.y+10.);
             app.pinch(0.5);
             assert_eq!(app.zoom,zoom);
@@ -8631,6 +9230,114 @@ mod tests {
     /// worker hands back a decodable RGB PNG at the clip's native size, and
     /// the menu is dead without a clip.
     #[test]
+    fn source_render_visibility_and_compact_layout() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.can_render_source()));
+        for width in [110., 180., 210., 280.] {
+            app.source_width = Some(width);
+            let controls = app.controls();
+            let render = controls.iter().find(|c| matches!(c.action, Action::RenderSource)).unwrap();
+            let add = controls.iter().find(|c| matches!(c.action, Action::OpenFiles)).unwrap();
+            assert_eq!(render.label, "Render");
+            assert!(render.r.y + render.r.h <= add.r.y);
+            assert!(render.r.w >= 86.);
+            let ws = app.workspace();
+            assert!(ws.inspector.y + ws.inspector.h <= render.r.y);
+        }
+        app.videos[0].input_crop = Some(Crop { x: 0., y: 0., w: 64., h: 64. });
+        assert!(!app.can_render_source());
+        assert!(!app.controls().iter().any(|c| matches!(c.action, Action::RenderSource)));
+        app.videos[0].input_crop = None;
+        app.set_cut_mode(true);
+        assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.cut.as_ref().is_some_and(|c| !c.scanning())));
+        let cut = app.cut.as_mut().unwrap();
+        cut.snap = Snap::Frame;
+        cut.split(0.5);
+        assert!(!app.can_render_source());
+    }
+
+    #[test]
+    fn source_render_is_drawn_and_clickable_on_single_file_timeline() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        app.set_cut_default(true); // Same startup path as the executable.
+        assert!(app.cut_mode);
+        assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.can_render_source()));
+        let render = app.controls().into_iter().find(|c| matches!(c.action, Action::RenderSource))
+            .expect("Timeline must expose Render in its Sources pane");
+        let ws = app.workspace();
+        assert!(render.r.y + render.r.h <= ws.transport.y);
+        assert!(ws.inspector.y + ws.inspector.h <= render.r.y);
+        let mut items = Vec::new();
+        app.build_cut_hud(&mut items, app.vp);
+        assert!(items.iter().any(|item| matches!(item, Item::Label(t)
+            if t.string == "Render" && t.rect.y < ws.transport.y)), "button must be painted, not just hit-testable");
+        app.mouse_down(render.r.x + render.r.w / 2., render.r.y + render.r.h / 2.);
+        assert!(app.source_render.is_some(), "click must launch the source copy");
+        assert!(tick_until(&mut app, Duration::from_secs(15), |a| a.source_render.is_none()));
+        for cmd in app.take_cmds() {
+            if let Cmd::AddRendered(path) = cmd { std::fs::remove_file(path).unwrap(); }
+        }
+    }
+
+    #[test]
+    fn source_render_copies_trim_and_retains_original() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        app.set_cut_mode(true);
+        assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.cut.as_ref().is_some_and(|c| !c.scanning())));
+        let cut = app.cut.as_mut().unwrap();
+        cut.set_in(0.); cut.set_out(1.); assert!(cut.cut_selection());
+        app.set_cut_mode(false);
+        assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.can_render_source()));
+        app.render_source();
+        assert!(app.control_dead(&Action::RenderSource));
+        app.render_source(); // A second click cannot start another job.
+        assert!(tick_until(&mut app, Duration::from_secs(15), |a| a.source_render.is_none()));
+        let paths: Vec<_> = app.take_cmds().into_iter().filter_map(|c| match c {
+            Cmd::AddRendered(p) => Some(p), _ => None,
+        }).collect();
+        assert_eq!(paths.len(), 1, "{:?}", app.fresh_notice());
+        let dest = &paths[0];
+        assert_eq!(dest.parent(), clip.parent());
+        let info = probe::probe(dest).unwrap();
+        assert!((info.duration - 3.).abs() < 0.1, "{}", info.duration);
+        let original = crate::media_io::Input::open(&clip).unwrap();
+        let rendered = crate::media_io::Input::open(dest).unwrap();
+        let ov = original.video().unwrap(); let rv = rendered.video().unwrap();
+        let start = original.tracks[ov].samples.iter().position(|s| (s.pts - 1.).abs() < 0.0001).unwrap();
+        for i in 0..rendered.tracks[rv].samples.len() {
+            assert_eq!(original.data(ov, start+i).unwrap(), rendered.data(rv, i).unwrap());
+        }
+        // The runner sends the result through this same additive load path.
+        app.add_videos(vec![mk_video(dest)], false);
+        assert_eq!(app.videos.len(), 2);
+        assert_eq!(app.videos[0].info.path, clip);
+        assert_eq!(app.videos[app.active].info.path, *dest);
+        let second = crate::media_io::render_copy(&clip, &[(1., 4.)], &[]).unwrap();
+        assert_ne!(*dest, second);
+        assert!(dest.exists());
+        drop(app);
+        std::fs::remove_file(dest).unwrap();
+        std::fs::remove_file(second).unwrap();
+    }
+
+    #[test]
+    fn source_render_failure_does_not_add_a_source() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.source_render = Some(rx);
+        tx.send(Err("disk full".into())).unwrap();
+        app.poll_source_render();
+        assert!(app.source_render.is_none());
+        assert!(app.fresh_notice().unwrap().contains("disk full"));
+        assert!(!app.take_cmds().iter().any(|c| matches!(c, Cmd::AddRendered(_))));
+        assert_eq!(app.videos.len(), 1);
+    }
+
+    #[test]
     fn lossless_export_is_disabled_for_applied_crops() {
         let Some(clip) = test_clip() else { return };
         let mut app = mk_app(&clip, 1);
@@ -8686,6 +9393,7 @@ mod tests {
     fn crop_marquee_drags_and_exports_mask_and_video_at_one_size() {
         let Some(clip) = test_clip() else { return };
         let mut app = mk_app(&clip, 2);
+        app.set_sources_width(280.0);
         app.key(Key::Char('m'));
         // The export needs real pixels, so wait for a decoded frame.
         assert!(
@@ -8846,7 +9554,7 @@ mod tests {
         Some(clip)
     }
 
-    fn mk_video(clip: &PathBuf) -> Video {
+    fn mk_video(clip: &std::path::Path) -> Video {
         let info = probe::probe(clip).expect("probe");
         let player = crate::player::Player::spawn(
             clip,
@@ -8863,7 +9571,7 @@ mod tests {
     /// A playing app: most tests drive the clock, so they opt out of the
     /// paused-on-open default (`opened_clips_sit_paused_on_their_first_frame`
     /// covers that).
-    fn mk_app(clip: &PathBuf, n: usize) -> App {
+    fn mk_app(clip: &std::path::Path, n: usize) -> App {
         let mut cfg = crate::config::Config::default();
         cfg.playback.start_paused = false;
         App::new((0..n).map(|_| mk_video(clip)).collect(), &cfg)
@@ -8905,6 +9613,7 @@ mod tests {
         assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.cut.as_ref().is_some_and(|c| !c.scanning())));
         assert!(tick_until(&mut app, Duration::from_secs(5), |a| a.t > 2.3));
         app.key(Key::Space);
+        app.cut_tab = 0;
         for _ in 0..3 { app.tick(0.0, (1280.0, 800.0), 2.0); }
         let side = app.cut_side();
         let add = |app: &mut App| { app.mouse_down(side.add_btn.x + 4.0, side.add_btn.y + 4.0); app.mouse_up(); };
@@ -9122,6 +9831,11 @@ mod tests {
         assert_eq!(app.cut.as_ref().unwrap().chapters.len(), 2);
         assert!(!app.cut.as_ref().unwrap().facts.chips.is_empty(), "the stream chips never arrived");
 
+        // The inspector opens on Info; the chapters tab is the first icon.
+        assert_eq!(app.cut_tab, 1);
+        let side = app.cut_side();
+        app.mouse_down(side.tab[0].x + 4.0, side.tab[0].y + 4.0);
+        app.mouse_up();
         // Chapter rows seek to their chapter.
         assert_eq!(app.cut_tab, 0);
         let rows = app.cut_chapter_rows();
@@ -9147,7 +9861,9 @@ mod tests {
                         "overlapping toolbar controls: {} / {}", c.label, other.label);
                 }
             }
-            assert!(app.cut_tools_x() < app.cut_clock_x());
+            // Steps, clock, split tool, then zoom and the snap switch at the end.
+            assert!(app.cut_clock_x() < app.cut_tools_x());
+            assert!(app.cut_tools_x() + 32.0 <= app.cut_snap_rect().x);
         }
         app.vp = original_vp;
         let press = |app: &mut App, want: CutAction| {
@@ -9351,9 +10067,9 @@ mod tests {
         let frame = app.tick(0.0, vp, 1.0);
         let track = frame.items.iter().rev().find_map(|item| match item {
             Item::Rect(r) if r.r.h == 4.0 && r.r.w > 100.0
-                && r.r.x > crate::processor_gui::Panel::viewer(vp).x
-                && r.r.y > crate::processor_gui::Panel::viewer(vp).y
-                    + crate::processor_gui::Panel::viewer(vp).h => Some(r.r),
+                && r.r.x > crate::processor_gui::Panel::default().viewer(vp).x
+                && r.r.y > crate::processor_gui::Panel::default().viewer(vp).y
+                    + crate::processor_gui::Panel::default().viewer(vp).h => Some(r.r),
             _ => None,
         }).expect("processor seek track");
         app.mouse_down(track.x + track.w * 0.3, track.y);
@@ -9390,7 +10106,7 @@ mod tests {
         app.activate(Action::Tool(4));
         app.playing = false;
         let frame = app.tick(0.0, vp, 1.0);
-        let canvas = crate::processor_gui::Panel::viewer(vp);
+        let canvas = crate::processor_gui::Panel::default().viewer(vp);
         let track = frame.items.iter().rev().find_map(|item| match item {
             Item::Rect(r) if r.r.h == 4.0 && r.r.w > 100.0
                 && r.r.x > canvas.x && r.r.y > canvas.y + canvas.h => Some(r.r),
@@ -9553,6 +10269,56 @@ mod tests {
         app.cut_drag_to(x + 41.0);
         assert!(app.t > dragged, "and keeps scrubbing without a dead zone");
         app.mouse_up();
+    }
+
+    /// Trimming a clip's right edge shows that clip's last frame as the edge
+    /// moves — while the pointer is still moving, not once it rests — and
+    /// leaves the playhead on it; a left edge shows the clip's first frame.
+    #[test]
+    fn right_edge_drag_previews_the_last_kept_frame() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        let vp = (1280.0, 720.0);
+        app.playing = false;
+        app.set_cut_mode(true);
+        let settle = |app: &mut App| for _ in 0..40 {
+            app.tick(0.016, vp, 1.0);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        settle(&mut app);
+        let lane = app.cut_lanes().video;
+        let (dur, pps, t0) = { let c = app.cut.as_mut().unwrap(); c.snap = Snap::Frame; (c.duration, c.pps, c.t0) };
+        let frame = 1.0 / app.fps;
+        let x_of = |t: f64| lane.x + ((t - t0) * pps) as f32;
+        let y = lane.y + lane.h / 2.0;
+        let drag = |app: &mut App, from: f64, to: f64| {
+            app.cursor_moved(x_of(from) - 3.0, y);
+            app.mouse_down(x_of(from) - 3.0, y);
+            assert!(matches!(app.cut_drag, Some(CutDrag::Edge(_))));
+            for k in 1..=30 {
+                app.cursor_moved(x_of(from + (to - from) * k as f64 / 30.0), y);
+                app.tick(0.016, vp, 1.0);
+                std::thread::sleep(std::time::Duration::from_millis(8));
+            }
+        };
+        // The clip's own end, pulled in to 60% of the clip.
+        let to = dur * 0.6;
+        drag(&mut app, dur, to);
+        let shown = app.videos[0].shown_pts;
+        assert!(shown > 0.5 && shown < dur - 0.2, "the picture follows the moving edge, shown {shown:.3}");
+        app.mouse_released();
+        settle(&mut app);
+        let end = app.cut.as_ref().unwrap().keeps()[0].1;
+        assert!((end - to).abs() < frame, "the edge is where it was dropped");
+        assert!((app.t - (end - frame)).abs() < 1e-3, "the playhead is on the last kept frame: {:.4} vs edge {end:.4}", app.t);
+        assert!((app.videos[0].shown_pts - app.t).abs() < 1e-3);
+        // The clip's start: the first kept frame, at the edge itself.
+        drag(&mut app, 0.0, dur * 0.2);
+        app.mouse_released();
+        settle(&mut app);
+        let start = app.cut.as_ref().unwrap().keeps()[0].0;
+        assert!(start > 0.0 && (app.t - start).abs() < 1e-3);
+        assert!((app.videos[0].shown_pts - start).abs() < 1e-3);
     }
 
     /// Resting on the timeline prefetches the frame a click there would
@@ -9973,6 +10739,9 @@ mod tests {
         assert!(tick_until(&mut app, Duration::from_secs(5), |a| a.started));
         app.key(Key::Char('t'));
         assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.cut.as_ref().is_some_and(|c| !c.scanning() && c.pps > 0.0)));
+        assert!(tick_until(&mut app, Duration::from_secs(10), |a| !a.cut.as_ref().unwrap().reading_wave()));
+        // Give the band a deterministic audio lane, independent of worker timing.
+        app.cut.as_mut().unwrap().wave = vec![128; 100];
         app.playing = false;
         for t in [1.0, 2.0, 3.0] { assert!(app.cut.as_mut().unwrap().split(t)); }
         assert_eq!(app.cut.as_ref().unwrap().segments().len(), 4);
@@ -10017,14 +10786,14 @@ mod tests {
         assert!(matches!(app.cut_drag, Some(CutDrag::Band { add: false, .. })));
         assert!(app.cut_picks.is_empty(), "a plain band starts from nothing");
         app.cursor_moved(x_of(&app, 3.5), v.y + v.h / 2.0);
-        assert_eq!(app.cut_picks, vec![(1.0, 2.0, false), (2.0, 3.0, false), (3.0, 4.0, false)]);
+        assert_eq!(app.cut_picks, vec![(1.0, 2.0, false), (2.0, 3.0, false), (3.0, 4.0, false), (1.0, 2.0, true), (2.0, 3.0, true), (3.0, 4.0, true)]);
         let mut items = Vec::new();
         app.build_cut_timeline(&mut items);
         assert!(items.iter().any(|i| matches!(i, Item::Rect(r) if r.border_w == 1.0 && r.border_color == ACCENT)), "the band is drawn");
         app.cursor_moved(x_of(&app, 2.5), v.y + v.h / 2.0);
-        assert_eq!(app.cut_picks, vec![(1.0, 2.0, false), (2.0, 3.0, false)], "shrinking the band drops clips again");
+        assert_eq!(app.cut_picks, vec![(1.0, 2.0, false), (2.0, 3.0, false), (1.0, 2.0, true), (2.0, 3.0, true)], "shrinking the band drops clips again");
         app.mouse_up();
-        assert_eq!(app.cut_picks.len(), 2, "the picks outlive the band");
+        assert_eq!(app.cut_picks.len(), 4, "the picks outlive the band");
         assert_eq!(app.t, held, "a band does not move the playhead");
 
         // The band also starts from the chapter row above the picture.
@@ -10046,7 +10815,7 @@ mod tests {
         app.mouse_down_with_mods(x_of(&app, 2.5), lanes.subs.y + 2.0, false, true, false);
         app.cursor_moved(x_of(&app, 3.5), v.y + v.h / 2.0);
         app.mouse_up();
-        assert_eq!(app.cut_picks, vec![(0.0, 1.0, false), (2.0, 3.0, false), (3.0, 4.0, false)]);
+        assert_eq!(app.cut_picks, vec![(0.0, 1.0, false), (2.0, 3.0, false), (3.0, 4.0, false), (2.0, 3.0, true), (3.0, 4.0, true)]);
 
         // J joins adjacent picks into one clip; with an unpicked clip between
         // them it is dead — on the key and on the footer button alike.
@@ -10056,7 +10825,7 @@ mod tests {
         app.key(Key::Char('j'));
         assert_eq!(app.cut.as_ref().unwrap().splits(), &[1.0, 2.0, 3.0], "a dead Join changes nothing");
         assert!(app.cut.as_ref().unwrap().status.contains("adjacent"));
-        assert_eq!(app.cut_picks.len(), 3, "and keeps the picks");
+        assert_eq!(app.cut_picks.len(), 5, "and keeps the picks");
         app.cut_picks = vec![(2.0, 3.0, false), (3.0, 4.0, false), (3.0, 4.0, true)];
         assert_eq!(app.join_picks(), Some(vec![(2.0, 3.0), (3.0, 4.0)]), "sound and picture rows are one clip");
         app.mouse_down(join.r.x + join.r.w / 2.0, join.r.y + join.r.h / 2.0);
@@ -10067,7 +10836,7 @@ mod tests {
         assert!(app.cut.as_ref().unwrap().status.contains("two or more"));
         app.key(Key::Undo);
         assert_eq!(app.cut.as_ref().unwrap().splits(), &[1.0, 2.0, 3.0]);
-        app.cut_picks = vec![(0.0, 1.0, false), (2.0, 3.0, false), (3.0, 4.0, false)];
+        app.cut_picks = vec![(0.0, 1.0, false), (2.0, 3.0, false), (3.0, 4.0, false), (2.0, 3.0, true), (3.0, 4.0, true)];
 
         // Backspace cuts them all; one undo brings them all back.
         app.key(Key::Backspace);
@@ -10257,7 +11026,10 @@ mod tests {
         assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.cut.as_ref().is_some_and(|c| !c.scanning())));
         assert_eq!(app.cut.as_ref().unwrap().keys.len(), 4);
         let l = app.workspace();
-        assert_eq!(l.canvas.y + l.canvas.h, l.transport.y);
+        // The canvas, its bar underneath, then the transport.
+        let under = l.surface.button_bar.unwrap().r;
+        assert_eq!(l.canvas.y + l.canvas.h, under.y);
+        assert_eq!(under.y + under.h, l.transport.y);
         assert_eq!(l.transport.y + l.transport.h, l.timeline.y);
         assert_eq!(l.canvas.x + l.canvas.w, l.side.x);
         let lanes = app.cut_lanes();
@@ -10276,7 +11048,7 @@ mod tests {
 
         // ⇧→ lands on the next keyframe, exactly.
         app.seek_all(2.2, true);
-        app.key(Key::KeyRight);
+        app.key(Key::NextKeyframe);
         assert_eq!(app.t, 3.0);
 
         // Playing into the cut resumes at its end.
@@ -10355,6 +11127,7 @@ mod tests {
     fn option_drag_duplicates_only_the_dragged_source_on_release() {
         let Some(clip) = test_clip() else { return };
         let mut app = mk_app(&clip, 2);
+        app.set_sources_width(280.0);
         app.playing = false;
         app.tick(0.0, (1280.0, 800.0), 2.0);
         let row = app.source_row(0);
@@ -10574,278 +11347,5 @@ mod tests {
         // Both streams show the same frame after stepping.
         let (a, b) = (app.videos[0].shown_pts, app.videos[1].shown_pts);
         assert!((a - b).abs() < d * 0.5, "steps desynced the streams: {a:.4} vs {b:.4}");
-    }
-}
-
-// ---- 2a "Instrument HUD, remixed" palette ----
-/// Signal accent — the one hot colour in the design, and where the whole
-/// palette comes from: 2a's lime read as a different product next to the
-/// logo. This is the mark's upper bar (`assets/logo.png`, #006dcf) lifted
-/// to #1580de, the one deliberate departure from the file: the bar itself
-/// clears only ~4:1 against the HUD's black, which is under the bar for
-/// 10–11px mono. Side by side with the mark it still reads as the same
-/// blue; illegible status text would not.
-/// The crop marquee's ratio presets, `A` to step through: (the keycap's
-/// label, w/h). Image pixels are taken as square, like everywhere else.
-const ASPECTS: [(&str, Option<f32>); 6] = [
-    ("ratio free", None),
-    ("ratio 16:9", Some(16.0 / 9.0)),
-    ("ratio 9:16", Some(9.0 / 16.0)),
-    ("ratio 4:3", Some(4.0 / 3.0)),
-    ("ratio 1:1", Some(1.0)),
-    ("ratio 2.39:1", Some(2.39)),
-];
-
-pub(crate) const ACCENT: [f32; 4] = [0.082, 0.502, 0.871, 1.0];
-/// A rubber band smaller than this on both axes is still a click.
-const BAND_MIN: f32 = 4.0;
-/// Logical pixels on each side of the playhead that start scrubbing in vacant lanes.
-const PLAYHEAD_GRAB: f32 = 8.0;
-/// Frame background / ink on the accent (#050506). Opaque: the window
-/// no longer lets the desktop through.
-const FRAME_BG: [f32; 4] = [0.0196, 0.0196, 0.0235, 1.0];
-pub(crate) const FRAME_INK: [f32; 4] = [0.0196, 0.0196, 0.0235, 1.0];
-const ERR: [f32; 4] = [1.0, 0.35, 0.3, 1.0];
-pub(crate) const TRACK: [f32; 4] = [1.0, 1.0, 1.0, 0.14];
-const MASK_RED: [f32; 4] = [0.906, 0.106, 0.141, 1.0];
-
-// Launch window — the design system's `Splash` surface.
-const LAUNCH_BG: [f32; 4] = [0.027, 0.027, 0.035, 1.0];
-/// Smallest window that still gets the plate. Under it the vanishing
-/// point leaves the frame and the horizon stops reading, so the launch
-/// window falls back to the mark centred on the flat ground.
-const SPLASH_MIN_W: f32 = 900.0;
-const SPLASH_MIN_H: f32 = 520.0;
-/// Where the plate's horizon is driven to, down the window.
-const HORIZON_Y: f32 = 0.578;
-/// Clear space each side of the mark at the plate's size.
-const LOCKUP_CLEAR: f32 = 80.0;
-/// The lockup's width, as a fraction of the frame (the card's 61%).
-const LOCKUP_W: f32 = 0.61;
-/// The mark stands ON the line: its baseline sits this fraction of its
-/// own height above it — the card's 5px under a 130px lockup.
-const LOCKUP_LIFT: f32 = 0.04;
-/// Three stacked shadows, (dy, blur, alpha) in the card lockup's px: a
-/// tight contact shadow, a wider fall, and an ambient halo that
-/// separates the metal from the lit horizon. Tighter than the card's
-/// (6/9, 14/20, 0/16): at the card's drops the tagline's shadow parts
-/// from the tagline and reads as a second, blurred line of type. Alphas
-/// run above the card's for the linear-blending reason the scrims do.
-const SHADOW_PASSES: [(f32, f32, f32); 3] = [(2.0, 4.0, 0.80), (5.0, 10.0, 0.55), (0.0, 9.0, 0.65)];
-/// The floor projection: pinhole distance as a multiple of the mark's
-/// width, the floor's tilt from the screen plane, and how much light
-/// the floor gives back.
-const FLOOR_PERSP: f32 = 1.36;
-const FLOOR_TILT: f32 = std::f32::consts::FRAC_PI_3; // 60° — shallower than the card's 72°, so it runs further toward the viewer
-const FLOOR_ALPHA: f32 = 0.15;
-/// How far below the horizon the reflection starts, as a fraction of the
-/// mark's height — a gap of floor between the tagline and its mirror,
-/// so the two never read as one doubled line.
-const FLOOR_DROP: f32 = 0.10;
-/// The brand's `void` (#06070a): the ground every Splash layer darkens to.
-const VOID: [f32; 4] = [0.024, 0.027, 0.039, 1.0];
-/// Ground under the traffic lights and under the message.
-const SPLASH_SCRIM: [f32; 4] = [0.024, 0.027, 0.039, 0.80];
-/// The brand's `scanline` token is white at 0.07, composited in sRGB;
-/// blended in linear space that would glow, so it runs far lower here.
-const SCANLINE: [f32; 4] = [1.0, 1.0, 1.0, 0.012];
-/// How far the foot's last line sits off the bottom edge, as a fraction
-/// of the frame (the card's 41px of 400).
-const FOOT_BOTTOM: f32 = 0.10;
-/// The foot's height (rule, instruction, formats and the two steps
-/// between them) — what centres the lockup in the bare fallback.
-const FOOT_H: f32 = 51.0;
-/// The instruction (#c3ccd6), the design system's `ink-muted` for the
-/// labels, and the hairline above them (#616b7b at half).
-const INSTRUCTION: [f32; 4] = [0.765, 0.800, 0.839, 1.0];
-const INK_MUTED: [f32; 4] = [0.604, 0.651, 0.706, 1.0];
-const RULE: [f32; 4] = [0.380, 0.420, 0.482, 0.5];
-/// The logo's own blue and red (the brand's `blue` #00adfa and `red`
-/// #fc0a1c), for the ticks either side of the formats.
-const BRAND_BLUE: [f32; 4] = [0.0, 0.678, 0.980, 1.0];
-const BRAND_RED: [f32; 4] = [0.988, 0.039, 0.110, 1.0];
-/// The status lamp (`green` #16d97e) and its glow.
-const LAMP: [f32; 4] = [0.086, 0.851, 0.494, 1.0];
-const LAMP_GLOW: [f32; 4] = [0.086, 0.851, 0.494, 0.07];
-/// What the launch window says it opens.
-const FORMATS: &str = "MP4 · MOV · MKV · Y4M";
-/// The recent row (the Splash design's recent files): 16:9 tiles on the
-/// 4px grid, spaced well apart, `radius-8`.
-const TILE_W: f32 = 132.0;
-const TILE_H: f32 = 74.0;
-const TILE_GAP: f32 = 64.0;
-const TILE_R: f32 = 8.0;
-/// A group's stack: each card behind the front one sits `STACK_STEP` px
-/// higher and `STACK_INSET` px narrower a side. The row reserves the
-/// full rise above every tile, so the header never moves as groups
-/// come and go.
-/// The hovered tile's lift: how much it grows, and how long the ease takes.
-const TILE_LIFT: f32 = 0.08;
-const TILE_LIFT_S: f32 = 0.15;
-const STACK_STEP: f32 = 5.0;
-const STACK_INSET: f32 = 6.0;
-const STACK_RISE: f32 = STACK_STEP * (recent::STACK as f32 - 1.0);
-/// Header line, the step between the row's lines, the metadata line.
-const RECENT_HEAD: f32 = 14.0;
-const RECENT_STEP: f32 = 8.0;
-const RECENT_META: f32 = 16.0;
-/// Floor kept clear above the row (under the horizon) and below it
-/// (over the foot).
-const RECENT_CLEAR: f32 = 16.0;
-/// The tile's recessed ground (the brand's `well`, #04050a).
-const WELL: [f32; 4] = [0.016, 0.020, 0.039, 1.0];
-/// The bevel: white hairlines. The design's sRGB alphas (0.16 all round,
-/// 0.34 on top) are run lower here because blending is linear-space.
-const BEVEL: [f32; 4] = [1.0, 1.0, 1.0, 0.09];
-const BEVEL_LIT: [f32; 4] = [1.0, 1.0, 1.0, 0.20];
-/// The corner chips: `void` at 0.85 under `ink` (#e8edf2).
-const CHIP_BG: [f32; 4] = [0.016, 0.020, 0.039, 0.85];
-const CHIP_INK: [f32; 4] = [0.910, 0.929, 0.949, 1.0];
-/// The brand's `ink-faint` (#7a8694): the key hint beside the header.
-/// Version, git hash (`+dirty` with uncommitted edits) and build time, stamped by
-/// build.rs. The launch window prints it so a screenshot says which build it is.
-const BUILD: &str = env!("ABNER_BUILD");
-
-fn build_label(w: f32, h: f32) -> Item {
-    Item::Text(TextItem {
-        align: Align::Right,
-        valign: VAlign::Middle,
-        tracking: 0.4,
-        ..TextItem::new(w - 16.0, h - 14.0, 9.5, INK_FAINT, format!("build {BUILD}"))
-    })
-}
-
-const INK_FAINT: [f32; 4] = [0.478, 0.525, 0.580, 1.0];
-
-/// The same stamp at the right end of the workspace status line. Its own
-/// placement is measured by the renderer (one right-aligned run);
-/// `status_build_width` is the `MONO_ADV` estimate of the room it takes,
-/// plus its gap, so the hint beside it steps left.
-pub(crate) fn status_build_label(items: &mut Vec<Item>, vp: (f32, f32), cy: f32) {
-    items.push(Item::Text(TextItem { interface: true, align: Align::Right, valign: VAlign::Middle, tracking: 0.4,
-        ..TextItem::new(vp.0 - 16.0, cy, 9.5, INK_FAINT, format!("build {BUILD}")) }));
-}
-pub(crate) fn status_build_width() -> f32 {
-    (6 + BUILD.chars().count()) as f32 * 9.5 * MONO_ADV + 16.0
-}
-
-// Crop marquee. The dimmer runs high for the reason the HUD's panels do
-// (see shader.wgsl): linear-space blending means a modest alpha barely
-// touches bright footage, and this one has to read as "not exported".
-const CROP_DIM: [f32; 4] = [0.0, 0.0, 0.0, 0.95];
-/// Outside the search area while detection runs: dimmed, still readable
-/// (blending is linear, so this alpha leaves roughly a third of the picture).
-const SEARCH_DIM: [f32; 4] = [0.0, 0.0, 0.0, 0.88];
-const MASK_HISTORY: usize = 24;
-const CROP_LINE: [f32; 4] = [1.0, 1.0, 1.0, 0.95];
-const CROP_INK: [f32; 4] = [0.0, 0.0, 0.0, 0.75];
-const CROP_LINE_W: f32 = 1.5;
-const CROP_DASH: f32 = 7.0;
-const CROP_GAP: f32 = 5.0;
-const CROP_HANDLE: f32 = 9.0;
-/// Half-size of a corner's grab square — a little wider than it is drawn.
-const CROP_GRAB: f32 = 11.0;
-/// The marquee's label chips (Figma: white @0.12, flat, 10px #d1d1d1). The
-/// alpha is the linear-space equivalent of the design's sRGB 0.12 — at 0.12
-/// here a white wash reads several times brighter than in the mock.
-const CROP_CHIP: [f32; 4] = [0.0, 0.0, 0.0, 0.8];
-/// The guide lines running out of each marquee side across the canvas.
-const CROP_GUIDE: [f32; 4] = [1.0, 1.0, 1.0, 0.22];
-const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(350);
-const CROP_CHIP_PAD: (f32, f32) = (10.0, 3.0);
-/// Screen size the marquee needs before the corner coordinates show, and
-/// before the size/ratio label in the middle does.
-const CROP_LABELS_MIN: (f32, f32) = (180.0, 72.0);
-const CROP_LABEL_MIN: (f32, f32) = (130.0, 24.0);
-
-
-/// Transport strip: 13px pad + 32px controls + 11px gap + the status line.
-const TRANSPORT_H: f32 = 60.0;
-/// Persistent footer for tool, selection, zoom, export results and shortcut hints.
-/// Every page's footer bar is the Timeline's height, so its buttons fit.
-const STATUS_H: f32 = CUT_STATUS_H;
-/// Timeline footer: 6px around its compact action buttons.
-pub(crate) const CUT_STATUS_H: f32 = 38.0;
-/// Extra grab margin above/below the 5px seek track.
-const SEEK_GRAB: f32 = 9.0;
-/// Advance width of the monospace UI font, in em — used only to step
-/// between right-aligned status segments and keycap chips, never to
-/// place a glyph (the renderer measures those exactly).
-pub(crate) const MONO_ADV: f32 = 0.60;
-
-/// Logical height of a standard macOS titlebar. The window has no visible
-/// bar (`set_titlebar_glass` makes it transparent and runs the content
-/// under it), but the traffic-light buttons still float in that strip, so
-/// launch content clears them. The loaded workspace uses HEADER_H instead.
-const TITLEBAR_H: f32 = 28.0;
-
-/// The ratio a crop is shown with: a locked preset by its own name, a free
-/// rect as its reduced ratio while that stays readable (640×360 → 16:9),
-/// otherwise as `n.nn:1`.
-fn ratio_label(w: u32, h: u32, preset: Option<&str>) -> String {
-    if let Some(name) = preset {
-        return name.trim_start_matches("ratio ").to_string();
-    }
-    let gcd = |mut a: u32, mut b: u32| { while b != 0 { (a, b) = (b, a % b); } a.max(1) };
-    let g = gcd(w, h);
-    let (rw, rh) = (w / g, h / g);
-    if rw <= 32 && rh <= 32 { format!("{rw}:{rh}") } else { format!("{:.2}:1", w as f32 / h.max(1) as f32) }
-}
-
-/// How long a `notify` line stays in the status bar.
-const NOTICE_S: f32 = 3.0;
-
-/// RGBA frame → RGB PNG bytes. A decoded video frame's alpha is always
-/// opaque, so the channel is dropped: a quarter smaller and no consumer
-/// gets to treat the picture as translucent.
-fn encode_png_rgb(rgba: &[u8], w: u32, h: u32) -> anyhow::Result<Vec<u8>> {
-    anyhow::ensure!(rgba.len() >= (w as usize) * (h as usize) * 4, "frame buffer is short");
-    let rgb: Vec<u8> = rgba.chunks_exact(4).take((w * h) as usize).flat_map(|p| [p[0], p[1], p[2]]).collect();
-    let mut out = Vec::new();
-    let mut encoder = png::Encoder::new(&mut out, w, h);
-    encoder.set_color(png::ColorType::Rgb);
-    encoder.set_depth(png::BitDepth::Eight);
-    let mut writer = encoder.write_header()?;
-    writer.write_image_data(&rgb)?;
-    writer.finish()?;
-    Ok(out)
-}
-
-fn name_of(path: &std::path::Path) -> String {
-    path.file_name().unwrap_or_default().to_string_lossy().into_owned()
-}
-
-pub(crate) fn fmt_time(t: f64) -> String {
-    let t = t.max(0.0);
-    let m = (t / 60.0) as u64;
-    format!("{m:02}:{:06.3}", t - m as f64 * 60.0)
-}
-
-/// `HH:MM:SS:FF`, non-drop: the frame count over the rounded rate.
-fn fmt_tc(t: f64, fps: f64) -> String {
-    let base = fps.round().max(1.0) as u64;
-    let frames = (t.max(0.0) * fps).round() as u64;
-    let (s, f) = (frames / base, frames % base);
-    format!("{:02}:{:02}:{:02}:{f:02}", s / 3600, s / 60 % 60, s % 60)
-}
-
-fn fmt_hms(t: f64) -> String {
-    let s = t.max(0.0) as u64;
-    format!("{:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
-}
-
-/// A length, as short as it reads: `0:20`, `37:38`, `1:02:10`.
-fn fmt_span(t: f64) -> String {
-    let s = t.max(0.0).round() as u64;
-    if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
-}
-
-fn fmt_size(b: u64) -> String {
-    const MIB: f64 = 1024.0 * 1024.0;
-    let b = b as f64;
-    if b >= 1024.0 * MIB {
-        format!("{:.2} GiB", b / (1024.0 * MIB))
-    } else {
-        format!("{:.1} MiB", b / MIB)
     }
 }

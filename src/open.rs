@@ -4,8 +4,8 @@
 //! on the main thread — never as argv — so the paths arrive through the
 //! `open_shim.m` application delegate mid-run-loop. They buffer here and
 //! `Runner::about_to_wait` drains them (`Opened`), flushing each batch
-//! through `files_dropped`: a Finder open REPLACES the open set, while the
-//! in-app "Add sources" picker, which shares this queue, adds. The notify hook covers the running-app case: an open
+//! through the Finder process policy; the initial launch document and the
+//! in-app "Add sources" picker load into the current process. The notify hook covers the running-app case: an open
 //! landing while the loop sleeps on the idle tick still redraws promptly.
 //!
 //! The native File / View / Frame menus live here too (`open_shim.m` builds
@@ -52,7 +52,7 @@ mod imp {
     use super::{MenuAction, Opened};
     use crate::player::Notify;
 
-    static OPENED: Mutex<Opened> = Mutex::new(Opened { replace: Vec::new(), add: Vec::new() });
+    static OPENED: Mutex<Opened> = Mutex::new(Opened { initial: Vec::new(), replace: Vec::new(), add: Vec::new() });
     static NOTIFY: OnceLock<Notify> = OnceLock::new();
     static VIEW_REQUEST: AtomicI32 = AtomicI32::new(-1);
     static MENU_REQUESTS: Mutex<Vec<MenuAction>> = Mutex::new(Vec::new());
@@ -112,7 +112,7 @@ mod imp {
         let path = PathBuf::from(OsStr::from_bytes(bytes));
         log::debug!("open-with: {} ({})", path.display(), if from_os != 0 { "finder" } else { "picker" });
         let mut opened = OPENED.lock().unwrap();
-        if from_os != 0 { opened.replace.push(path) } else { opened.add.push(path) }
+        match from_os { 2 => opened.initial.push(path), 1 => opened.replace.push(path), _ => opened.add.push(path) }
         if let Some(n) = NOTIFY.get() {
             n();
         }
@@ -179,7 +179,9 @@ mod imp {
 /// Paths opened since the last `drain`, by where they came from.
 #[derive(Default)]
 pub struct Opened {
-    /// Finder Open With / double-click: these REPLACE the open set.
+    /// Documents delivered during the initial application launch.
+    pub initial: Vec<std::path::PathBuf>,
+    /// Subsequent Finder opens, routed according to the process policy.
     pub replace: Vec<std::path::PathBuf>,
     /// The in-app "Add sources" picker: these add.
     pub add: Vec<std::path::PathBuf>,
@@ -215,4 +217,57 @@ pub(crate) fn export_directory(current: Option<&std::path::Path>) -> Option<std:
     }
     #[cfg(not(target_os="macos"))]
     { let _ = current; None }
+}
+
+
+/// Finder routing uses the same executable and config as this process. Spawning
+/// and waiting happen off the UI thread; no shell and no inference are involved.
+pub(crate) struct FinderLauncher {
+    pub reuse_window: bool,
+    executable: std::path::PathBuf,
+    config: Option<std::path::PathBuf>,
+}
+static LAUNCH_ERRORS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+pub(crate) fn take_launch_errors() -> Vec<String> {
+    std::mem::take(&mut *LAUNCH_ERRORS.lock().unwrap())
+}
+impl FinderLauncher {
+    pub fn new(reuse_window: bool, config: Option<std::path::PathBuf>) -> std::io::Result<Self> {
+        Ok(Self { reuse_window, executable: std::env::current_exe()?, config })
+    }
+    fn command(&self, paths: &[std::path::PathBuf]) -> std::process::Command {
+        let mut cmd = std::process::Command::new(&self.executable);
+        cmd.arg(if self.reuse_window { "--reuse-window" } else { "--new-window" });
+        if let Some(config) = &self.config { cmd.arg("--config").arg(config); }
+        cmd.args(paths);
+        cmd
+    }
+    pub fn launch(&self, paths: Vec<std::path::PathBuf>, notify: crate::player::Notify) {
+        let mut cmd = self.command(&paths);
+        std::thread::spawn(move || {
+            match cmd.spawn() {
+                Ok(mut child) => { let _ = child.wait(); }
+                Err(error) => {
+                    let message = format!("Could not open a new Abner window: {error}");
+                    log::error!("{message}");
+                    LAUNCH_ERRORS.lock().unwrap().push(message);
+                    notify();
+                }
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod finder_tests {
+    use super::*;
+    #[test]
+    fn child_arguments_preserve_paths_config_and_explicit_policy_without_a_shell() {
+        let paths = vec![std::path::PathBuf::from("/tmp/a clip $(literal).mov")];
+        let mut launcher = FinderLauncher::new(false, Some("/tmp/my config.toml".into())).unwrap();
+        let args: Vec<_> = launcher.command(&paths).get_args().map(|s| s.to_owned()).collect();
+        assert_eq!(args, ["--new-window", "--config", "/tmp/my config.toml", "/tmp/a clip $(literal).mov"]);
+        launcher.reuse_window = true;
+        assert_eq!(launcher.command(&paths).get_args().next().unwrap(), "--reuse-window");
+    }
 }

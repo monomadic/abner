@@ -17,7 +17,8 @@ them. Every mask snapshot has a distinct renderer identity.
 - Plugin bindings are keyed by stable source identity, processor ID, and input
   key. Source list insertion/reordering cannot redirect another source's binding.
   A job snapshots bindings, including shared immutable mask data. Applying edits
-  invalidates pending preview work.
+  changes the active preview configuration; running jobs keep their snapshots.
+  Retained renders remain reviewable from history within the preview cache budget.
 
 Source and timeline crops fit the selected rectangle into the source-sized canvas
 with bilinear sampling and black letterboxing. This maintains a constant output
@@ -25,6 +26,15 @@ geometry across clips. The same transformation runs before preview and export
 processing. A plugin editor shows that transformed input. Timeline export excludes
 removed intervals and starts fresh processor sessions at kept segment boundaries.
 The legacy stream-copy exporter refuses pixel crops; use the Export workspace.
+
+## Process controls
+
+Add Processor omits spatial controls. After adding a processor, its inspector shows
+its declared Crop/Mask tiles. Missing required masks show 􀇾 both beside the processor
+name and on the mask tile. Clicking either opens the embedded editor without
+leaving Process; Apply stores the binding and clears both indicators. Cancel
+preserves the existing binding. The selected render can still show its original
+cached pixels after a binding changes; it is not output from the new binding.
 
 ## Processor API
 
@@ -74,9 +84,10 @@ not open the HEVC encoder; the same export test passed with native media access.
 
 ## Current limits
 
-Spatial inputs currently require the first enabled processor. Editing arbitrary
-intermediate stages needs a stage-input preview; the host rejects that arrangement
-rather than authoring a mask against the wrong picture. Coordinate grids must
+Rendering spatial inputs currently requires the first enabled processor. The editor
+can open for later stages, but shows source-based pixels rather than an intermediate
+stage output; move the processor first before rendering its bindings. Supporting
+arbitrary intermediate inputs still needs a stage-input preview. Coordinate grids must
 match exactly. There are no animated masks, keyframed crops, tracking, GPU input
 negotiation, or arbitrary secondary media sources in this first implementation.
 
