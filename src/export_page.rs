@@ -413,6 +413,23 @@ impl Page {
         path.set_extension(ext);
         path.file_name().unwrap_or_default().to_string_lossy().into_owned()
     }
+    /// A destination chosen up front (`--export-run OUT`): the container
+    /// follows its extension and the Export press skips the save panel. The
+    /// file must not exist yet — an export never overwrites.
+    pub fn set_destination(&mut self, path: PathBuf) -> Result<(), String> {
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+        self.container = match ext.as_str() {
+            "mp4" => Container::Mp4,
+            "mov" => Container::Mov,
+            "mkv" => Container::Mkv,
+            _ => return Err(format!("{}: export to .mp4, .mov or .mkv", path.display())),
+        };
+        if path.exists() {
+            return Err(format!("{} already exists; exports never overwrite", path.display()));
+        }
+        self.destination = Some(path);
+        Ok(())
+    }
     pub fn set_copy_unavailable(&mut self, reason: Option<&'static str>) {
         self.copy_unavailable = reason;
         if reason.is_some() { self.lossless = false; }
@@ -496,6 +513,10 @@ impl Page {
         self.following = true;
         self.original = false;
         self.duration = keeps.iter().map(|(a, b)| b - a).sum();
+        // The source's rate until the output's first frame says otherwise: the
+        // total bar sizes an in-flight call's frames by it, and 30 fps read a
+        // 24 fps clip's first batch a fifth short.
+        if info.fps > 0. { self.review_fps = info.fps; }
         self.started = Instant::now();
         self.elapsed = 0.;
         self.status = if self.lossless { "Copying compressed media…" } else { "Preparing pipeline…" }.into();
@@ -1247,6 +1268,19 @@ mod tests {
                 total: None,
             }
         }
+    }
+    #[test]
+    fn set_destination_picks_the_container_and_refuses_overwrites() {
+        let dir = std::env::temp_dir().join(format!("abner-dest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut p = Page::default();
+        p.set_destination(dir.join("out.MOV")).unwrap();
+        assert!(p.container == Container::Mov);
+        assert_eq!(p.destination.as_deref(), Some(dir.join("out.MOV").as_path()));
+        assert!(p.set_destination(dir.join("out.avi")).is_err());
+        std::fs::write(dir.join("taken.mkv"), b"").unwrap();
+        assert!(p.set_destination(dir.join("taken.mkv")).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
     #[test]
     fn bitrate_input_defaults_validates_and_preserves_last_valid_value() {

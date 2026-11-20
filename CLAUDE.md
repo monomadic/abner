@@ -179,7 +179,9 @@ from one to the other, keeping its number.
   sources, `+` duplicates, ←/→ step a frame (`Panel::key`); `R` / the footer's
   Render frame button renders; Tab or the canvas's Source | Rendered switch
   (`compare_switch`, shown once a frame is rendered here) flips the picture at the
-  shared zoom, and `--processor-render` renders on open for captures.
+  shared zoom, and `--processor-render` renders on open for captures;
+  `--export-run OUT` presses Export on open, writing OUT (container from its extension,
+  never overwritten) with no save panel.
   ⌘W (`Key::Close`, from winit's `ModifiersChanged` state) closes the focused clip
   (`close_active`): survivors shift down a slot and are exact-seeked to the current `t`
   so each re-delivers into its new texture slot; `started` is NOT reset (the seek lands

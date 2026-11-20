@@ -77,6 +77,9 @@ processor previews:
   --processor-settings JSON         optional initial settings object
   --processor-render                render the current frame on open (captures)
   --export                          open the minimal Export workspace
+  --export-run OUT                  open it and export to OUT (.mp4/.mov/.mkv,
+                                    must not exist) at once, with the
+                                    --processor chain and default settings
   --process                         open the Process workspace
   R                                 preview current frame in Process
   Tab                               flip the Process canvas between source and rendered
@@ -157,6 +160,7 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
     let mut processor = None;
     let mut process_workspace = false;
     let mut export_workspace = false;
+    let mut export_run: Option<PathBuf> = None;
     let mut processor_settings = serde_json::json!({});
     let mut processor_render = false;
     // The Sources sidebar hidden, as the header toggle leaves it: for captures.
@@ -173,6 +177,10 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
     let mut it = args.iter();
     while let Some(a) = it.next() {
         if a == "--export" { export_workspace=true; }
+        else if a == "--export-run" {
+            let out = it.next().ok_or_else(|| anyhow::anyhow!("--export-run needs an output path"))?;
+            export_run = Some(std::path::absolute(out)?);
+        }
         else if a == "--process" {
             process_workspace = true;
         } else if a == "--processor" {
@@ -306,7 +314,14 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
             .map_err(anyhow::Error::msg)?;
         if processor_render { app.render_processor_frame(); }
     }
-    if export_workspace { app.select_workspace_mode(5); }
+    if export_workspace || export_run.is_some() { app.select_workspace_mode(5); }
+    // The same press as the page's Export button, to a file named up front:
+    // the processor chain set up above, the whole clip, the page's default
+    // codec settings, the container from OUT's extension.
+    if let Some(out) = export_run {
+        app.set_export_destination(out).map_err(anyhow::Error::msg)?;
+        app.start_pipeline_export();
+    }
     app.set_recent(recent::load());
     app.set_video_splash(video_splash);
     if let Some(path) = video_splash.then(backdrop_path).flatten() {

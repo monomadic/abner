@@ -1866,7 +1866,12 @@ impl App {
         self.export_page.set_copy_unavailable(reason);
     }
 
-    fn start_pipeline_export(&mut self) {
+    /// `--export-run OUT`: where the Export press writes, without a panel.
+    pub fn set_export_destination(&mut self, path: std::path::PathBuf) -> Result<(), String> {
+        self.export_page.set_destination(path)
+    }
+    /// The Export page's Export press; `--export-run` makes it on open.
+    pub fn start_pipeline_export(&mut self) {
         if !self.ready() { return; }
         self.update_export_copy_availability();
         let info = self.videos[self.active].info.clone();
