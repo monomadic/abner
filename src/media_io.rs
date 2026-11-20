@@ -409,9 +409,8 @@ fn source_meta(input: &Input, path: &Path) -> SourceMeta {
             let mp4: Vec<_> = f.metadata.entries.iter().filter(|(k, _)| k != "©too").cloned().collect();
             let mut mkv: Vec<(String, String)> = Vec::new();
             for (k, v) in &mp4 {
-                if let Some((_, _, name)) = TAG_MAP.iter().find(|(a, b, _)| a == k || b == k) {
-                    if !mkv.iter().any(|(n, _)| n == name) { mkv.push((name.to_string(), v.clone())); }
-                }
+                if let Some((_, _, name)) = TAG_MAP.iter().find(|(a, b, _)| a == k || b == k)
+                    && !mkv.iter().any(|(n, _)| n == name) { mkv.push((name.to_string(), v.clone())); }
             }
             SourceMeta { title: f.metadata.title().map(str::to_owned), mp4, mkv, ..Default::default() }
         }
@@ -431,9 +430,8 @@ fn source_meta(input: &Input, path: &Path) -> SourceMeta {
             let mut mp4: Vec<(String, String)> = mkv.iter().filter_map(|(n, v)| {
                 TAG_MAP.iter().find(|(_, _, m)| m == n).map(|(a, _, _)| (a.to_string(), v.clone()))
             }).collect();
-            if let Some(t) = &title {
-                if !mp4.iter().any(|(k, _)| k == "©nam") { mp4.push(("©nam".into(), t.clone())); }
-            }
+            if let Some(t) = &title
+                && !mp4.iter().any(|(k, _)| k == "©nam") { mp4.push(("©nam".into(), t.clone())); }
             SourceMeta { mp4, mkv, title, ..meta }
         }
     }
@@ -528,7 +526,7 @@ pub(crate) fn cues(path: &Path) -> Result<Vec<Cue>> {
 /// container can take from it verbatim.
 enum SubSource {
     /// An MP4/MOV track: its sample entry (`tx3g`, `text`, `wvtt`).
-    Mp4(SampleEntry),
+    Mp4(Box<SampleEntry>),
     /// A Matroska text track: codec id and private data (the ASS header).
     Mkv { codec_id: String, private: Vec<u8> },
 }
@@ -558,7 +556,7 @@ fn subtitle_tracks(input: &Input, keeps: &[(f64, f64)]) -> Result<Vec<SubTrack>>
     for (ti, t) in input.tracks.iter().enumerate().filter(|(_, t)| t.kind == Kind::Subtitle) {
         let source = match &input.container {
             Container::Mp4(_) => match &t.entry {
-                Some(e) if matches!(&e.format.0, b"tx3g" | b"text" | b"wvtt") => SubSource::Mp4(e.clone()),
+                Some(e) if matches!(&e.format.0, b"tx3g" | b"text" | b"wvtt") => SubSource::Mp4(Box::new(e.clone())),
                 _ => { log::warn!("subtitle track {ti}: no text mapping, not exported"); continue }
             },
             Container::Mkv(f) => {
@@ -629,7 +627,7 @@ fn tx3g_sample(text: &str) -> Vec<u8> {
 fn write_subs_mp4(mux: &mut mp4::Mp4Writer<std::fs::File>, subs: &[SubTrack]) -> Result<()> {
     for sub in subs {
         let (entry, verbatim) = match &sub.source {
-            SubSource::Mp4(e) => (e.clone(), true),
+            SubSource::Mp4(e) => (e.as_ref().clone(), true),
             SubSource::Mkv { .. } => (tx3g_entry(), false),
         };
         let empty = if entry.format.0 == *b"wvtt" { box_bytes(b"vtte", &[]) } else { vec![0, 0] };
@@ -2625,6 +2623,452 @@ pub(crate) fn smart(
     std::fs::rename(&temp.0, &dest)?;
     Ok(dest)
 }
+
+/// Export the enabled processor chain. Output is published only after mux finalization.
+#[cfg(test)]
+// Keep the explicit geometry/pipeline inputs at this boundary.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn pipeline_export(
+    info:&crate::probe::VideoInfo,dest:&Path,keeps:&[(f64,f64)],registry:&abner_processor_api::Registry,
+    chain:&[(String,serde_json::Value)],prores:bool,crop:Option<(u32,u32,u32,u32)>,
+    cancel:&abner_processor_api::Cancellation,active:&Mutex<Vec<abner_processor_api::Cancellation>>,
+    emit:impl FnMut(crate::export_page::Rendered)->Result<(),String>,
+)->Result<()> {pipeline_export_with_inputs(&Default::default(),info,dest,keeps,&[],registry,chain,prores,None,crop,cancel,active,None,emit)}
+
+// Keep the explicit geometry/pipeline inputs at this boundary.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn pipeline_export_with_inputs(
+    inputs:&crate::spatial::JobInputs,
+    info: &crate::probe::VideoInfo,
+    dest: &Path,
+    keeps: &[(f64, f64)],
+    chapters: &[ExportChapter],
+    registry: &abner_processor_api::Registry,
+    chain: &[(String, serde_json::Value)],
+    prores: bool,
+    bitrate_kbps: Option<u32>,
+    crop: Option<(u32, u32, u32, u32)>,
+    cancel: &abner_processor_api::Cancellation,
+    active: &Mutex<Vec<abner_processor_api::Cancellation>>,
+    // Each stage's own in-flight reports, by the stage's name: what the chain is
+    // doing between the frames `emit` delivers.
+    stage_report: Option<&crate::export_page::StageReport>,
+    mut emit: impl FnMut(crate::export_page::Rendered) -> Result<(), String>,
+) -> Result<()> {
+    use abner_processor_api::{VideoFrame, PixelFormat, InputRequirement, Role};
+    inputs.validate_geometry(info.width,info.height).map_err(anyhow::Error::msg)?;
+    ensure!(crop.is_none() || inputs.crops.is_empty(), "Use either the timeline crop or an export crop");
+    validate_ranges(keeps)?;
+    ensure!(
+        !dest.exists(),
+        "Output already exists; choose another filename"
+    );
+    let extension = dest.extension().and_then(|ext| ext.to_str()).unwrap_or_default();
+    let extension = extension.to_ascii_lowercase();
+    ensure!(
+        matches!(extension.as_str(), "mp4" | "mov" | "mkv"),
+        "Choose MP4, MOV or MKV for pipeline export"
+    );
+    ensure!(!prores || extension != "mp4", "ProRes requires MOV or MKV");
+    cancel.check().map_err(anyhow::Error::msg)?;
+    if bitrate_kbps.is_none() && chain.is_empty() && crop.is_none() && inputs.crops.is_empty() && !prores {
+        // Keep the packet path available through the Export workspace. Repair
+        // only boundary GOPs, and never pass untouched HDR through the SDR host.
+        // Publish after checking cancellation; RAII removes unpublished work.
+        let reservation = pending(dest)?;
+        let work_path = reservation.0.with_extension(&extension);
+        ensure!(!work_path.exists(), "Export working file already exists");
+        let work = Pending(work_path);
+        export(&info.path, &work.0, keeps, false, &[], None)?;
+        cancel.check().map_err(anyhow::Error::msg)?;
+        std::fs::rename(&work.0, dest)?;
+        return Ok(());
+    }
+    crate::media_metadata::read(&info.path)
+        .map_err(anyhow::Error::msg)?
+        .check_processable()
+        .map_err(anyhow::Error::msg)?;
+    if crate::processor_gui::retimes(registry, chain, info.fps).map_err(anyhow::Error::msg)? {
+        crate::media_metadata::require_constant_rate(&info.path).map_err(anyhow::Error::msg)?;
+    }
+    // Subtitles and tags from the source, when it is a container the
+    // packet reader knows; other sources export without them.
+    let (subs, meta) = match Input::open(&info.path) {
+        Ok(original) => (subtitle_tracks(&original, keeps)?, source_meta(&original, &info.path)),
+        Err(e) => {
+            log::warn!("{}: subtitles and tags not carried: {e}", info.path.display());
+            (Vec::new(), SourceMeta::default())
+        }
+    };
+    let temp = pending(dest)?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .truncate(true)
+        .open(&temp.0)?;
+    let mut options = mp4::WriterOptions::new(if prores || extension == "mov" {
+        mp4::Brand::Mov
+    } else {
+        mp4::Brand::Mp4
+    });
+    options.metadata = meta.mp4.clone();
+    let mut mux = mp4::Mp4Writer::new(file, options)?;
+    ensure!(
+        info.fps.is_finite() && info.fps > 0. && info.fps <= 1000.,
+        "Export requires a valid constant frame rate"
+    );
+    let (cx, cy, cw, ch) = crop.unwrap_or((0, 0, info.width, info.height));
+    ensure!(
+        cw >= 2
+            && ch >= 2
+            && cx.checked_add(cw).is_some_and(|x| x <= info.width)
+            && cy.checked_add(ch).is_some_and(|y| y <= info.height),
+        "Crop lies outside the source"
+    );
+    let mut encoder: Option<PipelineEncoder> = None;
+    let mut track = None;
+    let mut index = 0u64;
+    let mut output_time = 0.;
+    let mut expected_duration: Option<f64> = None;
+    for &(start, end) in keeps {
+        cancel.check().map_err(anyhow::Error::msg)?;
+        active.lock().unwrap().clear();
+        let mut dims = [cw as usize, ch as usize];
+        let mut sessions = Vec::new();
+        for (stage,(id, settings)) in chain.iter().enumerate() {
+            ensure!(stage==0 || inputs.bindings.get(id).is_none_or(|b|b.is_empty()), "Spatial inputs currently require the first enabled processor");
+            let f = registry.get(id).map_err(anyhow::Error::msg)?;
+            ensure!(matches!(f.capabilities().role, Role::Processor),
+                "{}: generator/post-processor execution is not supported by export", f.descriptor().name);
+            ensure!(!matches!(f.capabilities().input, InputRequirement::WholeClip),
+                "{}: whole-clip execution is not supported by export", f.descriptor().name);
+            let mut session = abner_processor_api::create_bound(f,dims[0],dims[1],settings,inputs.bindings.get(id).cloned().unwrap_or_default())
+                .map_err(anyhow::Error::msg)?;
+            if let Some(report) = stage_report {
+                use crate::export_page::StageUpdate;
+                let (count, name) = (chain.len(), f.descriptor().name);
+                let phase = (report.clone(), name.clone());
+                session.set_progress_reporter(std::sync::Arc::new(move |p| (phase.0)(&phase.1, StageUpdate::Phase(p))));
+                let frame = (report.clone(), name.clone());
+                session.set_frame_progress_reporter(std::sync::Arc::new(move |p| {
+                    (frame.0)(&frame.1, StageUpdate::Frame(stage, count, Some(p)))
+                }));
+                // The frame bar ends with the call it described.
+                let report = report.clone();
+                session = Box::new(abner_processing::progress::CallBoundary::new(session,
+                    std::sync::Arc::new(move || report(&name, StageUpdate::Frame(stage, count, None)))));
+            }
+            active.lock().unwrap().push(session.cancellation());
+            dims = session.output_dimensions();
+            ensure!(
+                dims.iter().all(|&d| (2..=8192).contains(&d)),
+                "Unsupported processor output size"
+            );
+            sessions.push(session);
+        }
+        let sink_format = if prores { PixelFormat::Yuv422p10 } else { PixelFormat::Rgba8 };
+        let mut format_plan: Option<abner_processing::negotiation::FormatPlan> = None;
+        let mut source=crate::processing_source::Source::open(registry,chain.first().map(|s|s.0.as_str()),&info.path,info.width,info.height,info.fps).map_err(anyhow::Error::msg)?;
+        source.seek(start).map_err(anyhow::Error::msg)?;
+        let mut previous_end: Option<f64> = None;
+        let mut accept = |frames: Vec<VideoFrame>| -> Result<()> {
+            for f in frames {
+                cancel.check().map_err(anyhow::Error::msg)?;
+                f.validate().map_err(anyhow::Error::msg)?;
+                ensure!(
+                    f.width == dims[0] && f.height == dims[1],
+                    "Processor changed declared dimensions"
+                );
+                let unit = f.time_base[0] as f64 / f.time_base[1] as f64;
+                let source_pts = f.pts as f64 * unit;
+                if source_pts < start - 1e-6 || source_pts >= end - 1e-6 {
+                    continue;
+                }
+                let duration = f.duration as f64 * unit;
+                ensure!(
+                    duration > 0. && duration.is_finite(),
+                    "Invalid processor output duration"
+                );
+                if let Some(previous) = previous_end {
+                    ensure!(
+                        (source_pts - previous).abs() < 0.002,
+                        "Processor returned missing, reordered, or discontinuous output timestamps"
+                    );
+                }
+                previous_end = Some(source_pts + duration);
+                if let Some(expected) = expected_duration {
+                    ensure!(
+                        (expected - duration).abs() < 0.00001,
+                        "Export currently requires constant-rate output"
+                    );
+                } else {
+                    expected_duration = Some(duration);
+                }
+                let rgba = abner_processing::color::rgba8(&f).map_err(anyhow::Error::msg)?;
+                if encoder.is_none() {
+                    encoder = Some(PipelineEncoder::new(
+                        f.width as u32,
+                        f.height as u32,
+                        duration,
+                        prores,
+                        bitrate_kbps.unwrap_or(40_000),
+                    )?);
+                }
+                let e = encoder.as_mut().unwrap();
+                ensure!(
+                    e.dims() == [f.width as u32, f.height as u32],
+                    "Output dimensions changed between segments"
+                );
+                let packets = e.encode(f, &rgba, index)?;
+                let ti = match track {
+                    Some(t) => t,
+                    None => {
+                        let mut config = cfg(e.entry(), "und");
+                        config.timescale = e.scale();
+                        let t = mux.add_track(config)?;
+                        track = Some(t);
+                        t
+                    }
+                };
+                for packet in packets {
+                    write_packet_scaled(
+                        &mut mux,
+                        ti,
+                        e.scale(),
+                        &packet.data,
+                        packet.duration as f64 / e.scale() as f64,
+                        packet.composition_offset as f64 / e.scale() as f64,
+                        packet.key,
+                    )?;
+                }
+                index += 1;
+                output_time += duration;
+                emit(crate::export_page::Rendered {
+                    pixels: rgba,
+                    dims: [dims[0] as u32, dims[1] as u32],
+                    source_pts,
+                    output_time,
+                    count: index,
+                    frame_duration: duration,
+                })
+                .map_err(anyhow::Error::msg)?;
+            }
+            Ok(())
+        };
+        // A rounded nominal duration cannot join independently rounded PTS values:
+        // 24 fps alternates between 41,666 and 41,667 microseconds. Look ahead
+        // once, as the Process preview does, so every input ends at the next PTS.
+        let mut read_next = || source.read(cancel).map_err(anyhow::Error::msg);
+        let mut next = read_next()?;
+        while let Some(decoded_frame) = next.take() {
+            let pts=decoded_frame.pts as f64*decoded_frame.time_base[0] as f64/decoded_frame.time_base[1] as f64;
+            cancel.check().map_err(anyhow::Error::msg)?;
+            if pts >= end - 1e-6 {
+                break;
+            }
+            next = read_next()?;
+            let mut f=decoded_frame;
+            if cx != 0 || cy != 0 || cw != info.width || ch != info.height {
+                // Arbitrary crop origins can split a chroma sample. Crop in RGB16
+                // rather than inventing chroma phase or reducing to display depth.
+                let mut rgb = abner_processing::color::convert(f, PixelFormat::Rgb16)
+                    .and_then(VideoFrame::into_rgb16).map_err(anyhow::Error::msg)?;
+                rgb.pixels = (cy..cy + ch).flat_map(|y| {
+                    let start = ((y * info.width + cx) * 3) as usize;
+                    rgb.pixels[start..start + (cw * 3) as usize].iter().copied()
+                }).collect();
+                rgb.width = cw as usize; rgb.height = ch as usize;
+                f = rgb.into();
+            }
+            if !inputs.crops.is_empty() {
+                let mut rgb = abner_processing::color::convert(f, PixelFormat::Rgb16)
+                    .and_then(VideoFrame::into_rgb16).map_err(anyhow::Error::msg)?;
+                crate::spatial::apply_crop(&mut rgb,&inputs.crops);
+                f = rgb.into();
+            }
+            if format_plan.is_none() {
+                format_plan = Some(abner_processing::negotiation::FormatPlan::new(&mut sessions, f.format, sink_format)
+                    .map_err(anyhow::Error::msg)?);
+            }
+            accept(
+                format_plan.as_ref().unwrap().process_native(
+                    &mut sessions,
+                    0,
+                    vec![f],
+                    cancel,
+                    512 * 1024 * 1024,
+                )
+                .map_err(anyhow::Error::msg)?,
+            )?;
+        }
+        for i in 0..sessions.len() {
+            let Some(plan) = &format_plan else { break; };
+            accept(
+                plan.finish_stage_native(
+                    &mut sessions,
+                    i,
+                    cancel,
+                    512 * 1024 * 1024,
+                )
+                .map_err(anyhow::Error::msg)?,
+            )?;
+        }
+    }
+    cancel.check().map_err(anyhow::Error::msg)?;
+    let e = encoder
+        .as_mut()
+        .context("Pipeline returned no output frames")?;
+    for packet in e.flush()? {
+        write_packet_scaled(
+            &mut mux,
+            track.unwrap(),
+            e.scale(),
+            &packet.data,
+            packet.duration as f64 / e.scale() as f64,
+            packet.composition_offset as f64 / e.scale() as f64,
+            packet.key,
+        )?;
+    }
+    let source = crate::fc::open(&info.path).map_err(anyhow::Error::msg)?;
+    // The existing audio path preserves kept-range timing and encodes AAC for all output containers.
+    audio_encode_checked(&source, &mut mux, keeps, false, || {
+        cancel.check().map_err(anyhow::Error::msg)
+    })?;
+    cancel.check().map_err(anyhow::Error::msg)?;
+    let mkv = dest
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("mkv"));
+    if !mkv {
+        write_subs_mp4(&mut mux, &subs)?;
+    }
+    mux.finish()?;
+    if !mkv {
+        text_handlers(&temp.0)?;
+    }
+    let tags: &[(String, String)] = if mp4_brand(dest) { &meta.mp4 } else { &[] };
+    finish_mp4(&temp.0, chapters, !mkv, tags)?;
+    if mkv {
+        let remuxed = pending(dest)?;
+        remux_mkv(&temp.0, &remuxed.0, chapters, &meta, &subs)?;
+        cancel.check().map_err(anyhow::Error::msg)?;
+        std::fs::hard_link(&remuxed.0, dest)?;
+    } else {
+        std::fs::hard_link(&temp.0, dest)?;
+    }
+    Ok(())
+}
+
+enum PipelineEncoder {
+    ProRes {
+        encoder: filmcraft_prores::Encoder,
+        dims: [u32; 2],
+        duration: u32,
+    },
+    #[cfg(target_os = "macos")]
+    Hevc {
+        encoder: Box<dyn filmcraft_export::VideoEncoder>,
+        dims: [u32; 2],
+    },
+}
+impl PipelineEncoder {
+    fn new(w: u32, h: u32, duration: f64, prores: bool, bitrate_kbps: u32) -> Result<Self> {
+        ensure!(
+            w.is_multiple_of(2) && h.is_multiple_of(2),
+            "Export requires even output dimensions"
+        );
+        if prores {
+            return Ok(Self::ProRes {
+                encoder: filmcraft_prores::Encoder::new(filmcraft_prores::Profile::Standard, w, h),
+                dims: [w, h],
+                duration: (duration * SCALE as f64).round() as u32,
+            });
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let settings = filmcraft_export::ExportSettings {
+                format: filmcraft_export::Format::Hevc,
+                bitrate_kbps,
+                ..Default::default()
+            };
+            let encoder = filmcraft_platform::hardware_encode::videotoolbox_encoder_factory(
+                filmcraft_export::Format::Hevc,
+                w,
+                h,
+                filmcraft_time::FrameRate::new(1_000_000, (duration * 1e6).round() as i64),
+                &settings,
+            )
+            .context("HEVC encoder unavailable on this machine")??;
+            Ok(Self::Hevc {
+                encoder,
+                dims: [w, h],
+            })
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            anyhow::bail!("HEVC export requires macOS VideoToolbox")
+        }
+    }
+    fn dims(&self) -> [u32; 2] {
+        match self {
+            Self::ProRes { dims, .. } => *dims,
+            #[cfg(target_os = "macos")]
+            Self::Hevc { dims, .. } => *dims,
+        }
+    }
+    fn scale(&self) -> u32 {
+        match self {
+            Self::ProRes { .. } => SCALE,
+            #[cfg(target_os = "macos")]
+            Self::Hevc { encoder, .. } => encoder.timescale(),
+        }
+    }
+    fn entry(&self) -> SampleEntry {
+        match self {
+            Self::ProRes { dims, .. } => {
+                SampleEntry::prores(mp4::FourCc(*b"apcn"), dims[0] as u16, dims[1] as u16)
+            }
+            #[cfg(target_os = "macos")]
+            Self::Hevc { encoder, .. } => encoder.sample_entry(),
+        }
+    }
+    fn encode(&mut self, frame: abner_processor_api::VideoFrame, _display_rgba: &[u8], index: u64) -> Result<Vec<filmcraft_export::EncodedPacket>> {
+        match self {
+            Self::ProRes {
+                encoder,
+                duration,
+                ..
+            } => {
+                let p = abner_processing::color::into_prores(frame)
+                    .map_err(anyhow::Error::msg)?;
+                Ok(vec![filmcraft_export::EncodedPacket {
+                    data: encoder.encode(&p)?,
+                    duration: *duration,
+                    composition_offset: 0,
+                    key: true,
+                }])
+            }
+            #[cfg(target_os = "macos")]
+            Self::Hevc { encoder, dims } => {
+                // Reuse the preview pixels only for this RGBA8 encoder.
+                Ok(encoder.encode(&filmcraft_export::EncoderFrame {
+                    width: dims[0],
+                    height: dims[1],
+                    rgba: _display_rgba,
+                    hdr: None,
+                    index,
+                })?)
+            }
+        }
+    }
+    fn flush(&mut self) -> Result<Vec<filmcraft_export::EncodedPacket>> {
+        match self {
+            Self::ProRes { .. } => Ok(vec![]),
+            #[cfg(target_os = "macos")]
+            Self::Hevc { encoder, .. } => Ok(encoder.flush()?),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3352,446 +3796,5 @@ mod tests {
         })
         .unwrap();
         assert_eq!(frames.len(), 12);
-    }
-}
-
-/// Export the enabled processor chain. Output is published only after mux finalization.
-#[cfg(test)]
-pub(crate) fn pipeline_export(
-    info:&crate::probe::VideoInfo,dest:&Path,keeps:&[(f64,f64)],registry:&abner_processor_api::Registry,
-    chain:&[(String,serde_json::Value)],prores:bool,crop:Option<(u32,u32,u32,u32)>,
-    cancel:&abner_processor_api::Cancellation,active:&Mutex<Vec<abner_processor_api::Cancellation>>,
-    emit:impl FnMut(crate::export_page::Rendered)->Result<(),String>,
-)->Result<()> {pipeline_export_with_inputs(&Default::default(),info,dest,keeps,&[],registry,chain,prores,None,crop,cancel,active,None,emit)}
-
-pub(crate) fn pipeline_export_with_inputs(
-    inputs:&crate::spatial::JobInputs,
-    info: &crate::probe::VideoInfo,
-    dest: &Path,
-    keeps: &[(f64, f64)],
-    chapters: &[ExportChapter],
-    registry: &abner_processor_api::Registry,
-    chain: &[(String, serde_json::Value)],
-    prores: bool,
-    bitrate_kbps: Option<u32>,
-    crop: Option<(u32, u32, u32, u32)>,
-    cancel: &abner_processor_api::Cancellation,
-    active: &Mutex<Vec<abner_processor_api::Cancellation>>,
-    // Each stage's own in-flight reports, by the stage's name: what the chain is
-    // doing between the frames `emit` delivers.
-    stage_report: Option<&crate::export_page::StageReport>,
-    mut emit: impl FnMut(crate::export_page::Rendered) -> Result<(), String>,
-) -> Result<()> {
-    use abner_processor_api::{VideoFrame, PixelFormat, InputRequirement, Role};
-    inputs.validate_geometry(info.width,info.height).map_err(anyhow::Error::msg)?;
-    ensure!(crop.is_none() || inputs.crops.is_empty(), "Use either the timeline crop or an export crop");
-    validate_ranges(keeps)?;
-    ensure!(
-        !dest.exists(),
-        "Output already exists; choose another filename"
-    );
-    let extension = dest.extension().and_then(|ext| ext.to_str()).unwrap_or_default();
-    let extension = extension.to_ascii_lowercase();
-    ensure!(
-        matches!(extension.as_str(), "mp4" | "mov" | "mkv"),
-        "Choose MP4, MOV or MKV for pipeline export"
-    );
-    ensure!(!prores || extension != "mp4", "ProRes requires MOV or MKV");
-    cancel.check().map_err(anyhow::Error::msg)?;
-    if bitrate_kbps.is_none() && chain.is_empty() && crop.is_none() && inputs.crops.is_empty() && !prores {
-        // Keep the packet path available through the Export workspace. Repair
-        // only boundary GOPs, and never pass untouched HDR through the SDR host.
-        // Publish after checking cancellation; RAII removes unpublished work.
-        let reservation = pending(dest)?;
-        let work_path = reservation.0.with_extension(&extension);
-        ensure!(!work_path.exists(), "Export working file already exists");
-        let work = Pending(work_path);
-        export(&info.path, &work.0, keeps, false, &[], None)?;
-        cancel.check().map_err(anyhow::Error::msg)?;
-        std::fs::rename(&work.0, dest)?;
-        return Ok(());
-    }
-    crate::media_metadata::read(&info.path)
-        .map_err(anyhow::Error::msg)?
-        .check_processable()
-        .map_err(anyhow::Error::msg)?;
-    if crate::processor_gui::retimes(registry, chain, info.fps).map_err(anyhow::Error::msg)? {
-        crate::media_metadata::require_constant_rate(&info.path).map_err(anyhow::Error::msg)?;
-    }
-    // Subtitles and tags from the source, when it is a container the
-    // packet reader knows; other sources export without them.
-    let (subs, meta) = match Input::open(&info.path) {
-        Ok(original) => (subtitle_tracks(&original, keeps)?, source_meta(&original, &info.path)),
-        Err(e) => {
-            log::warn!("{}: subtitles and tags not carried: {e}", info.path.display());
-            (Vec::new(), SourceMeta::default())
-        }
-    };
-    let temp = pending(dest)?;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .truncate(true)
-        .open(&temp.0)?;
-    let mut options = mp4::WriterOptions::new(if prores || extension == "mov" {
-        mp4::Brand::Mov
-    } else {
-        mp4::Brand::Mp4
-    });
-    options.metadata = meta.mp4.clone();
-    let mut mux = mp4::Mp4Writer::new(file, options)?;
-    ensure!(
-        info.fps.is_finite() && info.fps > 0. && info.fps <= 1000.,
-        "Export requires a valid constant frame rate"
-    );
-    let (cx, cy, cw, ch) = crop.unwrap_or((0, 0, info.width, info.height));
-    ensure!(
-        cw >= 2
-            && ch >= 2
-            && cx.checked_add(cw).is_some_and(|x| x <= info.width)
-            && cy.checked_add(ch).is_some_and(|y| y <= info.height),
-        "Crop lies outside the source"
-    );
-    let mut encoder: Option<PipelineEncoder> = None;
-    let mut track = None;
-    let mut index = 0u64;
-    let mut output_time = 0.;
-    let mut expected_duration: Option<f64> = None;
-    for &(start, end) in keeps {
-        cancel.check().map_err(anyhow::Error::msg)?;
-        active.lock().unwrap().clear();
-        let mut dims = [cw as usize, ch as usize];
-        let mut sessions = Vec::new();
-        for (stage,(id, settings)) in chain.iter().enumerate() {
-            ensure!(stage==0 || inputs.bindings.get(id).is_none_or(|b|b.is_empty()), "Spatial inputs currently require the first enabled processor");
-            let f = registry.get(id).map_err(anyhow::Error::msg)?;
-            ensure!(matches!(f.capabilities().role, Role::Processor),
-                "{}: generator/post-processor execution is not supported by export", f.descriptor().name);
-            ensure!(!matches!(f.capabilities().input, InputRequirement::WholeClip),
-                "{}: whole-clip execution is not supported by export", f.descriptor().name);
-            let mut session = abner_processor_api::create_bound(f,dims[0],dims[1],settings,inputs.bindings.get(id).cloned().unwrap_or_default())
-                .map_err(anyhow::Error::msg)?;
-            if let Some(report) = stage_report {
-                use crate::export_page::StageUpdate;
-                let (count, name) = (chain.len(), f.descriptor().name);
-                let phase = (report.clone(), name.clone());
-                session.set_progress_reporter(std::sync::Arc::new(move |p| (phase.0)(&phase.1, StageUpdate::Phase(p))));
-                let frame = (report.clone(), name.clone());
-                session.set_frame_progress_reporter(std::sync::Arc::new(move |p| {
-                    (frame.0)(&frame.1, StageUpdate::Frame(stage, count, Some(p)))
-                }));
-                // The frame bar ends with the call it described.
-                let report = report.clone();
-                session = Box::new(abner_processing::progress::CallBoundary::new(session,
-                    std::sync::Arc::new(move || report(&name, StageUpdate::Frame(stage, count, None)))));
-            }
-            active.lock().unwrap().push(session.cancellation());
-            dims = session.output_dimensions();
-            ensure!(
-                dims.iter().all(|&d| d >= 2 && d <= 8192),
-                "Unsupported processor output size"
-            );
-            sessions.push(session);
-        }
-        let sink_format = if prores { PixelFormat::Yuv422p10 } else { PixelFormat::Rgba8 };
-        let mut format_plan: Option<abner_processing::negotiation::FormatPlan> = None;
-        let mut source=crate::processing_source::Source::open(registry,chain.first().map(|s|s.0.as_str()),&info.path,info.width,info.height,info.fps).map_err(anyhow::Error::msg)?;
-        source.seek(start).map_err(anyhow::Error::msg)?;
-        let mut previous_end: Option<f64> = None;
-        let mut accept = |frames: Vec<VideoFrame>| -> Result<()> {
-            for f in frames {
-                cancel.check().map_err(anyhow::Error::msg)?;
-                f.validate().map_err(anyhow::Error::msg)?;
-                ensure!(
-                    f.width == dims[0] && f.height == dims[1],
-                    "Processor changed declared dimensions"
-                );
-                let unit = f.time_base[0] as f64 / f.time_base[1] as f64;
-                let source_pts = f.pts as f64 * unit;
-                if source_pts < start - 1e-6 || source_pts >= end - 1e-6 {
-                    continue;
-                }
-                let duration = f.duration as f64 * unit;
-                ensure!(
-                    duration > 0. && duration.is_finite(),
-                    "Invalid processor output duration"
-                );
-                if let Some(previous) = previous_end {
-                    ensure!(
-                        (source_pts - previous).abs() < 0.002,
-                        "Processor returned missing, reordered, or discontinuous output timestamps"
-                    );
-                }
-                previous_end = Some(source_pts + duration);
-                if let Some(expected) = expected_duration {
-                    ensure!(
-                        (expected - duration).abs() < 0.00001,
-                        "Export currently requires constant-rate output"
-                    );
-                } else {
-                    expected_duration = Some(duration);
-                }
-                let rgba = abner_processing::color::rgba8(&f).map_err(anyhow::Error::msg)?;
-                if encoder.is_none() {
-                    encoder = Some(PipelineEncoder::new(
-                        f.width as u32,
-                        f.height as u32,
-                        duration,
-                        prores,
-                        bitrate_kbps.unwrap_or(40_000),
-                    )?);
-                }
-                let e = encoder.as_mut().unwrap();
-                ensure!(
-                    e.dims() == [f.width as u32, f.height as u32],
-                    "Output dimensions changed between segments"
-                );
-                let packets = e.encode(f, &rgba, index)?;
-                let ti = match track {
-                    Some(t) => t,
-                    None => {
-                        let mut config = cfg(e.entry(), "und");
-                        config.timescale = e.scale();
-                        let t = mux.add_track(config)?;
-                        track = Some(t);
-                        t
-                    }
-                };
-                for packet in packets {
-                    write_packet_scaled(
-                        &mut mux,
-                        ti,
-                        e.scale(),
-                        &packet.data,
-                        packet.duration as f64 / e.scale() as f64,
-                        packet.composition_offset as f64 / e.scale() as f64,
-                        packet.key,
-                    )?;
-                }
-                index += 1;
-                output_time += duration;
-                emit(crate::export_page::Rendered {
-                    pixels: rgba,
-                    dims: [dims[0] as u32, dims[1] as u32],
-                    source_pts,
-                    output_time,
-                    count: index,
-                    frame_duration: duration,
-                })
-                .map_err(anyhow::Error::msg)?;
-            }
-            Ok(())
-        };
-        // A rounded nominal duration cannot join independently rounded PTS values:
-        // 24 fps alternates between 41,666 and 41,667 microseconds. Look ahead
-        // once, as the Process preview does, so every input ends at the next PTS.
-        let mut read_next = || source.read(cancel).map_err(anyhow::Error::msg);
-        let mut next = read_next()?;
-        while let Some(decoded_frame) = next.take() {
-            let pts=decoded_frame.pts as f64*decoded_frame.time_base[0] as f64/decoded_frame.time_base[1] as f64;
-            cancel.check().map_err(anyhow::Error::msg)?;
-            if pts >= end - 1e-6 {
-                break;
-            }
-            next = read_next()?;
-            let mut f=decoded_frame;
-            if cx != 0 || cy != 0 || cw != info.width || ch != info.height {
-                // Arbitrary crop origins can split a chroma sample. Crop in RGB16
-                // rather than inventing chroma phase or reducing to display depth.
-                let mut rgb = abner_processing::color::convert(f, PixelFormat::Rgb16)
-                    .and_then(VideoFrame::into_rgb16).map_err(anyhow::Error::msg)?;
-                rgb.pixels = (cy..cy + ch).flat_map(|y| {
-                    let start = ((y * info.width + cx) * 3) as usize;
-                    rgb.pixels[start..start + (cw * 3) as usize].iter().copied()
-                }).collect();
-                rgb.width = cw as usize; rgb.height = ch as usize;
-                f = rgb.into();
-            }
-            if !inputs.crops.is_empty() {
-                let mut rgb = abner_processing::color::convert(f, PixelFormat::Rgb16)
-                    .and_then(VideoFrame::into_rgb16).map_err(anyhow::Error::msg)?;
-                crate::spatial::apply_crop(&mut rgb,&inputs.crops);
-                f = rgb.into();
-            }
-            if format_plan.is_none() {
-                format_plan = Some(abner_processing::negotiation::FormatPlan::new(&mut sessions, f.format, sink_format)
-                    .map_err(anyhow::Error::msg)?);
-            }
-            accept(
-                format_plan.as_ref().unwrap().process_native(
-                    &mut sessions,
-                    0,
-                    vec![f],
-                    cancel,
-                    512 * 1024 * 1024,
-                )
-                .map_err(anyhow::Error::msg)?,
-            )?;
-        }
-        for i in 0..sessions.len() {
-            let Some(plan) = &format_plan else { break; };
-            accept(
-                plan.finish_stage_native(
-                    &mut sessions,
-                    i,
-                    cancel,
-                    512 * 1024 * 1024,
-                )
-                .map_err(anyhow::Error::msg)?,
-            )?;
-        }
-    }
-    cancel.check().map_err(anyhow::Error::msg)?;
-    let e = encoder
-        .as_mut()
-        .context("Pipeline returned no output frames")?;
-    for packet in e.flush()? {
-        write_packet_scaled(
-            &mut mux,
-            track.unwrap(),
-            e.scale(),
-            &packet.data,
-            packet.duration as f64 / e.scale() as f64,
-            packet.composition_offset as f64 / e.scale() as f64,
-            packet.key,
-        )?;
-    }
-    let source = crate::fc::open(&info.path).map_err(anyhow::Error::msg)?;
-    // The existing audio path preserves kept-range timing and encodes AAC for all output containers.
-    audio_encode_checked(&source, &mut mux, keeps, false, || {
-        cancel.check().map_err(anyhow::Error::msg)
-    })?;
-    cancel.check().map_err(anyhow::Error::msg)?;
-    let mkv = dest
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("mkv"));
-    if !mkv {
-        write_subs_mp4(&mut mux, &subs)?;
-    }
-    mux.finish()?;
-    if !mkv {
-        text_handlers(&temp.0)?;
-    }
-    let tags: &[(String, String)] = if mp4_brand(dest) { &meta.mp4 } else { &[] };
-    finish_mp4(&temp.0, chapters, !mkv, tags)?;
-    if mkv {
-        let remuxed = pending(dest)?;
-        remux_mkv(&temp.0, &remuxed.0, chapters, &meta, &subs)?;
-        cancel.check().map_err(anyhow::Error::msg)?;
-        std::fs::hard_link(&remuxed.0, dest)?;
-    } else {
-        std::fs::hard_link(&temp.0, dest)?;
-    }
-    Ok(())
-}
-
-enum PipelineEncoder {
-    ProRes {
-        encoder: filmcraft_prores::Encoder,
-        dims: [u32; 2],
-        duration: u32,
-    },
-    #[cfg(target_os = "macos")]
-    Hevc {
-        encoder: Box<dyn filmcraft_export::VideoEncoder>,
-        dims: [u32; 2],
-    },
-}
-impl PipelineEncoder {
-    fn new(w: u32, h: u32, duration: f64, prores: bool, bitrate_kbps: u32) -> Result<Self> {
-        ensure!(
-            w.is_multiple_of(2) && h.is_multiple_of(2),
-            "Export requires even output dimensions"
-        );
-        if prores {
-            return Ok(Self::ProRes {
-                encoder: filmcraft_prores::Encoder::new(filmcraft_prores::Profile::Standard, w, h),
-                dims: [w, h],
-                duration: (duration * SCALE as f64).round() as u32,
-            });
-        }
-        #[cfg(target_os = "macos")]
-        {
-            let settings = filmcraft_export::ExportSettings {
-                format: filmcraft_export::Format::Hevc,
-                bitrate_kbps,
-                ..Default::default()
-            };
-            let encoder = filmcraft_platform::hardware_encode::videotoolbox_encoder_factory(
-                filmcraft_export::Format::Hevc,
-                w,
-                h,
-                filmcraft_time::FrameRate::new(1_000_000, (duration * 1e6).round() as i64),
-                &settings,
-            )
-            .context("HEVC encoder unavailable on this machine")??;
-            Ok(Self::Hevc {
-                encoder,
-                dims: [w, h],
-            })
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            anyhow::bail!("HEVC export requires macOS VideoToolbox")
-        }
-    }
-    fn dims(&self) -> [u32; 2] {
-        match self {
-            Self::ProRes { dims, .. } => *dims,
-            #[cfg(target_os = "macos")]
-            Self::Hevc { dims, .. } => *dims,
-        }
-    }
-    fn scale(&self) -> u32 {
-        match self {
-            Self::ProRes { .. } => SCALE,
-            #[cfg(target_os = "macos")]
-            Self::Hevc { encoder, .. } => encoder.timescale(),
-        }
-    }
-    fn entry(&self) -> SampleEntry {
-        match self {
-            Self::ProRes { dims, .. } => {
-                SampleEntry::prores(mp4::FourCc(*b"apcn"), dims[0] as u16, dims[1] as u16)
-            }
-            #[cfg(target_os = "macos")]
-            Self::Hevc { encoder, .. } => encoder.sample_entry(),
-        }
-    }
-    fn encode(&mut self, frame: abner_processor_api::VideoFrame, _display_rgba: &[u8], index: u64) -> Result<Vec<filmcraft_export::EncodedPacket>> {
-        match self {
-            Self::ProRes {
-                encoder,
-                duration,
-                ..
-            } => {
-                let p = abner_processing::color::into_prores(frame)
-                    .map_err(anyhow::Error::msg)?;
-                Ok(vec![filmcraft_export::EncodedPacket {
-                    data: encoder.encode(&p)?,
-                    duration: *duration,
-                    composition_offset: 0,
-                    key: true,
-                }])
-            }
-            #[cfg(target_os = "macos")]
-            Self::Hevc { encoder, dims } => {
-                // Reuse the preview pixels only for this RGBA8 encoder.
-                Ok(encoder.encode(&filmcraft_export::EncoderFrame {
-                    width: dims[0],
-                    height: dims[1],
-                    rgba: _display_rgba,
-                    hdr: None,
-                    index,
-                })?)
-            }
-        }
-    }
-    fn flush(&mut self) -> Result<Vec<filmcraft_export::EncodedPacket>> {
-        match self {
-            Self::ProRes { .. } => Ok(vec![]),
-            #[cfg(target_os = "macos")]
-            Self::Hevc { encoder, .. } => Ok(encoder.flush()?),
-        }
     }
 }

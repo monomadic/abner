@@ -757,9 +757,9 @@ impl Cut {
         self.edit.crops=merged;
     }
     pub(crate) fn inherit_crop(&mut self,crop:Option<crate::mask::Crop>) {
-        if self.edit.crops.is_empty() { if let Some(crop)=crop {
+        if self.edit.crops.is_empty() && let Some(crop)=crop {
             self.edit.crops.push(crate::spatial::ClipCrop{start:0.,end:self.duration,crop});
-        }}
+        }
     }
     pub fn cuts(&self) -> &[(f64, f64)] {
         &self.edit.cuts
@@ -1131,7 +1131,7 @@ pub fn parse_facts(v: &serde_json::Value) -> Facts {
         let codec = codec_name(s["codec_name"].as_str().unwrap_or("?"));
         let level = s["level"].as_i64().filter(|l| *l > 0).map(|l| if l >= 10 && l % 10 != 0 || l >= 10 { format!("{}.{}", l / 10, l % 10) } else { l.to_string() });
         let profile = s["profile"].as_str().map(|p| p.to_string());
-        f.video_title = [Some(codec.clone()), profile, level].into_iter().flatten().collect::<Vec<_>>().join(" · ").replacen(" · ", " · ", 1);
+        f.video_title = [Some(codec.clone()), profile, level].into_iter().flatten().collect::<Vec<_>>().join(" · ");
         let (w, h) = (num(s, "width").unwrap_or(0.0) as u32, num(s, "height").unwrap_or(0.0) as u32);
         let fps = rate(s);
         let pix = s["pix_fmt"].as_str().unwrap_or("");

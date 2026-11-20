@@ -161,7 +161,7 @@ fn frame_icon_pixels(index: usize) -> Vec<u8> {
     resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(ICON_SCALE, ICON_SCALE), &mut pix.as_mut());
     // resvg returns premultiplied sRGB; the texture pipeline expects straight alpha.
     let mut rgba = pix.data().to_vec();
-    for p in rgba.chunks_exact_mut(4) {
+    for p in rgba.as_chunks_mut::<4>().0.iter_mut() {
         if p[3] > 0 { for c in 0..3 { p[c] = ((p[c] as u32 * 255 + p[3] as u32 / 2) / p[3] as u32).min(255) as u8; } }
     }
     rgba
@@ -481,6 +481,8 @@ struct Uniforms {
     /// reflection onto it, which fixed-function blending can't do.
     plate: [f32; 4],
 }
+
+type DrawBatch = ((usize, usize), Option<[u32; 4]>, std::ops::Range<u32>);
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -1256,9 +1258,9 @@ impl Gpu {
 
         // Build instances + draw batches (bind-group key per range).
         let mut data: Vec<Instance> = Vec::new();
-        let mut batches: Vec<((usize, usize), Option<[u32; 4]>, std::ops::Range<u32>)> = Vec::new();
+        let mut batches: Vec<DrawBatch> = Vec::new();
         let push = |data: &mut Vec<Instance>,
-                        batches: &mut Vec<((usize, usize), Option<[u32; 4]>, std::ops::Range<u32>)>,
+                        batches: &mut Vec<DrawBatch>,
                         clip: Option<[u32; 4]>,
                         key: Option<(usize, usize)>,
                         inst: Instance| {
@@ -1850,7 +1852,7 @@ mod frame_icon_tests {
         for i in [4,5] {
             let tree=frame_icon_tree(i);
             assert_eq!((tree.size().width(),tree.size().height()),(20.,20.));
-            assert!(frame_icon_pixels(i).chunks_exact(4).any(|p|p[3]>200));
+            assert!(frame_icon_pixels(i).as_chunks::<4>().0.iter().any(|p|p[3]>200));
             assert!((recent::ATLAS+i)/recent::ATLAS_COLS<THUMB_ROWS);
         }
     }
@@ -1860,7 +1862,7 @@ mod frame_icon_tests {
             let tree=frame_icon_tree(i);
             assert_eq!((tree.size().width(),tree.size().height()),size);
             assert!(size.0*ICON_SCALE<THUMB_W as f32 && size.1*ICON_SCALE<THUMB_H as f32);
-            assert!(frame_icon_pixels(i).chunks_exact(4).any(|p|p[3]>0));
+            assert!(frame_icon_pixels(i).as_chunks::<4>().0.iter().any(|p|p[3]>0));
         }
     }
     #[test]
@@ -1871,9 +1873,9 @@ mod frame_icon_tests {
             assert!(tree.size().width()*ICON_SCALE < THUMB_W as f32);
             assert!(tree.size().height()*ICON_SCALE < THUMB_H as f32);
             let pixels = frame_icon_pixels(i);
-            assert!(pixels.chunks_exact(4).any(|p| p[3] > 200));
-            assert!(pixels.chunks_exact(4).any(|p| p[3] > 0 && p[3] < 255));
-            assert!(pixels.chunks_exact(4).filter(|p| p[3] == 255).all(|p| p[..3] == [27,31,34]));
+            assert!(pixels.as_chunks::<4>().0.iter().any(|p| p[3] > 200));
+            assert!(pixels.as_chunks::<4>().0.iter().any(|p| p[3] > 0 && p[3] < 255));
+            assert!(pixels.as_chunks::<4>().0.iter().filter(|p| p[3] == 255).all(|p| p[..3] == [27,31,34]));
             assert!(!images.contains(&pixels));
             images.push(pixels);
         }

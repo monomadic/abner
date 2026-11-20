@@ -71,7 +71,7 @@ impl Canvas {
                 w: bounds.w,
                 h: (end - bounds.y - bar_h).max(0.),
             },
-            button_bar: show_bar.then(|| ButtonBar {
+            button_bar: show_bar.then_some(ButtonBar {
                 r: RectPx { h: bar_h, ..bounds },
             }),
             timeline,
@@ -163,7 +163,6 @@ impl ButtonBar {
     pub const PADDING_Y: f32 = 6.0;
     pub const GAP: f32 = 4.0;
     pub const GROUP_GAP: f32 = 8.0;
-    const PRIMARY_HEIGHT: f32 = 32.0;
 
     pub fn at(x: f32, y: f32, width: f32) -> Self {
         Self {
@@ -197,15 +196,6 @@ impl ButtonBar {
         let content = self.content();
         self.control(content.x + content.w - width, width)
     }
-    pub fn primary_rect(&self, width: f32) -> RectPx {
-        let height = Self::PRIMARY_HEIGHT.min(self.r.h.max(0.));
-        RectPx {
-            y: self.r.y + (self.r.h - height) / 2.,
-            h: height,
-            ..self.trailing(width)
-        }
-    }
-
     pub fn draw(&self, items: &mut Vec<Item>) {
         self.draw_radii(items, [4.0, 4.0, 0.0, 0.0]);
     }

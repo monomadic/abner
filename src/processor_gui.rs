@@ -36,7 +36,6 @@ use std::{
 /// `processors.preview_cache_mb`'s default, for a `Panel` nobody configured.
 pub const DEFAULT_PREVIEW_BYTES: usize = 1024 * 1024 * 1024;
 const FRAMES: usize = 24;
-const DIM: [f32; 4] = [0.43, 0.43, 0.43, 1.0];
 const BLUE: [f32; 4] = [0.04, 0.33, 0.7, 1.0];
 /// Compact processor rows (Figma rail): 30px rows on a 3px gap, inside a
 /// rounded group box with 10px padding, under the category chips.
@@ -2270,11 +2269,11 @@ impl Panel {
                 self.toggle_play = true;
                 true
             }
-            Key::KeyLeft => {
+            Key::PreviousKeyframe => {
                 self.jump(false);
                 true
             }
-            Key::KeyRight => {
+            Key::NextKeyframe => {
                 self.jump(true);
                 true
             }
@@ -3651,7 +3650,7 @@ impl Panel {
             }
         });
         ui_label(items, v.x + 12.0, header.y + header.h / 2.0, 10.0,
-            hex_color(0xa3a5a8), &format!("{} → {output}{note}", describe(self.source_dims)),
+            hex_color(0xa3a5a8), format!("{} → {output}{note}", describe(self.source_dims)),
             Align::Left, (self.compare_switch(vp).x - v.x - 24.0).max(1.0));
         self.draw_compare_switch(items, vp);
         items.push(Item::Clip(Some(r)));
@@ -3991,7 +3990,7 @@ impl Panel {
     }
     fn draw_transport(&self, items: &mut Vec<Item>, vp: (f32, f32)) {
         const NAMES: [&str; 5] = ["Prev rendered", "Frame back", "Play", "Frame on", "Next rendered"];
-        for i in 0..5 {
+        for (i, name) in NAMES.iter().enumerate() {
             let b = self.transport(vp, i);
             // Bare glyphs, as the reference draws them: no box, the hover
             // lifts the ink to white and names the control beneath.
@@ -4022,7 +4021,7 @@ impl Panel {
                 _ => draw_icon(items, Icon::KeyFwd, cx, cy, ink),
             }
             if hover {
-                let name = if i == 2 && self.playback { "Pause" } else { NAMES[i] };
+                let name = if i == 2 && self.playback { "Pause" } else { name };
                 // Under the row from its left edge: the buttons sit too close
                 // to the time readout for a label centred on each.
                 let x = self.transport(vp, 0).x;
@@ -4074,6 +4073,14 @@ fn text(items: &mut Vec<Item>, x: f32, y: f32, size: f32, s: &str, color: [f32; 
     let mut t = TextItem::new(x, y, size, color, s);
     t.max_width = Some(width.max(1.0));
     items.push(Item::Text(t));
+}
+
+
+/// Attach to the label so placement uses the renderer's font metrics.
+fn set_caret(items: &mut [Item], cursor: &crate::text_edit::Cursor) {
+    if let Some(Item::Text(text)) = items.last_mut() {
+        cursor.show(text);
+    }
 }
 
 #[cfg(test)]
@@ -5968,11 +5975,4 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-}
-
-/// Attach to the label so placement uses the renderer's font metrics.
-fn set_caret(items: &mut [Item], cursor: &crate::text_edit::Cursor) {
-    if let Some(Item::Text(text)) = items.last_mut() {
-        cursor.show(text);
-    }
 }

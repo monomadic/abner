@@ -71,8 +71,8 @@ pub enum Key {
     /// ⌘S: save timeline edits beside the source clip.
     SaveProject,
     /// ⇧← / ⇧→: cut mode's previous / next keyframe. Plain arrows elsewhere.
-    KeyLeft,
-    KeyRight,
+    PreviousKeyframe,
+    NextKeyframe,
     /// ⌃⇧[ / ⌃⇧]: the previous / next header tab, in the header's order
     /// (Sources · Timeline · Process · Crop · Mask), stopping at the ends.
     PrevMode,
@@ -191,6 +191,8 @@ struct SourceCopyCheck {
     ready: bool,
 }
 
+type FramePngResult = Result<(Vec<u8>, u32, u32), String>;
+
 pub struct App {
     editor: Option<crate::spatial::Editor>,
     detection_range:Option<crate::watermark::Range>,
@@ -236,7 +238,7 @@ pub struct App {
     /// Frame > Copy Frame as PNG: the encode runs on a worker; the runner
     /// takes the bytes (`take_frame_png`) and puts them on the pasteboard,
     /// which only it can reach.
-    frame_copy: Option<std::sync::mpsc::Receiver<Result<(Vec<u8>, u32, u32), String>>>,
+    frame_copy: Option<std::sync::mpsc::Receiver<FramePngResult>>,
     /// A transient line for the status bar (`notify`), shown for `NOTICE_S`.
     notice: Option<(String, Instant)>,
     /// The crop marquee (`C`), in the ACTIVE video's image pixels. While
@@ -699,7 +701,7 @@ fn fit_cell(buf: &[u8], w: u32, h: u32) -> Vec<u8> {
     let (cw, ch) = (recent::THUMB_W as usize, recent::THUMB_H as usize);
     let (w, h) = (w as usize, h as usize);
     let mut out = vec![0u8; cw * ch * 4];
-    for px in out.chunks_exact_mut(4) { px[3] = 255; }
+    for px in out.as_chunks_mut::<4>().0.iter_mut() { px[3] = 255; }
     if w != cw || buf.len() < w * h * 4 { return out; }
     let shift = (h as isize - ch as isize) / 2;
     for y in 0..ch {
@@ -1030,7 +1032,7 @@ impl App {
             let c=self.editor_processing_region().map(|[x,y,w,h]|Crop{x:x as f32,y:y as f32,w:w as f32,h:h as f32}).unwrap_or_else(||self.full_crop());
             self.detection_area=Some(c);
         }
-        self.detection_area_visible=!self.detection_area_visible;
+        self.detection_area_visible= !self.detection_area_visible;
         self.painting=false;self.stroke_last=None;self.crop_drag=None;
     }
     fn detection_search_region(&self) -> Option<[usize;4]> {
@@ -1216,7 +1218,7 @@ impl App {
         if index!=self.detection_samples {self.watermark_task=None;self.mask_status.clear();self.detection_samples=index;}
     }
     fn toggle_detection_panel(&mut self) {
-        self.detection_panel=!self.detection_panel;
+        self.detection_panel= !self.detection_panel;
         if !self.detection_panel {self.detection_area_visible=false;self.crop_drag=None;}
     }
     fn detection_press(&mut self,x:f32,y:f32)->bool {
@@ -1281,7 +1283,7 @@ impl App {
         if !self.ready() || !self.mask_mode || self.crop.is_some() {return;}
         self.playing=false;self.mouse_up();self.ensure_mask();self.detection_area_visible=false;
         let v=&self.videos[self.active];let mask=self.masks[self.active].as_ref().unwrap();
-        match crate::watermark::Task::spawn(v.info.clone(),v.spatial_id,mask.id,mask.revision,self.detection_search_region(),self.detection_range.unwrap_or_else(||crate::watermark::Range{start:0.,end:v.info.duration}),self.detection_area.is_some(),self.detection_sample_count()) {
+        match crate::watermark::Task::spawn(v.info.clone(),v.spatial_id,mask.id,mask.revision,self.detection_search_region(),self.detection_range.unwrap_or(crate::watermark::Range{start:0.,end:v.info.duration}),self.detection_area.is_some(),self.detection_sample_count()) {
             Ok(task)=>{self.mask_status=task.status();self.watermark_task=Some(task);}
             Err(e)=>self.mask_status=e,
         }
@@ -1632,7 +1634,6 @@ impl App {
 
 
     /// A backdrop frame goes back to its decoder's pool.
-
     /// Advance the backdrop's clock and take the frame now due, spawning
     /// the decoder on the launch window's first frame.
     fn tick_backdrop(&mut self, dt: f32) -> Option<Upload> {
@@ -2015,7 +2016,7 @@ impl App {
     }
 
     /// The finished PNG from `copy_frame`, once; the runner owns the pasteboard.
-    pub fn take_frame_png(&mut self) -> Option<Result<(Vec<u8>, u32, u32), String>> {
+    pub fn take_frame_png(&mut self) -> Option<FramePngResult> {
         let receiver = self.frame_copy.as_ref()?;
         let result = match receiver.try_recv() {
             Ok(r) => r,
@@ -2349,7 +2350,7 @@ impl App {
             return;
         }
         if !self.cut_mode {
-            k = match k { Key::KeyLeft => Key::Left, Key::KeyRight => Key::Right, k => k };
+            k = match k { Key::PreviousKeyframe => Key::Left, Key::NextKeyframe => Key::Right, k => k };
         }
         if !self.mask_mode && matches!(k, Key::Char('t' | 'T')) {
             self.set_cut_mode(!self.cut_mode);
@@ -2409,7 +2410,7 @@ impl App {
                 }
             }
             Key::Backspace => self.speed = 1.0,
-            Key::Up | Key::Down | Key::Close | Key::ActualSize | Key::CmdDigit(_) | Key::Undo | Key::Redo | Key::Render | Key::SaveProject | Key::KeyLeft | Key::KeyRight | Key::DuplicateSources | Key::OpenFiles | Key::PrevMode | Key::NextMode => {} // handled above
+            Key::Up | Key::Down | Key::Close | Key::ActualSize | Key::CmdDigit(_) | Key::Undo | Key::Redo | Key::Render | Key::SaveProject | Key::PreviousKeyframe | Key::NextKeyframe | Key::DuplicateSources | Key::OpenFiles | Key::PrevMode | Key::NextMode => {} // handled above
             Key::Char('V') => self.mode = self.mode.cycle(-1),
             Key::Char(c @ '1'..='9') => {
                 let idx = c as usize - '1' as usize;
@@ -2552,6 +2553,7 @@ impl App {
         self.cursor = (x, y);
     }
 
+    #[cfg(test)]
     pub fn mouse_down_with_alt(&mut self, x: f32, y: f32, alt: bool) {
         self.mouse_down_with_mods(x, y, alt, false, false);
     }
@@ -2582,13 +2584,12 @@ impl App {
     pub fn mouse_released(&mut self) {
         let copy = self.source_copy_drag.take();
         self.mouse_up();
-        if let Some((idx, _, _, true)) = copy {
-            if self.cursor_inside && self.show_ui && !self.cut_mode && !self.mask_mode
+        if let Some((idx, _, _, true)) = copy
+            && self.cursor_inside && self.show_ui && !self.cut_mode && !self.mask_mode
                 && contains(self.workspace().list, self.cursor.0, self.cursor.1) && idx < self.videos.len() {
                 let at = self.source_drop_index(self.cursor.1);
                 self.duplicate_source(idx, at);
             }
-        }
     }
 
     pub fn mouse_down(&mut self, x: f32, y: f32) {
@@ -2678,9 +2679,8 @@ impl App {
                 if contains(self.btn_play(), x, y) { self.playing = !self.playing; return; }
                 if contains(self.btn_next(), x, y) { self.step(1); return; }
             }
-            if self.cut_mode {
-                if self.cut_press(x, y) { return; }
-            }
+            if self.cut_mode
+                && self.cut_press(x, y) { return; }
             let s = self.seek_rect(self.vp);
             if !self.cut_mode && contains(RectPx { x: s.x - 6.0, y: s.y - SEEK_GRAB, w: s.w + 12.0, h: s.h + 2.0 * SEEK_GRAB }, x, y) {
                 self.scrubbing = true;
@@ -2732,9 +2732,8 @@ impl App {
         self.export_page.release_text();
         self.detection_drag=None;self.detection_samples_drag=false;
         // Dragged shut: the toggle reopens the rail at the width it had.
-        if let Some((_, from)) = self.source_resize.take() {
-            if !self.show_sources { self.source_width = Some(from); }
-        }
+        if let Some((_, from)) = self.source_resize.take()
+            && !self.show_sources { self.source_width = Some(from); }
         if self.processors.release() {
             // While dragging, coalesce to let useful decodes finish. On release,
             // the final target owns the decoder immediately: do not wait for
@@ -2800,7 +2799,8 @@ impl App {
     }
 
     pub fn scroll(&mut self, dx: f32, dy: f32) {
-        if self.export_page.open { if self.export_page.scroll(dy,self.cursor,self.vp) { return; } if self.ready() { self.pan_canvas(dx,dy); } return; }
+        if self.export_page.open { if self.export_page.scroll(dy,self.cursor,self.vp) { return; }
+            if self.ready() { self.pan_canvas(dx,dy); } return; }
         if self.show_ui && self.processors.scroll(dy, self.cursor, self.vp) { return; }
         self.stroke_last = None;
         if !self.ready() { return; }
@@ -3178,14 +3178,13 @@ impl App {
                 }
             }
         }
-        if let Some(p) = &mut self.split_preview {
-            if p.waiting && let Some((pts, buf)) = p.player.take_next() {
+        if let Some(p) = &mut self.split_preview
+            && p.waiting && let Some((pts, buf)) = p.player.take_next() {
                 p.waiting = false;
                 p.shown = true;
                 p.shown_pts = pts;
                 uploads.push(Upload { idx: p.idx, w: p.player.w, h: p.player.h, buf });
             }
-        }
         // Adopt once for a discrete seek/framestep. Pointer seeks retain
         // the requested clock even when decoding lands on a nearby frame.
         if !self.playing && let Some(pts) = adopt {
@@ -3213,11 +3212,8 @@ impl App {
         self.rail_slide = toward(self.rail_slide, self.show_sources);
         self.side_slide = toward(self.side_slide, self.show_inspector);
         let step = dt / DETAIL_SLIDE_S;
-        let toward = |cur: f32, shown: bool| {
-            let target = if shown { 1.0 } else { 0.0 };
-            if cur < target { (cur + step).min(target) } else { (cur - step).max(target) }
-        };
-        self.detail_slide = toward(self.detail_slide, self.show_detail);
+        let target = if self.show_detail { 1.0 } else { 0.0 };
+        self.detail_slide = if self.detail_slide < target { (self.detail_slide + step).min(target) } else { (self.detail_slide - step).max(target) };
         self.source_scroll = self.source_scroll_offset();
         self.tick_cut_hot(dt);
 
@@ -3372,12 +3368,11 @@ impl App {
             Canvas::lift(&mut items, picture);
             items.push(Item::Video { a:self.active, b:self.active, r:picture, uv:[0.,0.,1.,1.], mode:VideoMode::Tex, p0:0., p1:0. });
             self.build_mask_layer(&mut items);
-            if self.crop.is_none() {
-                if let Some(region) = self.editor_processing_region() {
+            if self.crop.is_none()
+                && let Some(region) = self.editor_processing_region() {
                     let v = &self.videos[self.active];
                     crate::processor_gui::draw_region_preview(&mut items,picture,[v.info.width as usize,v.info.height as usize],region);
                 }
-            }
             let mode_label = if self.crop.is_some() { "Processing region mode" } else { "Mask mode" };
             let label_y = (picture.y - 18.).max(canvas.y + 18.).min(canvas.y + canvas.h - 18.);
             ui_label(&mut items,canvas.x+canvas.w/2.,label_y,13.,WORKSPACE_TEXT,mode_label,Align::Center,canvas.w-24.);
@@ -5001,7 +4996,7 @@ impl App {
         let Some(cut) = self.cut.as_mut().filter(|c| !c.scanning()) else { return };
         let ranges = std::mem::take(&mut self.cut_boot);
         let pairs = ranges.len() / 2;
-        for (i, pair) in ranges.chunks_exact(2).enumerate() {
+        for (i, pair) in ranges.as_chunks::<2>().0.iter().enumerate() {
             cut.set_in(pair[0]);
             cut.set_out(pair[1]);
             if i + 1 < pairs { cut.cut_selection(); }
@@ -5068,8 +5063,8 @@ impl App {
             // The design's arrows: a frame, and with shift a keyframe.
             Key::Left => { self.step(-1); return true; }
             Key::Right => { self.step(1); return true; }
-            Key::KeyLeft | Key::KeyRight => {
-                let dir = if k == Key::KeyRight { 1 } else { -1 };
+            Key::PreviousKeyframe | Key::NextKeyframe => {
+                let dir = if k == Key::NextKeyframe { 1 } else { -1 };
                 let to = self.cut.as_ref().map(|c| c.key_step(t, dir)).unwrap_or(t);
                 let end = if self.wrap.is_finite() { (self.wrap - 0.05).max(0.0) } else { f64::MAX };
                 self.playing = false;
@@ -5166,9 +5161,8 @@ impl App {
                     // The same range picked on both rows is one cut.
                     let mut ranges: Vec<(f64, f64)> = Vec::new();
                     for (a, b, _) in picks {
-                        if self.cut_gop || cut.segments().iter().any(|s| !s.cut && (s.start - a).abs() < 1e-6 && (s.end - b).abs() < 1e-6) {
-                            if !ranges.iter().any(|r| (r.0 - a).abs() < 1e-6 && (r.1 - b).abs() < 1e-6) { ranges.push((a, b)); }
-                        }
+                        if (self.cut_gop || cut.segments().iter().any(|s| !s.cut && (s.start - a).abs() < 1e-6 && (s.end - b).abs() < 1e-6))
+                            && !ranges.iter().any(|r| (r.0 - a).abs() < 1e-6 && (r.1 - b).abs() < 1e-6) { ranges.push((a, b)); }
                     }
                     if ranges.is_empty() { return; }
                     // A picked piece is already bounded by edits; don't expand it
@@ -5186,7 +5180,6 @@ impl App {
                     }
                     cut.snap = snap;
                     cut.status = if ranges.len() == 1 { format!("Cut {total:.2} s") } else { format!("Cut {} clips, {total:.2} s", ranges.len()) };
-                    return;
                 }
             }
             CutAction::Apply => {
@@ -5454,9 +5447,8 @@ impl App {
         let target = if self.hidden { None } else { self.cut_razor() };
         let same_source = self.split_preview.as_ref().is_some_and(|p|
             p.idx == self.active && self.videos.get(p.idx).is_some_and(|v| v.info.path == p.path));
-        if (target.is_none() || !same_source) && let Some(p) = self.split_preview.take() {
-            if p.shown { self.restore_split_preview(p.idx, &p.path); }
-        }
+        if (target.is_none() || !same_source) && let Some(p) = self.split_preview.take()
+            && p.shown { self.restore_split_preview(p.idx, &p.path); }
         let Some(target) = target else { return };
         if self.split_preview.is_none() {
             let info = &self.videos[self.active].info;
@@ -6593,7 +6585,7 @@ impl App {
             let facts = &cut.facts;
             let rows = |r: &Vec<(&'static str, String)>| r.iter().map(|(k, v)| (k.to_string(), v.clone(), ink)).collect::<Vec<_>>();
             let v = &self.videos[self.active].info;
-            let video_title = if facts.video_title.is_empty() { v.codec.to_uppercase() } else { facts.video_title.to_uppercase().replace("·", "·") };
+            let video_title = if facts.video_title.is_empty() { v.codec.to_uppercase() } else { facts.video_title.to_uppercase() };
             let video_rows = if facts.video.is_empty() {
                 vec![("Size".into(), format!("{} × {}", v.width, v.height), ink), ("Rate".into(), format!("{:.3} fps", v.fps), ink)]
             } else { rows(&facts.video) };
@@ -7297,6 +7289,8 @@ pub(crate) fn draw_icon(items: &mut Vec<Item>, icon: Icon, cx: f32, cy: f32, col
 }
 
 /// The design's small-caps section label.
+// Keep the explicit geometry/pipeline inputs at this boundary.
+#[allow(clippy::too_many_arguments)]
 fn inspector_label(items: &mut Vec<Item>, x: f32, y: f32, px: f32, color: [f32; 4], text: impl Into<String>, align: Align, width: f32) {
     let mono = px == 10.0 || px == 15.0;
     items.push(Item::Text(TextItem { inspector: if mono { 0 } else if px == 12.0 { 2 } else { 1 }, header: mono,
@@ -7437,6 +7431,8 @@ struct Workspace {
 impl Workspace {
     /// `lift` is how far cut mode's lanes grow upward past their base
     /// height (frame detail, the encode rail); everything above moves with it.
+    // Keep the explicit geometry/pipeline inputs at this boundary.
+    #[allow(clippy::too_many_arguments)]
     fn new(vp: (f32, f32), visible: bool, cut: bool, lift: f32, slide: f32, side_slide: f32, detail_slide: f32, source_width: Option<f32>, render_source: bool) -> Self {
         let (w, h) = vp;
         let none = RectPx { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
@@ -7543,6 +7539,8 @@ fn inset_rect(r: RectPx, pad: f32) -> RectPx {
     let pad = pad.min((r.w - 1.0).max(0.0) / 2.0).min((r.h - 1.0).max(0.0) / 2.0);
     RectPx { x: r.x + pad, y: r.y + pad, w: r.w - pad * 2.0, h: r.h - pad * 2.0 }
 }
+// Keep the explicit geometry/pipeline inputs at this boundary.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn ui_label(items: &mut Vec<Item>, x: f32, y: f32, px: f32, color: [f32; 4], text: impl Into<String>, align: Align, width: f32) {
     items.push(Item::Text(TextItem { interface: true, align, valign: VAlign::Middle, max_width: Some(width.max(0.0)),
         ..TextItem::new(x, y, px, color, text) }));
@@ -7717,6 +7715,280 @@ pub(crate) const WORKSPACE_DIM: [f32; 4] = [0.57, 0.57, 0.57, 1.0];
 pub(crate) const WORKSPACE_MUTED: [f32; 4] = [0.43, 0.43, 0.43, 1.0];
 pub(crate) const WORKSPACE_RULE: [f32; 4] = [0.09, 0.09, 0.09, 1.0];
 const CONTROL_BG: [f32; 4] = [26.0 / 255.0, 26.0 / 255.0, 26.0 / 255.0, 1.0];
+
+
+// ---- 2a "Instrument HUD, remixed" palette ----
+/// Signal accent — the one hot colour in the design, and where the whole
+/// palette comes from: 2a's lime read as a different product next to the
+/// logo. This is the mark's upper bar (`assets/logo.png`, #006dcf) lifted
+/// to #1580de, the one deliberate departure from the file: the bar itself
+/// clears only ~4:1 against the HUD's black, which is under the bar for
+/// 10–11px mono. Side by side with the mark it still reads as the same
+/// blue; illegible status text would not.
+/// The crop marquee's ratio presets, `A` to step through: (the keycap's
+/// label, w/h). Image pixels are taken as square, like everywhere else.
+const ASPECTS: [(&str, Option<f32>); 6] = [
+    ("ratio free", None),
+    ("ratio 16:9", Some(16.0 / 9.0)),
+    ("ratio 9:16", Some(9.0 / 16.0)),
+    ("ratio 4:3", Some(4.0 / 3.0)),
+    ("ratio 1:1", Some(1.0)),
+    ("ratio 2.39:1", Some(2.39)),
+];
+
+pub(crate) const ACCENT: [f32; 4] = [0.082, 0.502, 0.871, 1.0];
+/// A rubber band smaller than this on both axes is still a click.
+const BAND_MIN: f32 = 4.0;
+/// Logical pixels on each side of the playhead that start scrubbing in vacant lanes.
+const PLAYHEAD_GRAB: f32 = 8.0;
+/// Frame background / ink on the accent (#050506). Opaque: the window
+/// no longer lets the desktop through.
+const FRAME_BG: [f32; 4] = [0.0196, 0.0196, 0.0235, 1.0];
+pub(crate) const FRAME_INK: [f32; 4] = [0.0196, 0.0196, 0.0235, 1.0];
+const ERR: [f32; 4] = [1.0, 0.35, 0.3, 1.0];
+pub(crate) const TRACK: [f32; 4] = [1.0, 1.0, 1.0, 0.14];
+const MASK_RED: [f32; 4] = [0.906, 0.106, 0.141, 1.0];
+
+// Launch window — the design system's `Splash` surface.
+const LAUNCH_BG: [f32; 4] = [0.027, 0.027, 0.035, 1.0];
+/// Smallest window that still gets the plate. Under it the vanishing
+/// point leaves the frame and the horizon stops reading, so the launch
+/// window falls back to the mark centred on the flat ground.
+const SPLASH_MIN_W: f32 = 900.0;
+const SPLASH_MIN_H: f32 = 520.0;
+/// Where the plate's horizon is driven to, down the window.
+const HORIZON_Y: f32 = 0.578;
+/// Clear space each side of the mark at the plate's size.
+const LOCKUP_CLEAR: f32 = 80.0;
+/// The lockup's width, as a fraction of the frame (the card's 61%).
+const LOCKUP_W: f32 = 0.61;
+/// The mark stands ON the line: its baseline sits this fraction of its
+/// own height above it — the card's 5px under a 130px lockup.
+const LOCKUP_LIFT: f32 = 0.04;
+/// Three stacked shadows, (dy, blur, alpha) in the card lockup's px: a
+/// tight contact shadow, a wider fall, and an ambient halo that
+/// separates the metal from the lit horizon. Tighter than the card's
+/// (6/9, 14/20, 0/16): at the card's drops the tagline's shadow parts
+/// from the tagline and reads as a second, blurred line of type. Alphas
+/// run above the card's for the linear-blending reason the scrims do.
+const SHADOW_PASSES: [(f32, f32, f32); 3] = [(2.0, 4.0, 0.80), (5.0, 10.0, 0.55), (0.0, 9.0, 0.65)];
+/// The floor projection: pinhole distance as a multiple of the mark's
+/// width, the floor's tilt from the screen plane, and how much light
+/// the floor gives back.
+const FLOOR_PERSP: f32 = 1.36;
+const FLOOR_TILT: f32 = std::f32::consts::FRAC_PI_3; // 60° — shallower than the card's 72°, so it runs further toward the viewer
+const FLOOR_ALPHA: f32 = 0.15;
+/// How far below the horizon the reflection starts, as a fraction of the
+/// mark's height — a gap of floor between the tagline and its mirror,
+/// so the two never read as one doubled line.
+const FLOOR_DROP: f32 = 0.10;
+/// The brand's `void` (#06070a): the ground every Splash layer darkens to.
+const VOID: [f32; 4] = [0.024, 0.027, 0.039, 1.0];
+/// Ground under the traffic lights and under the message.
+const SPLASH_SCRIM: [f32; 4] = [0.024, 0.027, 0.039, 0.80];
+/// The brand's `scanline` token is white at 0.07, composited in sRGB;
+/// blended in linear space that would glow, so it runs far lower here.
+const SCANLINE: [f32; 4] = [1.0, 1.0, 1.0, 0.012];
+/// How far the foot's last line sits off the bottom edge, as a fraction
+/// of the frame (the card's 41px of 400).
+const FOOT_BOTTOM: f32 = 0.10;
+/// The foot's height (rule, instruction, formats and the two steps
+/// between them) — what centres the lockup in the bare fallback.
+const FOOT_H: f32 = 51.0;
+/// The instruction (#c3ccd6), the design system's `ink-muted` for the
+/// labels, and the hairline above them (#616b7b at half).
+const INSTRUCTION: [f32; 4] = [0.765, 0.800, 0.839, 1.0];
+const INK_MUTED: [f32; 4] = [0.604, 0.651, 0.706, 1.0];
+const RULE: [f32; 4] = [0.380, 0.420, 0.482, 0.5];
+/// The logo's own blue and red (the brand's `blue` #00adfa and `red`
+/// #fc0a1c), for the ticks either side of the formats.
+const BRAND_BLUE: [f32; 4] = [0.0, 0.678, 0.980, 1.0];
+const BRAND_RED: [f32; 4] = [0.988, 0.039, 0.110, 1.0];
+/// The status lamp (`green` #16d97e) and its glow.
+const LAMP: [f32; 4] = [0.086, 0.851, 0.494, 1.0];
+const LAMP_GLOW: [f32; 4] = [0.086, 0.851, 0.494, 0.07];
+/// What the launch window says it opens.
+const FORMATS: &str = "MP4 · MOV · MKV · Y4M";
+/// The recent row (the Splash design's recent files): 16:9 tiles on the
+/// 4px grid, spaced well apart, `radius-8`.
+const TILE_W: f32 = 132.0;
+const TILE_H: f32 = 74.0;
+const TILE_GAP: f32 = 64.0;
+const TILE_R: f32 = 8.0;
+/// A group's stack: each card behind the front one sits `STACK_STEP` px
+/// higher and `STACK_INSET` px narrower a side. The row reserves the
+/// full rise above every tile, so the header never moves as groups
+/// come and go.
+/// The hovered tile's lift: how much it grows, and how long the ease takes.
+const TILE_LIFT: f32 = 0.08;
+const TILE_LIFT_S: f32 = 0.15;
+const STACK_STEP: f32 = 5.0;
+const STACK_INSET: f32 = 6.0;
+const STACK_RISE: f32 = STACK_STEP * (recent::STACK as f32 - 1.0);
+/// Header line, the step between the row's lines, the metadata line.
+const RECENT_HEAD: f32 = 14.0;
+const RECENT_STEP: f32 = 8.0;
+const RECENT_META: f32 = 16.0;
+/// Floor kept clear above the row (under the horizon) and below it
+/// (over the foot).
+const RECENT_CLEAR: f32 = 16.0;
+/// The tile's recessed ground (the brand's `well`, #04050a).
+const WELL: [f32; 4] = [0.016, 0.020, 0.039, 1.0];
+/// The bevel: white hairlines. The design's sRGB alphas (0.16 all round,
+/// 0.34 on top) are run lower here because blending is linear-space.
+const BEVEL: [f32; 4] = [1.0, 1.0, 1.0, 0.09];
+const BEVEL_LIT: [f32; 4] = [1.0, 1.0, 1.0, 0.20];
+/// The corner chips: `void` at 0.85 under `ink` (#e8edf2).
+const CHIP_BG: [f32; 4] = [0.016, 0.020, 0.039, 0.85];
+const CHIP_INK: [f32; 4] = [0.910, 0.929, 0.949, 1.0];
+/// The brand's `ink-faint` (#7a8694): the key hint beside the header.
+/// Version, git hash (`+dirty` with uncommitted edits) and build time, stamped by
+/// build.rs. The launch window prints it so a screenshot says which build it is.
+const BUILD: &str = env!("ABNER_BUILD");
+
+fn build_label(w: f32, h: f32) -> Item {
+    Item::Text(TextItem {
+        align: Align::Right,
+        valign: VAlign::Middle,
+        tracking: 0.4,
+        ..TextItem::new(w - 16.0, h - 14.0, 9.5, INK_FAINT, format!("build {BUILD}"))
+    })
+}
+
+const INK_FAINT: [f32; 4] = [0.478, 0.525, 0.580, 1.0];
+
+/// The same stamp at the right end of the workspace status line. Its own
+/// placement is measured by the renderer (one right-aligned run);
+/// `status_build_width` is the `MONO_ADV` estimate of the room it takes,
+/// plus its gap, so the hint beside it steps left.
+pub(crate) fn status_build_label(items: &mut Vec<Item>, vp: (f32, f32), cy: f32) {
+    items.push(Item::Text(TextItem { interface: true, align: Align::Right, valign: VAlign::Middle, tracking: 0.4,
+        ..TextItem::new(vp.0 - 16.0, cy, 9.5, INK_FAINT, format!("build {BUILD}")) }));
+}
+pub(crate) fn status_build_width() -> f32 {
+    (6 + BUILD.chars().count()) as f32 * 9.5 * MONO_ADV + 16.0
+}
+
+// Crop marquee. The dimmer runs high for the reason the HUD's panels do
+// (see shader.wgsl): linear-space blending means a modest alpha barely
+// touches bright footage, and this one has to read as "not exported".
+const CROP_DIM: [f32; 4] = [0.0, 0.0, 0.0, 0.95];
+/// Outside the search area while detection runs: dimmed, still readable
+/// (blending is linear, so this alpha leaves roughly a third of the picture).
+const SEARCH_DIM: [f32; 4] = [0.0, 0.0, 0.0, 0.88];
+const MASK_HISTORY: usize = 24;
+const CROP_LINE: [f32; 4] = [1.0, 1.0, 1.0, 0.95];
+const CROP_INK: [f32; 4] = [0.0, 0.0, 0.0, 0.75];
+const CROP_LINE_W: f32 = 1.5;
+const CROP_DASH: f32 = 7.0;
+const CROP_GAP: f32 = 5.0;
+const CROP_HANDLE: f32 = 9.0;
+/// Half-size of a corner's grab square — a little wider than it is drawn.
+const CROP_GRAB: f32 = 11.0;
+/// The marquee's label chips (Figma: white @0.12, flat, 10px #d1d1d1). The
+/// alpha is the linear-space equivalent of the design's sRGB 0.12 — at 0.12
+/// here a white wash reads several times brighter than in the mock.
+const CROP_CHIP: [f32; 4] = [0.0, 0.0, 0.0, 0.8];
+/// The guide lines running out of each marquee side across the canvas.
+const CROP_GUIDE: [f32; 4] = [1.0, 1.0, 1.0, 0.22];
+const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(350);
+const CROP_CHIP_PAD: (f32, f32) = (10.0, 3.0);
+/// Screen size the marquee needs before the corner coordinates show, and
+/// before the size/ratio label in the middle does.
+const CROP_LABELS_MIN: (f32, f32) = (180.0, 72.0);
+const CROP_LABEL_MIN: (f32, f32) = (130.0, 24.0);
+
+
+/// Transport strip: 13px pad + 32px controls + 11px gap + the status line.
+const TRANSPORT_H: f32 = 60.0;
+/// Persistent footer for tool, selection, zoom, export results and shortcut hints.
+/// Every page's footer bar is the Timeline's height, so its buttons fit.
+const STATUS_H: f32 = CUT_STATUS_H;
+/// Timeline footer: 6px around its compact action buttons.
+pub(crate) const CUT_STATUS_H: f32 = 38.0;
+/// Extra grab margin above/below the 5px seek track.
+const SEEK_GRAB: f32 = 9.0;
+/// Advance width of the monospace UI font, in em — used only to step
+/// between right-aligned status segments and keycap chips, never to
+/// place a glyph (the renderer measures those exactly).
+pub(crate) const MONO_ADV: f32 = 0.60;
+
+/// Logical height of a standard macOS titlebar. The window has no visible
+/// bar (`set_titlebar_glass` makes it transparent and runs the content
+/// under it), but the traffic-light buttons still float in that strip, so
+/// launch content clears them. The loaded workspace uses HEADER_H instead.
+const TITLEBAR_H: f32 = 28.0;
+
+/// The ratio a crop is shown with: a locked preset by its own name, a free
+/// rect as its reduced ratio while that stays readable (640×360 → 16:9),
+/// otherwise as `n.nn:1`.
+fn ratio_label(w: u32, h: u32, preset: Option<&str>) -> String {
+    if let Some(name) = preset {
+        return name.trim_start_matches("ratio ").to_string();
+    }
+    let gcd = |mut a: u32, mut b: u32| { while b != 0 { (a, b) = (b, a % b); } a.max(1) };
+    let g = gcd(w, h);
+    let (rw, rh) = (w / g, h / g);
+    if rw <= 32 && rh <= 32 { format!("{rw}:{rh}") } else { format!("{:.2}:1", w as f32 / h.max(1) as f32) }
+}
+
+/// How long a `notify` line stays in the status bar.
+const NOTICE_S: f32 = 3.0;
+
+/// RGBA frame → RGB PNG bytes. A decoded video frame's alpha is always
+/// opaque, so the channel is dropped: a quarter smaller and no consumer
+/// gets to treat the picture as translucent.
+fn encode_png_rgb(rgba: &[u8], w: u32, h: u32) -> anyhow::Result<Vec<u8>> {
+    anyhow::ensure!(rgba.len() >= (w as usize) * (h as usize) * 4, "frame buffer is short");
+    let rgb: Vec<u8> = rgba.as_chunks::<4>().0.iter().take((w * h) as usize).flat_map(|p| [p[0], p[1], p[2]]).collect();
+    let mut out = Vec::new();
+    let mut encoder = png::Encoder::new(&mut out, w, h);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header()?;
+    writer.write_image_data(&rgb)?;
+    writer.finish()?;
+    Ok(out)
+}
+
+fn name_of(path: &std::path::Path) -> String {
+    path.file_name().unwrap_or_default().to_string_lossy().into_owned()
+}
+
+pub(crate) fn fmt_time(t: f64) -> String {
+    let t = t.max(0.0);
+    let m = (t / 60.0) as u64;
+    format!("{m:02}:{:06.3}", t - m as f64 * 60.0)
+}
+
+/// `HH:MM:SS:FF`, non-drop: the frame count over the rounded rate.
+fn fmt_tc(t: f64, fps: f64) -> String {
+    let base = fps.round().max(1.0) as u64;
+    let frames = (t.max(0.0) * fps).round() as u64;
+    let (s, f) = (frames / base, frames % base);
+    format!("{:02}:{:02}:{:02}:{f:02}", s / 3600, s / 60 % 60, s % 60)
+}
+
+fn fmt_hms(t: f64) -> String {
+    let s = t.max(0.0) as u64;
+    format!("{:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+}
+
+/// A length, as short as it reads: `0:20`, `37:38`, `1:02:10`.
+fn fmt_span(t: f64) -> String {
+    let s = t.max(0.0).round() as u64;
+    if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
+}
+
+fn fmt_size(b: u64) -> String {
+    const MIB: f64 = 1024.0 * 1024.0;
+    let b = b as f64;
+    if b >= 1024.0 * MIB {
+        format!("{:.2} GiB", b / (1024.0 * MIB))
+    } else {
+        format!("{:.1} MiB", b / MIB)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -8043,7 +8315,8 @@ mod tests {
             assert!((thumb.w / thumb.h - w as f32 / h as f32).abs() < 1e-5);
             assert!(thumb.h <= (app.workspace().panel - 32.0) * PORTRAIT_THUMB_MAX + 0.001, "a portrait preview stops at 4:3");
             let card = app.source_card(0);
-            assert_eq!((card.x, card.w), (thumb.x - 4.0, thumb.w + 8.0), "the ring hugs the preview");
+            assert!(card.x <= thumb.x - 4.0 && card.x + card.w >= thumb.x + thumb.w + 4.0, "the card contains the preview rim");
+            assert!((card.x + card.w / 2.0 - thumb.x - thumb.w / 2.0).abs() < 0.001, "portrait previews stay centered in label-width cards");
             assert!(thumb.h + 69.0 <= app.workspace().list.h + 0.001);
         }
         app.mouse_down(200.0, HEADER_H + 20.0);
@@ -8083,8 +8356,7 @@ mod tests {
 
     #[test]
     fn recent_tile_lift_eases_toward_the_hovered_slot_and_settles() {
-        let mut row = super::RecentRow::default();
-        row.hover = Some(1);
+        let mut row = super::RecentRow { hover: Some(1), ..Default::default() };
         assert!(row.animate(super::TILE_LIFT_S / 2.0));
         assert!((row.lift[1] - 0.5).abs() < 1e-4);
         assert_eq!(row.lift[0], 0.0);
@@ -8260,13 +8532,15 @@ mod tests {
         let mut app = mk_app(&clip, 1);
         for from in 0..6 {
             for to in 0..6 {
+                app.select_workspace_mode(0);
                 app.select_workspace_mode(from);
                 app.select_workspace_mode(to);
-                assert_eq!(app.workspace_mode(), to, "{from} -> {to}");
+                let expected = if from == 4 && matches!(to, 1 | 2) { 4 } else { to };
+                assert_eq!(app.workspace_mode(), expected, "{from} -> {to}");
                 let selected: Vec<_> = app.mode_selector().controls().into_iter()
                     .filter(|c| c.selected).collect();
                 assert_eq!(selected.len(), 1);
-                assert!(matches!(selected[0].action, Action::Tool(mode) if mode == to));
+                assert!(matches!(selected[0].action, Action::Tool(mode) if mode == expected));
             }
         }
         app.select_workspace_mode(0);
@@ -8463,7 +8737,7 @@ mod tests {
         let Some(clip) = test_clip() else { return };
         let mut app = mk_app(&clip, 2);
         app.vp = (1280.0, 800.0);
-        // Six 110px tabs on a 5px gap end at 763; the strip past them is bare.
+        // Four permanent tabs; temporary editor tabs share the same header area.
         let tabs = app.header_tabs();
         assert_eq!((tabs.x, tabs.w, tabs.h), (78.0, 455.0, TAB_H));
         assert!(app.titlebar_background(800.0, 20.0));
@@ -8471,22 +8745,17 @@ mod tests {
         assert!(!app.titlebar_background(100.0, 20.0));
         assert!(app.titlebar_background(600.0, 20.0), "no permanent editor tab");
         assert!(!app.titlebar_background(700.0, HEADER_H));
-        let original = app.mode_selector().controls();
         for mode in [3, 4, 2, 1, 0] {
+            app.select_workspace_mode(0);
             app.activate(Action::Tool(mode));
             let controls = app.mode_selector().controls();
             assert_eq!(controls.len(), if matches!(mode,1|2){5}else{4});
             assert_eq!(controls.iter().filter(|c| c.selected).count(), 1);
-            for (before, after) in original.iter().zip(&controls) {
-                assert_eq!(
-                    (before.r.x, before.r.y, before.r.w, before.r.h),
-                    (after.r.x, after.r.y, after.r.w, after.r.h),
-                    "mode changes cannot move the shared selector"
-                );
-                assert_eq!(
-                    after.selected,
-                    matches!(after.action, Action::Tool(i) if i == mode)
-                );
+            let during = app.header_tabs();
+            assert_eq!((tabs.x,tabs.y,tabs.w,tabs.h),(during.x,during.y,during.w,during.h));
+            for control in &controls {
+                assert!(!app.titlebar_background(control.r.x + control.r.w/2.,control.r.y + control.r.h/2.));
+                assert_eq!(control.selected,matches!(control.action,Action::Tool(i) if i == mode));
             }
         }
         app.set_cut_mode(true);
@@ -8790,7 +9059,8 @@ mod tests {
             let under=timeline.surface.button_bar.unwrap().r;
             assert_eq!((under.y,under.h),(timeline.canvas.y+timeline.canvas.h,ButtonBar::HEIGHT));
             assert_eq!(under.y+under.h,timeline.transport.y);
-            for bar in [sources.surface.button_bar.unwrap()] {
+            {
+                let bar = sources.surface.button_bar.unwrap();
                 assert_eq!(bar.r.h,ButtonBar::HEIGHT);
                 let control=bar.control(bar.content().x,60.);
                 assert_eq!(control.y,HEADER_H+ButtonBar::PADDING_Y);
@@ -9248,7 +9518,7 @@ mod tests {
         Some(clip)
     }
 
-    fn mk_video(clip: &PathBuf) -> Video {
+    fn mk_video(clip: &std::path::Path) -> Video {
         let info = probe::probe(clip).expect("probe");
         let player = crate::player::Player::spawn(
             clip,
@@ -9265,7 +9535,7 @@ mod tests {
     /// A playing app: most tests drive the clock, so they opt out of the
     /// paused-on-open default (`opened_clips_sit_paused_on_their_first_frame`
     /// covers that).
-    fn mk_app(clip: &PathBuf, n: usize) -> App {
+    fn mk_app(clip: &std::path::Path, n: usize) -> App {
         let mut cfg = crate::config::Config::default();
         cfg.playback.start_paused = false;
         App::new((0..n).map(|_| mk_video(clip)).collect(), &cfg)
@@ -10433,6 +10703,9 @@ mod tests {
         assert!(tick_until(&mut app, Duration::from_secs(5), |a| a.started));
         app.key(Key::Char('t'));
         assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.cut.as_ref().is_some_and(|c| !c.scanning() && c.pps > 0.0)));
+        assert!(tick_until(&mut app, Duration::from_secs(10), |a| !a.cut.as_ref().unwrap().reading_wave()));
+        // Give the band a deterministic audio lane, independent of worker timing.
+        app.cut.as_mut().unwrap().wave = vec![128; 100];
         app.playing = false;
         for t in [1.0, 2.0, 3.0] { assert!(app.cut.as_mut().unwrap().split(t)); }
         assert_eq!(app.cut.as_ref().unwrap().segments().len(), 4);
@@ -10477,14 +10750,14 @@ mod tests {
         assert!(matches!(app.cut_drag, Some(CutDrag::Band { add: false, .. })));
         assert!(app.cut_picks.is_empty(), "a plain band starts from nothing");
         app.cursor_moved(x_of(&app, 3.5), v.y + v.h / 2.0);
-        assert_eq!(app.cut_picks, vec![(1.0, 2.0, false), (2.0, 3.0, false), (3.0, 4.0, false)]);
+        assert_eq!(app.cut_picks, vec![(1.0, 2.0, false), (2.0, 3.0, false), (3.0, 4.0, false), (1.0, 2.0, true), (2.0, 3.0, true), (3.0, 4.0, true)]);
         let mut items = Vec::new();
         app.build_cut_timeline(&mut items);
         assert!(items.iter().any(|i| matches!(i, Item::Rect(r) if r.border_w == 1.0 && r.border_color == ACCENT)), "the band is drawn");
         app.cursor_moved(x_of(&app, 2.5), v.y + v.h / 2.0);
-        assert_eq!(app.cut_picks, vec![(1.0, 2.0, false), (2.0, 3.0, false)], "shrinking the band drops clips again");
+        assert_eq!(app.cut_picks, vec![(1.0, 2.0, false), (2.0, 3.0, false), (1.0, 2.0, true), (2.0, 3.0, true)], "shrinking the band drops clips again");
         app.mouse_up();
-        assert_eq!(app.cut_picks.len(), 2, "the picks outlive the band");
+        assert_eq!(app.cut_picks.len(), 4, "the picks outlive the band");
         assert_eq!(app.t, held, "a band does not move the playhead");
 
         // The band also starts from the chapter row above the picture.
@@ -10506,7 +10779,7 @@ mod tests {
         app.mouse_down_with_mods(x_of(&app, 2.5), lanes.subs.y + 2.0, false, true, false);
         app.cursor_moved(x_of(&app, 3.5), v.y + v.h / 2.0);
         app.mouse_up();
-        assert_eq!(app.cut_picks, vec![(0.0, 1.0, false), (2.0, 3.0, false), (3.0, 4.0, false)]);
+        assert_eq!(app.cut_picks, vec![(0.0, 1.0, false), (2.0, 3.0, false), (3.0, 4.0, false), (2.0, 3.0, true), (3.0, 4.0, true)]);
 
         // J joins adjacent picks into one clip; with an unpicked clip between
         // them it is dead — on the key and on the footer button alike.
@@ -10516,7 +10789,7 @@ mod tests {
         app.key(Key::Char('j'));
         assert_eq!(app.cut.as_ref().unwrap().splits(), &[1.0, 2.0, 3.0], "a dead Join changes nothing");
         assert!(app.cut.as_ref().unwrap().status.contains("adjacent"));
-        assert_eq!(app.cut_picks.len(), 3, "and keeps the picks");
+        assert_eq!(app.cut_picks.len(), 5, "and keeps the picks");
         app.cut_picks = vec![(2.0, 3.0, false), (3.0, 4.0, false), (3.0, 4.0, true)];
         assert_eq!(app.join_picks(), Some(vec![(2.0, 3.0), (3.0, 4.0)]), "sound and picture rows are one clip");
         app.mouse_down(join.r.x + join.r.w / 2.0, join.r.y + join.r.h / 2.0);
@@ -10527,7 +10800,7 @@ mod tests {
         assert!(app.cut.as_ref().unwrap().status.contains("two or more"));
         app.key(Key::Undo);
         assert_eq!(app.cut.as_ref().unwrap().splits(), &[1.0, 2.0, 3.0]);
-        app.cut_picks = vec![(0.0, 1.0, false), (2.0, 3.0, false), (3.0, 4.0, false)];
+        app.cut_picks = vec![(0.0, 1.0, false), (2.0, 3.0, false), (3.0, 4.0, false), (2.0, 3.0, true), (3.0, 4.0, true)];
 
         // Backspace cuts them all; one undo brings them all back.
         app.key(Key::Backspace);
@@ -10739,7 +11012,7 @@ mod tests {
 
         // ⇧→ lands on the next keyframe, exactly.
         app.seek_all(2.2, true);
-        app.key(Key::KeyRight);
+        app.key(Key::NextKeyframe);
         assert_eq!(app.t, 3.0);
 
         // Playing into the cut resumes at its end.
@@ -11038,278 +11311,5 @@ mod tests {
         // Both streams show the same frame after stepping.
         let (a, b) = (app.videos[0].shown_pts, app.videos[1].shown_pts);
         assert!((a - b).abs() < d * 0.5, "steps desynced the streams: {a:.4} vs {b:.4}");
-    }
-}
-
-// ---- 2a "Instrument HUD, remixed" palette ----
-/// Signal accent — the one hot colour in the design, and where the whole
-/// palette comes from: 2a's lime read as a different product next to the
-/// logo. This is the mark's upper bar (`assets/logo.png`, #006dcf) lifted
-/// to #1580de, the one deliberate departure from the file: the bar itself
-/// clears only ~4:1 against the HUD's black, which is under the bar for
-/// 10–11px mono. Side by side with the mark it still reads as the same
-/// blue; illegible status text would not.
-/// The crop marquee's ratio presets, `A` to step through: (the keycap's
-/// label, w/h). Image pixels are taken as square, like everywhere else.
-const ASPECTS: [(&str, Option<f32>); 6] = [
-    ("ratio free", None),
-    ("ratio 16:9", Some(16.0 / 9.0)),
-    ("ratio 9:16", Some(9.0 / 16.0)),
-    ("ratio 4:3", Some(4.0 / 3.0)),
-    ("ratio 1:1", Some(1.0)),
-    ("ratio 2.39:1", Some(2.39)),
-];
-
-pub(crate) const ACCENT: [f32; 4] = [0.082, 0.502, 0.871, 1.0];
-/// A rubber band smaller than this on both axes is still a click.
-const BAND_MIN: f32 = 4.0;
-/// Logical pixels on each side of the playhead that start scrubbing in vacant lanes.
-const PLAYHEAD_GRAB: f32 = 8.0;
-/// Frame background / ink on the accent (#050506). Opaque: the window
-/// no longer lets the desktop through.
-const FRAME_BG: [f32; 4] = [0.0196, 0.0196, 0.0235, 1.0];
-pub(crate) const FRAME_INK: [f32; 4] = [0.0196, 0.0196, 0.0235, 1.0];
-const ERR: [f32; 4] = [1.0, 0.35, 0.3, 1.0];
-pub(crate) const TRACK: [f32; 4] = [1.0, 1.0, 1.0, 0.14];
-const MASK_RED: [f32; 4] = [0.906, 0.106, 0.141, 1.0];
-
-// Launch window — the design system's `Splash` surface.
-const LAUNCH_BG: [f32; 4] = [0.027, 0.027, 0.035, 1.0];
-/// Smallest window that still gets the plate. Under it the vanishing
-/// point leaves the frame and the horizon stops reading, so the launch
-/// window falls back to the mark centred on the flat ground.
-const SPLASH_MIN_W: f32 = 900.0;
-const SPLASH_MIN_H: f32 = 520.0;
-/// Where the plate's horizon is driven to, down the window.
-const HORIZON_Y: f32 = 0.578;
-/// Clear space each side of the mark at the plate's size.
-const LOCKUP_CLEAR: f32 = 80.0;
-/// The lockup's width, as a fraction of the frame (the card's 61%).
-const LOCKUP_W: f32 = 0.61;
-/// The mark stands ON the line: its baseline sits this fraction of its
-/// own height above it — the card's 5px under a 130px lockup.
-const LOCKUP_LIFT: f32 = 0.04;
-/// Three stacked shadows, (dy, blur, alpha) in the card lockup's px: a
-/// tight contact shadow, a wider fall, and an ambient halo that
-/// separates the metal from the lit horizon. Tighter than the card's
-/// (6/9, 14/20, 0/16): at the card's drops the tagline's shadow parts
-/// from the tagline and reads as a second, blurred line of type. Alphas
-/// run above the card's for the linear-blending reason the scrims do.
-const SHADOW_PASSES: [(f32, f32, f32); 3] = [(2.0, 4.0, 0.80), (5.0, 10.0, 0.55), (0.0, 9.0, 0.65)];
-/// The floor projection: pinhole distance as a multiple of the mark's
-/// width, the floor's tilt from the screen plane, and how much light
-/// the floor gives back.
-const FLOOR_PERSP: f32 = 1.36;
-const FLOOR_TILT: f32 = std::f32::consts::FRAC_PI_3; // 60° — shallower than the card's 72°, so it runs further toward the viewer
-const FLOOR_ALPHA: f32 = 0.15;
-/// How far below the horizon the reflection starts, as a fraction of the
-/// mark's height — a gap of floor between the tagline and its mirror,
-/// so the two never read as one doubled line.
-const FLOOR_DROP: f32 = 0.10;
-/// The brand's `void` (#06070a): the ground every Splash layer darkens to.
-const VOID: [f32; 4] = [0.024, 0.027, 0.039, 1.0];
-/// Ground under the traffic lights and under the message.
-const SPLASH_SCRIM: [f32; 4] = [0.024, 0.027, 0.039, 0.80];
-/// The brand's `scanline` token is white at 0.07, composited in sRGB;
-/// blended in linear space that would glow, so it runs far lower here.
-const SCANLINE: [f32; 4] = [1.0, 1.0, 1.0, 0.012];
-/// How far the foot's last line sits off the bottom edge, as a fraction
-/// of the frame (the card's 41px of 400).
-const FOOT_BOTTOM: f32 = 0.10;
-/// The foot's height (rule, instruction, formats and the two steps
-/// between them) — what centres the lockup in the bare fallback.
-const FOOT_H: f32 = 51.0;
-/// The instruction (#c3ccd6), the design system's `ink-muted` for the
-/// labels, and the hairline above them (#616b7b at half).
-const INSTRUCTION: [f32; 4] = [0.765, 0.800, 0.839, 1.0];
-const INK_MUTED: [f32; 4] = [0.604, 0.651, 0.706, 1.0];
-const RULE: [f32; 4] = [0.380, 0.420, 0.482, 0.5];
-/// The logo's own blue and red (the brand's `blue` #00adfa and `red`
-/// #fc0a1c), for the ticks either side of the formats.
-const BRAND_BLUE: [f32; 4] = [0.0, 0.678, 0.980, 1.0];
-const BRAND_RED: [f32; 4] = [0.988, 0.039, 0.110, 1.0];
-/// The status lamp (`green` #16d97e) and its glow.
-const LAMP: [f32; 4] = [0.086, 0.851, 0.494, 1.0];
-const LAMP_GLOW: [f32; 4] = [0.086, 0.851, 0.494, 0.07];
-/// What the launch window says it opens.
-const FORMATS: &str = "MP4 · MOV · MKV · Y4M";
-/// The recent row (the Splash design's recent files): 16:9 tiles on the
-/// 4px grid, spaced well apart, `radius-8`.
-const TILE_W: f32 = 132.0;
-const TILE_H: f32 = 74.0;
-const TILE_GAP: f32 = 64.0;
-const TILE_R: f32 = 8.0;
-/// A group's stack: each card behind the front one sits `STACK_STEP` px
-/// higher and `STACK_INSET` px narrower a side. The row reserves the
-/// full rise above every tile, so the header never moves as groups
-/// come and go.
-/// The hovered tile's lift: how much it grows, and how long the ease takes.
-const TILE_LIFT: f32 = 0.08;
-const TILE_LIFT_S: f32 = 0.15;
-const STACK_STEP: f32 = 5.0;
-const STACK_INSET: f32 = 6.0;
-const STACK_RISE: f32 = STACK_STEP * (recent::STACK as f32 - 1.0);
-/// Header line, the step between the row's lines, the metadata line.
-const RECENT_HEAD: f32 = 14.0;
-const RECENT_STEP: f32 = 8.0;
-const RECENT_META: f32 = 16.0;
-/// Floor kept clear above the row (under the horizon) and below it
-/// (over the foot).
-const RECENT_CLEAR: f32 = 16.0;
-/// The tile's recessed ground (the brand's `well`, #04050a).
-const WELL: [f32; 4] = [0.016, 0.020, 0.039, 1.0];
-/// The bevel: white hairlines. The design's sRGB alphas (0.16 all round,
-/// 0.34 on top) are run lower here because blending is linear-space.
-const BEVEL: [f32; 4] = [1.0, 1.0, 1.0, 0.09];
-const BEVEL_LIT: [f32; 4] = [1.0, 1.0, 1.0, 0.20];
-/// The corner chips: `void` at 0.85 under `ink` (#e8edf2).
-const CHIP_BG: [f32; 4] = [0.016, 0.020, 0.039, 0.85];
-const CHIP_INK: [f32; 4] = [0.910, 0.929, 0.949, 1.0];
-/// The brand's `ink-faint` (#7a8694): the key hint beside the header.
-/// Version, git hash (`+dirty` with uncommitted edits) and build time, stamped by
-/// build.rs. The launch window prints it so a screenshot says which build it is.
-const BUILD: &str = env!("ABNER_BUILD");
-
-fn build_label(w: f32, h: f32) -> Item {
-    Item::Text(TextItem {
-        align: Align::Right,
-        valign: VAlign::Middle,
-        tracking: 0.4,
-        ..TextItem::new(w - 16.0, h - 14.0, 9.5, INK_FAINT, format!("build {BUILD}"))
-    })
-}
-
-const INK_FAINT: [f32; 4] = [0.478, 0.525, 0.580, 1.0];
-
-/// The same stamp at the right end of the workspace status line. Its own
-/// placement is measured by the renderer (one right-aligned run);
-/// `status_build_width` is the `MONO_ADV` estimate of the room it takes,
-/// plus its gap, so the hint beside it steps left.
-pub(crate) fn status_build_label(items: &mut Vec<Item>, vp: (f32, f32), cy: f32) {
-    items.push(Item::Text(TextItem { interface: true, align: Align::Right, valign: VAlign::Middle, tracking: 0.4,
-        ..TextItem::new(vp.0 - 16.0, cy, 9.5, INK_FAINT, format!("build {BUILD}")) }));
-}
-pub(crate) fn status_build_width() -> f32 {
-    (6 + BUILD.chars().count()) as f32 * 9.5 * MONO_ADV + 16.0
-}
-
-// Crop marquee. The dimmer runs high for the reason the HUD's panels do
-// (see shader.wgsl): linear-space blending means a modest alpha barely
-// touches bright footage, and this one has to read as "not exported".
-const CROP_DIM: [f32; 4] = [0.0, 0.0, 0.0, 0.95];
-/// Outside the search area while detection runs: dimmed, still readable
-/// (blending is linear, so this alpha leaves roughly a third of the picture).
-const SEARCH_DIM: [f32; 4] = [0.0, 0.0, 0.0, 0.88];
-const MASK_HISTORY: usize = 24;
-const CROP_LINE: [f32; 4] = [1.0, 1.0, 1.0, 0.95];
-const CROP_INK: [f32; 4] = [0.0, 0.0, 0.0, 0.75];
-const CROP_LINE_W: f32 = 1.5;
-const CROP_DASH: f32 = 7.0;
-const CROP_GAP: f32 = 5.0;
-const CROP_HANDLE: f32 = 9.0;
-/// Half-size of a corner's grab square — a little wider than it is drawn.
-const CROP_GRAB: f32 = 11.0;
-/// The marquee's label chips (Figma: white @0.12, flat, 10px #d1d1d1). The
-/// alpha is the linear-space equivalent of the design's sRGB 0.12 — at 0.12
-/// here a white wash reads several times brighter than in the mock.
-const CROP_CHIP: [f32; 4] = [0.0, 0.0, 0.0, 0.8];
-/// The guide lines running out of each marquee side across the canvas.
-const CROP_GUIDE: [f32; 4] = [1.0, 1.0, 1.0, 0.22];
-const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(350);
-const CROP_CHIP_PAD: (f32, f32) = (10.0, 3.0);
-/// Screen size the marquee needs before the corner coordinates show, and
-/// before the size/ratio label in the middle does.
-const CROP_LABELS_MIN: (f32, f32) = (180.0, 72.0);
-const CROP_LABEL_MIN: (f32, f32) = (130.0, 24.0);
-
-
-/// Transport strip: 13px pad + 32px controls + 11px gap + the status line.
-const TRANSPORT_H: f32 = 60.0;
-/// Persistent footer for tool, selection, zoom, export results and shortcut hints.
-/// Every page's footer bar is the Timeline's height, so its buttons fit.
-const STATUS_H: f32 = CUT_STATUS_H;
-/// Timeline footer: 6px around its compact action buttons.
-pub(crate) const CUT_STATUS_H: f32 = 38.0;
-/// Extra grab margin above/below the 5px seek track.
-const SEEK_GRAB: f32 = 9.0;
-/// Advance width of the monospace UI font, in em — used only to step
-/// between right-aligned status segments and keycap chips, never to
-/// place a glyph (the renderer measures those exactly).
-pub(crate) const MONO_ADV: f32 = 0.60;
-
-/// Logical height of a standard macOS titlebar. The window has no visible
-/// bar (`set_titlebar_glass` makes it transparent and runs the content
-/// under it), but the traffic-light buttons still float in that strip, so
-/// launch content clears them. The loaded workspace uses HEADER_H instead.
-const TITLEBAR_H: f32 = 28.0;
-
-/// The ratio a crop is shown with: a locked preset by its own name, a free
-/// rect as its reduced ratio while that stays readable (640×360 → 16:9),
-/// otherwise as `n.nn:1`.
-fn ratio_label(w: u32, h: u32, preset: Option<&str>) -> String {
-    if let Some(name) = preset {
-        return name.trim_start_matches("ratio ").to_string();
-    }
-    let gcd = |mut a: u32, mut b: u32| { while b != 0 { (a, b) = (b, a % b); } a.max(1) };
-    let g = gcd(w, h);
-    let (rw, rh) = (w / g, h / g);
-    if rw <= 32 && rh <= 32 { format!("{rw}:{rh}") } else { format!("{:.2}:1", w as f32 / h.max(1) as f32) }
-}
-
-/// How long a `notify` line stays in the status bar.
-const NOTICE_S: f32 = 3.0;
-
-/// RGBA frame → RGB PNG bytes. A decoded video frame's alpha is always
-/// opaque, so the channel is dropped: a quarter smaller and no consumer
-/// gets to treat the picture as translucent.
-fn encode_png_rgb(rgba: &[u8], w: u32, h: u32) -> anyhow::Result<Vec<u8>> {
-    anyhow::ensure!(rgba.len() >= (w as usize) * (h as usize) * 4, "frame buffer is short");
-    let rgb: Vec<u8> = rgba.chunks_exact(4).take((w * h) as usize).flat_map(|p| [p[0], p[1], p[2]]).collect();
-    let mut out = Vec::new();
-    let mut encoder = png::Encoder::new(&mut out, w, h);
-    encoder.set_color(png::ColorType::Rgb);
-    encoder.set_depth(png::BitDepth::Eight);
-    let mut writer = encoder.write_header()?;
-    writer.write_image_data(&rgb)?;
-    writer.finish()?;
-    Ok(out)
-}
-
-fn name_of(path: &std::path::Path) -> String {
-    path.file_name().unwrap_or_default().to_string_lossy().into_owned()
-}
-
-pub(crate) fn fmt_time(t: f64) -> String {
-    let t = t.max(0.0);
-    let m = (t / 60.0) as u64;
-    format!("{m:02}:{:06.3}", t - m as f64 * 60.0)
-}
-
-/// `HH:MM:SS:FF`, non-drop: the frame count over the rounded rate.
-fn fmt_tc(t: f64, fps: f64) -> String {
-    let base = fps.round().max(1.0) as u64;
-    let frames = (t.max(0.0) * fps).round() as u64;
-    let (s, f) = (frames / base, frames % base);
-    format!("{:02}:{:02}:{:02}:{f:02}", s / 3600, s / 60 % 60, s % 60)
-}
-
-fn fmt_hms(t: f64) -> String {
-    let s = t.max(0.0) as u64;
-    format!("{:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
-}
-
-/// A length, as short as it reads: `0:20`, `37:38`, `1:02:10`.
-fn fmt_span(t: f64) -> String {
-    let s = t.max(0.0).round() as u64;
-    if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
-}
-
-fn fmt_size(b: u64) -> String {
-    const MIB: f64 = 1024.0 * 1024.0;
-    let b = b as f64;
-    if b >= 1024.0 * MIB {
-        format!("{:.2} GiB", b / (1024.0 * MIB))
-    } else {
-        format!("{:.1} MiB", b / MIB)
     }
 }

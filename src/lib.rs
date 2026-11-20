@@ -370,7 +370,7 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
 /// `in,out[,in,out…]` in seconds, for `--cut`.
 fn parse_times(s: &str) -> Option<Vec<f64>> {
     let v: Vec<f64> = s.split(',').map(|p| p.trim().parse().ok()).collect::<Option<_>>()?;
-    (v.len() >= 2 && v.len() % 2 == 0 && v.iter().all(|t| t.is_finite() && *t >= 0.0)).then_some(v)
+    (v.len() >= 2 && v.len().is_multiple_of(2) && v.iter().all(|t| t.is_finite() && *t >= 0.0)).then_some(v)
 }
 
 /// `x,y,w,h` in image pixels, for `--crop`.
@@ -965,8 +965,8 @@ impl ApplicationHandler for Runner {
                         Some(Key::SaveProject)
                     }
                     // ⇧ + arrow: cut mode's keyframe step (a plain arrow elsewhere).
-                    WinitKey::Named(NamedKey::ArrowLeft) if self.mods.shift_key() => Some(Key::KeyLeft),
-                    WinitKey::Named(NamedKey::ArrowRight) if self.mods.shift_key() => Some(Key::KeyRight),
+                    WinitKey::Named(NamedKey::ArrowLeft) if self.mods.shift_key() => Some(Key::PreviousKeyframe),
+                    WinitKey::Named(NamedKey::ArrowRight) if self.mods.shift_key() => Some(Key::NextKeyframe),
                     WinitKey::Named(NamedKey::ArrowUp) => Some(Key::Up),
                     WinitKey::Named(NamedKey::ArrowDown) => Some(Key::Down),
                     WinitKey::Named(NamedKey::ArrowLeft) => Some(Key::Left),

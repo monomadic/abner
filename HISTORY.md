@@ -1,5 +1,24 @@
 # abner — history
 
+## 2026-11-20 — Task 11: strict lint and full-suite cleanup
+
+Completed **11**, the Clippy housekeeping task, across all host targets. Removed
+unused UI helpers and the unconnected bitrate action, simplified expressions and
+iteration, named complex types, boxed the large subtitle-entry enum variant, and
+moved test modules after production items. Existing geometry/pipeline boundaries
+retain narrowly scoped argument-count allowances.
+
+Updated UI regression assertions for embedded Process editors, temporary tabs
+sharing the header, and label-width portrait cards. The rubber-band test now waits
+for waveform completion and seeds a deterministic audio lane, then checks both
+video and audio picks. The README, spatial-input contract and agent notes now
+describe the current processor picker, required masks, source-scoped render history,
+background review, native processing and export behavior.
+
+Validation: **284 tests passed, 4 intentionally ignored** with native encoder access;
+`cargo clippy --all-targets -- -D warnings` and doc-tests pass. See
+[the validation record](docs/validation/tests-and-clippy.md).
+
 ## 2026-11-20 — Smooth Sources scrolling
 
 The Sources rail now follows logical-pixel wheel and trackpad deltas instead of

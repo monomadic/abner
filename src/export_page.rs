@@ -48,7 +48,6 @@ pub(crate) enum Action {
     Container(Container),
     Export,
     EditFilename,
-    EditBitrate,
     OpenExport(usize),
     RevealDirectory,
     Cancel,
@@ -639,8 +638,8 @@ impl Page {
         }
     }
     fn poll_current(&mut self, uploads: &mut Vec<Upload>, slot: usize) {
-        if let Some(job) = &self.job {
-            if let Some(frame) = job
+        if let Some(job) = &self.job
+            && let Some(frame) = job
                 .latest
                 .lock()
                 .unwrap()
@@ -670,7 +669,6 @@ impl Page {
                 }
                 .into();
             }
-        }
         let result = self.job.as_ref().and_then(|j| match j.done.try_recv() {
             Ok(r) => Some(r),
             Err(mpsc::TryRecvError::Disconnected) => Some(Err("Export worker stopped".into())),
@@ -880,7 +878,7 @@ impl Page {
             .map(|(.., a)| a)
     }
     pub fn apply(&mut self, a: Action) -> Option<PathBuf> {
-        if !matches!(a, Action::EditFilename | Action::EditBitrate) && !self.finish_filename() { return None; }
+        if !matches!(a, Action::EditFilename) && !self.finish_filename() { return None; }
         match a {
             Action::OpenExport(index) => {
                 if index < self.history.len() {
@@ -891,11 +889,6 @@ impl Page {
                 self.original = false;
                 self.dirty = true;
                 self.open_output();
-            }
-            Action::EditBitrate => {
-                self.bitrate_edit = Some(self.bitrate_mbps.to_string());
-                self.filename_cursor = Cursor::default();
-                self.filename_cursor.apply(self.bitrate_edit.as_mut().unwrap(), Edit::SelectAll);
             }
             Action::EditFilename => {
                 if self.filename_edit.is_none() {
@@ -966,6 +959,8 @@ impl Page {
     pub(crate) fn base_rect(&self,vp:(f32,f32),show_ui:bool,info:&VideoInfo)->RectPx {
         Self::canvas(vp,show_ui).fit_inset(self.display_dims(info),if !show_ui {0.}else if vp.0<900. {16.}else{24.})
     }
+    // Keep the explicit geometry/pipeline inputs at this boundary.
+    #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &self,
         items: &mut Vec<Item>,
@@ -1230,7 +1225,7 @@ mod tests {
                 return Err("non-contiguous timing; create a new session at cuts or seeks".into());
             }
             self.next_time = Some((f.pts + f.duration, f.time_base));
-            for p in f.pixels.chunks_exact_mut(3) {
+            for p in f.pixels.as_chunks_mut::<3>().0.iter_mut() {
                 p.copy_from_slice(&[65535, 0, 0]);
             }
             if self.double {
@@ -1270,9 +1265,9 @@ mod tests {
     fn bitrate_input_defaults_validates_and_preserves_last_valid_value() {
         let mut p = Page::default(); p.open = true;
         assert_eq!(p.bitrate_mbps, 40);
-        p.apply(Action::EditBitrate); p.text_input("65");
+        p.bitrate_edit = Some(p.bitrate_mbps.to_string()); p.filename_cursor.apply(p.bitrate_edit.as_mut().unwrap(), Edit::SelectAll); p.text_input("65");
         assert!(p.finish_filename()); assert_eq!(p.bitrate_mbps, 65);
-        p.apply(Action::EditBitrate); p.text_input("0");
+        p.bitrate_edit = Some(p.bitrate_mbps.to_string()); p.filename_cursor.apply(p.bitrate_edit.as_mut().unwrap(), Edit::SelectAll); p.text_input("0");
         assert!(!p.finish_filename()); assert_eq!(p.bitrate_mbps, 65);
         p.key(Key::Escape); assert!(!p.editing_filename());
     }

@@ -350,65 +350,65 @@ a missing default `plugins/` directory is treated as an empty installation.
 
 ### Process workspace
 
-Open a clip and select **Process**, immediately after Timeline (also available in
-View > Process or with `--process`). The old floating preview dialog and P toggle
-are gone. Installed processors appear on the left in processing order. Toggle a
-row’s checkbox to bypass it; select a row to focus its settings, and use Move up /
-Move down to reorder it. Each processor retains its own settings when focus moves.
+Open a clip and select **Process** (also available in View > Process or with
+`--process`). The chain starts empty. **Add Processor** opens the installed catalog
+with search, categories, settings and presets. Add appends the configured processor;
+Cancel leaves the chain unchanged. Spatial inputs are configured after adding.
 
-The large viewer uses the normal clip transport: five icon buttons under it
-(previous rendered frame, a frame back, play / pause, a frame on, next rendered
-frame; each names itself on hover). Click the clip timeline to seek or drag its
-playhead; Space plays/pauses, ← / → step a source frame, `[` / `]` walk the
-sources, `+` duplicates the focused source. The page has the same footer bar as
-the others, at the Timeline's height: **Render frame** (R), drawn like the
-Timeline's Split button, renders the current frame through enabled processors
-up to and including the focused processor; the status line and key hints sit
-beside it. The returned frame replaces source display at that position and gets
-a blue timeline mark; while a render runs, the frame asked for pulses amber on
-the timeline and the temporal context being decoded sweeps in behind it.
-**Prev rendered** / **Next rendered** (Shift-Left / Shift-Right) jump between
-marked frames. ⌃⇧[ / ⌃⇧] move one header tab back or forward in every
-workspace (Sources · Timeline · Process · Crop · Mask, no wrap). Seeking
-preserves marks; settings, order, bypass, source or timeline edits invalidate them.
-Preview frames survive switching workspaces, within the `processors.preview_cache_mb`
-budget (1024 MB by default); evicted frames lose their marks. Changing processor focus conservatively clears the cache.
+The left column lists the chain in processing order. Toggle a row’s switch to
+bypass it; select a row to edit its settings. Drag rows or use Move up / Move down
+to reorder them. Each processor retains its own settings when focus moves.
 
-The right inspector uses runtime schemas: numeric sliders support exact entry by
-clicking their labels, enums cycle, booleans toggle, and text fields accept paths.
-Enter commits text, Escape cancels; Cmd+A / Cmd+V work. Scroll to reach additional
-settings. Cycle processor presets applies built-in presets over schema defaults.
-Unsupported nested/auxiliary types are labelled. Factories may opt out of frame
-previews with `supports_preview()`; the host has no processor-specific branches.
+The viewer shares the app’s pan and zoom. Its transport offers previous rendered
+frame, frame back, play/pause, frame forward and next rendered frame. Click or drag
+the timeline to seek; Space plays/pauses, ← / → step, `[` / `]` change source, and
+`+` duplicates the focused source. **Source | Rendered** or Tab compares the result
+at the same view. **Render frame** (R) processes through the focused processor;
+preview length offers one frame, five frames, one second or five seconds.
+**Render segment** starts at the kept segment’s beginning and stops at its end or
+the preview cache budget. The progress panel reports decoding and processor work.
 
-Preview sessions run on a worker, in chain order, including each stage’s buffered
-output and end-of-stream flush. To preserve temporal history, decoding begins at
-the current kept segment’s start, continues through the requested frame and up to
-24 following frames, stopping at the segment boundary or EOF. Only the requested
-frame is cached. This can take time for distant frames; context preparation shows
-frame progress. Reconfiguration cancels old work and rejects late results. Device
-calls already executing may finish before cancellation takes effect.
+**Renders** lists only previews belonging to the focused source, newest first.
+Click a row to restore its frame, chain, settings and output rate; the backtick key
+cycles that source’s renders. Switching sources hides unrelated rows without
+throwing away their cached pixels. Returning to a source makes its retained renders
+available again. Selecting a saved preview works while another render continues,
+including previews made before spatial inputs changed. New output at the same time
+keeps separate render identities, and job completion does not take over another
+selected preview. A running row can show frames already received.
 
-**Downsize input** (Topaz's "Focus Fix", for any processor that upscales): a
-processor that declares its 2x and/or 4x models gets a first settings row, Off ·
-1/2 · 1/4. The frame is shrunk by that factor with swscale's spline before the
-stage and the stage's matching model brings it back to the source size, so the
-network has to invent the detail instead of preserving the blur. The before is
-the untouched source; the caption says "input downsized". It cannot be combined
-with spatial inputs.
+The shared `processors.preview_cache_mb` budget (1024 MB by default) bounds the
+paired before/after preview images across sources and configurations; it excludes
+model/session memory. A render disappears once all its frames are evicted, unless
+it is still running or queued. Previews are session-local memory, not saved media
+files. Changing settings or inputs switches the active cache; it does not cancel
+an in-flight job. A new render takes priority and queues the interrupted job to
+restart afterward. Cancel explicitly stops the current render; leaving Process
+does not stop it.
 
-Plugins are fed the source at its **native size** (display dimensions, rotation
-applied), decoded as 8-bit SDR RGBA then expanded to RGB16, and their output is
-rounded back to 8 bits for display — so a preview is what the plugin makes of the
-real pixels, but not a 16-bit export. `processors.preview_cache_mb` bounds the paired
-before/after frames a section keeps (a 1080p pair with a 2× output is ~41 MB a
-frame, 4K ~166 MB; the number of frames decoded past the requested one shrinks to
-fit) and excludes model/session memory; a pair that does not fit at all is refused
-with the key's name. Current previews require constant-rate,
-timestamp-preserving processors and SDR Rec.709; incompatible tagged color is
-rejected. Persistent stack presets, auxiliary inputs, interpolation, full color
-negotiation and processor export remain future work. Process does not write media;
-Timeline’s existing export still exports its source edits, without processing.
+The right inspector uses processor schemas: numeric sliders support exact entry,
+enums cycle, booleans toggle and text fields accept typing. Enter commits text,
+Escape cancels, and Cmd+A / Cmd+V work. Presets apply built-in defaults or saved
+numeric settings. Missing required masks show 􀇾 beside the processor name and on
+the mask tile. Either opens the editor; Apply clears the indicators. Model-discovery
+paths stay out of the settings UI. Unsupported input types are labelled.
+
+Preview sessions run on a worker, in chain order, including temporal buffering
+and end-of-stream flush. The host negotiates native input formats and output rates;
+retiming processors can emit multiple output frames for each source frame. Display
+previews use 8-bit RGBA, while processor frames preserve the negotiated precision.
+Processing currently requires constant-rate input and supported SDR color metadata;
+incompatible tagged color is rejected. A processor may provide its own source
+reader. Whole-clip/generator factories are not supported by frame preview.
+
+**Downsize input** appears for processors declaring suitable 2× or 4× models.
+It uses the host’s spline resampler to shrink the input, then selects the matching
+upscale model to restore source size. The caption identifies downsized input;
+this option cannot be combined with spatial inputs.
+
+Use **Export** to write media with the enabled processor chain and source/timeline
+edits. Previewing itself does not write output files. See
+[the native media contract](docs/NATIVE-MEDIA.md) for codec and preservation limits.
 
 `--processor ID --processor-settings JSON` opens Process focused on a registered
 processor.
@@ -417,8 +417,10 @@ processor.
 
 Sources has **Crop** and **Mask** controls. Timeline has **Crop clip**, targeting
 one selected kept clip, or the kept clip under the playhead. Process settings show
-Crop/Mask controls only for inputs the processor declares. Each opens a temporary
-tab with Reset, Cancel, and Apply. Choosing another workspace cancels the draft.
+Crop/Mask controls only for inputs the processor declares. Process embeds the editor
+in its canvas, retaining the chain and settings; source and timeline controls open
+a temporary editor tab. Reset, Cancel and Apply act on the draft. Choosing another
+workspace cancels it. Add Processor omits these controls until the processor is added.
 
 A source crop is copied into a newly opened timeline. Later source edits do not
 change that timeline. Clip crops are included in timeline saves and undo; split
@@ -435,7 +437,9 @@ returns coordinates without discarding image pixels. See
 [generic example](examples/spatial-inputs.rs).
 
 Current scope: static rectangles and masks; spatial inputs belong to the first
-enabled processor. Source crops, source masks, and plugin bindings last for the
+enabled processor when rendering. Later stages can open the source-based editor,
+but rendering their bindings requires moving them first. Source crops, source masks,
+and plugin bindings last for the
 current application session. Only timeline crops are saved to the timeline file;
 PNG mask export remains available. Spatial bindings are not included in numeric
 processor presets.

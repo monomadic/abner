@@ -13,10 +13,10 @@ pub(super) struct Maps {
 fn temporal(frames: &[Frame], x: usize, y: usize) -> ([f32; 3], f32) {
     let mut median = [0.; 3];
     let mut spread = 0.;
-    for c in 0..3 {
+    for (c, channel) in median.iter_mut().enumerate() {
         let mut values: Vec<_> = frames.iter().map(|f| f.pixel(x, y)[c]).collect();
         values.sort_by(f32::total_cmp);
-        median[c] = values[values.len() / 2];
+        *channel = values[values.len() / 2];
         spread += (values[values.len() * 7 / 8] - values[values.len() / 8]) / 3.;
     }
     (median, spread)
@@ -511,14 +511,14 @@ mod tests {
     fn letterbox_bars_are_not_proposed_but_a_logo_beside_them_is() {
         let logo = |x: usize, y: usize| (60..70).contains(&x) && (40..62).contains(&y);
         let frames = noisy(96, 80, 24, |x, y| {
-            if y < 12 || y >= 68 { Some(0) } else if logo(x, y) { Some(235) } else { None }
+            if !(12..68).contains(&y) { Some(0) } else if logo(x, y) { Some(235) } else { None }
         });
         let maps = detect(&frames, [0, 0, 96, 80], 16);
         let mut stray = 0;
         for y in 0..80 {
             for x in 0..96 {
                 let c = maps.confidence[y * 96 + x];
-                if y < 12 || y >= 68 {
+                if !(12..68).contains(&y) {
                     assert_eq!(c, 0., "bar proposed at {x},{y}");
                 } else if !logo(x, y) && c > 0. {
                     stray += 1;

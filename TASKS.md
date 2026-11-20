@@ -80,9 +80,7 @@ Effort estimates come from the 2026-09-04 comparison against switchblade.
 10. **objc2 0.6 / objc2-app-kit 0.3.** Five AppKit calls to migrate, but winit 0.30
     still pulls objc2 0.5 transitively, so upgrading now only duplicates the stack.
     Do it when winit 0.31 ships (0.31.0-beta.2 as of 2026-09-04).
-11. **Clippy housekeeping in `app.rs`.** Four pre-existing lints: `mod tests` not last,
-    `== false`, a very complex tuple type in the drop-zone table, `&PathBuf` in a test
-    helper. Cosmetic.
+11. *(done 2026-11-20 — strict all-target Clippy cleanup; see HISTORY.md)*
 
 ## Ideas (unscheduled, from the README)
 

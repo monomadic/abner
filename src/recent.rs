@@ -307,7 +307,7 @@ mod tests {
         let mut expected=frame;
         super::mask_unchanged(&mut expected,&super::timeline_frame(&path,0.25,None).unwrap());
         assert_eq!(changes,expected);
-        assert!(changes.chunks_exact(4).any(|p|p==[255;4]));
+        assert!(changes.as_chunks::<4>().0.contains(&[255;4]));
         std::fs::remove_file(path).unwrap();
     }
 

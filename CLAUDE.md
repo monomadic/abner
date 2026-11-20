@@ -553,21 +553,25 @@ verified against ffmpeg's own scale to within an LSB or two; its parity test
 needs `full_chroma_inp`, since swscale otherwise halves RGB chroma on the way
 in. The before stays the untouched source; the caption says "input downsized".
 Refused with spatial inputs.
-**Renders pane** (2026-11-13): the Process rail's folding pane lists every Render
-press (`Render`, newest first) with an atlas thumbnail (`RENDER_THUMB_SLOT`, cells
-after the frame icons); the processor inspector moved under the settings
-(`draw_info`). Frames stay in the preview cache stamped with `Preview::render`, so
-a render whose frames were evicted or rendered over leaves the list
-(`prune_renders`). A click (`open_render`) restores chain order, switches, settings,
-focus, source and playhead; the bin deletes; `` ` `` / `~` cycle. A render in
-flight is never cancelled by a change to the chain, the source or the page: its
-frames land under the chain key it was pressed with (`render_key`). A Render press
-while one runs takes the worker (`preempt`); the interrupted `Job` waits in
-`Panel::queue`, newest first, and is submitted again from its start. Only Cancel,
-the bin or closing the last clip removes one. The 1f · 5f · 1s ·
-5s buttons beside Render pick the length: more than one frame is ONE render and
-one seekbar block (`spans`), requested as a start/end stream, and switches Loop on
-— the app plays `loop_range` (`take_autoplay`, the wrap in `tick`, `sync_jumps`).
+**Renders pane** (2026-11-20): the Process rail lists retained renders for the
+focused source only (`visible_renders`), newest first, with atlas thumbnails.
+Counts, scroll bounds, clicks, deletion and keyboard cycling share that filter.
+`open_render` restores chain order, switches, settings, focus, playhead and output
+rate; it cannot switch source files. `viewing_frames` resolves selected pixels in
+the active cache or stash, so earlier spatial inputs remain reviewable during a
+new job. Output at overlapping timestamps keeps separate render IDs within the
+shared cache budget. Fully evicted renders leave the list (`prune_renders`).
+Changing settings clears the review selection but does not cancel running work.
+A job keeps its input snapshot and publishes under `render_key`. Another Render
+press preempts it and queues it to restart; Cancel, deletion or abandoning the
+source set stops work. The running row can show already-delivered frames.
+Completion autoplays only if that render is still selected. The 1f · 5f · 1s · 5s
+buttons choose preview length; Render segment runs to the segment/cache limit.
+`loop_range` and timeline marks use the same selected cache as the displayed image.
+Add Processor omits spatial controls until the processor is added. Missing required
+masks show 􀇾 on the processor row and mask tile; either opens the embedded editor,
+and Apply clears both warnings. Later stages can edit source-based inputs, but
+rendering spatial bindings still requires the first enabled stage.
 The generic API lives in `crates/processor-api`; processor implementations are
 maintained independently. **`cargo build-with-plugins`** (alias → the committed,
 generic helper `tools/build-with-plugins`) is the sanctioned way to compose them

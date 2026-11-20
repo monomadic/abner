@@ -144,7 +144,7 @@ impl Cursor {
 
     /// On for half a second, off for half, restarting at every edit.
     pub fn caret_visible(&self) -> bool {
-        self.touched.elapsed().as_millis() / BLINK_MS % 2 == 0
+        (self.touched.elapsed().as_millis() / BLINK_MS).is_multiple_of(2)
     }
 
     /// When the caret next changes state: the redraw a blink needs.
