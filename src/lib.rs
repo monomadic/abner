@@ -128,8 +128,8 @@ keys:
   Cmd-O        add files
   Cmd-W        close the focused clip (on the empty window: quit)
   Cmd-Delete   close the focused clip
-  Q            quit
-  Esc          leave fullscreen, else quit
+  Cmd-Q        quit (config keys.quit)
+  Esc          leave fullscreen
 ";
 
 /// Start the host with built-in and externally composed processor factories.
@@ -922,6 +922,12 @@ impl ApplicationHandler for Runner {
                     return;
                 }
                 let key = match &event.logical_key {
+                    // A ⌘-chord a `[keys]` binding names (keys.quit = "cmd+q").
+                    WinitKey::Character(s)
+                        if self.mods.super_key() && s.chars().next().and_then(|c| self.app.bound_cmd(c)).is_some() =>
+                    {
+                        s.chars().next().and_then(|c| self.app.bound_cmd(c))
+                    }
                     WinitKey::Character(s) if self.mods.super_key() && s.eq_ignore_ascii_case("d") => Some(Key::DuplicateSources),
                     WinitKey::Character(s) if self.mods.super_key() && s.eq_ignore_ascii_case("o") => Some(Key::OpenFiles),
                     // ⌘W closes the focused clip, like a document window.

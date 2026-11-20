@@ -80,6 +80,10 @@ pub enum Key {
     /// ⌘0: show the focused video at its original size (one video pixel
     /// per screen pixel).
     ActualSize,
+    /// ⌘ plus a character with no fixed meaning. lib.rs produces it only
+    /// for a chord a `[keys]` binding names (`quit = "cmd+q"`); every other
+    /// ⌘-chord still falls through as its bare key.
+    Cmd(char),
 }
 
 #[derive(Debug, Clone)]
@@ -2254,7 +2258,14 @@ impl App {
         self.processors.set_budget(self.preview_bytes);
     }
 
+    /// The bindable ⌘-chord for `c`, if a `[keys]` binding names one.
+    pub fn bound_cmd(&self, c: char) -> Option<Key> {
+        let k = Key::Cmd(c.to_ascii_lowercase());
+        (k == self.keys.quit).then_some(k)
+    }
+
     pub fn key(&mut self, mut k: Key) {
+        if k == self.keys.quit { self.cmds.push(Cmd::Quit); return; }
         if self.processors.modal_open() { self.processors.key(k); return; }
         if self.export_page.editing_filename() && self.export_page.key(k) { return; }
         if self.editor.is_some() {
@@ -2316,12 +2327,9 @@ impl App {
                     if self.fullscreen {
                         self.fullscreen = false;
                         self.cmds.push(Cmd::ToggleFullscreen);
-                    } else {
-                        self.cmds.push(Cmd::Quit);
                     }
                 }
                 Key::Char(c) => match c.to_ascii_lowercase() {
-                    'q' => self.cmds.push(Cmd::Quit),
                     'f' => {
                         self.fullscreen = !self.fullscreen;
                         self.cmds.push(Cmd::ToggleFullscreen);
@@ -2405,12 +2413,10 @@ impl App {
                     self.fullscreen = false;
                     self.show_ui = true;
                     self.cmds.push(Cmd::ToggleFullscreen);
-                } else {
-                    self.cmds.push(Cmd::Quit);
                 }
             }
             Key::Backspace => self.speed = 1.0,
-            Key::Up | Key::Down | Key::Close | Key::ActualSize | Key::CmdDigit(_) | Key::Undo | Key::Redo | Key::Render | Key::SaveProject | Key::PreviousKeyframe | Key::NextKeyframe | Key::DuplicateSources | Key::OpenFiles | Key::PrevMode | Key::NextMode => {} // handled above
+            Key::Up | Key::Down | Key::Close | Key::ActualSize | Key::CmdDigit(_) | Key::Undo | Key::Redo | Key::Render | Key::SaveProject | Key::PreviousKeyframe | Key::NextKeyframe | Key::DuplicateSources | Key::OpenFiles | Key::PrevMode | Key::NextMode | Key::Cmd(_) => {} // handled above
             Key::Char('V') => self.mode = self.mode.cycle(-1),
             Key::Char(c @ '1'..='9') => {
                 let idx = c as usize - '1' as usize;
@@ -2419,7 +2425,6 @@ impl App {
                 }
             }
             Key::Char(c) => match c.to_ascii_lowercase() {
-                'q' => self.cmds.push(Cmd::Quit),
                 'f' => {
                     self.fullscreen = !self.fullscreen;
                     self.cmds.push(Cmd::ToggleFullscreen);

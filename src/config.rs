@@ -72,10 +72,23 @@ pub struct Keys {
     pub next_source: Key,
     #[serde(deserialize_with = "de_key")]
     pub fullscreen_video: Key,
+    #[serde(deserialize_with = "de_key")]
+    pub quit: Key,
 }
 
 fn de_key<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Key, D::Error> {
     let s = String::deserialize(d)?;
+    // A ⌘-chord: `cmd+q` (also `command+`, `super+`, `⌘`), one character.
+    let lower = s.to_ascii_lowercase();
+    if let Some(rest) = ["cmd+", "command+", "super+", "⌘"].iter().find_map(|p| lower.strip_prefix(p)) {
+        let mut cs = rest.chars();
+        return match (cs.next(), cs.next()) {
+            (Some(c), None) => Ok(Key::Cmd(c)),
+            _ => Err(serde::de::Error::custom(format!(
+                "unknown key `{s}`, a cmd+ chord takes a single character"
+            ))),
+        };
+    }
     let mut chars = s.chars();
     match (s.to_ascii_lowercase().as_str(), chars.next(), chars.next()) {
         ("tab", ..) => Ok(Key::Tab),
@@ -84,7 +97,7 @@ fn de_key<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Key, D::Error> {
         ("backspace", ..) => Ok(Key::Backspace),
         (_, Some(c), None) => Ok(Key::Char(c)),
         _ => Err(serde::de::Error::custom(format!(
-            "unknown key `{s}`, expected tab, enter, space, backspace or a single character"
+            "unknown key `{s}`, expected tab, enter, space, backspace, a single character or cmd+<character>"
         ))),
     }
 }
@@ -232,6 +245,7 @@ mod tests {
         assert!(!c.window.reuse_window);
         assert!(Config::from_overlay_str("[window]\nreuse_window = true\n").unwrap().window.reuse_window);
         assert_eq!((c.keys.next_source, c.keys.fullscreen_video), (Key::Tab, Key::Enter));
+        assert_eq!(c.keys.quit, Key::Cmd('q'));
     }
 
     #[test]
@@ -239,6 +253,9 @@ mod tests {
         let c = Config::from_overlay_str("[keys]\nnext_source = \"n\"\nfullscreen_video = \"Space\"\n").unwrap();
         assert_eq!((c.keys.next_source, c.keys.fullscreen_video), (Key::Char('n'), Key::Space));
         assert!(err("[keys]\nnext_source = \"pgup\"\n").contains("next_source"));
+        assert_eq!(Config::from_overlay_str("[keys]\nquit = \"Cmd+Q\"\n").unwrap().keys.quit, Key::Cmd('q'));
+        assert_eq!(Config::from_overlay_str("[keys]\nquit = \"⌘x\"\n").unwrap().keys.quit, Key::Cmd('x'));
+        assert!(err("[keys]\nquit = \"cmd+qq\"\n").contains("quit"));
     }
 
     #[test]
