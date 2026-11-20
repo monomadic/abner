@@ -431,6 +431,46 @@ under the bar for 10–11px mono). The lower bar (#e71b24) was `ACCENT_B`, slot 
 colour on the old launch zones; it went with them. The launch window's wordmark is the logo IMAGE, not type — it already carries
 the "VIDEO QUALITY TESTING TOOLKIT" line that used to be a second text run.
 
+### Drawing Figma controls with figleaf
+
+Controls designed in Figma are drawn with the figleaf library (`../figleaf`, a
+path dependency; its README's "Using figleaf in an app" is the guide), not as
+more `Item::Rect`s. The shared surfaces already are: `src/canvas.rs` (grounds,
+button bar), the rail and Process switches, the Export page. Reach for it
+when the design has what a rect only approximates: an OUTSIDE stroke, an inner
+shadow, a gradient, round-capped lines, a text effect.
+
+- **In the draw list:** `Item::Shape(figleaf::Shape)` and
+  `Item::Label(figleaf::Text)` are painted in list order and respect
+  `Item::Clip`. `render.rs` owns the figleaf renderer and its CoreText fonts;
+  font slot 0 is the bundled header face, 1 is SF Pro Medium (wght 510, bundled
+  fallback); read the `figleaf header and interface fonts` block there for the
+  rest before relying on a slot.
+- **Whole pieces: the Figma plugin.** `../figleaf/plugin` shows Rust for a
+  selected frame (Figma Desktop: Plugins → Development → figleaf — Rust). An
+  agent cannot click it: ask the owner to run it and paste the result, or read
+  the values with `use_figma` and write the calls by hand, as figleaf's
+  `examples/abner_button_bar.rs` does. Put exported code in its own module,
+  regenerate rather than hand-edit it, and place it with
+  `Canvas::append_at(piece, [x, y])` (it always draws at the origin).
+- **No adapter from an exported `Canvas` to `Item`s yet.** Write one small
+  function (loop `canvas.items()`, push `Item::Shape` / `Item::Label` clones)
+  and reuse it, not a copy per call site. `Composite` and `Masked` items
+  (opacity groups, blend modes, blurs, masks) have no `Item`: refuse them or
+  hand-write that piece. Exported `fonts` indices must be mapped to the slots
+  above.
+- **Blending:** the surface is sRGB with premultiplied alpha and figleaf
+  blends translucent colours in linear light. Opaque colours copy from Figma
+  1:1; translucent black is corrected by figleaf; write any other translucent
+  fill as the opaque colour it makes on its ground, as the rail switch and the
+  button bar do.
+- **Layout:** figleaf's solver is fine for one control's own row (the embedded
+  editor's button row); hit targets are its solved rectangles. Everything else
+  stays explicit geometry shared by drawing and hit testing.
+- **Check it:** look at the running window beside Figma's export of the frame,
+  and read the log for `figleaf left out item` lines; nothing is dropped
+  silently. Do not call it Figma-accurate until that comparison was made.
+
 ## Rules
 
 - `cargo test` generates tiny ffmpeg test clips; the suite covers master-clock

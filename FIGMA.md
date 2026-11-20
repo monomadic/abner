@@ -30,7 +30,11 @@ rebuilt every frame in `src/app.rs` and drawn by a single wgpu pipeline
 - `get_design_context` output (React + Tailwind) is **a spec to read, never
   code to paste**. Translate it into `Item`s.
 - A Figma *component* maps to a **builder function** in `app.rs`, not a class.
-- Figma *auto-layout* has no runtime equivalent: layout is explicit geometry,
+- Controls drawn with figleaf (see CLAUDE.md, "Drawing Figma controls with
+  figleaf") may use its layout solver and, where the owner can run it, its
+  Figma plugin's exported Rust; read that section before hand-translating a
+  control into `Item::Rect`s.
+- Otherwise Figma *auto-layout* has no runtime equivalent: layout is explicit geometry,
   computed once in `Workspace::new` / `controls()` and shared by drawing AND
   hit testing. Read the resolved x/y/w/h from Figma, then express them the way
   the code already does (offsets from `rail`, `HEADER_H`, etc.), not as magic
