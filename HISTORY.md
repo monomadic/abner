@@ -1,5 +1,17 @@
 # abner — history
 
+## 2026-11-20 — Scope render history to the focused source
+
+The Process page now lists only renders owned by its focused source. Counts,
+scroll bounds, row clicks, deletion and keyboard cycling use that same filtered
+list. Switching sources resets the history selection and scroll; retained previews
+remain cached and reappear when their source is focused again. Foreign render IDs
+cannot switch files through history. This avoids reopening an old source from a
+stale global render row without its preview.
+
+Validation: processor-panel tests cover interleaved source histories, cycling,
+clicking and deleting filtered rows, empty sources and cached-preview restoration.
+
 ## 2026-11-20 — Required processor masks
 
 Spatial inputs are edited after adding a processor, so Add Processor no longer

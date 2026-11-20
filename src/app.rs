@@ -2211,14 +2211,6 @@ impl App {
         if std::mem::take(&mut self.processors.toggle_play) {
             self.playing = !self.playing;
         }
-        // A reopened render from another source: focus that source first;
-        // the panel's next tick brings the render's frames back with it.
-        if let Some(owner) = self.processors.source_request.take()
-            && let Some(i) = self.videos.iter().position(|v| v.spatial_id == owner)
-            && i != self.active
-        {
-            self.select(i);
-        }
         if let Some(t) = self.processors.take_seek() {
             self.playing = false;
             let t = t.min((self.videos[self.active].info.duration - 1.0 / self.fps.max(1.0)).max(0.0));

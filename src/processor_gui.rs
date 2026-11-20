@@ -1256,8 +1256,6 @@ pub struct Panel {
     expected: usize,
     /// A finished or reopened multi-frame render: the app seeks here and plays.
     autoplay: Option<f64>,
-    /// A reopened render from another source: the app focuses that source.
-    pub(crate) source_request: Option<usize>,
     /// Snapshot thumbnails for the renderer's atlas, drained by the app.
     pub(crate) thumb_uploads: Vec<ThumbUpload>,
 }
@@ -1347,7 +1345,6 @@ impl Default for Panel {
             loop_preview: false,
             expected: 1,
             autoplay: None,
-            source_request: None,
             thumb_uploads: vec![],
         }
     }
@@ -1734,7 +1731,10 @@ impl Panel {
     pub(crate) fn input_owner(&mut self,id:usize) {
         if self.input_owner!=id {
             self.source_bindings.insert(self.input_owner,std::mem::take(&mut self.inputs.bindings));
-            self.inputs.bindings=self.source_bindings.remove(&id).unwrap_or_default();self.input_owner=id;self.changed();
+            self.inputs.bindings=self.source_bindings.remove(&id).unwrap_or_default();self.input_owner=id;
+            self.renders_scroll=0.;
+            self.current=None;
+            self.changed();
         }
     }
     pub(crate) fn job_inputs(&self)->crate::spatial::JobInputs {self.inputs.clone()}
@@ -2001,16 +2001,20 @@ impl Panel {
         }
         self.status = "Render deleted".into();
     }
+    /// History belongs to the focused source, just like its preview cache.
+    fn visible_renders(&self) -> impl DoubleEndedIterator<Item = &Render> {
+        self.renders.iter().filter(|r| r.owner == self.input_owner)
+    }
     /// Put the page back where a render was made: the chain's order, which
     /// stages were on, every setting, the focused processor, the source and
     /// the playhead. Its frames come back with the chain.
     fn open_render(&mut self, id: u64) {
-        let Some(r) = self.renders.iter().find(|r| r.id == id) else { return };
+        let Some(r) = self.visible_renders().find(|r| r.id == id) else { return };
         if self.busy && self.rendering == id {
             return;
         }
-        let (stages, focus, time, owner, many) =
-            (r.stages.clone(), r.focus.clone(), r.time, r.owner, r.frames > 1);
+        let (stages, focus, time, many) =
+            (r.stages.clone(), r.focus.clone(), r.time, r.frames > 1);
         self.added.fill(false);
         self.enabled.fill(false);
         self.reorder(&stages.iter().map(|s| s.0.clone()).collect::<Vec<_>>());
@@ -2032,16 +2036,12 @@ impl Panel {
         self.select(at);
         self.current = Some(id);
         self.show_rendered = true;
-        let here = owner == self.input_owner;
-        if !here {
-            self.source_request = Some(owner);
-        }
         if many && self.loop_preview && self.playback {
             self.autoplay = Some(time);
         } else {
             self.seek = Some(time);
         }
-        self.status = if here && !self.frames.iter().any(|f| f.render == id) {
+        self.status = if !self.frames.iter().any(|f| f.render == id) {
             "Settings restored · the inputs changed since this render, so render again to see it".into()
         } else {
             format!("Render at {} restored", fmt_time(time))
@@ -2049,20 +2049,20 @@ impl Panel {
     }
     /// ` walks the renders pane downwards (older), ~ upwards; both wrap.
     fn cycle_render(&mut self, dir: isize) {
-        if self.renders.is_empty() {
-            self.status = "No renders yet · R renders at the playhead".into();
+        let ids: Vec<_> = self.visible_renders().map(|r| r.id).collect();
+        if ids.is_empty() {
+            self.status = "No renders for this source yet · R renders at the playhead".into();
             return;
         }
-        let n = self.renders.len() as isize;
-        let at = self.current.and_then(|id| self.renders.iter().position(|r| r.id == id));
+        let n = ids.len() as isize;
+        let at = self.current.and_then(|id| ids.iter().position(|r| *r == id));
         let next = match at {
             Some(i) => (i as isize - dir).rem_euclid(n),
             None if dir > 0 => n - 1,
             None => 0,
         } as usize;
-        let id = self.renders[next].id;
-        self.open_render(id);
-        let row = (self.renders.len() - 1 - next) as f32 * RENDER_PITCH;
+        self.open_render(ids[next]);
+        let row = (ids.len() - 1 - next) as f32 * RENDER_PITCH;
         let view = RAIL_INSPECTOR_H - RENDER_HEAD;
         self.renders_scroll = self.renders_scroll.clamp((row + RENDER_ROW - view).max(0.0), row);
     }
@@ -2836,7 +2836,7 @@ impl Panel {
                 if hit(renders, cursor.0, cursor.1) {
                     self.renders_scroll = (self.renders_scroll - dy).clamp(
                         0.0,
-                        (self.renders.len() as f32 * RENDER_PITCH - 4.0 - renders.h).max(0.0),
+                        (self.visible_renders().count() as f32 * RENDER_PITCH - 4.0 - renders.h).max(0.0),
                     );
                     return true;
                 }
@@ -2904,8 +2904,8 @@ impl Panel {
             } else if hit(renders, x, y) {
                 let n = ((y - renders.y + self.renders_scroll) / RENDER_PITCH) as usize;
                 let row = self.render_row(n, vp);
-                if n < self.renders.len() && hit(row, x, y) {
-                    let id = self.renders[self.renders.len() - 1 - n].id;
+                let id = self.visible_renders().rev().nth(n).map(|r| r.id);
+                if let Some(id) = id && hit(row, x, y) {
                     if hit(Self::render_delete(row), x, y) {
                         self.delete_render(id);
                     } else {
@@ -3376,17 +3376,17 @@ impl Panel {
             items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(l - 110.0),
                 ..TextItem::new(pane.x + 16.0, hy, 13.0, hex_color(SOURCE_INK), "Renders") }));
             items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(40.0),
-                ..TextItem::new(pane.x + 16.0 + 8.0 * 13.0 * MONO_ADV, hy, 13.0, hex_color(0xa3a5a8), self.renders.len().to_string()) }));
+                ..TextItem::new(pane.x + 16.0 + 8.0 * 13.0 * MONO_ADV, hy, 13.0, hex_color(0xa3a5a8), self.visible_renders().count().to_string()) }));
             items.push(Item::Text(TextItem { regular: true, align: Align::Right, valign: VAlign::Middle, max_width: Some(70.0),
                 ..TextItem::new(pane.x + pane.w - 16.0, hy, 10.0, WORKSPACE_DIM, "` cycles") }));
             let list = self.renders_list(vp);
             items.push(Item::Clip(Some(list)));
-            if self.renders.is_empty() {
+            if self.visible_renders().next().is_none() {
                 items.push(Item::Text(TextItem { regular: true, wrap: Some(pane.w - 32.0),
                     ..TextItem::new(pane.x + 16.0, list.y + 6.0, 11.0, WORKSPACE_DIM,
-                        "Nothing rendered yet. Every render is kept here: click one to return to its frame, chain and settings.") }));
+                        "Nothing rendered for this source yet. Click a render to return to its frame, chain and settings.") }));
             }
-            for (n, r) in self.renders.iter().rev().enumerate() {
+            for (n, r) in self.visible_renders().rev().enumerate() {
                 let row = self.render_row(n, vp);
                 if row.y + row.h < list.y || row.y > list.y + list.h {
                     continue;
@@ -4183,6 +4183,60 @@ mod tests {
         p.frames.clear();
         p.prune_renders();
         assert!(p.renders.is_empty());
+    }
+    #[test]
+    fn render_history_only_lists_and_opens_the_focused_source() {
+        let mut registry = Registry::default();
+        registry.register(Box::new(Named("example.a"))).unwrap();
+        let mut p = populated(registry);
+        p.enter();
+        p.toggle_enabled(0);
+        let render = |p: &mut Panel, owner, time| {
+            p.input_owner(owner);
+            p.begin_render(time, "frame");
+            let id = p.rendering;
+            let mut frame = mark(time);
+            frame.render = id;
+            p.frames.push(frame);
+            p.prune_renders();
+            id
+        };
+        let first = render(&mut p, 10, 1.);
+        let second = render(&mut p, 20, 2.);
+        let third = render(&mut p, 10, 3.);
+        assert_eq!(p.visible_renders().map(|r|r.id).collect::<Vec<_>>(),[first,third]);
+        p.cycle_render(1);
+        assert_eq!(p.current,Some(first));
+        p.cycle_render(1);
+        assert_eq!(p.current,Some(third));
+        p.renders_scroll=100.;
+        p.input_owner(20);
+        assert_eq!(p.renders_scroll,0.);
+        assert!(p.current.is_none());
+        p.open_render(first);
+        assert!(p.current.is_none(),"stale foreign IDs cannot reopen a source");
+        p.cycle_render(1);
+        assert_eq!(p.current,Some(second));
+        p.time=p.take_seek().unwrap();
+        assert_eq!(p.shown().unwrap().render,second,"refocusing restores cached pixels");
+        let vp=(1280.,800.);
+        let row=p.render_row(0,vp);
+        p.click(row.x+8.,row.y+8.,vp);
+        assert_eq!(p.current,Some(second),"clicks use filtered row indices");
+        let bin=Panel::render_delete(row);
+        p.click(bin.x+2.,bin.y+2.,vp);
+        assert!(p.visible_renders().next().is_none());
+        assert_eq!(p.renders.len(),2,"deleting a visible row preserves other sources");
+        p.input_owner(30);
+        p.cycle_render(1);
+        assert!(p.current.is_none());
+        let mut items=vec![];
+        p.draw_renders(&mut items,vp);
+        assert!(items.iter().any(|i|matches!(i,Item::Text(t) if t.text.starts_with("Nothing rendered for this source"))));
+        p.input_owner(10);
+        p.open_render(first);
+        p.time=p.take_seek().unwrap();
+        assert_eq!(p.shown().unwrap().render,first);
     }
     #[test]
     fn actual_zoom_matches_displayed_upscaled_pixels() {
