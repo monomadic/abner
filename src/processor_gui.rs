@@ -1441,7 +1441,7 @@ impl Panel {
         // Keep discovery overrides available to presets/CLI, but out of the UI.
         let schema = &self.descriptors[index].settings_schema;
         self.fields.retain(|f| !matches!(schema["properties"][&f.key]["format"].as_str(), Some("file-path" | "directory-path")));
-        if let Some(inputs)=self.declarations.get(&self.descriptors[index].id) {
+        if self.picker.is_none() && let Some(inputs)=self.declarations.get(&self.descriptors[index].id) {
             use abner_processor_api::SpatialInputKind as K;
             for d in inputs {
                 let tools: &[bool]=match d.kind {K::Image|K::Region=>&[true],K::Mask=>&[false],K::MaskedImage=>&[true,false]};
@@ -2426,6 +2426,18 @@ impl Panel {
                 .and_then(|d| self.card_slides.get(&d.id))
                 .is_some_and(|s| s.from != (0.0, 0.0) && s.at.elapsed().as_secs_f32() < CARD_SLIDE_S))
     }
+    fn missing_mask(&self, i: usize) -> Option<&str> {
+        use abner_processor_api::SpatialInputKind as K;
+        let id = &self.descriptors[i].id;
+        self.declarations.get(id)?.iter().find(|d| d.required
+            && matches!(d.kind, K::Mask | K::MaskedImage)
+            && !self.binding(id, &d.key).is_some_and(|b| b.mask.is_some()))
+            .map(|d| d.key.as_str())
+    }
+    fn mask_warning(&self, i: usize, vp: (f32, f32)) -> RectPx {
+        let c = self.card(i, vp);
+        RectPx { x: c.x + c.w - 70., y: c.y + (c.h - 16.) / 2., w: 16., h: 16. }
+    }
     fn draw_processor_card(&self, items: &mut Vec<Item>, i: usize, c: RectPx, floating: bool) {
         let active = i == self.selected;
         let hover = self.card_drag.is_none() && hit(c, self.cursor.0, self.cursor.1);
@@ -2439,7 +2451,9 @@ impl Panel {
             ..RectItem::new(c, hex_color(if floating { 0x232323 } else if hover && !active { 0x0c0c0c } else { 0x030303 })) }));
         let switch = RectPx { x: c.x + c.w - 46.0, y: c.y + (c.h - 18.0) / 2.0, w: 34.0, h: 18.0 };
         let tx = c.x + 13.0;
-        items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(switch.x - tx - 10.0),
+        let missing = self.missing_mask(i).is_some();
+        if missing { items.push(Item::FrameIcon { x:c.x+c.w-70., y:c.y+(c.h-16.)/2., index:14 }); }
+        items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(switch.x - tx - if missing { 32.0 } else { 10.0 }),
             ..TextItem::new(tx, c.y + c.h / 2.0, 12.0,
                 hex_color(if self.enabled[i] || active { 0xe6e6e6 } else { 0x8c8c8c }), self.descriptors[i].name.as_str()) }));
         draw_rail_switch(items, switch, self.switch_position(i, Instant::now()));
@@ -2763,6 +2777,9 @@ impl Panel {
                 } else {items.push(Item::Rect(RectItem::new(thumb,hex_color(if hovered {0x353535}else{0x232323}))));}
                 items.push(Item::Rect(RectItem{radius:6.,..RectItem::new(RectPx{x:thumb.x+(thumb.w-40.)/2.,y:thumb.y+7.,w:40.,h:40.},[0.,0.,0.,0.7])}));
                 items.push(Item::FrameIcon{x:thumb.x+(thumb.w-20.)/2.,y:thumb.y+17.,index:if *crop {5}else{4}});
+                if !crop && f.required && !configured {
+                    items.push(Item::FrameIcon{x:thumb.x+thumb.w-18.,y:thumb.y+2.,index:14});
+                }
             } else if matches!(f.kind,Kind::Bool) {
                 items.push(Item::Text(TextItem{valign:VAlign::Middle,max_width:Some((row.w-48.).max(1.)),..TextItem::new(row.x,row.y+10.,11.,ink,&f.title)}));
                 let on=value.as_bool().unwrap_or(false);
@@ -2903,7 +2920,10 @@ impl Panel {
             } else if hit(self.list(vp), x, y) {
                 let row = ((y - self.list_top(vp) + self.list_scroll) / CARD_PITCH) as usize;
                 if let Some(&index) = self.visible().get(row) && hit(self.card(index, vp), x, y) {
-                    if hit(self.card_switch(index, vp), x, y) {
+                    if hit(self.mask_warning(index, vp), x, y) && self.missing_mask(index).is_some() {
+                        self.select(index);
+                        self.editor_request = Some((self.descriptors[index].id.clone(), self.missing_mask(index).unwrap().into(), false));
+                    } else if hit(self.card_switch(index, vp), x, y) {
                         self.toggle_enabled(index);
                     } else {
                         if index != self.selected { self.select(index); }
@@ -3016,7 +3036,6 @@ impl Panel {
                     Kind::Spatial{key,crop} => {
                         if !hit(spatial_button(row),x,y) {return true;}
                         if let Some(p) = self.picker.as_mut() { p.message="Add this processor, then choose its spatial inputs.".into(); return true; }
-                        if self.enabled.iter().take(self.selected).any(|e|*e) {self.status="Move this processor first to edit its spatial inputs".into();return true;}
                         self.editor_request=Some((self.descriptors[self.selected].id.clone(),key.clone(),*crop));return true;
                     }
                     Kind::Unsupported => {
@@ -4785,12 +4804,18 @@ mod tests {
         assert!(matches!(p.fields[0].kind,Kind::Spatial{crop:false,..}));
         assert!(!p.fields.iter().any(|f| f.key=="model"));
         assert_eq!(p.settings["model"],"automatic");
+        assert_eq!(p.missing_mask(0),Some("mask"));
+        p.open_picker();
+        assert!(!p.fields.iter().any(|f|matches!(f.kind,Kind::Spatial{..})));
+        p.cancel_picker();
+        assert!(matches!(p.fields[0].kind,Kind::Spatial{crop:false,..}));
         assert!(p.editor_request.is_none());
         p.open = true;
         let row = p.row(0,(1280.,800.));
         p.click(row.x+10.,row.y+35.,(1280.,800.));
         assert_eq!(p.editor_request.take(),Some(("example.buffered".into(),"mask".into(),false)));
         p.set_binding("example.buffered".into(),"mask".into(),abner_processor_api::SpatialBinding {mask:Some(Arc::new(vec![255])),..Default::default()});
+        assert!(p.missing_mask(0).is_none());
         p.select(0);
         assert!(p.editor_request.is_none());
     }

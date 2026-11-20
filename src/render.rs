@@ -128,7 +128,7 @@ fn decode_logo() -> Logo {
 }
 
 // Original Figma card-instance exports, including their intrinsic view boxes.
-const FRAME_ICON_SVGS: [&[u8]; 14] = [
+const FRAME_ICON_SVGS: [&[u8]; 15] = [
     include_bytes!("../assets/frame-icons/key.svg"), include_bytes!("../assets/frame-icons/i.svg"),
     include_bytes!("../assets/frame-icons/p.svg"), include_bytes!("../assets/frame-icons/b.svg"),
     include_bytes!("../assets/spatial-icons/mask.svg"), include_bytes!("../assets/spatial-icons/crop.svg"),
@@ -141,6 +141,7 @@ const FRAME_ICON_SVGS: [&[u8]; 14] = [
     // The default processor icon (Process info pane), tile outline included.
     include_bytes!("../assets/process-icons/processor.svg"),
     include_bytes!("../assets/process-icons/search.svg"),
+    include_bytes!("../assets/process-icons/required-mask.svg"),
 ];
 /// The Process page's render snapshots: `RENDER_THUMBS` atlas cells after the
 /// frame icons, so the recent row and the timeline strip never share them.
@@ -1855,7 +1856,7 @@ mod frame_icon_tests {
     }
     #[test]
     fn export_svg_controls_fit_the_atlas_at_their_figma_sizes() {
-        for (i,size) in [(6,(20.,20.)),(7,(34.,24.)),(8,(34.,24.)),(9,(34.,34.)),(10,(34.,24.)),(11,(34.,24.))] {
+        for (i,size) in [(14,(16.,16.)),(6,(20.,20.)),(7,(34.,24.)),(8,(34.,24.)),(9,(34.,34.)),(10,(34.,24.)),(11,(34.,24.))] {
             let tree=frame_icon_tree(i);
             assert_eq!((tree.size().width(),tree.size().height()),size);
             assert!(size.0*ICON_SCALE<THUMB_W as f32 && size.1*ICON_SCALE<THUMB_H as f32);

@@ -7789,6 +7789,12 @@ mod tests {
                     presets: vec![],
                 }
             }
+            fn spatial_inputs(&self) -> Vec<abner_processor_api::SpatialInputDescriptor> {
+                vec![abner_processor_api::SpatialInputDescriptor {
+                    key: "input".into(), title: "Mask".into(),
+                    kind: abner_processor_api::SpatialInputKind::Mask, required: true,
+                }]
+            }
             fn create(&self, _: usize, _: usize, _: &Value) -> Result<Box<dyn Session>, String> {
                 unreachable!("editing a spatial input does not render")
             }
@@ -7800,6 +7806,21 @@ mod tests {
         registry.register(Box::new(TestProcessor)).unwrap();
         app.set_processors(registry);
         app.activate(Action::Tool(4));
+        app.open_processor_picker();
+        app.key(Key::Enter);
+        let frame = app.tick(0., (1280.,800.), 1.);
+        let warnings: Vec<_> = frame.items.iter().filter_map(|item| match item {
+            Item::FrameIcon{x,y,index:14} => Some((*x+8.,*y+8.)), _ => None,
+        }).collect();
+        assert_eq!(warnings.len(),2,"chain and required mask both warn");
+        app.mouse_down(warnings[1].0,warnings[1].1);
+        assert!(app.mask_mode,"clicking the required mask opens its editor");
+        app.key(Key::Escape);
+        app.mouse_down(warnings[0].0,warnings[0].1);
+        assert!(app.mask_mode,"clicking the chain warning opens its editor");
+        app.key(Key::Enter);
+        let frame = app.tick(0., (1280.,800.), 1.);
+        assert!(!frame.items.iter().any(|item|matches!(item,Item::FrameIcon{index:14,..})),"applying a mask clears both warnings");
         let id = app.processors.focused_id().unwrap().to_owned();
         for crop in [false, true] {
             for open in [true, false] {

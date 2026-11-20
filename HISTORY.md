@@ -1,5 +1,17 @@
 # abner — history
 
+## 2026-11-20 — Required processor masks
+
+Spatial inputs are edited after adding a processor, so Add Processor no longer
+shows their inactive controls. Missing required masks show the requested warning
+symbol beside the processor name and on the mask tile; either opens the editor,
+and applying the mask clears both indicators. Editing is allowed for later stages
+(the existing first-stage restriction still applies when rendering spatial inputs).
+Adding without reordering also rebuilds the inspector to restore its spatial controls.
+
+Validated with 47 processor-panel tests, the add/click/apply editor regression,
+and SVG atlas checks.
+
 ## 2026-11-20 — Fit clips and open Finder files separately
 
 New clips and workspace changes fit the image to the canvas with a 24-point

@@ -266,6 +266,8 @@ impl Panel {
             .max()
             .map_or(0, |last| if index < last { last } else { last + 1 });
         self.move_selected_to(to);
+        // Restore spatial controls even when appending did not reorder the catalog.
+        self.select(self.selected);
         self.changed();
         self.list_scroll = 0.0;
     }
