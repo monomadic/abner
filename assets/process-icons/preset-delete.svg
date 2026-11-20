@@ -1,0 +1,7 @@
+<svg preserveAspectRatio="none" overflow="visible" style="display: block;" width="25" height="23" viewBox="0 0 25 23" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g id="Preset / Delete">
+<rect x="0.5" y="0.5" width="24" height="22" rx="4.5" fill="#0A0A0A"/>
+<rect x="0.5" y="0.5" width="24" height="22" rx="4.5" stroke="#303234"/>
+<path id="line" d="M9.125 8.16667V15.3889C9.125 16.0025 9.62868 16.5 10.25 16.5H14.75C15.3713 16.5 15.875 16.0025 15.875 15.3889V8.16667M8 8.16667H17M10.25 8.16667V7.61111C10.25 6.99746 10.7537 6.5 11.375 6.5H13.625C14.2463 6.5 14.75 6.99746 14.75 7.61111V8.16667M11.375 10.3889V14.2778M13.625 10.3889V14.2778" stroke-linecap="round" stroke-linejoin="round" stroke="#F4F3ED"/>
+</g>
+</svg>

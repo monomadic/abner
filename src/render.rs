@@ -128,7 +128,7 @@ fn decode_logo() -> Logo {
 }
 
 // Original Figma card-instance exports, including their intrinsic view boxes.
-const FRAME_ICON_SVGS: [&[u8]; 16] = [
+const FRAME_ICON_SVGS: [&[u8]; 22] = [
     include_bytes!("../assets/frame-icons/key.svg"), include_bytes!("../assets/frame-icons/i.svg"),
     include_bytes!("../assets/frame-icons/p.svg"), include_bytes!("../assets/frame-icons/b.svg"),
     include_bytes!("../assets/spatial-icons/mask.svg"), include_bytes!("../assets/spatial-icons/crop.svg"),
@@ -144,6 +144,12 @@ const FRAME_ICON_SVGS: [&[u8]; 16] = [
     // 14: a required mask is missing (alert triangle); 15: it is applied (tick).
     include_bytes!("../assets/process-icons/required-mask.svg"),
     include_bytes!("../assets/process-icons/mask-ready.svg"),
+    include_bytes!("../assets/process-icons/catalog-processor.svg"),
+    include_bytes!("../assets/process-icons/processor-glyph.svg"),
+    include_bytes!("../assets/process-icons/preset-previous.svg"),
+    include_bytes!("../assets/process-icons/preset-next.svg"),
+    include_bytes!("../assets/process-icons/preset-save.svg"),
+    include_bytes!("../assets/process-icons/preset-delete.svg"),
 ];
 /// The Process page's render snapshots: `RENDER_THUMBS` atlas cells after the
 /// frame icons, so the recent row and the timeline strip never share them.
@@ -1860,7 +1866,7 @@ mod frame_icon_tests {
     }
     #[test]
     fn export_svg_controls_fit_the_atlas_at_their_figma_sizes() {
-        for (i,size) in [(14,(16.,16.)),(15,(16.,16.)),(6,(20.,20.)),(7,(34.,24.)),(8,(34.,24.)),(9,(34.,34.)),(10,(34.,24.)),(11,(34.,24.))] {
+        for (i,size) in [(14,(16.,16.)),(15,(16.,16.)),(16,(26.,26.)),(17,(17.,17.)),(18,(25.,23.)),(19,(25.,23.)),(20,(25.,23.)),(21,(25.,23.)),(6,(20.,20.)),(7,(34.,24.)),(8,(34.,24.)),(9,(34.,34.)),(10,(34.,24.)),(11,(34.,24.))] {
             let tree=frame_icon_tree(i);
             assert_eq!((tree.size().width(),tree.size().height()),size);
             assert!(size.0*ICON_SCALE<THUMB_W as f32 && size.1*ICON_SCALE<THUMB_H as f32);

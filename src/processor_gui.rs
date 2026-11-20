@@ -1671,7 +1671,7 @@ impl Panel {
             let row = self.row(i, vp);
             let f = &self.fields[i];
             if let Kind::Number { min, max, integer } = f.kind {
-                let value = numeric(min, max, integer, ((x - row.x) / row.w) as f64);
+                let value = numeric(min, max, integer, self.slider_fraction(row, x));
                 if self.settings[&f.key] != value {
                     self.settings[&f.key] = value;
                     self.changed();
@@ -2758,6 +2758,11 @@ impl Panel {
         self.draw_fields(items, vp, clip);
         self.draw_info(items, vp);
     }
+    fn slider_fraction(&self, row: RectPx, x: f32) -> f64 {
+        let inset = if self.picker.is_some() { 6.0 } else { 0.0 };
+        ((x - row.x - inset) / (row.w - 2.0 * inset)) as f64
+    }
+
     fn draw_fields(&self, items: &mut Vec<Item>, vp: (f32, f32), clip: RectPx) {
         use figleaf::StrokeAlign;
         use picker::{field_title, picker_text, ui_shape};
@@ -2765,7 +2770,8 @@ impl Panel {
         let Some(d) = self.descriptors.get(self.selected) else {
             return;
         };
-        let ink = hex_color(0xe6e6e6);
+        let in_picker = self.picker.is_some();
+        let ink = hex_color(if in_picker { 0xd1d1d1 } else { 0xe6e6e6 });
         let blue = hex_color(0x007be5);
         items.push(Item::Clip(Some(clip)));
         for (i, f) in self.fields.iter().enumerate() {
@@ -2793,8 +2799,8 @@ impl Panel {
                 picker_text(
                     items,
                     row.x,
-                    row.y + if self.picker.is_some() { 4.0 } else { 0.0 },
-                    11.0,
+                    row.y + if in_picker { 3.0 } else { 0.0 },
+                    if in_picker { 10.0 } else { 11.0 },
                     &f.title,
                     ink,
                     if self.picker.is_some() {
@@ -2837,7 +2843,7 @@ impl Panel {
                 let value_rect = slider_value(row);
                 let hovered = hit(row, self.cursor.0, self.cursor.1);
                 let focused = editing.is_some();
-                field_title(items, row, &f.title, ink);
+                field_title(items, row, &f.title, ink, in_picker);
                 let mut value_box = ui_shape(
                     value_rect,
                     hex_color(if focused || hovered {
@@ -2850,7 +2856,11 @@ impl Panel {
                 if focused || !hovered {
                     value_box = value_box.stroke(
                         1.0,
-                        if focused { blue } else { hex_color(0x4e4e4e) },
+                        if focused {
+                            blue
+                        } else {
+                            hex_color(if in_picker { 0x303234 } else { 0x4e4e4e })
+                        },
                         StrokeAlign::Inside,
                     );
                 }
@@ -2858,16 +2868,18 @@ impl Panel {
                 self.draw_field_value(items, value_rect, &shown, ink, 2.0, focused);
                 let amount =
                     ((value.as_f64().unwrap_or(min) - min) / (max - min)).clamp(0., 1.) as f32;
+                let track_height = if in_picker { 2.0 } else { 4.0 };
                 let track = RectPx {
                     x: row.x,
-                    y: row.y + 26.,
+                    y: row.y + 28.0 - track_height / 2.0,
                     w: row.w,
-                    h: 4.,
+                    h: track_height,
                 };
                 items.push(Item::Shape(
                     ui_shape(track, hex_color(0x303234)).radius(2.0),
                 ));
-                let cx = track.x + track.w * amount;
+                let inset = if in_picker { 6.0 } else { 0.0 };
+                let cx = track.x + inset + (track.w - 2.0 * inset) * amount;
                 if hovered || focused || self.dragging == Some(i) {
                     items.push(Item::Shape(
                         ui_shape(
@@ -2886,7 +2898,7 @@ impl Panel {
                     items.push(Item::Shape(
                         ui_shape(
                             RectPx {
-                                w: track.w * amount,
+                                w: cx - track.x,
                                 ..track
                             },
                             blue,
@@ -2902,7 +2914,7 @@ impl Panel {
                             w: 12.0,
                             h: 12.0,
                         },
-                        ink,
+                        if in_picker { hex_color(0xf0f0f0) } else { ink },
                     )
                     .radius(6.0),
                 ));
@@ -2997,7 +3009,7 @@ impl Panel {
                     });
                 }
             } else if matches!(f.kind, Kind::Bool) {
-                field_title(items, row, &f.title, ink);
+                field_title(items, row, &f.title, ink, in_picker);
                 let on = value.as_bool().unwrap_or(false);
                 draw_rail_switch(
                     items,
@@ -3076,6 +3088,7 @@ impl Panel {
                 },
                 value,
                 ink,
+                self.picker.is_some(),
             );
         }
     }
@@ -3281,7 +3294,7 @@ impl Panel {
                         if y<row.y+20. {return true;}
                         self.dragging = Some(i);
                         self.settings[&f.key] =
-                            numeric(*min, *max, *integer, ((x - row.x) / row.w) as f64)
+                            numeric(*min, *max, *integer, self.slider_fraction(row, x))
                     }
                     Kind::Enum(choices) => {
                         let n = choices

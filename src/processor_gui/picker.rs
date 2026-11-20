@@ -1,12 +1,14 @@
 //! The catalog is a draft editor, not the processing chain. Browsing never
 //! changes enabled stages, preview cache keys, exports, or a running job.
 use super::*;
-use figleaf::{
-    Shape, StrokeAlign, Text, VectorPath, WindingRule, paint::Align as Place, text::TextTruncation,
-};
+use figleaf::{Shadow, StrokeAlign, Text, paint::Align as Place, text::TextTruncation};
 
 const CATALOG_PITCH: f32 = 45.0;
 const SEARCH_ICON: usize = 13;
+const CATALOG_ICON: usize = 16;
+const PROCESSOR_GLYPH: usize = 17;
+const PRESET_ICONS: [usize; 4] = [18, 19, 20, 21];
+const HEADER_HEIGHT: f32 = 90.0;
 
 pub(super) struct Picker {
     pub(super) focus: usize,
@@ -37,7 +39,7 @@ pub(super) struct PickerLayout {
 impl PickerLayout {
     pub(super) fn new(vp: (f32, f32), chip_bottom: f32) -> Self {
         let w = (vp.0 - 32.0).clamp(320.0, 880.0);
-        let h = (vp.1 - 72.0).clamp(300.0, 640.0);
+        let h = (vp.1 - 72.0).clamp(300.0, 644.0);
         let panel = RectPx {
             x: (vp.0 - w) / 2.0,
             y: ((vp.1 - h) / 2.0 + 30.0).min(vp.1 - h - 16.0).max(16.0),
@@ -64,22 +66,24 @@ impl PickerLayout {
             w: bw - 40.0,
             h: (body.h - 88.0).clamp(1.0, 291.0),
         };
+        let short = h < 500.0;
         let heading = RectPx {
             x: browser.x + bw + 24.0,
-            y: body.y + 22.0,
+            y: body.y + if short { 10.0 } else { 22.0 },
             w: w - bw - 48.0,
-            h: 86.0,
+            h: if short { 72.0 } else { 84.0 },
         };
         let sw = if w >= 820.0 {
             258.0
         } else {
             (heading.w * 0.53).max(160.0)
         };
+        let settings_y = heading.y + heading.h + if short { 6.0 } else { 21.0 };
         let settings = RectPx {
             x: heading.x,
-            y: heading.y + 103.0,
+            y: settings_y,
             w: sw,
-            h: (body.y + body.h - heading.y - 115.0).max(1.0),
+            h: (body.y + body.h - settings_y - if short { 4.0 } else { 10.0 }).max(1.0),
         };
         let about = RectPx {
             x: settings.x + sw + 28.0,
@@ -87,11 +91,12 @@ impl PickerLayout {
             w: (heading.w - sw - 28.0).max(1.0),
             h: settings.h,
         };
+        let fields_top = if short { 50.0 } else { 71.0 };
         let fields = RectPx {
             x: settings.x,
-            y: settings.y + 60.0,
+            y: settings.y + fields_top,
             w: sw,
-            h: (settings.h - 60.0).max(1.0),
+            h: (settings.h - fields_top).max(1.0),
         };
         let add = RectPx {
             x: panel.x + w - 172.0,
@@ -117,7 +122,7 @@ impl PickerLayout {
             },
             close: RectPx {
                 x: panel.x + w - 55.0,
-                y: panel.y + 29.0,
+                y: panel.y + 30.5,
                 w: 30.0,
                 h: 30.0,
             },
@@ -133,7 +138,7 @@ impl PickerLayout {
     }
     pub(super) fn presets(self) -> [RectPx; 5] {
         let x = self.settings.x;
-        let y = self.settings.y + 25.0;
+        let y = self.settings.y + 23.0;
         let w = self.settings.w;
         [
             RectPx {
@@ -334,7 +339,7 @@ impl Panel {
                 let label = category
                     .as_ref()
                     .map_or("ALL".into(), |c| c.label().to_uppercase());
-                let w = (label.chars().count() as f32 * 6.0 + 20.0).clamp(53.0, width);
+                let w = (label.chars().count() as f32 * 6.7 + 20.0).clamp(53.0, width);
                 (tree.add(root, Node::fixed([w, 18.0])), category, label)
             })
             .collect();
@@ -348,7 +353,7 @@ impl Panel {
                 (
                     RectPx {
                         x: panel.x + 23.0 + r.x,
-                        y: panel.y + 92.0 + r.y,
+                        y: panel.y + HEADER_HEIGHT + 5.0 + r.y,
                         w: r.w,
                         h: r.h,
                     },
@@ -359,12 +364,10 @@ impl Panel {
             .collect()
     }
     pub(super) fn picker_layout(&self, vp: (f32, f32)) -> PickerLayout {
-        let bottom = self
-            .picker_chips(vp)
-            .last()
-            .map_or(PickerLayout::new(vp, 0.0).panel.y + 114.0, |(r, ..)| {
-                r.y + r.h + 4.0
-            });
+        let bottom = self.picker_chips(vp).last().map_or(
+            PickerLayout::new(vp, 0.0).panel.y + HEADER_HEIGHT + 28.0,
+            |(r, ..)| r.y + r.h + 5.0,
+        );
         PickerLayout::new(vp, bottom)
     }
     pub(super) fn picker_pitch(&self, i: usize) -> f32 {
@@ -653,40 +656,28 @@ impl Panel {
                 w: vp.0,
                 h: vp.1,
             },
-            [0.0, 0.0, 0.0, 0.94],
+            [0.0, 0.0, 0.0, 0.72],
         )));
         items.push(Item::Shape(
             ui_shape(r, hex_color(0x171717)).radius(14.0).stroke(
                 1.0,
-                hex_color(0x353535),
+                hex_color(0x303234),
                 StrokeAlign::Inside,
             ),
         ));
-        items.push(Item::Shape(
-            ui_shape(RectPx { h: 87.0, ..r }, hex_color(0x171717)).radius(14.0),
-        ));
-        items.push(Item::Shape(ui_shape(
-            RectPx {
-                x: r.x + 1.0,
-                y: r.y + 73.0,
-                w: r.w - 2.0,
-                h: 14.0,
-            },
-            hex_color(0x171717),
-        )));
-        interface_text(
+        picker_text(
             items,
             r.x + 25.0,
-            r.y + 23.0,
+            r.y + 22.0,
             22.0,
             "Add processor",
-            0xd6d6d6,
+            hex_color(0xd6d6d6),
             r.w - 80.0,
         );
         interface_text(
             items,
             r.x + 25.0,
-            r.y + 55.0,
+            r.y + 56.0,
             12.0,
             "Choose a processor, configure it, then add it to your chain.",
             0x999999,
@@ -698,69 +689,76 @@ impl Panel {
             StrokeAlign::Inside,
         )));
         picker_center(items, l.close, "×", 18.0, 0x999999, INTERFACE_FONT);
-        items.push(Item::Shape(ui_shape(
-            RectPx {
-                x: r.x + 1.0,
-                y: r.y + 87.0,
-                w: r.w - 2.0,
-                h: l.body.y - r.y - 87.0,
-            },
-            hex_color(0x000000),
-        )));
-        for (r, c, label) in self.picker_chips(vp) {
-            if c == self.filter {
+        let category_bar = RectPx {
+            x: r.x + 1.0,
+            y: r.y + HEADER_HEIGHT,
+            w: r.w - 2.0,
+            h: l.body.y - r.y - HEADER_HEIGHT,
+        };
+        items.push(Item::Shape(ui_shape(category_bar, hex_color(0x232323))));
+        for y in [category_bar.y, l.body.y - 1.0] {
+            items.push(Item::Shape(ui_shape(
+                RectPx {
+                    y,
+                    h: 1.0,
+                    ..category_bar
+                },
+                hex_color(0x4d4d4d),
+            )));
+        }
+        for (r, c, name) in self.picker_chips(vp) {
+            let selected = c == self.filter;
+            if selected {
                 items.push(Item::Shape(ui_shape(r, [0.0; 4]).radius(9.0).stroke(
-                    1.0,
+                    1.5,
                     hex_color(SOURCE_RING),
                     StrokeAlign::Inside,
                 )));
             }
-            picker_center(items, r, &label, 9.5, 0xc8c8c8, MONO_FONT);
+            let ink = hex_color(if selected { 0xf0f0f0 } else { 0xc8c8c8 });
+            items.push(Item::Label(
+                label(name, r, 9.5, ink, MONO_FONT)
+                    .letter_spacing(1.0)
+                    .align(Place::Center, Place::Center),
+            ));
         }
         items.push(Item::Shape(ui_shape(l.browser, hex_color(0x0f0f0f))));
         items.push(Item::Shape(
-            ui_shape(l.search, hex_color(0x9fa89f)).radius(17.0).stroke(
-                2.0,
-                hex_color(if p.search_focus {
-                    SOURCE_RING
-                } else {
-                    0xdbe0db
-                }),
-                StrokeAlign::Inside,
-            ),
+            ui_shape(l.search, hex_color(0x9fa89f))
+                .radius(17.0)
+                .shadow(Shadow::inner([0.0, 0.0, 0.0, 1.0], [0.0, 3.0], 9.0).spread(-1.0))
+                .stroke(2.0, [1.0, 1.0, 1.0, 0.62], StrokeAlign::Inside),
         ));
         items.push(Item::FrameIcon {
             x: l.search.x + 16.0,
-            y: l.search.y + 11.0,
+            y: l.search.y + 11.25,
             index: SEARCH_ICON,
         });
         let search = RectPx {
-            x: l.search.x + 32.0,
-            y: l.search.y + 10.0,
-            w: l.search.w - 48.0,
-            h: 16.0,
+            x: l.search.x + 33.0,
+            w: l.search.w - 49.0,
+            ..l.search
         };
-        if p.search_focus && !p.search.is_empty() {
-            // Text editing uses Abner's renderer to place the caret and selection.
+        let ink = hex_color(0x3c3a3a);
+        if p.search_focus {
+            // The text editor positions the caret and selection from measured glyphs.
             items.push(Item::Text(TextItem {
-                inspector: 1,
+                inspector: 2,
+                valign: VAlign::Middle,
                 max_width: Some(search.w),
-                ..TextItem::new(search.x, search.y, 12.0, hex_color(0x393735), &p.search)
+                ..TextItem::new(search.x, search.y + search.h / 2.0, 13.0, ink, &p.search)
             }));
             set_caret(items, &self.text_cursor);
-        } else {
+        }
+        if p.search.is_empty() || !p.search_focus {
             let value = if p.search.is_empty() {
                 "Search…"
             } else {
                 &p.search
             };
-            items.push(Item::Label(label(
-                value,
-                search,
-                12.0,
-                hex_color(0x393735),
-                INTERFACE_FONT,
-            )));
+            items.push(Item::Label(
+                label(value, search, 13.0, ink, 1).align(Place::Start, Place::Center),
+            ));
         }
         items.push(Item::Shape(
             ui_shape(l.list, hex_color(0x121212)).radius(14.0).stroke(
@@ -785,31 +783,33 @@ impl Panel {
                     ),
                 ));
             }
-            {
-                items.push(Item::FrameIcon {
-                    x: row.x + 10.0,
-                    y: row.y + 8.0,
-                    index: PROCESSOR_ICON,
-                });
-                picker_text(
-                    items,
-                    row.x + 42.0,
-                    row.y + 6.0,
-                    11.0,
-                    &self.descriptors[i].name,
-                    hex_color(0xf0f0f0),
-                    row.w - 50.0,
-                );
-                picker_text(
-                    items,
-                    row.x + 42.0,
-                    row.y + 22.0,
-                    10.0,
-                    &category_label(&self.categories[i]),
-                    hex_color(0xff8d28),
-                    row.w - 50.0,
-                );
-            }
+            items.push(Item::FrameIcon {
+                x: row.x + 12.0,
+                y: row.y + 7.0,
+                index: CATALOG_ICON,
+            });
+            let name = RectPx {
+                x: row.x + 43.0,
+                y: row.y + 6.0,
+                w: row.w - 49.0,
+                h: 15.0,
+            };
+            items.push(Item::Label(label(
+                &self.descriptors[i].name,
+                name,
+                11.0,
+                hex_color(0xf0f0f0),
+                0, // JetBrains Mono Medium, the bundled heavier face.
+            )));
+            picker_text(
+                items,
+                name.x,
+                row.y + 20.0,
+                11.0,
+                &category_label(&self.categories[i]),
+                hex_color(0xff8d28),
+                name.w,
+            );
         }
         if visible.is_empty() {
             interface_text(
@@ -832,17 +832,17 @@ impl Panel {
             let h = l.heading;
             items.push(Item::FrameIcon {
                 x: h.x,
-                y: h.y,
-                index: PROCESSOR_ICON,
+                y: h.y + 3.5,
+                index: PROCESSOR_GLYPH,
             });
             picker_text(
                 items,
-                h.x + 25.0,
+                h.x + 23.0,
                 h.y + 2.0,
                 18.0,
                 &d.name,
                 hex_color(0xd6d6d6),
-                h.w - 25.0,
+                h.w - 23.0,
             );
             interface_text(
                 items,
@@ -853,13 +853,20 @@ impl Panel {
                 0xff8d28,
                 h.w,
             );
-            if let Some(description) = self.info_description() {
-                interface_text(items, h.x, h.y + 52.0, 12.0, description, 0xa0a0a0, h.w);
+            // Older SeedVR2 adapters omit the description shown in the catalog design.
+            let description = self.info_description().or(match d.id.as_str() {
+                "bytedance.seedvr2-research" => {
+                    Some("Restore and upscale footage a few frames at a time.")
+                }
+                _ => None,
+            });
+            if let Some(description) = description {
+                interface_text(items, h.x, h.y + 51.0, 12.0, description, 0xa0a0a0, h.w);
             }
             items.push(Item::Shape(ui_shape(
                 RectPx {
                     x: h.x,
-                    y: h.y + 86.0,
+                    y: h.y + h.h,
                     w: h.w,
                     h: 1.0,
                 },
@@ -880,15 +887,15 @@ impl Panel {
                     .map_or("Default", |p| p.name.as_str())
             });
             for (i, b) in l.presets().into_iter().enumerate() {
-                items.push(Item::Shape(
-                    ui_shape(b, hex_color(0x0a0a0a)).radius(4.0).stroke(
-                        1.0,
-                        hex_color(0x303234),
-                        StrokeAlign::Inside,
-                    ),
-                ));
                 match i {
                     0 => {
+                        items.push(Item::Shape(ui_shape(b, hex_color(0x0a0a0a))));
+                        for y in [b.y, b.y + b.h - 1.0] {
+                            items.push(Item::Shape(ui_shape(
+                                RectPx { y, h: 1.0, ..b },
+                                hex_color(0x303234),
+                            )));
+                        }
                         if self.preset_name.is_some() {
                             items.push(Item::Text(TextItem {
                                 regular: true,
@@ -905,50 +912,23 @@ impl Panel {
                             }));
                             set_caret(items, &self.text_cursor);
                         } else {
-                            picker_center(items, b, name, 10.0, 0xc8c8c8, MONO_FONT);
-                        }
-                    }
-                    1 | 2 => draw_preset_step(items, b, i == 1),
-                    3 => {
-                        // Save icon: same 16px disk outline as the Figma control.
-                        let a = RectPx {
-                            x: b.x + 6.0,
-                            y: b.y + 4.0,
-                            w: 13.0,
-                            h: 14.0,
-                        };
-                        items.push(Item::Shape(ui_shape(a, [0.0; 4]).radius(2.0).stroke(
-                            1.0,
-                            hex_color(0xd6d6d6),
-                            StrokeAlign::Inside,
-                        )));
-                        for z in [
-                            RectPx {
-                                x: a.x + 3.0,
-                                y: a.y + 1.0,
-                                w: 7.0,
-                                h: 4.0,
-                            },
-                            RectPx {
-                                x: a.x + 3.0,
-                                y: a.y + 8.0,
-                                w: 7.0,
-                                h: 5.0,
-                            },
-                        ] {
-                            items.push(Item::Shape(ui_shape(z, [0.0; 4]).stroke(
-                                1.0,
-                                hex_color(0xd6d6d6),
-                                StrokeAlign::Inside,
-                            )));
+                            interface_center(items, b, name, 10.0, 0xc8c8c8);
                         }
                     }
                     _ => {
-                        let custom = d
-                            .presets
-                            .get(self.preset)
-                            .is_some_and(|p| self.user_presets.contains_key(&p.id));
-                        draw_preset_delete(items, b, custom);
+                        items.push(Item::FrameIcon {
+                            x: b.x,
+                            y: b.y,
+                            index: PRESET_ICONS[i - 1],
+                        });
+                        if i == 4
+                            && !d
+                                .presets
+                                .get(self.preset)
+                                .is_some_and(|p| self.user_presets.contains_key(&p.id))
+                        {
+                            items.push(Item::Shape(ui_shape(b, [0.0, 0.0, 0.0, 0.42]).radius(4.0)));
+                        }
                     }
                 }
             }
@@ -984,7 +964,7 @@ impl Panel {
                 picker_text(
                     items,
                     l.about.x,
-                    l.about.y + 29.0 + n as f32 * 20.0,
+                    l.about.y + 27.0 + n as f32 * 20.0,
                     10.0,
                     key,
                     hex_color(0x909090),
@@ -995,11 +975,11 @@ impl Panel {
                         value,
                         RectPx {
                             x: l.about.x + 65.0,
-                            y: l.about.y + 29.0 + n as f32 * 20.0,
-                            w: l.about.w - 65.0,
+                            y: l.about.y + 27.0 + n as f32 * 20.0,
+                            w: l.about.w - 65.0 - if l.panel.w >= 820.0 { 20.0 } else { 0.0 },
                             h: 13.0,
                         },
-                        9.0,
+                        10.0,
                         hex_color(0xc8c8c8),
                         MONO_FONT,
                     )
@@ -1009,7 +989,7 @@ impl Panel {
             picker_text(
                 items,
                 l.about.x,
-                l.about.y + 119.0,
+                l.about.y + 115.0,
                 8.0,
                 &d.id,
                 hex_color(INSPECTOR_PATH),
@@ -1020,7 +1000,7 @@ impl Panel {
                 interface_text(
                     items,
                     l.about.x,
-                    l.about.y + 153.0,
+                    l.about.y + 151.0,
                     10.0,
                     status,
                     0xff8d28,
@@ -1032,7 +1012,7 @@ impl Panel {
             } else {
                 "Adds one step to your chain. You can change these settings after adding it."
             };
-            let note_y = l.about.y + if status.is_some() { 173.0 } else { 153.0 };
+            let note_y = l.about.y + if status.is_some() { 170.0 } else { 151.0 };
             let note_box = RectPx {
                 y: note_y,
                 h: l.about.y + l.about.h - note_y,
@@ -1040,7 +1020,9 @@ impl Panel {
             };
             if note_box.h >= 15.0 {
                 items.push(Item::Label(
-                    label(note, note_box, 11.0, hex_color(0x999999), INTERFACE_FONT).wrap(),
+                    label(note, note_box, 10.0, hex_color(0x999999), INTERFACE_FONT)
+                        .size(10.0, 19.0)
+                        .wrap(),
                 ));
             }
             items.push(Item::Clip(None));
@@ -1066,7 +1048,7 @@ impl Panel {
         let enabled = visible.contains(&self.selected)
             && !self.added.get(self.selected).copied().unwrap_or(false);
         items.push(Item::Shape(
-            ui_shape(l.add, hex_color(if enabled { 0x005bff } else { 0x303238 })).radius(7.0),
+            ui_shape(l.add, hex_color(if enabled { 0x0059ff } else { 0x303238 })).radius(7.0),
         ));
         interface_center(
             items,
@@ -1098,57 +1080,6 @@ impl Panel {
         }
     }
 }
-fn draw_preset_step(items: &mut Vec<Item>, button: RectPx, previous: bool) {
-    let r = RectPx {
-        x: button.x + (button.w - 12.0) / 2.0,
-        y: button.y + (button.h - 11.0) / 2.0,
-        w: 12.0,
-        h: 11.0,
-    };
-    let (base, tip, bar) = if previous {
-        (10.5, 2.5, 0.0)
-    } else {
-        (1.5, 9.5, 10.5)
-    };
-    let ink = hex_color(0xd6d6d6);
-    let arrow = VectorPath::new(WindingRule::NonZero)
-        .move_to([base, 0.0])
-        .line_to([tip, 5.5])
-        .line_to([base, r.h])
-        .close();
-    items.push(Item::Shape(
-        Shape::vector(figleaf_rect(r), vec![arrow]).fill(ink),
-    ));
-    items.push(Item::Shape(ui_shape(
-        RectPx {
-            x: r.x + bar,
-            w: 1.5,
-            ..r
-        },
-        ink,
-    )));
-}
-
-fn draw_preset_delete(items: &mut Vec<Item>, button: RectPx, enabled: bool) {
-    let r = RectPx {
-        x: button.x + (button.w - 11.0) / 2.0,
-        y: button.y + (button.h - 11.0) / 2.0,
-        w: 11.0,
-        h: 11.0,
-    };
-    let cross = VectorPath::new(WindingRule::NonZero)
-        .move_to([0.0, 0.0])
-        .line_to([11.0, 11.0])
-        .move_to([11.0, 0.0])
-        .line_to([0.0, 11.0]);
-    let ink = hex_color(if enabled { 0xd6d6d6 } else { 0x606060 });
-    items.push(Item::Shape(
-        Shape::vector(figleaf_rect(r), vec![cross])
-            .fill([0.0; 4])
-            .stroke(1.5, ink, StrokeAlign::Center),
-    ));
-}
-
 fn text_center(items: &mut Vec<Item>, r: RectPx, label: &str, size: f32, color: u32) {
     items.push(Item::Text(TextItem {
         regular: true,
@@ -1206,20 +1137,46 @@ pub(super) fn picker_text(
     )));
 }
 
-pub(super) fn field_title(items: &mut Vec<Item>, row: RectPx, value: &str, ink: [f32; 4]) {
+pub(super) fn field_title(
+    items: &mut Vec<Item>,
+    row: RectPx,
+    value: &str,
+    ink: [f32; 4],
+    in_picker: bool,
+) {
     let r = RectPx {
         w: row.w - 48.0,
         h: 20.0,
         ..row
     };
     items.push(Item::Label(
-        label(value, r, 11.0, ink, MONO_FONT).align(Place::Start, Place::Center),
+        label(
+            value,
+            r,
+            if in_picker { 10.0 } else { 11.0 },
+            ink,
+            MONO_FONT,
+        )
+        .align(Place::Start, Place::Center),
     ));
 }
 
-pub(super) fn field_label(items: &mut Vec<Item>, r: RectPx, value: &str, ink: [f32; 4]) {
+pub(super) fn field_label(
+    items: &mut Vec<Item>,
+    r: RectPx,
+    value: &str,
+    ink: [f32; 4],
+    in_picker: bool,
+) {
     items.push(Item::Label(
-        label(value, r, 10.0, ink, INTERFACE_FONT).align(Place::Center, Place::Center),
+        label(
+            value,
+            r,
+            10.0,
+            ink,
+            if in_picker { MONO_FONT } else { INTERFACE_FONT },
+        )
+        .align(Place::Center, Place::Center),
     ));
 }
 
@@ -1525,7 +1482,10 @@ mod tests {
         let chips = p.picker_chips(vp);
         let (r, category, _) = chips.last().unwrap();
         assert!(r.y > chips[0].0.y, "the last chip wraps on a narrow popup");
-        assert!(r.y + r.h <= p.picker_layout(vp).body.y);
+        let layout = p.picker_layout(vp);
+        assert!(r.y + r.h <= layout.body.y);
+        assert!(layout.fields.y + layout.fields.h <= layout.body.y + layout.body.h);
+        assert!(layout.fields.h >= 20.0);
         p.click(r.x + r.w / 2.0, r.y + r.h / 2.0, vp);
         assert_eq!(&p.filter, category);
         assert_eq!(p.catalog_visible().len(), 1);
