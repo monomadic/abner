@@ -2866,8 +2866,11 @@ impl App {
         let (cx, cy) = self.cursor;
         let base = self.gesture_base(cx, cy);
         let old = self.zoom;
-        // Below fit only if ⌘0 already put it there (a small window).
-        let new = (old * (1.0 + delta)).clamp(old.min(1.0), 32.0);
+        // Below fit only if ⌘0 already put it there (a small window), or by
+        // CROP_ZOOM_OUT with the marquee up, so a handle at the picture's edge
+        // can always be pulled clear of whatever sits next to it.
+        let floor = if self.crop.is_some() { CROP_ZOOM_OUT } else { 1.0 };
+        let new = (old * (1.0 + delta)).clamp(old.min(floor), 32.0);
         if (new - old).abs() < 1e-5 {
             return;
         }
@@ -2956,6 +2959,9 @@ impl App {
         if self.mask_mode && self.crop.is_none() && self.detection_panel && self.show_ui {
             let reserved=132f32.min((cell.h-80.).max(0.));cell.y+=reserved;cell.h-=reserved;
         }
+        // The Process viewer meets the header and the embedded editor's bar
+        // covers its top strip; the panel owns where the picture fits.
+        if self.processors.open && self.show_ui { cell=self.processors.picture_area(self.vp); }
         let frame=if (self.processors.open || self.cut_mode) && self.show_ui {Canvas::new(cell).fit(dims)}
             else {Self::fit_rect(dims, inset_rect(cell, if self.show_ui { 24.0 } else { 0.0 }))};
         if self.applied_crop(idx).is_some(){Self::fit_rect(self.image_dims(idx),frame)}else{frame}
@@ -3344,6 +3350,7 @@ impl App {
         let preview_end = segment.map(|s| s.end);
         self.processors.input_owner(self.videos[self.active].spatial_id);
         self.processors.set_crops(self.crop_schedule());
+        self.processors.editor_bar = self.mask_mode;
         self.processors.source(
             self.active,
             [
@@ -7888,6 +7895,8 @@ const CROP_LINE_W: f32 = 1.5;
 const CROP_DASH: f32 = 7.0;
 const CROP_GAP: f32 = 5.0;
 const CROP_HANDLE: f32 = 9.0;
+/// How far below fit a pinch may go while the crop marquee is up.
+const CROP_ZOOM_OUT: f32 = 0.8;
 /// Half-size of a corner's grab square — a little wider than it is drawn.
 const CROP_GRAB: f32 = 11.0;
 /// The marquee's label chips (Figma: white @0.12, flat, 10px #d1d1d1). The
@@ -8115,6 +8124,7 @@ mod tests {
         app.key(Key::Enter);
         let frame = app.tick(0., (1280.,800.), 1.);
         assert!(!frame.items.iter().any(|item|matches!(item,Item::FrameIcon{index:14,..})),"applying a mask clears both warnings");
+        assert_eq!(frame.items.iter().filter(|item|matches!(item,Item::FrameIcon{index:15,..})).count(),2,"both places tick once the mask is applied");
         let id = app.processors.focused_id().unwrap().to_owned();
         for crop in [false, true] {
             for open in [true, false] {
@@ -8571,6 +8581,22 @@ mod tests {
         assert_eq!(app.workspace_mode(), 3);
         for _ in 0..6 { app.key(Key::NextMode); }
         assert_eq!(app.workspace_mode(), 5, "Export is the last tab");
+    }
+
+    #[test]
+    fn process_crop_editor_fits_below_its_bar_and_can_zoom_out() {
+        let Some(clip)=test_clip() else{return};let mut app=mk_app(&clip,1);
+        app.select_workspace_mode(4);
+        // A window whose height limits the fit, as a portrait clip does.
+        app.tick(0.,(1600.,700.),1.);
+        app.start_crop(None);app.tick(0.,(1600.,700.),1.);
+        assert!(app.processors.open&&app.crop.is_some());
+        let top=app.content_rect(app.active).y;
+        assert!(top>=HEADER_H+ButtonBar::HEIGHT,"the top handles clear the editor bar ({top})");
+        app.cursor=(800.,400.);app.pinch(-0.5);
+        assert!((app.zoom-CROP_ZOOM_OUT).abs()<1e-5,"the marquee may zoom out past fit");
+        app.crop=None;app.zoom=1.;app.pinch(-0.5);
+        assert_eq!(app.zoom,1.,"without it a pinch stops at fit");
     }
 
     #[test]

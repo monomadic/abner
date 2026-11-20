@@ -1141,6 +1141,9 @@ pub struct Panel {
     source_bindings: BTreeMap<usize,abner_processor_api::ChainBindings>,
     pub editor_request: Option<(String,String,bool)>,
     pub active_editor: Option<(String,String,bool)>,
+    /// The app's embedded mask/crop editor is up: its bar covers the
+    /// viewer's top strip, so the picture fits below it (`picture_area`).
+    pub editor_bar: bool,
     preset_dir: Option<std::path::PathBuf>,
     user_presets: BTreeMap<String,std::path::PathBuf>,
     preset_name: Option<String>,
@@ -1263,7 +1266,7 @@ pub struct Panel {
 impl Default for Panel {
     fn default() -> Self {
         Self {
-            input_owner:usize::MAX, declarations: BTreeMap::new(), inputs: Default::default(), source_bindings: BTreeMap::new(), editor_request: None, active_editor:None,
+            input_owner:usize::MAX, declarations: BTreeMap::new(), inputs: Default::default(), source_bindings: BTreeMap::new(), editor_request: None, active_editor:None, editor_bar:false,
             preset_dir: None,
             user_presets: BTreeMap::new(),
             preset_name: None,
@@ -2450,6 +2453,13 @@ impl Panel {
             && !self.binding(id, &d.key).is_some_and(|b| b.mask.is_some()))
             .map(|d| d.key.as_str())
     }
+    /// Whether the stage declares a required mask at all; with `missing_mask`
+    /// this picks the row's alert triangle (unset) or tick (applied).
+    fn requires_mask(&self, i: usize) -> bool {
+        use abner_processor_api::SpatialInputKind as K;
+        self.declarations.get(&self.descriptors[i].id)
+            .is_some_and(|ds| ds.iter().any(|d| d.required && matches!(d.kind, K::Mask | K::MaskedImage)))
+    }
     fn mask_warning(&self, i: usize, vp: (f32, f32)) -> RectPx {
         let c = self.card(i, vp);
         RectPx { x: c.x + c.w - 70., y: c.y + (c.h - 16.) / 2., w: 16., h: 16. }
@@ -2467,9 +2477,10 @@ impl Panel {
             ..RectItem::new(c, hex_color(if floating { 0x232323 } else if hover && !active { 0x0c0c0c } else { 0x030303 })) }));
         let switch = RectPx { x: c.x + c.w - 46.0, y: c.y + (c.h - 18.0) / 2.0, w: 34.0, h: 18.0 };
         let tx = c.x + 13.0;
-        let missing = self.missing_mask(i).is_some();
-        if missing { items.push(Item::FrameIcon { x:c.x+c.w-70., y:c.y+(c.h-16.)/2., index:14 }); }
-        items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(switch.x - tx - if missing { 32.0 } else { 10.0 }),
+        let badge = self.requires_mask(i);
+        if badge { items.push(Item::FrameIcon { x:c.x+c.w-70., y:c.y+(c.h-16.)/2.,
+            index: if self.missing_mask(i).is_some() { 14 } else { 15 } }); }
+        items.push(Item::Text(TextItem { header: true, valign: VAlign::Middle, max_width: Some(switch.x - tx - if badge { 32.0 } else { 10.0 }),
             ..TextItem::new(tx, c.y + c.h / 2.0, 12.0,
                 hex_color(if self.enabled[i] || active { 0xe6e6e6 } else { 0x8c8c8c }), self.descriptors[i].name.as_str()) }));
         draw_rail_switch(items, switch, self.switch_position(i, Instant::now()));
@@ -2494,6 +2505,16 @@ impl Panel {
             Some(TimelineAttachment{x,width,transport_height:165.,lanes_height:0.})).bar_below()
     }
     pub(crate) fn viewer(&self, vp: (f32, f32)) -> RectPx { self.canvas_layout(vp).r }
+    /// The part of the viewer the picture fits into: all of it, or below the
+    /// embedded editor's bar while one is up, so a tall picture's top crop
+    /// handles never sit under Save / Apply.
+    pub(crate) fn picture_area(&self, vp: (f32, f32)) -> RectPx {
+        let v = self.viewer(vp);
+        if !self.editor_bar { return v; }
+        let top = (HEADER_H + ButtonBar::HEIGHT).min(v.y + v.h);
+        if top <= v.y { return v; }
+        RectPx { y: top, h: v.h - (top - v.y), ..v }
+    }
     /// The Source | Rendered switch at the right end of the bar under the
     /// picture, level with the format summary. Tab flips the same flag; the zoom is shared, so both sides
     /// show the same region of the picture.
@@ -2793,8 +2814,8 @@ impl Panel {
                 } else {items.push(Item::Rect(RectItem::new(thumb,hex_color(if hovered {0x353535}else{0x232323}))));}
                 items.push(Item::Rect(RectItem{radius:6.,..RectItem::new(RectPx{x:thumb.x+(thumb.w-40.)/2.,y:thumb.y+7.,w:40.,h:40.},[0.,0.,0.,0.7])}));
                 items.push(Item::FrameIcon{x:thumb.x+(thumb.w-20.)/2.,y:thumb.y+17.,index:if *crop {5}else{4}});
-                if !crop && f.required && !configured {
-                    items.push(Item::FrameIcon{x:thumb.x+thumb.w-18.,y:thumb.y+2.,index:14});
+                if !crop && f.required {
+                    items.push(Item::FrameIcon{x:thumb.x+thumb.w-18.,y:thumb.y+2.,index:if configured {15} else {14}});
                 }
             } else if matches!(f.kind,Kind::Bool) {
                 items.push(Item::Text(TextItem{valign:VAlign::Middle,max_width:Some((row.w-48.).max(1.)),..TextItem::new(row.x,row.y+10.,11.,ink,&f.title)}));
@@ -3555,7 +3576,7 @@ impl Panel {
         let dims = (dims[0], dims[1]);
         if dims.0 == 0 || dims.1 == 0 { return None; }
         let base = if show_ui {
-            Canvas::new(self.viewer(vp)).fit(dims)
+            Canvas::new(self.picture_area(vp)).fit(dims)
         } else {
             crate::app::App::fit_rect(dims, RectPx { x: 0.0, y: 0.0, w: vp.0, h: vp.1 })
         };
@@ -3608,7 +3629,7 @@ impl Panel {
         let top = [CANVAS_RADIUS, CANVAS_RADIUS, 0.0, 0.0];
         board.ground_radii(items, top);
         board.clip(items);
-        let picture = board.picture((dims[0], dims[1]), view);
+        let picture = Canvas::new(self.picture_area(vp)).picture((dims[0], dims[1]), view);
         Canvas::lift(items, picture);
         items.push(Item::Video {
             a: source,
