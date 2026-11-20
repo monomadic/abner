@@ -1,5 +1,17 @@
 # abner — history
 
+## 2026-11-20 — Fit clips and open Finder files separately
+
+New clips and workspace changes fit the image to the canvas with a 24-point
+margin at the nearest edge. Hidden Sources controls no longer leak Remove or
+Duplicate tooltips into the Process and Export workspaces.
+
+Finder opens now start separate processes after the initial launch document.
+Use `--reuse-window` or `[window] reuse_window = true` to append them to the
+receiving window instead; `--new-window` overrides that preference. The in-app
+file picker and file drops continue to add sources to their existing window.
+Validation is recorded in `docs/validation/canvas-and-finder.md`.
+
 ## 2026-11-20 — Build a processor chain from an empty list
 
 Process starts with an empty chain and an Add Processor button. The dialog

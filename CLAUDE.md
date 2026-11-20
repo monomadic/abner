@@ -144,7 +144,9 @@ from one to the other, keeping its number.
   atlas (binding 8, mode 14) holds the frames. See HISTORY 2026-09-30 and 2026-10-20.
 - `src/app.rs` — master clock, modes, input, UI overlay. **Zoom** is photo-style: one
   shared `(zoom, center)` where `center` is the content point (0..1) held mid-view —
-  every video applies it to its own fit rect, so pan/zoom position stays synced across
+  the default fit leaves a 24-point margin at the nearest canvas edge. New clips
+  and workspace changes reset the view to fit. Every video applies the shared
+  transform to its own fit rect, so pan/zoom position stays synced across
   streams and side-by-side cells; pinch anchors on the pointer (solve for the content
   point under the cursor, keep it there), `clamp_center` pins the view inside the
   content, Z resets. ⌘0 (`Key::ActualSize`, `actual_size`) sets the zoom that shows the
@@ -470,12 +472,15 @@ the "VIDEO QUALITY TESTING TOOLKIT" line that used to be a second text run.
   compiled by `build.rs`): LaunchServices delivers opened files as an Apple Event, never
   argv, and winit 0.30 panics if its `NSApplicationDelegate` is replaced, so the shim
   grafts `application:openURLs:` onto winit's delegate class before the run loop starts.
-  Opened paths drain in `about_to_wait` (`open::Opened`): a Finder Open With /
-  double-click REPLACES the open set (`files_dropped(paths, true)`), while the in-app
-  "Add sources" picker, which shares the queue, always adds; neither reads ⌘. A window
+  Opened paths drain in `about_to_wait` (`open::Opened`): AppKit launch completion
+  separates the initial document from later Finder events. Later events spawn
+  the same executable with the same config on a worker thread by default.
+  `--reuse-window` or `[window] reuse_window = true` opts into appending to the
+  receiving window; `--new-window` overrides the config. The initial document
+  and in-app "Add sources" picker load locally; neither reads ⌘. A window
   drop onto the sources rail (`App::over_sources`, pointer read from AppKit by
   `Runner::drop_point` — winit gives no cursor during an inbound drag) adds;
-  anywhere else it replaces the set, like a Finder open. No modifier is read. **The native menus** (File · View · Frame) are the same
+  anywhere else it also retains existing sources. No modifier is read. **The native menus** (File · View · Frame) are the same
   shim: `ab_sync_menus` builds them once and re-derives every item's enabled/checked
   state from `App` on each `about_to_wait` (never from clicks); a pick queues an
   `open::MenuAction` (File) or a view request, applied on the loop. Frame > Copy Frame
@@ -586,8 +591,9 @@ expected to understand video compression.
 
 ## Export queue and incoming sources (2026-11-15)
 
-Incoming Finder/external opens and all file drops retain the existing source list
-and select the first arrival; the former replace route no longer clears sources.
+Finder opens use the process policy described above. When reuse is enabled,
+Finder opens retain the existing source list and select the first arrival. File
+drops and the in-app picker always retain sources in their receiving window.
 Source thumbnails offer Figleaf Duplicate/Remove buttons on hover.
 `export_page::Page` retains per-job snapshots in its session queue across source
 changes; one worker runs at a time, and completed outputs have their own Player

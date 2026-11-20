@@ -3805,6 +3805,10 @@ impl App {
 
     fn activate(&mut self, action: Action) {
         self.mouse_up();
+        if matches!(action, Action::Tool(mode) if mode != self.workspace_mode()) {
+            self.zoom = 1.0;
+            self.center = (0.5, 0.5);
+        }
         match action {
             Action::LaunchEditor(crop)=>{self.begin_editor(crop,None);return}
             Action::ResetEdit=>{self.watermark_task=None;self.clear_mask_history();if self.crop.is_some(){self.crop=Some(self.full_crop())}else{let v=&self.videos[self.active];self.masks[self.active]=Some(Mask::new(v.info.width,v.info.height));}return}
@@ -4189,6 +4193,7 @@ impl App {
     }
 
     fn build_sources(&self, items: &mut Vec<Item>) {
+        if self.processors.open || self.export_page.open { return; }
         let l = self.workspace();
         if l.rail <= 0.0 { return; }
         let ink = hex_color(SOURCE_INK);
@@ -8342,6 +8347,28 @@ mod tests {
         assert!(!app.videos[2].linked_copy);
     }
 
+    #[test]
+    fn process_and_export_do_not_emit_hidden_source_tooltips() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        app.tick(0.0, (1280.0, 800.0), 1.0);
+        let button = app.source_hover_buttons(0)[0].0;
+        app.cursor = (button.x + 12.0, button.y + 12.0);
+        app.cursor_inside = true;
+        let mut source_items = Vec::new();
+        app.build_sources(&mut source_items);
+        assert!(source_items.iter().any(|i| matches!(i, Item::Text(t) if t.tooltip && t.text == "Duplicate source")));
+        for mode in [4, 5] {
+            app.zoom = 2.0;
+            app.center = (0.7, 0.6);
+            app.activate(Action::Tool(mode));
+            assert_eq!(app.zoom, 1.0);
+            assert_eq!(app.center, (0.5, 0.5));
+            let mut items = Vec::new();
+            app.build_sources(&mut items);
+            assert!(items.is_empty());
+        }
+    }
     #[test]
     fn source_hover_buttons_duplicate_and_remove_the_target_card() {
         let Some(clip) = test_clip() else { return; };

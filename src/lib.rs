@@ -79,6 +79,8 @@ processor previews:
   --export                          open the minimal Export workspace
   --process                         open the Process workspace
   --add-processor                   open the Add Processor dialog
+  --reuse-window                    receive subsequent Finder opens in this window
+  --new-window                      open subsequent Finder files in separate processes
   R                                 preview current frame in Process
   Tab                               flip the Process canvas between source and rendered
   Shift-Left / Shift-Right           previous / next rendered frame
@@ -154,6 +156,7 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
     }
     let mut mode: Option<app::Mode> = None;
     let mut config_path: Option<PathBuf> = None;
+    let mut reuse_window = None;
     let mut mask_mode = false;
     let mut processor = None;
     let mut process_workspace = false;
@@ -174,7 +177,9 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
     let mut paths: Vec<PathBuf> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
-        if a == "--export" { export_workspace=true; }
+        if a == "--reuse-window" { reuse_window = Some(true); }
+        else if a == "--new-window" { reuse_window = Some(false); }
+        else if a == "--export" { export_workspace=true; }
         else if a == "--add-processor" { add_processor = true; process_workspace = true; }
         else if a == "--process" {
             process_workspace = true;
@@ -248,9 +253,10 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
     }
     // Before anything else touches the disk or opens a window: a broken
     // config refuses to start, naming the file and the key.
+    let mut child_config = None;
     let mut config = match config::Config::load(config_path.as_deref()) {
         Ok((c, used)) => {
-            if let Some(p) = used { log::info!("config {}", p.display()); }
+            if let Some(p) = used { log::info!("config {}", p.display()); child_config = Some(std::path::absolute(p)?); }
             c
         }
         Err(e) => {
@@ -259,6 +265,7 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
         }
     };
     if let Some(m) = mode { config.playback.view = m; }
+    if let Some(reuse) = reuse_window { config.window.reuse_window = reuse; }
     // Zero paths (bundle double-click / bare `abner`) opens the launch
     // window; one path fills slot A and plays alone — the same state a
     // single dropped file produces.
@@ -321,6 +328,7 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
     }
 
     let mut runner = Runner {
+        finder: open::FinderLauncher::new(config.window.reuse_window, child_config)?,
         app,
         title,
         window_size: (config.window.width, config.window.height),
@@ -480,6 +488,7 @@ fn titlebar_click_interval() -> std::time::Duration {
 }
 
 struct Runner {
+    finder: open::FinderLauncher,
     header_click: HeaderClick,
     app: App,
     title: String,
@@ -1112,22 +1121,23 @@ impl ApplicationHandler for Runner {
                 w.request_redraw();
             }
         }
-        // Files opened through Finder (Open With / double-click) REPLACE the
-        // open set: opening a file means "show me this". The in-app "Add
-        // sources" picker shares the queue but always adds. Neither reads ⌘.
         let opened = open::drain();
-        let any = !opened.replace.is_empty() || !opened.add.is_empty();
+        let any = !opened.initial.is_empty() || !opened.replace.is_empty() || !opened.add.is_empty();
+        // A cold launch receives its initial document before AppKit finishes
+        // launching. Later Finder events use the configured process policy.
+        if !opened.initial.is_empty() { self.files_dropped(opened.initial, false); }
         if !opened.replace.is_empty() {
-            self.files_dropped(opened.replace, true);
+            if self.finder.reuse_window {
+                self.files_dropped(opened.replace, false);
+            } else {
+                self.finder.launch(opened.replace, self.notify.clone());
+            }
         }
-        if !opened.add.is_empty() {
-            self.files_dropped(opened.add, false);
-        }
+        if !opened.add.is_empty() { self.files_dropped(opened.add, false); }
+        for error in open::take_launch_errors() { self.app.notify(error); }
         if any {
             self.animating = true;
-            if let Some(w) = &self.window {
-                w.request_redraw();
-            }
+            if let Some(w) = &self.window { w.request_redraw(); }
         }
         if let Some(mode) = open::take_view_request() {
             self.app.select_workspace_mode(mode);

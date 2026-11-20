@@ -86,19 +86,9 @@ impl Canvas {
         }
         self
     }
-    /// Preserve the document-style fit used by Timeline and Process.
+    /// Fit to the available canvas with a small, viewport-independent margin.
     pub fn fit(&self, dims: (u32, u32)) -> RectPx {
-        let c = self.r;
-        let (dx, dy) = (c.w * 188. / 1140., c.h * 76.5 / 583.);
-        fit_rect(
-            dims,
-            RectPx {
-                x: c.x + dx,
-                y: c.y + dy,
-                w: c.w - 2. * dx,
-                h: c.h - 2. * dy,
-            },
-        )
+        self.fit_inset(dims, 24.0)
     }
     pub fn fit_inset(&self, dims: (u32, u32), inset: f32) -> RectPx {
         let c = self.r;
@@ -388,6 +378,17 @@ impl ButtonBar {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn default_fit_reaches_a_canvas_edge_with_a_small_margin() {
+        let c = Canvas::new(RectPx { x: 280.0, y: 44.0, w: 900.0, h: 600.0 });
+        for dims in [(1920, 1080), (1080, 1920), (640, 480), (4000, 600)] {
+            let r = c.fit(dims);
+            let dx = r.x - c.r.x;
+            let dy = r.y - c.r.y;
+            assert!((dx.min(dy) - 24.0).abs() < 0.01);
+            assert!((r.w / r.h - dims.0 as f32 / dims.1 as f32).abs() < 0.001);
+        }
+    }
     #[test]
     fn attachments_reserve_space_and_timeline_can_span_columns() {
         let bounds = RectPx {

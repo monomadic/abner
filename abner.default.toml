@@ -15,6 +15,9 @@
 # refuses to start and says which file and key.
 
 [window]
+# Finder opens start a separate process. Opt in to add them to this window.
+# --reuse-window / --new-window override this setting for the running process.
+reuse_window = false
 # Initial window size in logical points (minimum 720×480).
 width = 1280
 height = 800

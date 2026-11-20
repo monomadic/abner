@@ -30,6 +30,7 @@ pub struct Config {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Window {
+    pub reuse_window: bool,
     pub width: f64,
     pub height: f64,
 }
@@ -228,6 +229,8 @@ mod tests {
         assert_eq!(c.playback.view, Mode::Overlay);
         assert_eq!((c.window.width, c.window.height), (1280.0, 800.0));
         assert!(c.playback.start_paused);
+        assert!(!c.window.reuse_window);
+        assert!(Config::from_overlay_str("[window]\nreuse_window = true\n").unwrap().window.reuse_window);
         assert_eq!((c.keys.next_source, c.keys.fullscreen_video), (Key::Tab, Key::Enter));
     }
 
