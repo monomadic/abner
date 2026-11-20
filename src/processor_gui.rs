@@ -3360,9 +3360,10 @@ impl Panel {
             self.draw_processor_card(items, i, c, false);
         }
         items.push(Item::Clip(None));
-        let footer = if self.descriptors.is_empty() { "No processors in this build" } else { "Drag processors to reorder" };
-        items.push(Item::Text(TextItem { interface: true, valign: VAlign::Middle, max_width: Some(l - 2.0 * RAIL_PAD_X - 24.0),
-            ..TextItem::new(RAIL_PAD_X + 12.0, list.y + list.h + 16.0, 11.0, subtle, footer) }));
+        if self.descriptors.is_empty() {
+            items.push(Item::Text(TextItem { interface: true, valign: VAlign::Middle, max_width: Some(l - 2.0 * RAIL_PAD_X - 24.0),
+                ..TextItem::new(RAIL_PAD_X + 12.0, list.y + list.h + 16.0, 11.0, subtle, "No processors in this build") }));
+        }
         self.draw_renders(items, vp);
         for down in [false, true] {
             let b = Self::move_button(vp, down);
