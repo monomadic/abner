@@ -1,5 +1,17 @@
 # abner — history
 
+## 2026-11-20 — Smooth Sources scrolling
+
+The Sources rail now follows logical-pixel wheel and trackpad deltas instead of
+jumping one card per event. Partially visible cards and collapsed keycaps share
+the same scroll geometry for drawing and clicks. Keyboard selection reveals the
+whole selected item, and scrolling clamps to the content after layout changes.
+
+Validation covers fractional scrolling, partial-row clicks, both scroll limits,
+and keyboard reachability at multiple window sizes. The source-filtered suite
+passed 28 tests; the card-width assertion in `source_edge_drag_resizes_cards_without_selecting_or_seeking`
+also fails identically with the unchanged `app.rs`.
+
 ## 2026-11-20 — Review previews during background renders
 
 Selecting a retained render now resolves its pixels across the active and saved

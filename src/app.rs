@@ -206,7 +206,7 @@ pub struct App {
     source_render: Option<std::sync::mpsc::Receiver<Result<std::path::PathBuf, String>>>,
     pub videos: Vec<Video>,
     active: usize,
-    source_scroll: usize,
+    source_scroll: f32,
     source_width: Option<f32>,
     /// An edge drag: the pointer's offset from the panel's edge, and the
     /// width it started at (restored if the drag ends collapsed).
@@ -792,7 +792,7 @@ impl App {
             cut_boot: Vec::new(),
             videos,
             active: 0,
-            source_scroll: 0,
+            source_scroll: 0.0,
             source_width: None,
             source_resize: None,
             source_copy_drag: None,
@@ -1731,7 +1731,7 @@ impl App {
         self.cut_restore = None;
         self.cut_mode = false;
         self.source_status.clear();
-        self.source_scroll = 0;
+        self.source_scroll = 0.0;
         for v in &mut self.videos {
             v.player.seek(0.0, true);
             v.pending = false;
@@ -2475,12 +2475,13 @@ impl App {
     }
 
     fn reveal_source(&mut self) {
-        if self.active < self.source_first() {
-            self.source_scroll = self.active;
-        }
-        while self.active >= self.source_first() + self.source_capacity() {
-            self.source_scroll += 1;
-        }
+        let top = self.source_offset(self.active);
+        let bottom = top + self.source_stride(self.active);
+        let height = self.workspace().list.h;
+        let scroll = self.source_scroll_offset();
+        self.source_scroll = if top < scroll { top }
+            else if bottom > scroll + height { bottom - height }
+            else { scroll }.clamp(0.0, self.source_scroll_max());
     }
 
     pub fn cursor_moved(&mut self, x: f32, y: f32) {
@@ -2826,9 +2827,7 @@ impl App {
             return;
         }
         if self.show_ui && contains(self.workspace().list, self.cursor.0, self.cursor.1) {
-            let first = self.source_first();
-            self.source_scroll = if dy < 0.0 { (first + 1).min(self.videos.len().saturating_sub(1)) }
-                else if dy > 0.0 { first.saturating_sub(1) } else { first };
+            self.source_scroll = (self.source_scroll_offset() - dy).clamp(0.0, self.source_scroll_max());
             return;
         }
         self.pan_canvas(dx, dy);
@@ -3219,6 +3218,7 @@ impl App {
             if cur < target { (cur + step).min(target) } else { (cur - step).max(target) }
         };
         self.detail_slide = toward(self.detail_slide, self.show_detail);
+        self.source_scroll = self.source_scroll_offset();
         self.tick_cut_hot(dt);
 
         // ---- draw list ----
@@ -3580,15 +3580,30 @@ impl App {
         self.source_thumb_height(index) + self.source_chrome()
     }
 
+    fn source_stride(&self, index: usize) -> f32 {
+        if self.workspace().mini { RAIL_MINI_PITCH } else { self.source_pitch(index) }
+    }
+
+    fn source_offset(&self, index: usize) -> f32 {
+        (0..index).map(|i| self.source_stride(i)).sum()
+    }
+
+    fn source_scroll_max(&self) -> f32 {
+        (self.source_offset(self.videos.len()) - self.workspace().list.h).max(0.0)
+    }
+
+    fn source_scroll_offset(&self) -> f32 {
+        self.source_scroll.clamp(0.0, self.source_scroll_max())
+    }
+
     fn source_capacity(&self) -> usize {
-        let l = self.workspace();
-        if l.mini { return (l.list.h / RAIL_MINI_PITCH).floor().max(1.0) as usize; }
-        let first = self.source_scroll.min(self.videos.len().saturating_sub(1));
-        let mut height = 0.0;
+        let bottom = self.source_scroll_offset() + self.workspace().list.h;
+        let first = self.source_first();
+        let mut y = self.source_offset(first);
         let mut count = 0;
         for i in first..self.videos.len() {
-            if count > 0 && height + self.source_pitch(i) > l.list.h { break; }
-            height += self.source_pitch(i);
+            if y >= bottom { break; }
+            y += self.source_stride(i);
             count += 1;
         }
         count.max(1)
@@ -3597,17 +3612,27 @@ impl App {
     /// The collapsed rail's keycap for the `k`th visible clip.
     fn mini_row(&self, k: usize) -> RectPx {
         let l = self.workspace();
-        RectPx { x: (RAIL_MINI_W - 32.0) / 2.0, y: l.list.y + k as f32 * RAIL_MINI_PITCH, w: 32.0, h: 32.0 }
+        let partial = self.source_scroll_offset() - self.source_offset(self.source_first());
+        RectPx { x: (RAIL_MINI_W - 32.0) / 2.0,
+            y: l.list.y + k as f32 * RAIL_MINI_PITCH - partial,
+            w: 32.0, h: 32.0 }
     }
 
     fn source_first(&self) -> usize {
-        self.source_scroll.min(self.videos.len().saturating_sub(1))
+        let scroll = self.source_scroll_offset();
+        let mut bottom = 0.0;
+        for i in 0..self.videos.len() {
+            bottom += self.source_stride(i);
+            if bottom > scroll { return i; }
+        }
+        self.videos.len().saturating_sub(1)
     }
 
     fn source_row(&self, index: usize) -> RectPx {
         let l = self.workspace();
         if l.mini { return self.mini_row(index - self.source_first()); }
-        RectPx { x: l.list.x + 12.0, y: l.list.y + (self.source_first()..index).map(|i| self.source_pitch(i)).sum::<f32>(),
+        RectPx { x: l.list.x + 12.0,
+            y: l.list.y + self.source_offset(index) - self.source_scroll_offset(),
             w: l.panel - 24.0, h: self.source_pitch(index) - 12.0 }
     }
 
@@ -4212,7 +4237,7 @@ impl App {
             let fade = |c: [f32; 4]| [c[0], c[1], c[2], c[3] * alpha];
             let column = RectPx { x: 0.0, y: l.list.y, w: RAIL_MINI_W, h: l.list.h };
             items.push(Item::Clip(Some(column)));
-            let capacity = (column.h / RAIL_MINI_PITCH).floor().max(1.0) as usize;
+            let capacity = (column.h / RAIL_MINI_PITCH).ceil().max(1.0) as usize + 1;
             for (k, i) in (first..(first + capacity).min(self.videos.len())).enumerate() {
                 let r = self.mini_row(k);
                 let active = i == self.active;
@@ -8667,6 +8692,41 @@ mod tests {
         let info = &app.videos[0].info;
         assert!(((card.w - 8.0) / thumb_h - info.width as f32 / info.height as f32).abs() < 1e-5);
         assert_eq!(app.source_row(1).y - card.y, app.source_pitch(0));
+    }
+
+    #[test]
+    fn sources_scroll_by_pixels_and_hit_partially_visible_rows() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 12);
+        app.vp = (720.0, 480.0);
+        for expanded in [true, false] {
+            app.set_sources_visible(expanded);
+            app.source_scroll = 0.0;
+            let list = app.workspace().list;
+            app.cursor_moved(20.0, list.y + 12.0);
+            let before = app.source_row(0).y;
+            app.scroll(0.0, -7.5);
+            assert_eq!(app.source_first(), 0);
+            assert!((app.source_row(0).y - (before - 7.5)).abs() < 0.001);
+            app.scroll(0.0, -2.25);
+            assert!((app.source_scroll_offset() - 9.75).abs() < 0.001);
+
+            // The last visible row is included even when only its top fits.
+            let last = app.source_first() + app.source_capacity() - 1;
+            let row = app.source_card(last);
+            assert!(row.y < list.y + list.h);
+            app.mouse_down(row.x + row.w / 2.0, row.y + 1.0);
+            app.mouse_up();
+            assert_eq!(app.active, last);
+
+            app.cursor_moved(20.0, list.y + 12.0);
+            app.scroll(0.0, -100000.0);
+            assert_eq!(app.source_scroll_offset(), app.source_scroll_max());
+            let end = app.source_row(11);
+            assert!(end.y + end.h <= list.y + list.h + 0.001);
+            app.scroll(0.0, 100000.0);
+            assert_eq!(app.source_scroll_offset(), 0.0);
+        }
     }
 
     #[test]
