@@ -2759,79 +2759,325 @@ impl Panel {
         self.draw_info(items, vp);
     }
     fn draw_fields(&self, items: &mut Vec<Item>, vp: (f32, f32), clip: RectPx) {
-        let Some(d) = self.descriptors.get(self.selected) else { return; };
+        use figleaf::StrokeAlign;
+        use picker::{field_title, picker_text, ui_shape};
+
+        let Some(d) = self.descriptors.get(self.selected) else {
+            return;
+        };
         let ink = hex_color(0xe6e6e6);
         let blue = hex_color(0x007be5);
         items.push(Item::Clip(Some(clip)));
         for (i, f) in self.fields.iter().enumerate() {
-            let row = self.row(i, vp);
-            if row.y + row.h < clip.y || row.y > clip.y + clip.h { continue; }
-            if matches!(f.kind,Kind::Spatial{..}) && row.w<122. {
-                let (label,kind)=f.title.rsplit_once(" (").unwrap_or((&f.title,""));
-                text(items,row.x,row.y,11.,label,ink,row.w);
-                text(items,row.x,row.y+12.,11.,&format!("({kind}"),ink,row.w);
-            } else if !matches!(f.kind,Kind::Number{..}|Kind::Bool) { text(items, row.x, row.y + if self.picker.is_some() { 4.0 } else { 0.0 }, 11.0, &f.title, ink, if self.picker.is_some() { row.w - 52.0 } else { row.w }); }
+            let row = if self.picker.is_some() {
+                self.picker_row_in(i, clip)
+            } else {
+                self.row(i, vp)
+            };
+            if row.y + row.h < clip.y || row.y > clip.y + clip.h {
+                continue;
+            }
+            if matches!(f.kind, Kind::Spatial { .. }) && row.w < 122. {
+                let (label, kind) = f.title.rsplit_once(" (").unwrap_or((&f.title, ""));
+                picker_text(items, row.x, row.y, 11., label, ink, row.w);
+                picker_text(
+                    items,
+                    row.x,
+                    row.y + 12.,
+                    11.,
+                    &format!("({kind}"),
+                    ink,
+                    row.w,
+                );
+            } else if !matches!(f.kind, Kind::Number { .. } | Kind::Bool) {
+                picker_text(
+                    items,
+                    row.x,
+                    row.y + if self.picker.is_some() { 4.0 } else { 0.0 },
+                    11.0,
+                    &f.title,
+                    ink,
+                    if self.picker.is_some() {
+                        row.w - 52.0
+                    } else {
+                        row.w
+                    },
+                );
+            }
             let value = &self.settings[&f.key];
             let editing = self.editing.as_ref().filter(|(n, _)| *n == i);
-            let shown = if let Kind::Spatial{key,crop}=&f.kind {
-                let configured=self.binding(&self.descriptors[self.selected].id,key).is_some_and(|b| if *crop {b.crop.is_some()}else{b.mask.is_some()});
-                if configured {"Edit…".into()} else {"Choose…".into()}
-            } else { editing.map_or_else(|| if value.is_null() { "Automatic".into() } else { f.shown(value) }, |(_, s)| s.clone()) };
-            if let Kind::Number { min, max, .. } = f.kind {
-                let value_rect=slider_value(row);
-                let hovered=hit(row,self.cursor.0,self.cursor.1);
-                let focused=editing.is_some();
-                items.push(Item::Text(TextItem{valign:VAlign::Middle,max_width:Some((row.w-48.).max(1.)),..TextItem::new(row.x,row.y+10.,11.,ink,&f.title)}));
-                items.push(Item::Rect(RectItem{radius:4.,border_w:if focused||!hovered{1.}else{0.},border_color:if focused{blue}else{hex_color(0x4e4e4e)},
-                    ..RectItem::new(value_rect,hex_color(if focused||hovered{0x1a1a1a}else{0x0a0a0a}))}));
-                ui_label(items,value_rect.x+value_rect.w/2.,row.y+10.,10.,ink,&shown,Align::Center,value_rect.w-4.);
-                if focused {set_caret(items, &self.text_cursor);}
-                let amount=((value.as_f64().unwrap_or(min)-min)/(max-min)).clamp(0.,1.) as f32;
-                let track=RectPx{x:row.x,y:row.y+26.,w:row.w,h:4.};
-                items.push(Item::Rect(RectItem{radius:2.,..RectItem::new(track,hex_color(0x303234))}));
-                let cx=track.x+track.w*amount;
-                if hovered||focused||self.dragging==Some(i) {
-                    items.push(Item::Rect(RectItem{radius:10.,..RectItem::new(RectPx{x:cx-10.,y:row.y+18.,w:20.,h:20.},blue)}));
+            let shown = if let Kind::Spatial { key, crop } = &f.kind {
+                let configured = self
+                    .binding(&self.descriptors[self.selected].id, key)
+                    .is_some_and(|b| {
+                        if *crop {
+                            b.crop.is_some()
+                        } else {
+                            b.mask.is_some()
+                        }
+                    });
+                if configured {
+                    "Edit…".into()
+                } else {
+                    "Choose…".into()
                 }
-                items.push(Item::Rect(RectItem{radius:2.,..RectItem::new(RectPx{w:track.w*amount,..track},blue)}));
-                items.push(Item::Rect(RectItem{radius:6.,..RectItem::new(RectPx{x:cx-6.,y:row.y+22.,w:12.,h:12.},ink)}));
+            } else {
+                editing.map_or_else(
+                    || {
+                        if value.is_null() {
+                            "Automatic".into()
+                        } else {
+                            f.shown(value)
+                        }
+                    },
+                    |(_, s)| s.clone(),
+                )
+            };
+            if let Kind::Number { min, max, .. } = f.kind {
+                let value_rect = slider_value(row);
+                let hovered = hit(row, self.cursor.0, self.cursor.1);
+                let focused = editing.is_some();
+                field_title(items, row, &f.title, ink);
+                let mut value_box = ui_shape(
+                    value_rect,
+                    hex_color(if focused || hovered {
+                        0x1a1a1a
+                    } else {
+                        0x0a0a0a
+                    }),
+                )
+                .radius(4.0);
+                if focused || !hovered {
+                    value_box = value_box.stroke(
+                        1.0,
+                        if focused { blue } else { hex_color(0x4e4e4e) },
+                        StrokeAlign::Inside,
+                    );
+                }
+                items.push(Item::Shape(value_box));
+                self.draw_field_value(items, value_rect, &shown, ink, 2.0, focused);
+                let amount =
+                    ((value.as_f64().unwrap_or(min) - min) / (max - min)).clamp(0., 1.) as f32;
+                let track = RectPx {
+                    x: row.x,
+                    y: row.y + 26.,
+                    w: row.w,
+                    h: 4.,
+                };
+                items.push(Item::Shape(
+                    ui_shape(track, hex_color(0x303234)).radius(2.0),
+                ));
+                let cx = track.x + track.w * amount;
+                if hovered || focused || self.dragging == Some(i) {
+                    items.push(Item::Shape(
+                        ui_shape(
+                            RectPx {
+                                x: cx - 10.0,
+                                y: row.y + 18.0,
+                                w: 20.0,
+                                h: 20.0,
+                            },
+                            blue,
+                        )
+                        .radius(10.0),
+                    ));
+                }
+                if amount > 0.0 {
+                    items.push(Item::Shape(
+                        ui_shape(
+                            RectPx {
+                                w: track.w * amount,
+                                ..track
+                            },
+                            blue,
+                        )
+                        .radius(2.0),
+                    ));
+                }
+                items.push(Item::Shape(
+                    ui_shape(
+                        RectPx {
+                            x: cx - 6.0,
+                            y: row.y + 22.0,
+                            w: 12.0,
+                            h: 12.0,
+                        },
+                        ink,
+                    )
+                    .radius(6.0),
+                ));
             } else if let Kind::Spatial { key, crop } = &f.kind {
                 let r = spatial_button(row);
-                let hovered=hit(r,self.cursor.0,self.cursor.1);
-                let active=self.active_editor.as_ref().is_some_and(|(id,input,is_crop)|id==&d.id && input==key && is_crop==crop);
-                let binding = self.binding(&d.id,key);
-                let configured = binding.as_ref().is_some_and(|b| if *crop { b.crop.is_some() } else { b.mask.is_some() });
-                items.push(Item::Rect(RectItem { radius:6.,border_w:1.,border_color:hex_color(if active{0xff8800}else{0x303234}),..RectItem::new(r,hex_color(if hovered {0x1a1a1a}else{0x0a0a0a})) }));
-                let thumb=RectPx{x:r.x+4.,y:r.y+4.,w:r.w-8.,h:54.};
+                let hovered = hit(r, self.cursor.0, self.cursor.1);
+                let active = self
+                    .active_editor
+                    .as_ref()
+                    .is_some_and(|(id, input, is_crop)| {
+                        id == &d.id && input == key && is_crop == crop
+                    });
+                let binding = self.binding(&d.id, key);
+                let configured = binding.as_ref().is_some_and(|b| {
+                    if *crop {
+                        b.crop.is_some()
+                    } else {
+                        b.mask.is_some()
+                    }
+                });
+                items.push(Item::Shape(
+                    ui_shape(r, hex_color(if hovered { 0x1a1a1a } else { 0x0a0a0a }))
+                        .radius(6.0)
+                        .stroke(
+                            1.0,
+                            hex_color(if active { 0xff8800 } else { 0x303234 }),
+                            StrokeAlign::Inside,
+                        ),
+                ));
+                let thumb = RectPx {
+                    x: r.x + 4.,
+                    y: r.y + 4.,
+                    w: r.w - 8.,
+                    h: 54.,
+                };
                 if configured {
                     let uv = if *crop {
-                        let b=binding.as_ref().unwrap();let [x,y,w,h]=b.crop.unwrap();
-                        [x as f32/b.dimensions[0].max(1) as f32,y as f32/b.dimensions[1].max(1) as f32,(x+w) as f32/b.dimensions[0].max(1) as f32,(y+h) as f32/b.dimensions[1].max(1) as f32]
-                    } else {[0.,0.,1.,1.]};
-                    items.push(Item::Video{a:self.source,b:self.source,r:thumb,uv,mode:VideoMode::Tex,p0:0.,p1:0.});
-                    if !crop {let b=binding.as_ref().unwrap();if let Some(mask)=&b.mask {draw_mask_preview(items,thumb,b.dimensions,mask);}}
-                    if hovered {items.push(Item::Rect(RectItem::new(thumb,[1.,1.,1.,0.025])));}
-                } else {items.push(Item::Rect(RectItem::new(thumb,hex_color(if hovered {0x353535}else{0x232323}))));}
-                items.push(Item::Rect(RectItem{radius:6.,..RectItem::new(RectPx{x:thumb.x+(thumb.w-40.)/2.,y:thumb.y+7.,w:40.,h:40.},[0.,0.,0.,0.7])}));
-                items.push(Item::FrameIcon{x:thumb.x+(thumb.w-20.)/2.,y:thumb.y+17.,index:if *crop {5}else{4}});
-                if !crop && f.required {
-                    items.push(Item::FrameIcon{x:thumb.x+thumb.w-18.,y:thumb.y+2.,index:if configured {15} else {14}});
+                        let b = binding.as_ref().unwrap();
+                        let [x, y, w, h] = b.crop.unwrap();
+                        [
+                            x as f32 / b.dimensions[0].max(1) as f32,
+                            y as f32 / b.dimensions[1].max(1) as f32,
+                            (x + w) as f32 / b.dimensions[0].max(1) as f32,
+                            (y + h) as f32 / b.dimensions[1].max(1) as f32,
+                        ]
+                    } else {
+                        [0., 0., 1., 1.]
+                    };
+                    items.push(Item::Video {
+                        a: self.source,
+                        b: self.source,
+                        r: thumb,
+                        uv,
+                        mode: VideoMode::Tex,
+                        p0: 0.,
+                        p1: 0.,
+                    });
+                    if !crop {
+                        let b = binding.as_ref().unwrap();
+                        if let Some(mask) = &b.mask {
+                            draw_mask_preview(items, thumb, b.dimensions, mask);
+                        }
+                    }
+                    if hovered {
+                        items.push(Item::Shape(ui_shape(thumb, [1., 1., 1., 0.025])));
+                    }
+                } else {
+                    items.push(Item::Shape(ui_shape(
+                        thumb,
+                        hex_color(if hovered { 0x353535 } else { 0x232323 }),
+                    )));
                 }
-            } else if matches!(f.kind,Kind::Bool) {
-                items.push(Item::Text(TextItem{valign:VAlign::Middle,max_width:Some((row.w-48.).max(1.)),..TextItem::new(row.x,row.y+10.,11.,ink,&f.title)}));
-                let on=value.as_bool().unwrap_or(false);
-                draw_rail_switch(items,RectPx{x:row.x+row.w-32.,y:row.y+2.,w:32.,h:16.},if on{1.}else{0.});
+                let icon_plate = RectPx {
+                    x: thumb.x + (thumb.w - 40.0) / 2.0,
+                    y: thumb.y + 7.0,
+                    w: 40.0,
+                    h: 40.0,
+                };
+                items.push(Item::Shape(
+                    ui_shape(icon_plate, [0.0, 0.0, 0.0, 0.7]).radius(6.0),
+                ));
+                items.push(Item::FrameIcon {
+                    x: thumb.x + (thumb.w - 20.) / 2.,
+                    y: thumb.y + 17.,
+                    index: if *crop { 5 } else { 4 },
+                });
+                if !crop && f.required {
+                    items.push(Item::FrameIcon {
+                        x: thumb.x + thumb.w - 18.,
+                        y: thumb.y + 2.,
+                        index: if configured { 15 } else { 14 },
+                    });
+                }
+            } else if matches!(f.kind, Kind::Bool) {
+                field_title(items, row, &f.title, ink);
+                let on = value.as_bool().unwrap_or(false);
+                draw_rail_switch(
+                    items,
+                    RectPx {
+                        x: row.x + row.w - 32.,
+                        y: row.y + 2.,
+                        w: 32.,
+                        h: 16.,
+                    },
+                    if on { 1. } else { 0. },
+                );
             } else {
-                let r = if self.picker.is_some() { slider_value(row) } else { RectPx { x: row.x, y: row.y + 16.0, w: row.w, h: 20.0 } };
-                let hovered=hit(r,self.cursor.0,self.cursor.1);
-                items.push(Item::Rect(RectItem { radius: 4.0, border_w: 1.0, border_color: if editing.is_some(){blue}else{hex_color(0x303234)}, ..RectItem::new(r, hex_color(if hovered||editing.is_some(){0x1a1a1a}else{0x0a0a0a})) }));
-                ui_label(items, r.x + r.w / 2.0, r.y + r.h / 2.0, 10.0, ink, &shown, Align::Center, r.w - 12.0);
-                if editing.is_some() { set_caret(items, &self.text_cursor); }
+                let r = if self.picker.is_some() {
+                    slider_value(row)
+                } else {
+                    RectPx {
+                        x: row.x,
+                        y: row.y + 16.0,
+                        w: row.w,
+                        h: 20.0,
+                    }
+                };
+                let hovered = hit(r, self.cursor.0, self.cursor.1);
+                let focused = editing.is_some();
+                items.push(Item::Shape(
+                    ui_shape(
+                        r,
+                        hex_color(if hovered || focused {
+                            0x1a1a1a
+                        } else {
+                            0x0a0a0a
+                        }),
+                    )
+                    .radius(4.0)
+                    .stroke(
+                        1.0,
+                        if focused { blue } else { hex_color(0x303234) },
+                        StrokeAlign::Inside,
+                    ),
+                ));
+                self.draw_field_value(items, r, &shown, ink, 6.0, focused);
             }
         }
         items.push(Item::Clip(None));
 
         self.draw_tooltip(items, vp, clip);
+    }
+    fn draw_field_value(
+        &self,
+        items: &mut Vec<Item>,
+        r: RectPx,
+        value: &str,
+        ink: [f32; 4],
+        pad: f32,
+        editing: bool,
+    ) {
+        if editing {
+            ui_label(
+                items,
+                r.x + r.w / 2.0,
+                r.y + r.h / 2.0,
+                10.0,
+                ink,
+                value,
+                Align::Center,
+                r.w - 2.0 * pad,
+            );
+            set_caret(items, &self.text_cursor);
+        } else {
+            picker::field_label(
+                items,
+                RectPx {
+                    x: r.x + pad,
+                    w: r.w - 2.0 * pad,
+                    ..r
+                },
+                value,
+                ink,
+            );
+        }
     }
     fn spatial_count(&self) -> usize {
         self.fields.iter().take_while(|f|matches!(f.kind,Kind::Spatial{..})).count()
@@ -4807,7 +5053,7 @@ mod tests {
         assert_eq!(p.catalog_visible(), [0,2]);
         assert_eq!(p.selected, 0);
         assert!(p.visible().is_empty(), "filtering the catalog never populates the chain");
-        let second = p.catalog_row(1, vp);
+        let second = p.catalog_row(1, p.picker_layout(vp).list);
         p.click(second.x+20.0,second.y+10.0,vp);
         assert_eq!(p.selected, 2);
         let (all, ..)=p.chips(vp)[0];
