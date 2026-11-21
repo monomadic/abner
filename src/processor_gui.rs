@@ -81,7 +81,7 @@ fn downsize_field(scales: &[ScaleOption]) -> Option<Field> {
                 value: json!(factor),
                 title: Some(label.into()),
                 description: Some(format!(
-                    "Shrink the frame to 1/{factor} with swscale's spline, run the {factor}x model, and land back at the source size."
+                    "Shrink each dimension to 1/{factor}, then run the {factor}× model to restore roughly the input size."
                 )),
             });
         }
@@ -93,7 +93,7 @@ fn downsize_field(scales: &[ScaleOption]) -> Option<Field> {
         default: Some(json!(1)),
         required: false,
         description: Some(
-            "Topaz's Focus Fix, for any upscaling processor: the frame goes in smaller so the model's upscale has to invent the detail, instead of preserving the blur. The Scale setting is overridden to match.".into(),
+            "Run an upscale model on a smaller copy of the input to rebuild soft detail. The matching model overrides your Scale setting.".into(),
         ),
     })
 }
@@ -1449,7 +1449,7 @@ impl Panel {
                 for &crop in tools {
                     self.fields.push(Field { key:format!("__spatial_{}_{}",d.key,crop), title:if d.kind==K::Region {"Search Area (Crop)".into()} else if !crop {"Removal (Mask)".into()} else {format!("{} (Crop)",d.title)},
                         kind:Kind::Spatial{key:d.key.clone(),crop},default:None,required:d.required,
-                        description:Some(if d.kind==K::Region {"Processing region; keeps the complete input image"} else {"Edit this input without changing other inputs"}.into()) });
+                        description:Some(if d.kind==K::Region {"Limit processing to this region while keeping the full frame."} else if crop {"Choose the portion of the image this processor receives."} else {"Paint the pixels this processor should treat as masked."}.into()) });
                 }
             }
         }

@@ -125,11 +125,11 @@ impl Factory for Interpolate {
                         "description": "What the interpolator's output is compared against.",
                         "oneOf": [
                             {"const": "leave-one-out", "title": "Leave-one-out",
-                             "description": "Drops each interior frame and rebuilds it from its two neighbours, using their real timestamp spacing. The real frame exists, so A/B (or Difference) is the reconstruction error on real motion. First and last frames pass through."},
+                             "description": "Rebuild each interior frame from its neighbours. Use Difference to see the error against the real frame. The first and last frames pass through."},
                             {"const": "in-between", "title": "In-between",
-                             "description": "Replaces each frame with the frame synthesized Phase of the way to the next one: what a retime would insert after it, shown at the source frame's time against the original it follows. Rate unchanged."},
+                             "description": "Preview a generated frame between each source pair. Phase sets its position and the frame rate stays the same."},
                             {"const": "retime", "title": "Retime",
-                             "description": "Real frame-rate conversion to Target. The preview plays and steps at the new rate; the original side holds the latest source frame at or before each new one. Frames that land on a source frame are passed through untouched."}
+                             "description": "Play and step at the Target rate. Source frames at matching timestamps pass through. The Source view holds the most recent original frame."}
                         ]
                     },
                     "phase": {
