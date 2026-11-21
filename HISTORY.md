@@ -1,5 +1,24 @@
 # abner — history
 
+## 2026-11-21 — Crop ratio buttons on the canvas
+
+With the crop marquee up, the canvas carries a row of ratio buttons on its bottom
+edge: Custom, 16:9, 3:2, 4:3, 1:1, 3:4, 2:3, 9:16 and 2.39:1. A click snaps the
+marquee to that ratio's largest fit about its centre and locks corner drags to it;
+Custom unlocks without moving the rect. The row is `ASPECTS` itself, so `A` /
+Shift-A walk the same list (3:2, 3:4 and 2:3 are new, "free" is now "custom").
+The buttons are 22px, in the fitted picture's 24px margin, so at fit they cover no
+handle; presets that do not fit a narrow canvas drop from the end. The same row
+appears in the Process page's embedded crop editor.
+
+The Crop and Mask pages were re-exported to Figma (*Abner — Screens*, section
+*Tools — Crop & Mask (2026-11-21)*) as editable layers from the app's draw list;
+see FIGMA.md.
+
+Validation: `crop_ratio_buttons_snap_and_lock_the_marquee` and the updated
+`crop_aspect_presets_reshape_and_lock_the_marquee`; a window capture of `--crop`
+compared against the Figma frame.
+
 ## 2026-11-20 — Task 11: strict lint and full-suite cleanup
 
 Completed **11**, the Clippy housekeeping task, across all host targets. Removed

@@ -280,7 +280,11 @@ from one to the other, keeping its number.
   on a worker (`mask::export_prores`, its own `crop_export` receiver). With the marquee up the mask
   tint is NOT drawn (the footage shows plain, everything outside dimmed near-black at
   `CROP_DIM` 0.95 — linear blending, so lower reads grey). `A`/Shift-A step the ratio
-  presets (`ASPECTS`: free, 16:9, 9:16, 4:3, 1:1, 2.39:1); a preset snaps to its largest
+  presets (`ASPECTS`: custom, 16:9, 3:2, 4:3, 1:1, 3:4, 2:3, 9:16, 2.39:1), and the same list is a row of
+  22px buttons on the canvas's bottom edge while the marquee is up (`aspect_buttons`, 2026-11-21: one
+  set of rectangles drawn and hit, in the fitted picture's 24px margin so no handle is covered at fit,
+  presets that don't fit the canvas dropped from the end; a press is taken before the marquee's own
+  grab, and it is the same row in the Process page's embedded editor); a preset snaps to its largest
   fit about the marquee's centre (keeping the size ratchets smaller), and corner drags
   keep the ratio (`Crop::with_corner_locked`). The marquee carries the Figma design's
   three readouts (`build_crop_labels`): `WxH - ratio` in the middle, the image-pixel

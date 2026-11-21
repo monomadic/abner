@@ -8,7 +8,7 @@
 //! jump in time — the other stream was already decoding the same moment.
 
 use std::time::Instant;
-use crate::canvas::{Canvas, ButtonBar, TimelineAttachment};
+use crate::canvas::{Button, Canvas, ButtonBar, TimelineAttachment};
 
 use crate::cut::{Cut, Snap};
 use crate::player::Player;
@@ -1001,13 +1001,47 @@ impl App {
     /// rect where it is, just unlocked).
     fn cycle_aspect(&mut self, step: isize) {
         let n = ASPECTS.len() as isize;
-        self.aspect = (self.aspect as isize + step).rem_euclid(n) as usize;
+        self.set_aspect((self.aspect as isize + step).rem_euclid(n) as usize);
+    }
+
+    /// Lock the marquee to preset `index` and snap it to that ratio's
+    /// largest fit about its centre: `A`, and the canvas's ratio buttons.
+    fn set_aspect(&mut self, index: usize) {
+        self.aspect = index;
         let mask = self.masks[self.active].as_ref().unwrap();
         if let (Some(c), Some(r)) = (self.crop, ASPECTS[self.aspect].1) {
             self.crop = Some(c.with_aspect(r, mask.width, mask.height));
         }
         self.crop_drag = None;
         self.mask_status.clear();
+    }
+
+    /// The ratio presets as buttons floating on the canvas's bottom edge
+    /// while the crop marquee is up — under the fitted picture's margin, so
+    /// at fit they cover no handle. One row, centred; presets that don't fit
+    /// the canvas are dropped from the end (`A` still reaches them). The
+    /// same rectangles are drawn and hit.
+    fn aspect_buttons(&self) -> Vec<Button<usize>> {
+        if !self.ready() || !self.show_ui || !self.mask_mode || self.crop.is_none() || self.export_page.open {
+            return Vec::new();
+        }
+        let cv = self.canvas();
+        let mut widths: Vec<f32> = ASPECTS.iter().map(|(name, _)| 20.0 + 7.0 * aspect_label(name).len() as f32).collect();
+        let total = |w: &[f32]| w.iter().sum::<f32>() + ASPECT_GAP * w.len().saturating_sub(1) as f32;
+        while widths.len() > 1 && total(&widths) > cv.w - 16.0 { widths.pop(); }
+        let mut x = (cv.x + (cv.w - total(&widths)) / 2.0).round();
+        let y = cv.y + cv.h - ASPECT_BUTTON_H - 1.0;
+        widths.iter().enumerate().map(|(i, &w)| {
+            let r = RectPx { x, y, w, h: ASPECT_BUTTON_H };
+            x += w + ASPECT_GAP;
+            Button::new(r, aspect_label(ASPECTS[i].0), i == self.aspect, i)
+        }).collect()
+    }
+
+    fn draw_aspect_buttons(&self, items: &mut Vec<Item>) {
+        for b in self.aspect_buttons() {
+            b.draw(items, self.cursor_inside && b.contains(self.cursor.0, self.cursor.1), false);
+        }
     }
 
     /// Pointer position in the active video's image pixels — the mask's
@@ -1133,6 +1167,7 @@ impl App {
             None => {
                 let (x, y) = self.cursor;
                 if !contains(self.canvas(), x, y) { return None; }
+                if self.aspect_buttons().iter().any(|b| b.contains(x, y)) { return Some(CropCursor::Pointer); }
                 self.crop_hit(x, y)
             }
         };
@@ -1450,6 +1485,7 @@ impl App {
             self.build_marquee(items, c, SEARCH_DIM, false);
         } else if let Some(c) = self.active_marquee() {
             self.build_crop_layer(items, c);
+            self.draw_aspect_buttons(items);
         } else {
             items.push(Item::Mask { r, id: mask.id, revision: mask.revision,
                 width: mask.width, height: mask.height, pixels: mask.pixels.clone() });
@@ -2628,6 +2664,12 @@ impl App {
             self.export();
             return;
         }
+        if let Some(b) = self.aspect_buttons().into_iter().find(|b| b.contains(x, y)) {
+            self.cursor = (x, y); self.cursor_inside = true;
+            self.mouse_up();
+            self.set_aspect(b.action);
+            return;
+        }
         if self.mask_mode && self.processors.open {
             self.cursor = (x,y); self.cursor_inside = true;
             if let Some(c) = self.embedded_editor_controls().into_iter().find(|c| c.contains(x,y)) {
@@ -3394,7 +3436,7 @@ impl App {
             let label_y = (picture.y - 18.).max(canvas.y + 18.).min(canvas.y + canvas.h - 18.);
             ui_label(&mut items,canvas.x+canvas.w/2.,label_y,13.,WORKSPACE_TEXT,mode_label,Align::Center,canvas.w-24.);
             if !self.mask_status.is_empty() {
-                ui_label(&mut items,canvas.x+canvas.w/2.,canvas.y+canvas.h-if self.detection_range.is_some(){42.}else{16.},10.,WORKSPACE_TEXT,&self.mask_status,Align::Center,canvas.w-24.);
+                ui_label(&mut items,canvas.x+canvas.w/2.,canvas.y+canvas.h-if self.detection_range.is_some()||self.crop.is_some(){42.}else{16.},10.,WORKSPACE_TEXT,&self.mask_status,Align::Center,canvas.w-24.);
             }
             board.recess(&mut items);
             let bar = ButtonBar::at(canvas.x,HEADER_H,canvas.w);
@@ -7744,14 +7786,27 @@ const CONTROL_BG: [f32; 4] = [26.0 / 255.0, 26.0 / 255.0, 26.0 / 255.0, 1.0];
 /// blue; illegible status text would not.
 /// The crop marquee's ratio presets, `A` to step through: (the keycap's
 /// label, w/h). Image pixels are taken as square, like everywhere else.
-const ASPECTS: [(&str, Option<f32>); 6] = [
-    ("ratio free", None),
+/// The same list, in the same order, is the canvas's row of ratio buttons
+/// (`aspect_buttons`): landscape to portrait through square, scope last.
+const ASPECTS: [(&str, Option<f32>); 9] = [
+    ("ratio custom", None),
     ("ratio 16:9", Some(16.0 / 9.0)),
-    ("ratio 9:16", Some(9.0 / 16.0)),
+    ("ratio 3:2", Some(3.0 / 2.0)),
     ("ratio 4:3", Some(4.0 / 3.0)),
     ("ratio 1:1", Some(1.0)),
+    ("ratio 3:4", Some(3.0 / 4.0)),
+    ("ratio 2:3", Some(2.0 / 3.0)),
+    ("ratio 9:16", Some(9.0 / 16.0)),
     ("ratio 2.39:1", Some(2.39)),
 ];
+/// The canvas ratio buttons: slimmer than a bar button so the row sits in
+/// the fitted picture's 24px margin.
+const ASPECT_BUTTON_H: f32 = 22.0;
+const ASPECT_GAP: f32 = 4.0;
+/// A preset's button label: its ratio, or "Custom" for the unlocked one.
+fn aspect_label(name: &'static str) -> &'static str {
+    match name.trim_start_matches("ratio ") { "custom" => "Custom", ratio => ratio }
+}
 
 pub(crate) const ACCENT: [f32; 4] = [0.082, 0.502, 0.871, 1.0];
 /// A rubber band smaller than this on both axes is still a click.
@@ -9492,7 +9547,7 @@ mod tests {
         let c = app.crop.unwrap();
         assert!((c.w - c.h).abs() < 1e-3 && c.w < 180.0, "{c:?}");
         // Every preset snaps to its largest fit — no ratchet from the drag.
-        app.key(Key::Char('a'));
+        for _ in 0..4 { app.key(Key::Char('a')); }
         assert_eq!(ASPECTS[app.aspect].0, "ratio 2.39:1");
         let wide = app.crop.unwrap();
         assert!((wide.w - 320.0).abs() < 1e-3 && (wide.w / wide.h - 2.39).abs() < 1e-3, "{wide:?}");
@@ -9502,6 +9557,37 @@ mod tests {
         assert_eq!(app.crop, Some(wide));
         app.key(Key::Char('A'));
         assert_eq!(ASPECTS[app.aspect].0, "ratio 2.39:1");
+    }
+
+    /// The canvas's ratio buttons: one per preset on the canvas's bottom
+    /// edge, a click snaps the marquee and locks it, Custom unlocks.
+    #[test]
+    fn crop_ratio_buttons_snap_and_lock_the_marquee() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 1);
+        assert!(app.aspect_buttons().is_empty(), "no marquee, no buttons");
+        app.start_crop(None);
+        let buttons = app.aspect_buttons();
+        let labels: Vec<_> = buttons.iter().map(|b| b.label.clone()).collect();
+        assert_eq!(labels, ["Custom", "16:9", "3:2", "4:3", "1:1", "3:4", "2:3", "9:16", "2.39:1"]);
+        let cv = app.canvas();
+        assert!(buttons.iter().all(|b| b.r.x >= cv.x && b.r.x + b.r.w <= cv.x + cv.w
+            && b.r.y + b.r.h <= cv.y + cv.h), "inside the canvas");
+        assert!(buttons[0].selected);
+        let press = |app: &mut App, label: &str| {
+            let b = app.aspect_buttons().into_iter().find(|b| b.label == label).unwrap();
+            app.mouse_down(b.r.x + b.r.w / 2.0, b.r.y + b.r.h / 2.0);
+            app.mouse_up();
+        };
+        press(&mut app, "2:3");
+        assert_eq!(app.crop, Some(Crop { x: 100.0, y: 0.0, w: 120.0, h: 180.0 }));
+        assert!(app.crop_drag.is_none(), "a button press never grabs the marquee");
+        assert!(app.aspect_buttons().iter().any(|b| b.label == "2:3" && b.selected));
+        press(&mut app, "Custom");
+        assert_eq!(app.aspect, 0);
+        assert_eq!(app.crop, Some(Crop { x: 100.0, y: 0.0, w: 120.0, h: 180.0 }));
+        app.key(Key::Char('c'));
+        assert!(app.aspect_buttons().is_empty());
     }
 
     /// `E` with the marquee up re-encodes the whole clip, cut to it, as
@@ -11348,4 +11434,5 @@ mod tests {
         let (a, b) = (app.videos[0].shown_pts, app.videos[1].shown_pts);
         assert!((a - b).abs() < d * 0.5, "steps desynced the streams: {a:.4} vs {b:.4}");
     }
+
 }

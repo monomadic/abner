@@ -20,6 +20,15 @@ so card type copies 1:1. The tokens there (`sources/panel` #050506 =
 & assets*. Every frame is 1280×800, the default window (`abner.default.toml`
 `[window]`), so Figma x/y ARE the app's logical px at that size.
 
+**Crop and Mask were re-exported on 2026-11-21** into the section *Tools — Crop &
+Mask (2026-11-21)* (Mask `50:662`, Crop `50:670`, the button component set
+`Abner / Canvas / Button` `50:661`), built from the app's own draw list at 1280×800
+with the current shell (44px header, figleaf button bar, 180px rail, 38px status
+line) and the crop ratio row. The older *Workspace* Mask `4:276` / Crop `4:365`
+frames are the 2026-09-28 shell and are kept for reference only. Interface labels
+the app draws in SF Compact Rounded are SF Pro Regular there: Figma could not load
+the rounded face.
+
 ## 0. The one thing that is different here
 
 abner is **not a web app**. There is no React/Vue, no CSS, no DOM, no bundler,
@@ -106,6 +115,7 @@ by hand.
 | **Transport** (`Playing=Yes/No`) | `build_transport`, `btn_prev/btn_play/btn_next/seek_rect` |
 | **Status bar** (`Mode=Input/Mask/Crop`) | `build_status_line` |
 | **Crop marquee** | `build_crop_layer` + `build_crop_labels` (size/ratio chip, corner-coordinate chips; `CROP_*` consts) |
+| **Crop ratio row** (`Abner / Canvas / Button` instances, 22px, on the canvas's bottom edge) | `aspect_buttons` / `draw_aspect_buttons` over `ASPECTS`; the button itself is `ButtonBar::button` (`src/canvas.rs`) |
 | **Traffic lights** | *not drawn by abner* — macOS draws them; shown for layout only |
 
 Architecture rules that a new component must follow:
