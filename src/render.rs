@@ -490,7 +490,20 @@ struct Uniforms {
     plate: [f32; 4],
 }
 
+// Native batches index instances; Figleaf batches index canvas items.
 type DrawBatch = ((usize, usize), Option<[u32; 4]>, std::ops::Range<u32>);
+
+fn push_figleaf_batch(batches: &mut Vec<DrawBatch>, clip: Option<[u32; 4]>, index: usize) {
+    let index = u32::try_from(index).expect("Figleaf item index fits in a draw range");
+    match batches.last_mut() {
+        Some(((FIGLEAF, _), previous_clip, range))
+            if *previous_clip == clip && range.end == index =>
+        {
+            range.end += 1;
+        }
+        _ => batches.push(((FIGLEAF, 0), clip, index..index + 1)),
+    }
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -1317,14 +1330,13 @@ impl Gpu {
                     clip = rect.map(|r| scissor(r, scale, self.config.width, self.config.height));
                 }
                 Item::Rect(ri) => push(&mut data, &mut batches, clip, None, rect_inst(ri)),
-                // An empty batch holds the shape's place in the paint order;
-                // its key says which canvas item to draw there.
+                // Combine adjacent Figleaf items without crossing native items or clips.
                 Item::Shape(shape) => {
-                    batches.push(((FIGLEAF, shapes.items().len()), clip, 0..0));
+                    push_figleaf_batch(&mut batches, clip, shapes.items().len());
                     shapes.shape(shape.clone());
                 }
                 Item::Label(text) => {
-                    batches.push(((FIGLEAF, shapes.items().len()), clip, 0..0));
+                    push_figleaf_batch(&mut batches, clip, shapes.items().len());
                     shapes.text(text.clone());
                 }
                 Item::Shadow { r, inner, blur, alpha } => {
@@ -1809,7 +1821,7 @@ impl Gpu {
                 if w == 0 || h == 0 { continue; }
                 pass.set_scissor_rect(x, y, w, h);
                 if key.0 == FIGLEAF {
-                    self.figleaf.draw_items(&mut pass, key.1..key.1 + 1);
+                    self.figleaf.draw_items(&mut pass, range.start as usize..range.end as usize);
                     pass.set_pipeline(&self.pipeline);
                     pass.set_vertex_buffer(0, self.instances.slice(..));
                     continue;
@@ -1835,6 +1847,31 @@ fn scissor(r: RectPx, scale: f32, width: u32, height: u32) -> [u32; 4] {
 #[cfg(test)]
 mod workspace_tests {
     use super::*;
+
+    #[test]
+    fn figleaf_batches_preserve_clip_and_native_draw_boundaries() {
+        let clip = Some([0, 0, 40, 40]);
+        let other_clip = Some([10, 10, 20, 20]);
+        let mut batches = Vec::new();
+        push_figleaf_batch(&mut batches, clip, 0);
+        push_figleaf_batch(&mut batches, clip, 1);
+        push_figleaf_batch(&mut batches, other_clip, 2);
+        batches.push(((1, 1), other_clip, 0..3));
+        push_figleaf_batch(&mut batches, other_clip, 3);
+        push_figleaf_batch(&mut batches, None, 4);
+        push_figleaf_batch(&mut batches, None, 5);
+        assert_eq!(
+            batches,
+            [
+                ((FIGLEAF, 0), clip, 0..2),
+                ((FIGLEAF, 0), other_clip, 2..3),
+                ((1, 1), other_clip, 0..3),
+                ((FIGLEAF, 0), other_clip, 3..4),
+                ((FIGLEAF, 0), None, 4..6),
+            ]
+        );
+    }
+
     #[test]
     fn scissors_stay_inside_the_surface() {
         assert_eq!(scissor(RectPx { x: -5.0, y: 20.0, w: 50.0, h: 100.0 }, 2.0, 100, 100), [0, 40, 90, 60]);
