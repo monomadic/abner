@@ -567,8 +567,9 @@ with `Factory::output_rate(settings, input) -> Rate` (identity by default; a
 converts to µs). `render` then pairs each output frame with the LATEST original at
 or before it instead of requiring the input's timestamps; a render at the playhead
 returns every output frame its source frame owns. The page asks the chain's rate on
-the UI thread (`update_rate`, `try_lock` on the registry the worker holds for a
-render) and steps, scrubs and picks the shown frame (`Panel::shown`, the output
+the UI thread (`update_rate`, `try_lock` on the registry, which a preview or export
+worker holds only while it creates its sessions and source: `RegistryAccess`, never
+for the length of a job) and steps, scrubs and picks the shown frame (`Panel::shown`, the output
 frame whose span holds the playhead) on the OUTPUT grid, while `source_seek` sends
 the players half a source frame before the original that precedes the playhead —
 so an exact seek lands on it — and the clock stays on the output time.

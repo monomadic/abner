@@ -3,6 +3,24 @@
 use crate::player::{NativeFrame, Player};
 use abner_processor_api::{Cancellation, FrameSource, Registry, Result, VideoFrame};
 use std::sync::{Arc, Condvar, Mutex};
+/// How a job reaches the processor registry. A job needs it only to set up
+/// (create sessions, open a source, ask a rate), so the shared, locked registry
+/// is held for those moments and released while frames are processed: an export
+/// that takes minutes must not keep a preview render waiting for it.
+pub trait RegistryAccess {
+    fn with<R>(&self, f: impl FnOnce(&Registry) -> R) -> R;
+}
+impl RegistryAccess for Registry {
+    fn with<R>(&self, f: impl FnOnce(&Registry) -> R) -> R {
+        f(self)
+    }
+}
+impl RegistryAccess for Mutex<Registry> {
+    fn with<R>(&self, f: impl FnOnce(&Registry) -> R) -> R {
+        // A panic inside one factory call leaves the map itself intact.
+        f(&self.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+}
 pub struct Source {
     custom: Option<Box<dyn FrameSource>>,
     native: Option<NativeSource>,

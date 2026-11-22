@@ -1,5 +1,33 @@
 # abner — history
 
+## 2026-11-22 — Pipeline audit: crop copy, registry lock, preview validation
+
+An audit of the processed export and the Process preview is in
+[PIPELINE-AUDIT.md](docs/PIPELINE-AUDIT.md), with measurements; what it left open is
+task 24. With no plugin time the export already runs at the hardware encoder's ceiling
+(4K HEVC: 49.7 fps against ffmpeg `hevc_videotoolbox`'s 56 on a longer run of the same
+clip). Three of its findings landed with it.
+
+The export crop copies whole rows instead of one sample at a time: 12.65 ms to 0.79 ms
+for a 3600×2000 cut of a 4K frame, which had made the reader the slowest thread of a
+cropped export.
+
+An export or a preview render locks the shared processor registry only while it
+creates sessions, opens the source and asks the chain's rate
+(`processing_source::RegistryAccess`). Both used to hold it from start to finish, so a
+Render press during an export waited until the export ended. They can now run their
+sessions at the same time, where the lock used to make them take turns.
+
+The preview no longer re-validates frames the format plan already checked:
+`FormatPlan::to_sink` converts with `convert_validated` and keeps only the batch
+budget, `emit` checks geometry, and `color::rgba8_validated` serves the "before" frame
+and the export writer. Each dropped scan was up to 1.35 ms at 4K.
+
+Validation: `jobs_release_the_registry_while_frames_are_processed` (preview and export);
+the full suite and the processing crate's tests pass; `export_throughput` is unchanged
+(49.4 and 55.7 fps), as expected for a run with no crop that the encoder bounds. A
+cropped export was not timed end to end, and the app was not run.
+
 ## 2026-11-22 — Faster processed export
 
 A processed export (`pipeline_export_with_inputs`) now runs on three threads with

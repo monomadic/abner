@@ -2629,7 +2629,7 @@ pub(crate) fn smart(
 // Keep the explicit geometry/pipeline inputs at this boundary.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pipeline_export(
-    info:&crate::probe::VideoInfo,dest:&Path,keeps:&[(f64,f64)],registry:&abner_processor_api::Registry,
+    info:&crate::probe::VideoInfo,dest:&Path,keeps:&[(f64,f64)],registry:&impl crate::processing_source::RegistryAccess,
     chain:&[(String,serde_json::Value)],prores:bool,crop:Option<(u32,u32,u32,u32)>,
     cancel:&abner_processor_api::Cancellation,active:&Mutex<Vec<abner_processor_api::Cancellation>>,
     emit:impl FnMut(crate::export_page::Rendered)->Result<(),String>+Send,
@@ -2643,7 +2643,8 @@ pub(crate) fn pipeline_export_with_inputs(
     dest: &Path,
     keeps: &[(f64, f64)],
     chapters: &[ExportChapter],
-    registry: &abner_processor_api::Registry,
+    // Locked only while a range's sessions and source are created.
+    registry: &impl crate::processing_source::RegistryAccess,
     chain: &[(String, serde_json::Value)],
     prores: bool,
     bitrate_kbps: Option<u32>,
@@ -2688,7 +2689,7 @@ pub(crate) fn pipeline_export_with_inputs(
         .map_err(anyhow::Error::msg)?
         .check_processable()
         .map_err(anyhow::Error::msg)?;
-    if crate::processor_gui::retimes(registry, chain, info.fps).map_err(anyhow::Error::msg)? {
+    if registry.with(|registry| crate::processor_gui::retimes(registry, chain, info.fps)).map_err(anyhow::Error::msg)? {
         crate::media_metadata::require_constant_rate(&info.path).map_err(anyhow::Error::msg)?;
     }
     // Subtitles and tags from the source, when it is a container the
@@ -2741,6 +2742,7 @@ pub(crate) fn pipeline_export_with_inputs(
             for &(start, end) in keeps {
                 cancel.check().map_err(anyhow::Error::msg)?;
                 active.lock().unwrap().clear();
+                let (mut sessions, dims, mut source) = registry.with(|registry| -> Result<_> {
                 let mut dims = [cw as usize, ch as usize];
                 let mut sessions = Vec::new();
                 for (stage,(id, settings)) in chain.iter().enumerate() {
@@ -2774,6 +2776,9 @@ pub(crate) fn pipeline_export_with_inputs(
                     );
                     sessions.push(session);
                 }
+                let source=crate::processing_source::Source::open(registry,chain.first().map(|s|s.0.as_str()),&info.path,info.width,info.height,info.fps).map_err(anyhow::Error::msg)?;
+                Ok((sessions, dims, source))
+                })?;
                 let prep = Prep {
                     full: (info.width, info.height),
                     crop: (cx, cy, cw, ch),
@@ -2783,7 +2788,6 @@ pub(crate) fn pipeline_export_with_inputs(
                     sink: sink_format,
                     target: None,
                 };
-                let mut source=crate::processing_source::Source::open(registry,chain.first().map(|s|s.0.as_str()),&info.path,info.width,info.height,info.fps).map_err(anyhow::Error::msg)?;
                 source.seek(start).map_err(anyhow::Error::msg)?;
                 let mut feed = match source.into_native() {
                     Ok(mut native) => {
@@ -2953,10 +2957,15 @@ impl Prep {
             // rather than inventing chroma phase or reducing to display depth.
             let mut rgb = abner_processing::color::convert(f, PixelFormat::Rgb16)
                 .and_then(VideoFrame::into_rgb16)?;
-            rgb.pixels = (cy..cy + ch).flat_map(|y| {
-                let start = ((y * width + cx) * 3) as usize;
-                rgb.pixels[start..start + (cw * 3) as usize].iter().copied()
-            }).collect();
+            // Whole rows at a time: a per-sample iterator was 16 times slower
+            // at 4K and made the reader the export's slowest thread.
+            let (stride, row) = (width as usize * 3, cw as usize * 3);
+            let mut cropped = Vec::with_capacity(row * ch as usize);
+            for y in cy as usize..(cy + ch) as usize {
+                let start = y * stride + cx as usize * 3;
+                cropped.extend_from_slice(&rgb.pixels[start..start + row]);
+            }
+            rgb.pixels = cropped;
             rgb.width = cw as usize; rgb.height = ch as usize;
             f = rgb.into();
         }
@@ -3011,7 +3020,8 @@ fn write_frames<W: std::io::Write + std::io::Seek>(
     for (index, Output { frame: f, source_pts, duration }) in (0u64..).zip(frames) {
         cancel.check().map_err(anyhow::Error::msg)?;
         let dims = [f.width as u32, f.height as u32];
-        let rgba = abner_processing::color::rgba8(&f).map_err(anyhow::Error::msg)?;
+        // Validated where it left the chain (or the reader, for an empty one).
+        let rgba = abner_processing::color::rgba8_validated(&f).map_err(anyhow::Error::msg)?;
         if encoder.is_none() {
             encoder = Some(PipelineEncoder::new(
                 dims[0],

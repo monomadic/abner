@@ -581,16 +581,13 @@ impl Page {
                         .map_err(|e| e.to_string())?;
                     return Ok(dest);
                 }
-                let registry = registry
-                    .lock()
-                    .map_err(|_| "Processor registry unavailable".to_string())?;
                 crate::media_io::pipeline_export_with_inputs(
                     &inputs,
                     &info,
                     &dest,
                     &keeps,
                     &chapters,
-                    &registry,
+                    &*registry,
                     &chain,
                     prores,
                     Some(bitrate_kbps),

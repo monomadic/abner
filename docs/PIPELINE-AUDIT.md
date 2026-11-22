@@ -1,0 +1,196 @@
+# Export and Process preview efficiency audit, 2026-11-22
+
+An audit of the processed export (`media_io::pipeline_export_with_inputs`) and the
+Process page's preview renderer (`processor_gui::render`), made the day the export
+went to three threads. Three items were fixed the same day; the rest are open and
+tracked as task 24 in [TASKS.md](../TASKS.md).
+
+**Summary.** With no plugin time, the export already runs at the hardware
+encoder's ceiling, so its remaining waste is in particular paths: cropped exports,
+cut timelines, colour round trips and locking. The preview still does everything on
+one thread, as the export did before, but the host work around the plugin is now a
+few milliseconds per conversion, so it matters for fast processors and is noise for
+slow ones. The largest unmeasured costs in both are sessions created more often
+than needed.
+
+## Method and measurements
+
+Apple M4 Pro, 14 cores. Release builds. Source: 3840×2160 24 fps H.264
+(`testsrc2`, x264 ultrafast, yuv420p, GOP 24). Synthetic footage with no B
+pictures; do not generalize the absolute figures to other codecs or machines.
+
+Whole export, the ignored `export_throughput` test (HEVC 40 Mbps, 2 s of source):
+
+| Run | Result |
+|---|---|
+| Abner, no stages, 48 frames | 0.97 s, 49.7 fps |
+| Abner, frame-doubling float stage, 96 frames | 1.73 s, 55.6 fps |
+| ffmpeg `-hwaccel videotoolbox … -c:v hevc_videotoolbox -b:v 40M`, 48 frames | 1.05 s |
+| the same ffmpeg command, 240 frames | 4.28 s, 56 fps |
+| ffmpeg decode only, 240 frames | 1.78 s, 135 fps |
+
+Abner matches ffmpeg's hardware path. The VideoToolbox HEVC encoder is the limit,
+about 55 fps at 4K on this machine. The 2 s runs include set-up and finishing, so
+they understate steady state; a longer Abner run was not made.
+
+Host conversions, one 4K frame, mean of 8 (a temporary benchmark, not committed):
+
+| Operation | ms |
+|---|---|
+| validate yuv420p8 / yuv420p10 / rgba8 / rgbf32 | 0.00 / 0.27 / 0.67 / 1.35 |
+| yuv420p8 → rgba8 (as built, through RGB16) | 5.07 |
+| yuv420p8 → rgba8 (direct fixed-point, sketch) | 1.39 |
+| yuv420p8 → rgb16 | 4.43 |
+| yuv420p10 → rgba8 | 5.69 |
+| yuv420p8 → rgbf32 | 2.38 |
+| rgbf32 → rgba8 | 1.73 |
+| rgbf32 → yuv420p8 | 2.97 |
+| rgbf32 → yuv422p10 | 2.62 |
+| yuv420p8 → yuv422p10 (plane resample) | 3.84 |
+| rgb16 → yuv422p10 | 3.88 |
+| export crop copy, 3600×2000, per-sample iterator (before) | 12.65 |
+| export crop copy, whole rows (after) | 0.79 |
+
+Not measured: any real processor, ProRes export throughput, audio encode and
+container finishing on long files, the preview renderer end to end.
+
+## Export
+
+### E1. Crop copy was per sample on one thread — fixed
+
+`Prep::next` copied the cropped RGB16 picture through a per-sample iterator:
+12.65 ms per 4K frame. With the RGB16 conversions around it the reader thread took
+roughly 22 ms per frame, which is below the encoder's ceiling, so a cropped export
+was reader-bound. It now copies whole rows (0.79 ms).
+
+### E2. Sessions are rebuilt for every kept range — open
+
+The loop over `keeps` creates every stage's session again for each range, and
+drops them at the range's end. A timeline with ten cuts creates each processor ten
+times. For a processor that loads a model on creation that is ten loads. The cost
+depends on the processor and was not measured. Reuse needs a rule in the API: a
+session survives `finish_video`, or gains a reset that clears temporal state.
+The same rule would serve P3.
+
+### E3. The registry lock was held for the whole export — fixed
+
+The export worker locked the shared `Mutex<Registry>` before the export and kept
+it to the end. The preview worker takes the same lock, so a Render press during an
+export waited, silently, until the export finished. Both jobs now reach the
+registry through `processing_source::RegistryAccess` and hold the lock only while
+sessions and the source are created and the chain's rate is asked
+(`jobs_release_the_registry_while_frames_are_processed`).
+
+A consequence to know about: an export and a preview render can now run their
+sessions at the same time. Before, the lock made them take turns. Two heavy
+processors running together share the accelerator and its memory.
+
+### E4. Untouched frames take a colour round trip — open
+
+The HEVC encoder is given RGBA8. With no stages and a forced bitrate a frame goes
+decoder planes → RGB16 → RGBA8 in the reader, then FilmCraft's hardware encoder
+wrapper converts RGBA8 back to 4:2:0 on the CPU before VideoToolbox sees it.
+`filmcraft_platform::videotoolbox_encode::VtEncoder::encode` takes Y, U and V
+planes directly. Making `Yuv420p8` the HEVC sink would skip two conversions (about
+8 ms of CPU per 4K frame) and stop rounding pixels nothing touched. No wall-clock
+gain while encoder-bound. The on-page preview would then need its own RGBA branch
+(see E6 for throttling it).
+
+### E5. HEVC output is 8-bit Main only — open
+
+Ten-bit sources and float chains are quantised to 8 bits at the encoder. This is a
+quality limit, not a speed one, and the largest loss in the pipeline. It needs a
+Main 10 path in FilmCraft's VideoToolbox encoder (10-bit pixel buffers, profile,
+sample entry).
+
+### E6. ProRes builds a full RGBA frame per output frame for the preview only — open
+
+`write_frames` converts every chain output to RGBA8 before encoding. HEVC uses
+those pixels as encoder input; ProRes does not, so for ProRes the conversion
+(about 5.7 ms at 4K from 4:2:2 10-bit) exists only for the on-page preview, and
+the page keeps only the newest frame between polls. Convert for the preview only
+when the page has taken the previous one, or at a bounded rate.
+
+### E7. Audio waits for video, and MKV is written twice — open, unmeasured
+
+Audio is encoded after the last video frame, on the calling thread. An MKV export
+is muxed as MP4 and then remuxed whole into Matroska, which doubles the disk
+writes. Both grow with duration. Measure on a long file before changing either;
+audio could run beside the video, and the remux could be replaced by a Matroska
+writer fed directly.
+
+### E8. Every crop goes through RGB16 — open
+
+The export crop converts the frame to RGB16 (4.4 ms at 4K) so an odd origin cannot
+split a chroma sample, and a timeline crop converts again. A crop whose origin and
+size are multiples of the chroma subsampling can be cut from the planes directly,
+with no conversion in either direction. `E` in the crop marquee already floors to
+even sides.
+
+### E9. Y'CbCr → RGBA8 goes through an RGB16 intermediate — open
+
+`color::convert` has no direct planar → RGBA8 path: it builds a 48-bit-per-pixel
+RGB16 frame (50 MB at 4K) and narrows it. `media::rgb16` also reads each sample
+through a `&dyn Fn`, three indirect calls per pixel, which blocks vectorization. A
+direct fixed-point loop measured 1.39 ms against 5.07. This is the conversion
+behind every preview "before" frame and every 8-bit display branch. A direct path
+rounds once instead of twice, so `print_conversion_digests` will change: decide
+that the new rounding is the reference before landing it.
+
+## Process preview
+
+### P1. One thread does everything — open
+
+`render` decodes, builds the "before" RGBA frame, crops, runs the chain and
+converts for display on the worker thread. Summed from the table, that is roughly
+12 to 15 ms of host work per 4K frame that the processor waits on (not measured
+end to end). The export's reader / chain / writer split applies here unchanged: a
+reader thread for decode, "before" and crop, the chain thread, and the display
+conversion after it. Worth it for segment renders through fast processors; noise
+for a processor that takes a second per frame.
+
+### P2. Output frames were validated four times — fixed
+
+The plan validated each frame at the plugin's output, `to_sink` validated it again
+inside `convert`, once more after it, and `emit` a fourth time; the "before" branch
+re-validated the decoder's frame. `FormatPlan::to_sink` now uses
+`convert_validated` and keeps only the batch budget, `emit` checks geometry only,
+and `color::rgba8_validated` serves frames a decoder or plan already checked (the
+export writer uses it too). Each scan was at most 1.35 ms at 4K.
+
+### P3. Every Render press creates the sessions from scratch — open
+
+`render` creates each stage's session and drops it on return, so pressing Render
+after moving one slider pays every stage's creation again. For interactive use
+this is probably the largest cost on the page; it depends on the processor and was
+not measured. Needs the same API rule as E2, plus a cache keyed by processor,
+settings, dimensions and spatial bindings, bounded in count and dropped when the
+source set changes.
+
+### P4. Every press opens a decoder and cold-seeks — open
+
+`Source::open` spawns a new native player per render and exact-seeks it (a cold
+jump inside a long GOP is 285 to 470 ms at 1080p, per the player's own figures).
+A one-frame render also reads two frames: the second only supplies the first
+one's duration, which a targeted render could take from the frame rate. Keeping
+one processing decoder per source between renders would turn most presses into a
+seek inside its cache.
+
+### P5. The registry lock was held for the whole render — fixed
+
+With E3. The page's output-rate query (`update_rate`, a `try_lock`) no longer
+fails for the length of a render, only while sessions are being created.
+
+### P6. A 4K before/after pair is 66 MB — open, design
+
+Both pictures are kept as full RGBA8, so the default 1024 MB budget holds 15 pairs
+at 4K: about 0.6 s at 24 fps. The "before" is the source frame the display player
+can deliver again, so storing only the "after" would roughly double a section's
+length, at the cost of pairing against the player's cache (and of the retimed
+case, where one original pairs with several outputs and is already shared).
+
+### P7. Source metadata is re-read on every render — open, minor
+
+`check_processable` and, for retimed chains, `require_constant_rate` read the
+container again on each press. Unmeasured; cache per path with the source's
+probe if a profile shows it.

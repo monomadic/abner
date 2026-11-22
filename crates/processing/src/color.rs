@@ -384,6 +384,12 @@ pub fn into_prores(frame: VideoFrame) -> Result<filmcraft_prores::Frame> {
 /// cloning a full-resolution buffer merely to quantize it for the display.
 pub fn rgba8(frame: &VideoFrame) -> Result<Arc<Vec<u8>>> {
     frame.validate()?;
+    rgba8_validated(frame)
+}
+
+/// [`rgba8`] for a frame the caller has already validated (a decoder's or a
+/// format plan's output): the scan reads every sample, so pay it once.
+pub fn rgba8_validated(frame: &VideoFrame) -> Result<Arc<Vec<u8>>> {
     match &frame.pixels {
         FramePixels::Rgba8(p) => Ok(p.clone()),
         FramePixels::Rgb16(p) => Ok(Arc::new(rgb16_to_rgba8(p))),

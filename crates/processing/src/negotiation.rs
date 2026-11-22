@@ -128,12 +128,22 @@ impl FormatPlan {
         self.to_sink(frames, budget)
     }
     fn to_sink(&self, frames: Vec<VideoFrame>, budget: usize) -> Result<Vec<VideoFrame>> {
-        let out = frames
+        // `process_native` validated every frame it returned (at the last
+        // plugin's output, or on entry when no stage ran), and host conversions
+        // only make valid frames of the format asked for: no second and third
+        // sample scan here, only the batch budget.
+        let mut bytes = 0usize;
+        frames
             .into_iter()
-            .map(|f| color::convert(f, self.sink))
-            .collect::<Result<Vec<_>>>()?;
-        self.validate(&out, self.sink, None, budget)?;
-        Ok(out)
+            .map(|f| {
+                let f = color::convert_validated(f, self.sink)?;
+                bytes = bytes.checked_add(f.byte_len()).ok_or("batch size overflow")?;
+                if bytes > budget {
+                    return Err("Processor batch exceeds the memory budget".into());
+                }
+                Ok(f)
+            })
+            .collect()
     }
     /// Keep the final processor's format when a host branches to display and
     /// encode. Each sink converts from this frame independently, avoiding a

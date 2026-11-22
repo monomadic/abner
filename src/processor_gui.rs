@@ -777,8 +777,7 @@ impl Worker {
                 };
                 let generation = request.generation;
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let registry = registry.lock().unwrap_or_else(|e| e.into_inner());
-                    render(&registry, &request, &tx, Some(&active_worker), Some(&live_worker))
+                    render(&*registry, &request, &tx, Some(&active_worker), Some(&live_worker))
                 }))
                 .unwrap_or_else(|_| Err("Processor panicked; preview stopped".into()));
                 active_worker.lock().unwrap().clear();
@@ -815,7 +814,8 @@ impl Drop for Worker {
     }
 }
 fn render(
-    registry: &Registry,
+    // Locked only for set-up: sessions, the chain's rate, the source.
+    registry: &impl crate::processing_source::RegistryAccess,
     r: &Request,
     tx: &mpsc::SyncSender<Event>,
     active: Option<&Mutex<Vec<Cancellation>>>,
@@ -829,9 +829,10 @@ fn render(
     check_processable(&r.info.path)?;
     let [w, h] = [r.info.width, r.info.height];
     r.inputs.validate_geometry(w,h)?;
-    let mut sessions = Vec::new();
-    let mut dims = [w as usize, h as usize];
     let downsized = r.chain.iter().any(|(_, s)| split_downsize(s).1 > 1);
+    let (mut sessions, dims) = registry.with(|registry| -> Result<_, String> {
+    let mut sessions: Vec<Box<dyn Session>> = Vec::new();
+    let mut dims = [w as usize, h as usize];
     for (index, (id, raw)) in r.chain.iter().enumerate() {
         let factory = registry.get(id)?;
         if index>0 && r.inputs.bindings.get(id).is_some_and(|b|!b.is_empty()) {return Err("Spatial inputs currently require the first enabled processor; move this processor first".into());}
@@ -927,6 +928,8 @@ fn render(
         r.cancel.check()?;
         sessions.push(session);
     }
+    Ok((sessions, dims))
+    })?;
     // Decoder formats are discovered on the first native frame, then fixed for
     // the segment. The display's RGBA8 format never becomes the processor input.
     let mut format_plan: Option<abner_processing::negotiation::FormatPlan> = None;
@@ -948,12 +951,12 @@ fn render(
     }
     // A retimed chain emits frames on its own grid; each is paired with the
     // latest original at or before it instead of the original it replaces.
-    let retimed = retimes(registry, &r.chain, fps)?;
+    let retimed = registry.with(|registry| retimes(registry, &r.chain, fps))?;
     if retimed {
         crate::media_metadata::require_constant_rate(&r.info.path)?;
     }
     let mut last_out: Option<i64> = None;
-    let mut source = crate::processing_source::Source::open(registry,r.chain.first().map(|s|s.0.as_str()),&r.info.path,w,h,fps)?;
+    let mut source = registry.with(|registry| crate::processing_source::Source::open(registry,r.chain.first().map(|s|s.0.as_str()),&r.info.path,w,h,fps))?;
     // A frame preview is an isolated input, including for recurrent/batch models.
     // finish() lets implementations pad their own short input without replaying
     // the segment. Segment rendering retains the normal streaming contract.
@@ -969,7 +972,7 @@ fn render(
         for frame in frames {
             r.cancel.check()?;
             if r.target.is_none() && received.get() >= count { break; }
-            frame.validate()?;
+            // The format plan validated it; only the geometry is checked here.
             if frame.width != ow || frame.height != oh {
                 return Err("Preview processor changed its declared geometry or time base".into());
             }
@@ -1052,7 +1055,8 @@ fn render(
         if originals.len() >= count { return Err("Processor buffered too many frames for preview".into()); }
         let mut input = decoded_frame;
         // Before/after presentation is a separate display branch of the native frame.
-        let before = abner_processing::color::rgba8(&input)?;
+        // The source validated the frame as it decoded it.
+        let before = abner_processing::color::rgba8_validated(&input)?;
         originals.insert(pts, (before, source_pts));
         if !r.inputs.crops.is_empty() {
             let mut rgb = abner_processing::color::convert(input, PixelFormat::Rgb16)?.into_rgb16()?;
@@ -3353,8 +3357,9 @@ impl Panel {
         true
     }
     /// Re-ask the chain's output rate when the source rate or the chain
-    /// changed. The worker holds the registry for a whole render, so this
-    /// only tries; a busy registry keeps the old rate until the next tick.
+    /// changed. A worker holds the registry while it creates a job's
+    /// sessions (a model load can take seconds), so this only tries; a busy
+    /// registry keeps the old rate until the next tick.
     fn update_rate(&mut self, info: &VideoInfo) {
         let chain = self.chain();
         let key = format!("{}|{chain:?}", info.fps);
@@ -5497,6 +5502,57 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The shared registry is locked to set a job up, not while it runs: an
+    /// export must not keep a preview render waiting, nor the other way round.
+    #[test]
+    fn jobs_release_the_registry_while_frames_are_processed() {
+        type Slot = Arc<std::sync::OnceLock<std::sync::Weak<Mutex<Registry>>>>;
+        type Seen = Arc<Mutex<Vec<bool>>>;
+        struct ProbeFactory(Slot, Seen);
+        struct ProbeSession(Box<dyn Session>, Slot, Seen);
+        impl abner_processor_api::Factory for ProbeFactory {
+            fn descriptor(&self) -> Descriptor { BufferedFactory.descriptor() }
+            fn create(&self, w: usize, h: usize, settings: &Value) -> Result<Box<dyn Session>, String> {
+                Ok(Box::new(ProbeSession(BufferedFactory.create(w, h, settings)?, self.0.clone(), self.1.clone())))
+            }
+        }
+        impl Session for ProbeSession {
+            fn process(&mut self, frame: Frame) -> Result<Vec<Frame>, String> {
+                let registry = self.1.get().unwrap().upgrade().unwrap();
+                self.2.lock().unwrap().push(registry.try_lock().is_ok());
+                self.0.process(frame)
+            }
+            fn finish(&mut self) -> Result<Vec<Frame>, String> { self.0.finish() }
+            fn output_dimensions(&self) -> [usize; 2] { self.0.output_dimensions() }
+            fn cancellation(&self) -> Cancellation { self.0.cancellation() }
+            fn progress(&self) -> Progress { self.0.progress() }
+        }
+        let (slot, seen) = (Slot::default(), Seen::default());
+        let mut registry = Registry::default();
+        registry.register(Box::new(ProbeFactory(slot.clone(), seen.clone()))).unwrap();
+        let registry = Arc::new(Mutex::new(registry));
+        slot.set(Arc::downgrade(&registry)).unwrap();
+        let fixture = crate::native_decode_tests::Fixture::new();
+        let info = crate::probe::probe(&fixture.path).unwrap();
+        let chain = vec![("example.buffered".to_string(), json!({}))];
+        let request = Request {
+            inputs: Default::default(),
+            generation: 1, chain: chain.clone(), target: None,
+            info: info.clone(), start: 0.0, end: None, cancel: Cancellation::default(),
+            budget: DEFAULT_PREVIEW_BYTES,
+        };
+        let (tx, _rx) = mpsc::sync_channel(64);
+        render(&*registry, &request, &tx, None, None).unwrap();
+        let preview = std::mem::take(&mut *seen.lock().unwrap());
+        assert!(!preview.is_empty() && preview.iter().all(|free| *free), "{preview:?}");
+        crate::media_io::pipeline_export(
+            &info, &fixture.dir.join("unlocked.mov"), &[(0., 12. * 1001. / 24000.)], &*registry, &chain,
+            true, None, &Cancellation::default(), &Mutex::default(), |_| Ok(()),
+        ).unwrap();
+        let export = std::mem::take(&mut *seen.lock().unwrap());
+        assert!(!export.is_empty() && export.iter().all(|free| *free), "{export:?}");
     }
 
     #[test]
