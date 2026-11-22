@@ -2243,14 +2243,19 @@ impl App {
             self.finish_editor(false);
         }
         if let Some((id, key, crop)) = self.processors.editor_request.take() {
+            let autodetect = std::mem::take(&mut self.processors.editor_autodetect) && !crop;
             let same_component = self.editor.as_ref().is_some_and(|editor| {
                 matches!(&editor.owner, crate::spatial::Owner::Plugin { id: active_id, key: active_key }
                     if *active_id == id && *active_key == key && self.crop.is_some() == crop)
             });
-            if same_component {
+            if same_component && autodetect {
+                // Autodetect on the mask already being edited is its panel.
+                self.toggle_detection_panel();
+            } else if same_component {
                 self.finish_editor(false);
             } else {
                 self.begin_editor(crop, Some((id, key)));
+                if autodetect && self.editor.is_some() { self.detection_panel = true; }
             }
             return;
         }
@@ -2313,6 +2318,12 @@ impl App {
             if k==Key::Escape {self.finish_editor(false);return}
             if k==Key::Enter {self.finish_editor(true);return}
             if matches!(k,Key::Char('c'|'C')) && self.editor.as_ref().is_some_and(|e|!matches!(e.owner,crate::spatial::Owner::Source)) {return}
+        }
+        // On the Process page M and D belong to the focused stage's mask:
+        // paint it, or open it with Autodetect up.
+        if self.ready() && self.editor.is_none() && matches!(k,Key::Char('m'|'M'|'d'|'D'))
+            && self.processors.request_mask(matches!(k,Key::Char('d'|'D'))) {
+            self.apply_processor_transport();return
         }
         if self.ready() && matches!(k,Key::Char('m'|'M')) {if self.editor.is_some(){self.finish_editor(false)}else{self.begin_editor(false,None)}return}
         if self.ready() && !self.mask_mode && matches!(k,Key::Char('c'|'C')) {self.begin_editor(true,None);return}
@@ -8201,6 +8212,15 @@ mod tests {
                 assert!(app.processors.open);
             }
         }
+        // The Process page's keys: M paints the focused stage's mask (not the
+        // source's), D opens the same editor with Autodetect up.
+        app.key(Key::Char('d'));
+        assert!(app.editor.as_ref().is_some_and(|e|matches!(e.owner,crate::spatial::Owner::Plugin{..})) && app.detection_panel);
+        app.key(Key::Escape);
+        app.key(Key::Char('m'));
+        assert!(app.editor.as_ref().is_some_and(|e|matches!(e.owner,crate::spatial::Owner::Plugin{..})) && !app.detection_panel);
+        app.key(Key::Escape);
+        assert!(app.editor.is_none() && app.processors.open);
     }
 
     #[test]

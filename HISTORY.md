@@ -1,5 +1,27 @@
 # abner — history
 
+## 2026-11-22 — Process: the mask input is a full-width tile with Paint mask / Autodetect
+
+A processor's mask input was one 97×62 tile paired beside its crop tile, and the only
+way into Autodetect was through the editor's bar. It now leads the settings at the
+column's full width (`mask_tile`, 16:9, so 248×143 at 1280), over two of the footer's
+label + keycap buttons (`mask_buttons`, `draw_cut_footer_button`): **Paint mask** (Edit
+mask once one is applied) and **Autodetect**. An applied mask shows as its coverage on
+the footage without the icon plate over it. Crop inputs keep the paired tiles, below.
+
+On the Process page `M` and `D` now belong to the focused stage's mask
+(`Panel::request_mask`): `M` opens its editor where it used to open the source's, `D`
+opens it with the Autodetect panel up (`Panel::editor_autodetect`, read once by
+`apply_processor_transport`). A stage with no mask input leaves both keys as they were.
+The design is frame 1 of *Processor mask flow — v2* in the Screens Figma file; the rest
+of that flow (editing in place, the autodetect setup) is not built.
+
+Validation: `model_locations_are_hidden_and_masks_remain_manual` (tile, both buttons,
+the request and its flag), `paired_spatial_controls_stay_separate_and_leave_room_for_settings`
+(the new layout at 720 / 900 / 1280), the M / D assertions in the app's processor mask
+test; the full suite passes. Captured in the window with a mask-requiring processor;
+the buttons and keys were not pressed in the running app.
+
 ## 2026-11-22 — Pipeline audit: crop copy, registry lock, preview validation
 
 An audit of the processed export and the Process preview is in

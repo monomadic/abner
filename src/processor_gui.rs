@@ -279,6 +279,16 @@ fn slider_span(row: RectPx) -> (f32, f32) {
 }
 fn slider_value(row:RectPx)->RectPx {RectPx{x:row.x+row.w-40.,y:row.y,w:40.,h:20.}}
 fn spatial_button(row:RectPx)->RectPx { RectPx{x:row.x,y:row.y+if row.w<122. {33.}else{21.},w:row.w.min(97.),h:62.} }
+/// A mask input's control: the same tile as the paired crop tiles, but the
+/// row's full width at the picture's usual 16:9, over two buttons.
+fn mask_tile_h(w:f32)->f32 { ((w-8.)*9./16.).round()+8. }
+fn mask_pitch(w:f32)->f32 { 21.+mask_tile_h(w)+8.+28.+15. }
+fn mask_tile(row:RectPx)->RectPx { RectPx{x:row.x,y:row.y+21.,w:row.w,h:mask_tile_h(row.w)} }
+/// Paint / Edit mask, then Autodetect: the footer's label + keycap buttons.
+fn mask_buttons(row:RectPx)->[RectPx;2] {
+    let t=mask_tile(row);let w=(row.w-8.)/2.;
+    [0.,1.].map(|i|RectPx{x:row.x+i*(w+8.),y:t.y+t.h+8.,w,h:28.})
+}
 // Small coverage cells keep previews independent of the editor's full-size mask texture.
 fn draw_mask_preview(items: &mut Vec<Item>, r: RectPx, dims: [usize;2], pixels: &[u8]) {
     let [w,h] = dims;
@@ -1149,6 +1159,8 @@ pub struct Panel {
     input_owner:usize,
     source_bindings: BTreeMap<usize,abner_processor_api::ChainBindings>,
     pub editor_request: Option<(String,String,bool)>,
+    /// The pending `editor_request` wants the mask editor's Autodetect panel up.
+    pub editor_autodetect: bool,
     pub active_editor: Option<(String,String,bool)>,
     /// The app's embedded mask/crop editor is up: its bar covers the
     /// viewer's top strip, so the picture fits below it (`picture_area`).
@@ -1275,7 +1287,7 @@ pub struct Panel {
 impl Default for Panel {
     fn default() -> Self {
         Self {
-            input_owner:usize::MAX, declarations: BTreeMap::new(), inputs: Default::default(), source_bindings: BTreeMap::new(), editor_request: None, active_editor:None, editor_bar:false,
+            input_owner:usize::MAX, declarations: BTreeMap::new(), inputs: Default::default(), source_bindings: BTreeMap::new(), editor_request: None, editor_autodetect:false, active_editor:None, editor_bar:false,
             preset_dir: None,
             user_presets: BTreeMap::new(),
             preset_name: None,
@@ -1464,8 +1476,9 @@ impl Panel {
         }
         self.fields.sort_by_key(|f| match f.kind {
             Kind::Spatial { crop:false, .. } if f.required => 0,
-            Kind::Spatial { .. } => 1,
-            _ => 2,
+            Kind::Spatial { crop:false, .. } => 1,
+            Kind::Spatial { .. } => 2,
+            _ => 3,
         });
         if let Some(field) = downsize_field(self.scales.get(index).map_or(&[][..], Vec::as_slice)) {
             let position = self.fields.iter().take_while(|f| matches!(f.kind, Kind::Spatial { .. })).count();
@@ -2928,7 +2941,8 @@ impl Panel {
                     .radius(6.0),
                 ));
             } else if let Kind::Spatial { key, crop } = &f.kind {
-                let r = spatial_button(row);
+                let wide = !*crop;
+                let r = if wide { mask_tile(row) } else { spatial_button(row) };
                 let hovered = hit(r, self.cursor.0, self.cursor.1);
                 let active = self
                     .active_editor
@@ -2957,7 +2971,7 @@ impl Panel {
                     x: r.x + 4.,
                     y: r.y + 4.,
                     w: r.w - 8.,
-                    h: 54.,
+                    h: r.h - 8.,
                 };
                 if configured {
                     let uv = if *crop {
@@ -2996,26 +3010,40 @@ impl Panel {
                         hex_color(if hovered { 0x353535 } else { 0x232323 }),
                     )));
                 }
-                let icon_plate = RectPx {
-                    x: thumb.x + (thumb.w - 40.0) / 2.0,
-                    y: thumb.y + 7.0,
-                    w: 40.0,
-                    h: 40.0,
-                };
-                items.push(Item::Shape(
-                    ui_shape(icon_plate, [0.0, 0.0, 0.0, 0.7]).radius(6.0),
-                ));
-                items.push(Item::FrameIcon {
-                    x: thumb.x + (thumb.w - 20.) / 2.,
-                    y: thumb.y + 17.,
-                    index: if *crop { 5 } else { 4 },
-                });
-                if !crop && f.required {
+                // An applied mask shows as its coverage; the plate would hide it.
+                if !(wide && configured) {
+                    let plate = if wide { 56.0 } else { 40.0 };
+                    let icon_plate = RectPx {
+                        x: thumb.x + (thumb.w - plate) / 2.0,
+                        y: thumb.y + (thumb.h - plate) / 2.0,
+                        w: plate,
+                        h: plate,
+                    };
+                    items.push(Item::Shape(
+                        ui_shape(icon_plate, [0.0, 0.0, 0.0, if wide { 1.0 } else { 0.7 }]).radius(if wide { 10.0 } else { 6.0 }),
+                    ));
                     items.push(Item::FrameIcon {
-                        x: thumb.x + thumb.w - 18.,
-                        y: thumb.y + 2.,
+                        x: thumb.x + (thumb.w - 20.) / 2.,
+                        y: thumb.y + (thumb.h - 20.) / 2.,
+                        index: if *crop { 5 } else { 4 },
+                    });
+                }
+                if !crop && f.required {
+                    let inset = if wide { 6.0 } else { 0.0 };
+                    items.push(Item::FrameIcon {
+                        x: thumb.x + thumb.w - 18. - inset,
+                        y: thumb.y + 2. + inset,
                         index: if configured { 15 } else { 14 },
                     });
+                }
+                if wide {
+                    let [paint, detect] = mask_buttons(row);
+                    // Below a keycap's worth of room the label keeps the button.
+                    let keys = paint.w >= 104.0;
+                    for (b, label, k) in [(paint, if configured { "Edit mask" } else { "Paint mask" }, "M"), (detect, "Autodetect", "D")] {
+                        draw_cut_footer_button(items, b, label, if keys { k } else { "" }, false,
+                            hit(b, self.cursor.0, self.cursor.1), false);
+                    }
                 }
             } else if matches!(f.kind, Kind::Bool) {
                 field_title(items, row, &f.title, ink, in_picker);
@@ -3104,32 +3132,52 @@ impl Panel {
     fn spatial_count(&self) -> usize {
         self.fields.iter().take_while(|f|matches!(f.kind,Kind::Spatial{..})).count()
     }
+    /// Mask inputs lead the settings, one full-width control each.
+    fn mask_count(&self) -> usize {
+        self.fields.iter().take_while(|f|matches!(f.kind,Kind::Spatial{crop:false,..})).count()
+    }
+    /// The focused stage's first mask input, for the M / D keys: asks the
+    /// app for its editor, with the Autodetect panel up when `autodetect`.
+    pub fn request_mask(&mut self, autodetect: bool) -> bool {
+        if !self.open || self.picker.is_some() || self.preset_name.is_some() || self.editing.is_some() { return false; }
+        let Some(key)=self.fields.iter().find_map(|f| match &f.kind { Kind::Spatial{key,crop:false}=>Some(key.clone()), _=>None }) else { return false; };
+        let Some(d)=self.descriptors.get(self.selected) else { return false; };
+        self.editor_request=Some((d.id.clone(),key,false));self.editor_autodetect=autodetect;
+        true
+    }
     #[cfg(test)]
     fn settings_rows(&self) -> usize {
-        let spatial=self.spatial_count();
-        spatial.div_ceil(2)+self.fields.len()-spatial
+        let spatial=self.spatial_count();let masks=self.mask_count();
+        masks+(spatial-masks).div_ceil(2)+self.fields.len()-spatial
+    }
+    /// The height the spatial controls take at settings width `w`.
+    fn spatial_height(&self,w:f32)->f32 {
+        let masks=self.mask_count();
+        masks as f32*mask_pitch(w)+(self.spatial_count()-masks).div_ceil(2) as f32*104.
     }
     fn field_pitch(&self,i:usize)->f32 {
         if matches!(self.fields[i].kind,Kind::Spatial{..}){104.}else{44.}
     }
-    fn settings_height(&self)->f32 {
+    fn settings_height(&self,vp:(f32,f32))->f32 {
         let spatial=self.spatial_count();
-        spatial.div_ceil(2) as f32*104.+(spatial..self.fields.len()).map(|i|self.field_pitch(i)).sum::<f32>()
+        self.spatial_height(self.right(vp)-32.)+(spatial..self.fields.len()).map(|i|self.field_pitch(i)).sum::<f32>()
     }
     fn row(&self, i: usize, vp: (f32, f32)) -> RectPx {
         if self.picker.is_some() { return self.picker_row(i, vp); }
         let r = Self::bounds(vp);
-        let spatial=self.spatial_count();
+        let spatial=self.spatial_count();let masks=self.mask_count();
         let width=self.right(vp)-32.;
-        let paired=i<spatial;
-        let column=if paired {i%2}else{0};
-        let offset=if paired {(i/2) as f32*104.}else{spatial.div_ceil(2) as f32*104.+(spatial..i).map(|j|self.field_pitch(j)).sum::<f32>()};
+        let paired=i>=masks&&i<spatial;
+        let column=if paired {(i-masks)%2}else{0};
+        let offset=if i<masks {i as f32*mask_pitch(width)}
+            else if paired {masks as f32*mask_pitch(width)+((i-masks)/2) as f32*104.}
+            else {self.spatial_height(width)+(spatial..i).map(|j|self.field_pitch(j)).sum::<f32>()};
         let w=if paired {(width-12.)/2.}else{width};
         RectPx {
             x: vp.0 - self.right(vp) + 16.0 + column as f32*(w+12.),
             y: r.y + 164.0 + offset - self.scroll,
             w,
-            h: if matches!(self.fields[i].kind,Kind::Spatial{..}){96.}else{36.},
+            h: if i<masks {mask_pitch(width)-8.} else if paired {96.} else {36.},
         }
     }
     pub fn scroll(&mut self, dy: f32, cursor: (f32, f32), vp: (f32, f32)) -> bool {
@@ -3160,7 +3208,7 @@ impl Panel {
             }
             self.scroll = (self.scroll - dy).clamp(
                 0.0,
-                (self.settings_height() - (self.info(vp).y - 210.0)).max(0.0),
+                (self.settings_height(vp) - (self.info(vp).y - 210.0)).max(0.0),
             );
             return true;
         }
@@ -3339,8 +3387,12 @@ impl Panel {
                         return true;
                     }
                     Kind::Spatial{key,crop} => {
-                        if !hit(spatial_button(row),x,y) {return true;}
+                        let autodetect = !*crop && hit(mask_buttons(row)[1],x,y);
+                        let pressed = if *crop { hit(spatial_button(row),x,y) }
+                            else { autodetect || hit(mask_tile(row),x,y) || hit(mask_buttons(row)[0],x,y) };
+                        if !pressed {return true;}
                         if let Some(p) = self.picker.as_mut() { p.message="Add this processor, then choose its spatial inputs.".into(); return true; }
+                        self.editor_autodetect=autodetect;
                         self.editor_request=Some((self.descriptors[self.selected].id.clone(),key.clone(),*crop));return true;
                     }
                     Kind::Unsupported => {
@@ -5239,16 +5291,21 @@ mod tests {
             Field{key:"region".into(),title:"Search Area (Crop)".into(),kind:Kind::Spatial{key:"region".into(),crop:true},default:None,required:false,description:None},
             Field{key:"strength".into(),title:"Strength".into(),kind:Kind::Bool,default:None,required:false,description:None},
         ];
+        p.added=vec![true];
         for width in [720.,900.,1280.] {
             let vp=(width,800.);let a=p.row(0,vp);let b=p.row(1,vp);let next=p.row(2,vp);
-            assert_eq!(a.y,b.y);
-            let left=spatial_button(a);let right=spatial_button(b);
-            assert!(left.x+left.w<=right.x);
-            assert!(right.x+right.w<=width-16.);
-            assert!(left.y+left.h<next.y && right.y+right.h<next.y);
+            // The mask leads at full width: tile, then Paint mask | Autodetect.
+            let tile=mask_tile(a);let [paint,detect]=mask_buttons(a);
+            assert_eq!(tile.w,p.right(vp)-32.);
+            assert!(tile.y+tile.h<paint.y && paint.x+paint.w<detect.x);
+            assert!(detect.x+detect.w<=width-16.+0.01);
+            assert!(paint.y+paint.h<=a.y+a.h && a.y+a.h<b.y,"the crop tile starts below the mask's buttons");
+            let crop=spatial_button(b);
+            assert!(crop.y+crop.h<next.y);
             assert_eq!(next.w,p.right(vp)-32.);
         }
-        assert_eq!(p.settings_rows(),2);
+        assert_eq!(p.settings_rows(),3);
+        assert_eq!(p.mask_count(),1);
     }
     #[test]
     fn spatial_thumbnails_show_mask_coverage_and_region_bounds() {
@@ -5291,6 +5348,20 @@ mod tests {
         let row = p.row(0,(1280.,800.));
         p.click(row.x+10.,row.y+35.,(1280.,800.));
         assert_eq!(p.editor_request.take(),Some(("example.buffered".into(),"mask".into(),false)));
+        assert!(!p.editor_autodetect,"the tile paints");
+        // The two buttons under the tile, and their keys: Paint mask (M)
+        // opens the editor, Autodetect (D) opens it with its panel up.
+        let [paint,detect]=mask_buttons(row);
+        p.click(paint.x+5.,paint.y+5.,(1280.,800.));
+        assert!(p.editor_request.take().is_some() && !p.editor_autodetect);
+        p.click(detect.x+5.,detect.y+5.,(1280.,800.));
+        assert!(p.editor_request.take().is_some() && std::mem::take(&mut p.editor_autodetect));
+        assert!(p.request_mask(true));
+        assert_eq!(p.editor_request.take(),Some(("example.buffered".into(),"mask".into(),false)));
+        assert!(std::mem::take(&mut p.editor_autodetect));
+        p.editing=Some((0,String::new()));
+        assert!(!p.request_mask(false),"typing in a field keeps its keys");
+        p.editing=None;
         p.set_binding("example.buffered".into(),"mask".into(),abner_processor_api::SpatialBinding {mask:Some(Arc::new(vec![255])),..Default::default()});
         assert!(p.missing_mask(0).is_none());
         p.select(0);
@@ -5462,7 +5533,7 @@ mod tests {
         panel.edit_text(crate::text_edit::Edit::SelectAll);panel.text_input("0.25");panel.key(Key::Enter);
         assert_eq!(panel.settings["strength"],json!(0.25));
         assert_eq!(row.h,36.);
-        assert_eq!(panel.settings_height(),132.,"all regular settings share the compact pitch");
+        assert_eq!(panel.settings_height((1280.,800.)),132.,"all regular settings share the compact pitch");
         let i = panel.fields.iter().position(|f| f.key == "mode").unwrap();
         let row = panel.row(i, vp);
         panel.click(row.x + 20.0, row.y + 25.0, vp);
