@@ -1,5 +1,14 @@
 # abner — history
 
+## 2026-11-23 — Faster autodetect maps and bounded 4K whole-frame searches
+
+Context and edge maps now run in parallel with reusable scratch. Long sample
+sets use a histogram for temporal quantiles. The benchmark proposals matched
+pixel-for-pixel for identical sampling. Whole-frame 4K scans that exceed the
+detector memory budget now downsample to find candidates and refine those areas
+at source resolution. [Benchmarks and thin-stroke checks](OPTIMISE.md#parallel-maps-and-4k-whole-frame-scans)
+cover both codecs, Every frame and a 512-sample run.
+
 ## 2026-11-23 — Mask autodetect baseline and faster sampling and analysis
 
 Sparse MP4/MOV sampling reads nearby indexed keyframes where available and fills

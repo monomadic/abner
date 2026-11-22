@@ -56,6 +56,10 @@ Check first that sequential `video_frame` requests continue FilmCraft's running 
 (CLAUDE.md says a forward request in reach does); if not, read through
 `Player::spawn_native` / `take_next_native` as the Process preview does.
 
+The pinned FilmCraft `GopCache` continues through close forward requests, including
+the next sync sample. Its `running_decoder_continues_through_a_nearby_sync_sample`
+test covers that transition. This is the decoder path to use for P1 on long-GOP input.
+
 ### P2. Sparse samples decode half a GOP each
 
 `watermark.rs:254-258`. Each sample is `FrameRequest::full(t + 0.25 frame)`, an exact
@@ -288,3 +292,58 @@ ABNER_DETECT_INPUT=input.mp4 ABNER_DETECT_OUTPUT=mask.png \
 
 Unset `ABNER_DETECT_BOX` for Whole frame and use `ABNER_DETECT_COUNT=all` for
 Every frame. The diagnostic prints per-batch timings and peak RSS on macOS.
+
+## Parallel maps and 4K whole-frame scans
+
+P4 now runs the context grid and opacity and edge calculations in parallel.
+The edge quartile reuses scratch and selects its rank directly. Temporal
+quantiles use a byte histogram above 256 distinct frames. The 13 successful
+cases above and a 512-sample box case produced byte-identical masks before and
+after this change. At 64 samples, 1080p whole-frame analysis went from about
+0.52 s to 0.22 s for H.264 and 0.25 s for ProRes on the same machine.
+
+P3 keeps a native-resolution search whenever it fits the detector memory estimate.
+Larger searches box-average at the finest power-of-two scale that fits. The coarse
+pass scales its radius and component thresholds to match. For large sample sets,
+it can use an evenly spaced subset to retain finer spatial detail. Weaker coarse
+edge evidence can also nominate a window for refinement. Refined windows bound
+the coarse hits within spatial tiles and add native-resolution padding and context.
+Windows share a read of the full requested sample set when they fit in one batch.
+The proposal contains pixels accepted by the native-resolution detector.
+
+| 4K whole-frame case | Coarse scale | Read s | Analyse s | Peak MiB |
+| --- | ---: | ---: | ---: | ---: |
+| H.264, 64 | 2× | 2.74 | 0.51 | 1768 |
+| H.264, All | 2× | 8.22 | 1.17 | 1879 |
+| ProRes, 64 | 2× | 1.99 | 0.49 | 3998 |
+| ProRes, All | 2× | 5.64 | 1.19 | 3931 |
+
+The memory estimate covers detector working data. Peak process RSS also includes
+the full-size decoder and its cache. Every frame still uses three interleaved
+batches on the 192-frame fixtures.
+
+A temporary full-resolution diagnostic with a 4 GiB detector budget gave a
+comparison at 64 samples. Peak RSS was 2800 MiB for H.264 and 4242 MiB for
+ProRes. The coarse-to-fine mask differed from the full-resolution diagnostic by
+47,415 H.264 pixels and 55,571 ProRes pixels elsewhere in the test pattern.
+Both whole-frame paths missed the drawn mark on those fixtures, where
+the small drawn-box path could use the stroke fallback.
+
+For thin-stroke coverage, a 24 s 4K H.264 fixture used a temporally varying gray
+background and three adjacent horizontal marks. At 64 samples, whole-frame
+search matched the native box proposal byte-for-byte, including 243 of 244 pixels
+in the one-pixel stroke. At 512 samples the native box included 241 of those
+pixels. The native box PNGs for both runs are in
+[the reference masks](docs/evidence/autodetect-baseline/). An initial 4× pass
+matched the adjacent strokes but missed a separate fixture containing only the
+one-pixel stroke. The implementation uses a 2× scout with 221 of the 512 samples
+at 4K, followed by native refinement on all 512. With the weaker edge seeds it
+matched the native box for the isolated stroke, covering 242 of 244 pixels.
+
+```sh
+ffmpeg -f lavfi -i 'color=gray:s=192x108:r=24:d=24' \
+  -vf 'noise=alls=75:allf=t+u,scale=3840:2160:flags=bilinear,drawbox=x=102:y=104:w=284:h=2:color=white@0.9:t=fill,drawbox=x=102:y=121:w=180:h=2:color=white@0.9:t=fill,drawbox=x=102:y=145:w=244:h=1:color=white@0.9:t=fill' \
+  -an -c:v libx264 -preset ultrafast -g 96 -keyint_min 96 -sc_threshold 0 fine-moving.mp4
+```
+
+For the isolated-stroke fixture, remove the first two `drawbox` filters.

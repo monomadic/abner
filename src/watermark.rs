@@ -1,11 +1,13 @@
 //! Built-in mask proposals from stationary overlays over changing nearby frames.
 //! Owns a background decoder; never seeks the visible player or writes media.
+mod search;
 mod static_overlay;
 mod stroke_lift;
 use crate::probe::VideoInfo;
 use rayon::prelude::*;
+use search::{DETECTOR_RADIUS, Region, Search};
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -65,12 +67,35 @@ fn temporal_rows<T: Send>(
                     let mut range = 0.;
                     for (channel, level) in median.iter_mut().enumerate() {
                         let at = col * 3 + channel;
-                        for (value, row) in values.iter_mut().zip(rows.iter()) {
-                            *value = row[at];
-                        }
-                        values.sort_unstable();
-                        *level = values[mid] as f32 / 255.;
-                        range += (values[hi] as f32 / 255. - values[lo] as f32 / 255.) / 3.;
+                        let [lower, middle, upper] = if n > 256 {
+                            let mut counts = [0usize; 256];
+                            for row in rows.iter() {
+                                counts[row[at] as usize] += 1;
+                            }
+                            let mut found = [0; 3];
+                            let mut total = 0;
+                            let mut rank = 0;
+                            let ranks = [lo, mid, hi];
+                            for (byte, count) in counts.into_iter().enumerate() {
+                                total += count;
+                                while rank < ranks.len() && ranks[rank] < total {
+                                    found[rank] = byte as u8;
+                                    rank += 1;
+                                }
+                                if rank == ranks.len() {
+                                    break;
+                                }
+                            }
+                            found
+                        } else {
+                            for (value, row) in values.iter_mut().zip(rows.iter()) {
+                                *value = row[at];
+                            }
+                            values.sort_unstable();
+                            [values[lo], values[mid], values[hi]]
+                        };
+                        *level = middle as f32 / 255.;
+                        range += (upper as f32 / 255. - lower as f32 / 255.) / 3.;
                     }
                     write(&mut output, col, median, range);
                 }
@@ -163,9 +188,11 @@ impl Task {
     pub fn status(&self) -> String {
         let n = self.progress.load(Ordering::Relaxed);
         if n <= self.total {
-            format!("Autodetect · reading frames {n}/{}…",self.total)
-        } else {
+            format!("Autodetect · reading frames {n}/{}…", self.total)
+        } else if n == self.total + 1 {
             "Autodetect · analysing static pixels…".into()
+        } else {
+            "Autodetect · refining mask…".into()
         }
     }
     pub fn expired(&self) -> bool {
@@ -187,13 +214,6 @@ impl Task {
         let times = range.samples_count(info.duration, info.fps, samples)?;
         let total=times.len();
         let timeout=Duration::from_secs((total as u64*3).max(180));
-        let context=context_region(region,info.width as usize,info.height as usize);
-        let n=context[2]*context[3];
-        // All-frame scans combine bounded batches spread across the entire range.
-        let batch=if samples.is_none(){64.min(total)}else{total};
-        if n.checked_mul(batch*3+112).is_none_or(|v|v>1536*1024*1024) {
-            return Err("Detection needs more memory: reduce the detection area or frame count".into());
-        }
         let cancel = Arc::new(AtomicBool::new(false));
         let flag = cancel.clone();
         let progress = Arc::new(AtomicUsize::new(0));
@@ -269,19 +289,15 @@ fn detection_region(region: Option<[usize;4]>, w:usize, h:usize) -> Result<[usiz
     if x>=w || y>=h || rw==0 || rh==0 {return Err("The processing region is empty or outside the image".into());}
     Ok([x,y,rw.min(w-x),rh.min(h-y)])
 }
-fn context_region([x,y,w,h]:[usize;4],fw:usize,fh:usize)->[usize;4] {
-    let left=x.saturating_sub(96);let top=y.saturating_sub(96);
-    [left,top,(x+w+96).min(fw)-left,(y+h+96).min(fh)-top]
-}
-
-fn region_mask(w:usize,h:usize,region:[usize;4],opacity:&[f32],confidence:&[f32]) -> Vec<u8> {
-    let [x,y,rw,rh] = region;
-    let mut pixels = vec![0;w*h];
-    for row in 0..rh { for col in 0..rw {
-        let i = row*rw+col;
-        if opacity[i]>=0.35 && confidence[i]>=0.25 {pixels[(y+row)*w+x+col]=255;}
-    }}
-    pixels
+fn mark_region(pixels: &mut [u8], width: usize, [x, y, w, h]: Region, selected: &[bool]) {
+    for (row, flags) in selected.chunks_exact(w).take(h).enumerate() {
+        let start = (y + row) * width + x;
+        for (pixel, &mark) in pixels[start..start + w].iter_mut().zip(flags) {
+            if mark {
+                *pixel = 255;
+            }
+        }
+    }
 }
 
 fn snap_samples(times: &[f64], keyframes: &[f64]) -> Vec<Option<f64>> {
@@ -322,13 +338,11 @@ fn analyze(
     snap_range: Option<Range>,
     cancel: &AtomicBool,
     progress: &AtomicUsize,
-    region: Option<[usize;4]>,
+    region: Option<Region>,
     drawn: bool,
 ) -> Result<Proposal, String> {
     let region = detection_region(region, w as usize, h as usize)?;
-    let context=context_region(region,w as usize,h as usize);
-    let local_region=[region[0]-context[0],region[1]-context[1],region[2],region[3]];
-    let timeout=Duration::from_secs((times.len() as u64*3).max(180));
+    let timeout = Duration::from_secs((times.len() as u64 * 3).max(180));
     let started = Instant::now();
     let check = || {
         if cancel.load(Ordering::Relaxed) || started.elapsed() > timeout {
@@ -338,76 +352,154 @@ fn analyze(
         }
     };
     check()?;
-    let source = crate::fc::open(&path)?;
-    let mut frames = Vec::new();
-    let frame_s = crate::fc::timing(&source).map_or(0., |v| v.0);
     let snapped = snap_range.and_then(|range| {
         let table = crate::fc::SyncTable::for_frame_requests(&path)?;
         Some(snap_samples(times, table.in_range(range.start, range.end)))
     });
-    let mut rgba = Vec::new();
-    for (i, &t) in times.iter().enumerate() {
-        check()?;
-        let request_time = snapped
-            .as_ref()
-            .and_then(|times| times[i])
-            .unwrap_or(t + frame_s * 0.25);
-        let picture = source
-            .video_frame(filmcraft_media::FrameRequest::full(
-                filmcraft_time::Tick::from_seconds_f64(request_time),
-            ))
-            .map_err(|e| format!("Could not read a nearby frame: {e}"))?;
-        if (picture.width, picture.height) != (w, h) {
-            return Err("Sampled frame geometry does not match the mask".into());
-        }
-        crate::fc::fit_rgba_into(&picture, crate::fc::Fit::Exact { w, h }, &mut rgba);
-        let mut rgb=Vec::with_capacity(context[2]*context[3]*3);
-        for y in context[1]..context[1]+context[3] {
-            for x in context[0]..context[0]+context[2] {
-                let at=(y*w as usize+x)*4;rgb.extend_from_slice(&rgba[at..at+3]);
-            }
-        }
-        // Codec frames can leave the informational PTS unset. Use actual pixels
-        // to avoid counting identical decoded observations as independent evidence.
-        if !frames.iter().any(|f: &Frame| f.rgb == rgb) {
-            frames.push(Frame::new(context[2], context[3], rgb)?);
-        }
-        progress.store(i + 1, Ordering::Relaxed);
+    let mut sampling = Sampling {
+        path: &path,
+        size: [w, h],
+        times,
+        snapped,
+        check: &check,
+        #[cfg(test)]
+        read_elapsed: started.elapsed(),
+    };
+    let size = [w as usize, h as usize];
+    let mut search = Search::new(size, region, times.len());
+    let scout_count = search.scout_count(times.len());
+    if scout_count < times.len() {
+        search = Search::new(size, region, scout_count);
     }
-    drop(source);
-    drop(rgba);
-    #[cfg(test)]
-    let read_elapsed = started.elapsed();
-    if frames.len() < 6 {
+    sampling.read(std::slice::from_mut(&mut search), scout_count, Some(progress))?;
+    let mut samples = search.frames.len();
+    if samples < 6 {
         return Err("Too few distinct decoded frames to detect a watermark".into());
     }
-    progress.store(times.len()+1, Ordering::Relaxed);
-    let maps =
-        static_overlay::detect_checked(&frames, local_region, 32, &check)?;
-    check()?;
-    let mut pixels = region_mask(w as usize, h as usize, region, &maps.opacity, &maps.confidence);
-    // A box drawn tightly around an overlay is the user's claim that one is there,
-    // which licenses weaker evidence, including over scenery that never changes.
-    if drawn && !pixels.iter().any(|&p|p>0) && region[2] * region[3] * 4 <= w as usize * h as usize {
-        let strokes = stroke_lift::detect_checked(&frames, local_region, &check)?;
-        // Static-scene evidence is a fallback, never a replacement for a temporal mask.
-        if strokes.iter().any(|s| *s) {
-            pixels.fill(0);
-            for (i, _) in strokes.iter().enumerate().filter(|(_, s)| **s) {
-                pixels[(region[1] + i / region[2]) * w as usize + region[0] + i % region[2]] = 255;
+    progress.store(times.len() + 1, Ordering::Relaxed);
+    let selected = detect_search(&search, &check)?;
+    let mut pixels = vec![0; size[0] * size[1]];
+    if search.scale == 1 {
+        // A tightly drawn box permits weaker evidence, even over stationary scenery.
+        let selected = if drawn
+            && !selected.contains(&true)
+            && region[2] * region[3] <= pixels.len() / 4
+        {
+            stroke_lift::detect_checked(&search.frames, search.local_region(), &check)?
+        } else {
+            selected
+        };
+        mark_region(&mut pixels, size[0], region, &selected);
+    } else {
+        let batches = search.refinements(&selected, size, times.len(), &check)?;
+        #[cfg(test)]
+        eprintln!(
+            "Autodetect coarse scale: {}x, {} samples, {} refinement windows",
+            search.scale,
+            samples,
+            batches.iter().map(Vec::len).sum::<usize>(),
+        );
+        drop(search);
+        if !batches.is_empty() {
+            progress.store(times.len() + 2, Ordering::Relaxed);
+        }
+        for mut batch in batches {
+            sampling.read(&mut batch, times.len(), None)?;
+            for search in batch {
+                if search.frames.len() >= 6 {
+                    samples = samples.max(search.frames.len());
+                    let selected = detect_search(&search, &check)?;
+                    mark_region(&mut pixels, size[0], search.region, &selected);
+                }
             }
         }
     }
+    check()?;
     #[cfg(test)]
     eprintln!(
         "Autodetect batch: read {:.6}s, analyse {:.6}s",
-        read_elapsed.as_secs_f64(),
-        started.elapsed().saturating_sub(read_elapsed).as_secs_f64(),
+        sampling.read_elapsed.as_secs_f64(),
+        started.elapsed().saturating_sub(sampling.read_elapsed).as_secs_f64(),
     );
-    Ok(Proposal {
-        pixels,
-        samples: frames.len(),
-    })
+    Ok(Proposal { pixels, samples })
+}
+
+fn detect_search(search: &Search, check: Check<'_>) -> Result<Vec<bool>, String> {
+    let maps = static_overlay::detect_checked(
+        &search.frames,
+        search.local_region(),
+        DETECTOR_RADIUS,
+        search.scale,
+        check,
+    )?;
+    Ok(maps
+        .opacity
+        .iter()
+        .zip(&maps.confidence)
+        .enumerate()
+        .map(|(i, (&opacity, &confidence))| {
+            (opacity >= 0.35 && confidence >= 0.25)
+                || maps.refine_seeds.get(i) == Some(&true)
+        })
+        .collect())
+}
+
+struct Sampling<'a> {
+    path: &'a Path,
+    size: [u32; 2],
+    times: &'a [f64],
+    snapped: Option<Vec<Option<f64>>>,
+    check: Check<'a>,
+    #[cfg(test)]
+    read_elapsed: Duration,
+}
+
+impl Sampling<'_> {
+    fn read(
+        &mut self,
+        searches: &mut [Search],
+        count: usize,
+        progress: Option<&AtomicUsize>,
+    ) -> Result<(), String> {
+        #[cfg(test)]
+        let started = Instant::now();
+        (self.check)()?;
+        let source = crate::fc::open(self.path)?;
+        let frame_s = crate::fc::timing(&source).map_or(0., |v| v.0);
+        let [w, h] = self.size;
+        let mut rgba = Vec::new();
+        for sample in 0..count {
+            (self.check)()?;
+            let i = sample * (self.times.len() - 1) / (count - 1);
+            let t = self.times[i];
+            let request_time = self.snapped
+                .as_ref()
+                .and_then(|times| times[i])
+                .unwrap_or(t + frame_s * 0.25);
+            let picture = source
+                .video_frame(filmcraft_media::FrameRequest::full(
+                    filmcraft_time::Tick::from_seconds_f64(request_time),
+                ))
+                .map_err(|e| format!("Could not read a nearby frame: {e}"))?;
+            if (picture.width, picture.height) != (w, h) {
+                return Err("Sampled frame geometry does not match the mask".into());
+            }
+            crate::fc::fit_rgba_into(&picture, crate::fc::Fit::Exact { w, h }, &mut rgba);
+            for search in searches.iter_mut() {
+                search.add(&rgba, w as usize)?;
+            }
+            if let Some(progress) = progress {
+                progress.store(sample + 1, Ordering::Relaxed);
+            }
+        }
+        drop(source);
+        drop(rgba);
+        #[cfg(test)]
+        {
+            self.read_elapsed += started.elapsed();
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -451,7 +543,8 @@ mod tests {
     fn region_detection_only_marks_pixels_inside_the_processing_region() {
         let region = detection_region(Some([3,2,99,2]),8,6).unwrap();
         assert_eq!(region,[3,2,5,2]);
-        let pixels = region_mask(8,6,region,&[1.; 10],&[1.; 10]);
+        let mut pixels = vec![0; 8 * 6];
+        mark_region(&mut pixels, 8, region, &[true; 10]);
         for y in 0..6 { for x in 0..8 {
             assert_eq!(pixels[y*8+x],if (2..4).contains(&y) && x>=3 {255}else{0});
         }}

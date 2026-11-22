@@ -7,17 +7,19 @@ pub(super) struct Maps {
     pub confidence: Vec<f32>,
     pub edge: Vec<f32>,
     pub variation: Vec<f32>,
+    pub refine_seeds: Vec<bool>,
 }
 
 #[cfg(test)]
 fn detect(frames: &[Frame], region: [usize; 4], radius: usize) -> Maps {
-    detect_checked(frames, region, radius, &|| Ok(())).unwrap()
+    detect_checked(frames, region, radius, 1, &|| Ok(())).unwrap()
 }
 
 pub(super) fn detect_checked(
     frames: &[Frame],
     region: [usize; 4],
     radius: usize,
+    scale: usize,
     checkpoint: Check<'_>,
 ) -> Result<Maps, String> {
     checkpoint()?;
@@ -25,7 +27,13 @@ pub(super) fn detect_checked(
     let fw = frames[0].width;
     let fh = frames[0].height;
     // Include a halo of unselected pixels so tightly drawn boxes have clean context.
+    let radius = radius.div_ceil(scale);
     let halo = radius * 3;
+    let min_component = (radius * radius / 32).max(12usize.div_ceil(scale * scale));
+    let min_seeds = 3usize.div_ceil(scale);
+    let full_seeds = 6usize.div_ceil(scale) as f32;
+    let edge_offset = (2 / scale).max(1);
+    let band_reach = (radius / 3).max(4usize.div_ceil(scale)) as u32;
     let x0 = ox.saturating_sub(halo);
     let y0 = oy.saturating_sub(halo);
     let x1 = (ox + w + halo).min(fw);
@@ -57,36 +65,42 @@ pub(super) fn detect_checked(
     let (gw, gh) = ((cw - 1) / G + 2, (ch - 1) / G + 2);
     let mut local_grid = vec![0f32; gw * gh];
     let mut outer_grid = vec![0f32; gw * gh];
-    let mut context = Vec::new();
-    let mut ring = Vec::new();
-    for gy in 0..gh {
-        checkpoint()?;
-        for gx in 0..gw {
-            let (cx, cy) = ((gx * G).min(cw - 1), (gy * G).min(ch - 1));
-            context.clear();
-            for yy in (cy.saturating_sub(radius)..=(cy + radius).min(ch - 1)).step_by(4) {
-                for xx in (cx.saturating_sub(radius)..=(cx + radius).min(cw - 1)).step_by(4) {
-                    if !bar[yy * cw + xx] { context.push(ranges[yy * cw + xx]); }
-                }
-            }
-            ring.clear();
-            for yy in (cy.saturating_sub(halo)..=(cy + halo).min(ch - 1)).step_by(8) {
-                for xx in (cx.saturating_sub(halo)..=(cx + halo).min(cw - 1)).step_by(8) {
-                    if (xx.abs_diff(cx) > radius || yy.abs_diff(cy) > radius) && !bar[yy * cw + xx] {
-                        ring.push(ranges[yy * cw + xx]);
+    local_grid
+        .par_chunks_mut(gw)
+        .zip(outer_grid.par_chunks_mut(gw))
+        .enumerate()
+        .try_for_each_init(
+            || (Vec::new(), Vec::new()),
+            |(context, ring), (gy, (local, outer))| {
+                checkpoint()?;
+                for gx in 0..gw {
+                    let (cx, cy) = ((gx * G).min(cw - 1), (gy * G).min(ch - 1));
+                    context.clear();
+                    for yy in (cy.saturating_sub(radius)..=(cy + radius).min(ch - 1)).step_by(4) {
+                        for xx in (cx.saturating_sub(radius)..=(cx + radius).min(cw - 1)).step_by(4) {
+                            if !bar[yy * cw + xx] { context.push(ranges[yy * cw + xx]); }
+                        }
+                    }
+                    ring.clear();
+                    for yy in (cy.saturating_sub(halo)..=(cy + halo).min(ch - 1)).step_by(8) {
+                        for xx in (cx.saturating_sub(halo)..=(cx + halo).min(cw - 1)).step_by(8) {
+                            if (xx.abs_diff(cx) > radius || yy.abs_diff(cy) > radius) && !bar[yy * cw + xx] {
+                                ring.push(ranges[yy * cw + xx]);
+                            }
+                        }
+                    }
+                    if !context.is_empty() {
+                        let k = context.len() * 3 / 4;
+                        local[gx] = *context.select_nth_unstable_by(k, f32::total_cmp).1;
+                    }
+                    if !ring.is_empty() {
+                        let k = ring.len() / 2;
+                        outer[gx] = *ring.select_nth_unstable_by(k, f32::total_cmp).1;
                     }
                 }
-            }
-            if !context.is_empty() {
-                let k = context.len() * 3 / 4;
-                local_grid[gy * gw + gx] = *context.select_nth_unstable_by(k, f32::total_cmp).1;
-            }
-            if !ring.is_empty() {
-                let k = ring.len() / 2;
-                outer_grid[gy * gw + gx] = *ring.select_nth_unstable_by(k, f32::total_cmp).1;
-            }
-        }
-    }
+                Ok::<(), String>(())
+            },
+        )?;
     let lerp = |grid: &[f32], cx: usize, cy: usize| {
         let (gx, gy) = (cx / G, cy / G);
         let (tx, ty) = ((cx % G) as f32 / G as f32, (cy % G) as f32 / G as f32);
@@ -99,76 +113,97 @@ pub(super) fn detect_checked(
         confidence: vec![0.; w * h],
         edge: vec![0.; w * h],
         variation: vec![0.; w * h],
+        refine_seeds: Vec::new(),
     };
     let mut wider_opacity = vec![0.; w * h];
     let mut wider_variation = vec![0.; w * h];
-    for y in 0..h {
-        checkpoint()?;
-        for x in 0..w {
-            let px = ox + x;
-            let py = oy + y;
-            let cx = px - x0;
-            let cy = py - y0;
-            if bar[cy * cw + cx] { continue; }
-            let local_reference = lerp(&local_grid, cx, cy);
-            let outer_reference = lerp(&outer_grid, cx, cy);
-            let reference = local_reference.max(outer_reference);
-            let spread = ranges[cy * cw + cx];
-            let p = y * w + x;
-            wider_opacity[p] = if reference >= 0.06 {
-                (1. - spread / reference).clamp(0., 1.)
-            } else {
-                0.
-            };
-            wider_variation[p] = reference;
-            maps.variation[p] = local_reference;
-            if local_reference < 0.06 {
-                continue;
-            }
-            maps.opacity[p] = (1. - spread / local_reference).clamp(0., 1.);
-            // Repeated signed RGB differences distinguish a persistent boundary from
-            // edges passing through a pixel. Test both axes; avoid luminance-only failure on colored logos.
-            let mut coherence = 0f32;
-            for (dx, dy) in [(2usize, 0usize), (0, 2)] {
-                let ax = px.saturating_sub(dx).max(x0);
-                let ay = py.saturating_sub(dy).max(y0);
-                let bx = (px + dx).min(x1 - 1);
-                let by = (py + dy).min(y1 - 1);
-                // A gray overlay reverses contrast over light versus dark scenery.
-                // Require strong temporal attenuation as well as an edge present in
-                // at least three quarters of the observations; sign alone is not evidence.
-                if maps.opacity[p] >= 0.55 {
-                    let mut magnitudes: Vec<f32> = frames.iter().map(|f| {
-                        let a = f.pixel(ax, ay);
-                        let b = f.pixel(bx, by);
-                        (0..3).map(|c| (b[c] - a[c]).powi(2)).sum::<f32>().sqrt()
-                    }).collect();
-                    magnitudes.sort_by(f32::total_cmp);
-                    let persistent = magnitudes[magnitudes.len() / 4];
-                    coherence = coherence.max((persistent / 0.08).clamp(0., 1.));
+    (
+        maps.opacity.par_chunks_mut(w),
+        maps.variation.par_chunks_mut(w),
+        maps.edge.par_chunks_mut(w),
+        wider_opacity.par_chunks_mut(w),
+        wider_variation.par_chunks_mut(w),
+    )
+        .into_par_iter()
+        .enumerate()
+        .try_for_each_init(
+            || Vec::with_capacity(frames.len()),
+            |magnitudes, (y, (opacity, variation, edge, wider_opacity, wider_variation))| {
+                checkpoint()?;
+                for x in 0..w {
+                    let px = ox + x;
+                    let py = oy + y;
+                    let cx = px - x0;
+                    let cy = py - y0;
+                    if bar[cy * cw + cx] { continue; }
+                    let local_reference = lerp(&local_grid, cx, cy);
+                    let outer_reference = lerp(&outer_grid, cx, cy);
+                    let reference = local_reference.max(outer_reference);
+                    let spread = ranges[cy * cw + cx];
+                    wider_opacity[x] = if reference >= 0.06 {
+                        (1. - spread / reference).clamp(0., 1.)
+                    } else {
+                        0.
+                    };
+                    wider_variation[x] = reference;
+                    variation[x] = local_reference;
+                    if local_reference < 0.06 {
+                        continue;
+                    }
+                    opacity[x] = (1. - spread / local_reference).clamp(0., 1.);
+                    // Repeated signed RGB differences distinguish a persistent boundary from
+                    // edges passing through a pixel. Test both axes; avoid luminance-only failure on colored logos.
+                    let mut coherence = 0f32;
+                    for (dx, dy) in [(edge_offset, 0), (0, edge_offset)] {
+                        let ax = px.saturating_sub(dx).max(x0);
+                        let ay = py.saturating_sub(dy).max(y0);
+                        let bx = (px + dx).min(x1 - 1);
+                        let by = (py + dy).min(y1 - 1);
+                        // A gray overlay reverses contrast over light versus dark scenery.
+                        // Require strong temporal attenuation as well as an edge present in
+                        // at least three quarters of the observations; sign alone is not evidence.
+                        if opacity[x] >= 0.55 {
+                            magnitudes.clear();
+                            magnitudes.extend(frames.iter().map(|f| {
+                                let a = f.pixel(ax, ay);
+                                let b = f.pixel(bx, by);
+                                (0..3).map(|c| (b[c] - a[c]).powi(2)).sum::<f32>().sqrt()
+                            }));
+                            let quartile = magnitudes.len() / 4;
+                            let persistent = *magnitudes.select_nth_unstable_by(quartile, f32::total_cmp).1;
+                            coherence = coherence.max((persistent / 0.08).clamp(0., 1.));
+                        }
+                        let a = medians[(ay - y0) * cw + ax - x0];
+                        let b = medians[(by - y0) * cw + bx - x0];
+                        let direction: [f32; 3] = std::array::from_fn(|c| b[c] - a[c]);
+                        let norm = direction.iter().map(|v| v * v).sum::<f32>().sqrt();
+                        if norm < 0.04 {
+                            continue;
+                        }
+                        let consistent = frames
+                            .iter()
+                            .filter(|f| {
+                                let a = f.pixel(ax, ay);
+                                let b = f.pixel(bx, by);
+                                let dot = (0..3).map(|c| (b[c] - a[c]) * direction[c]).sum::<f32>() / norm;
+                                dot > 0.025
+                            })
+                            .count() as f32
+                            / frames.len() as f32;
+                        coherence = coherence
+                            .max(((consistent - 0.65) / 0.35).clamp(0., 1.) * (norm / 0.12).min(1.));
+                    }
+                    edge[x] = coherence;
                 }
-                let a = medians[(ay - y0) * cw + ax - x0];
-                let b = medians[(by - y0) * cw + bx - x0];
-                let direction: [f32; 3] = std::array::from_fn(|c| b[c] - a[c]);
-                let norm = direction.iter().map(|v| v * v).sum::<f32>().sqrt();
-                if norm < 0.04 {
-                    continue;
-                }
-                let consistent = frames
-                    .iter()
-                    .filter(|f| {
-                        let a = f.pixel(ax, ay);
-                        let b = f.pixel(bx, by);
-                        let dot = (0..3).map(|c| (b[c] - a[c]) * direction[c]).sum::<f32>() / norm;
-                        dot > 0.025
-                    })
-                    .count() as f32
-                    / frames.len() as f32;
-                coherence = coherence
-                    .max(((consistent - 0.65) / 0.35).clamp(0., 1.) * (norm / 0.12).min(1.));
-            }
-            maps.edge[p] = coherence;
-        }
+                Ok::<(), String>(())
+            },
+        )?;
+    if scale > 1 {
+        // Averaging across a thin stroke weakens its opacity and can break its
+        // coarse component. Persistent edges can still guide native refinement.
+        maps.refine_seeds = (0..w * h)
+            .map(|p| maps.opacity[p] >= 0.18 && maps.edge[p] > 0.85)
+            .collect();
     }
     // Use wider context only for enclosed interiors, not open background.
     // A one-pixel closing seals sampling gaps in a persistent outline. Actual
@@ -272,10 +307,9 @@ pub(super) fn detect_checked(
                 }
             }
         }
-        let edge_evidence = (seeds as f32 / 6.).min(1.);
+        let edge_evidence = (seeds as f32 / full_seeds).min(1.);
         // An overlay is an island: the band around it must be mostly changing scenery.
         // Stationary scenery beside motion, and anything hugging a bar, is not.
-        let reach = (radius / 3).max(4) as u32;
         stamp_id += 1;
         let mut frontier: Vec<(usize, u32)> = component
             .iter()
@@ -286,7 +320,7 @@ pub(super) fn detect_checked(
         while at < frontier.len() {
             let (q, d) = frontier[at];
             at += 1;
-            if d == reach { continue; }
+            if d == band_reach { continue; }
             let (qx, qy) = (q % cw, q / cw);
             for n in [
                 if qx > 0 { Some(q - 1) } else { None },
@@ -305,7 +339,7 @@ pub(super) fn detect_checked(
             }
         }
         let surrounded = band > 0 && moving as f32 >= band as f32 * 0.7;
-        if component.len() < (radius * radius / 32).max(12) || seeds < 3 || !surrounded {
+        if component.len() < min_component || seeds < min_seeds || !surrounded {
             for p in component {
                 maps.opacity[p] = 0.;
             }
@@ -355,7 +389,7 @@ pub(super) fn detect_checked(
                 }
             }
         }
-        if component.len() < (radius * radius / 32).max(12) {
+        if component.len() < min_component {
             for p in component {
                 maps.confidence[p] = 0.;
             }
