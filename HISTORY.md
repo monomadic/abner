@@ -1,5 +1,14 @@
 # abner — history
 
+## 2026-11-23 — Every frame autodetect decodes once
+
+The worker scans forward through the selected range with one source and keeps
+up to 64 diverse native pictures. It pools those pictures for detection and
+reuses them for any full-resolution refinement. A 36 s long-GOP box scan fell
+from 26.38 s to 1.55 s and a 24 s 4K whole-frame scan fell from 135.83 s to
+7.70 s. [Benchmarks and mask comparisons](OPTIMISE.md#one-pass-every-frame)
+record decoder input, memory, and thin-stroke coverage.
+
 ## 2026-11-23 — Faster autodetect maps and bounded 4K whole-frame searches
 
 Context and edge maps now run in parallel with reusable scratch. Long sample

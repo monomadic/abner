@@ -2,7 +2,7 @@
 use super::{Check, Frame};
 use rayon::prelude::*;
 
-const DETECTOR_BUDGET: usize = 1536 * 1024 * 1024;
+pub(super) const DETECTOR_BUDGET: usize = 1536 * 1024 * 1024;
 pub(super) const DETECTOR_RADIUS: usize = 32;
 const HALO: usize = DETECTOR_RADIUS * 3;
 const REFINE_PAD: usize = 24;
@@ -17,26 +17,29 @@ pub(super) struct Search {
 }
 
 impl Search {
-    pub fn new([w, h]: [usize; 2], region: Region, samples: usize) -> Self {
+    pub fn new(size: [usize; 2], region: Region, samples: usize, budget: usize) -> Self {
+        let mut search = Self {
+            region,
+            frames: Vec::new(),
+            context: Self::context(size, region),
+            scale: 1,
+        };
+        while search.bytes(samples) > budget {
+            search.scale *= 2;
+        }
+        search
+    }
+
+    pub fn context([w, h]: [usize; 2], region: Region) -> Region {
         let [x, y, rw, rh] = region;
         let left = x.saturating_sub(HALO);
         let top = y.saturating_sub(HALO);
-        let context = [
+        [
             left,
             top,
             (x + rw + HALO).min(w) - left,
             (y + rh + HALO).min(h) - top,
-        ];
-        let mut search = Self {
-            region,
-            frames: Vec::new(),
-            context,
-            scale: 1,
-        };
-        while search.bytes(samples) > DETECTOR_BUDGET {
-            search.scale *= 2;
-        }
-        search
+        ]
     }
 
     fn bytes(&self, samples: usize) -> usize {
@@ -53,13 +56,13 @@ impl Search {
 
     /// Prefer a finer scout for large sample sets. The native refinement still
     /// gets the whole set, including the frames omitted from this pass.
-    pub fn scout_count(&self, samples: usize) -> usize {
+    pub fn scout_count(&self, samples: usize, budget: usize) -> usize {
         if self.scale <= 2 {
             return samples;
         }
         let [_, _, w, h] = self.context;
         let half_area = w.div_ceil(2).saturating_mul(h.div_ceil(2));
-        let affordable = (DETECTOR_BUDGET / half_area).saturating_sub(112) / 3;
+        let affordable = (budget / half_area).saturating_sub(112) / 3;
         affordable.max(16).min(samples)
     }
 
@@ -77,8 +80,9 @@ impl Search {
         ]
     }
 
-    pub fn add(&mut self, rgba: &[u8], stride: usize) -> Result<(), String> {
+    pub fn add(&mut self, rgba: &[u8], stride: usize, origin: [usize; 2]) -> Result<(), String> {
         let [x, y, width, height] = self.context;
+        let (x, y) = (x - origin[0], y - origin[1]);
         let [w, h] = self.sample_size();
         let mut rgb = Vec::with_capacity(w * h * 3);
         if self.scale == 1 {
@@ -130,11 +134,12 @@ impl Search {
         selected: &[bool],
         size: [usize; 2],
         samples: usize,
+        budget: usize,
         check: Check<'_>,
     ) -> Result<Vec<Vec<Self>>, String> {
         let [x, y, w, h] = self.region;
         // Reserve the padding on both sides and room for one coarse pixel straddling a tile edge.
-        let side = (DETECTOR_BUDGET / (samples * 3 + 112)).isqrt();
+        let side = (budget / (samples * 3 + 112)).isqrt();
         let tile = side
             .saturating_sub(2 * (HALO + REFINE_PAD) + self.scale)
             .min(1024);
@@ -171,10 +176,15 @@ impl Search {
             let top = top.saturating_sub(REFINE_PAD).max(y);
             let right = (right + REFINE_PAD).min(x + w);
             let bottom = (bottom + REFINE_PAD).min(y + h);
-            let search = Self::new(size, [left, top, right - left, bottom - top], samples);
+            let search = Self::new(
+                size,
+                [left, top, right - left, bottom - top],
+                samples,
+                budget,
+            );
             debug_assert_eq!(search.scale, 1);
             let cost = search.bytes(samples);
-            if bytes + cost > DETECTOR_BUDGET {
+            if bytes + cost > budget {
                 batches.push(std::mem::take(&mut batch));
                 bytes = 0;
             }
@@ -196,18 +206,21 @@ mod tests {
     fn large_searches_fit_the_budget_and_refine_at_native_resolution() {
         let size = [3840, 2160];
         let region = [1, 1, size[0] - 2, size[1] - 2];
-        assert_eq!(Search::new(size, region, 16).scale, 1);
-        assert_eq!(Search::new(size, region, 64).scale, 2);
-        let search = Search::new(size, region, 512);
+        assert_eq!(Search::new(size, region, 16, DETECTOR_BUDGET).scale, 1);
+        assert_eq!(Search::new(size, region, 64, DETECTOR_BUDGET).scale, 2);
+        let search = Search::new(size, region, 512, DETECTOR_BUDGET);
         assert_eq!(search.scale, 4);
         assert!(search.bytes(512) <= DETECTOR_BUDGET);
-        let scout_count = search.scout_count(512);
+        let scout_count = search.scout_count(512, DETECTOR_BUDGET);
         assert!((16..512).contains(&scout_count));
-        assert_eq!(Search::new(size, region, scout_count).scale, 2);
+        assert_eq!(
+            Search::new(size, region, scout_count, DETECTOR_BUDGET).scale,
+            2
+        );
         let [_, _, w, h] = search.local_region();
         let selected = vec![true; w * h];
         let batches = search
-            .refinements(&selected, size, 512, &|| Ok(()))
+            .refinements(&selected, size, 512, DETECTOR_BUDGET, &|| Ok(()))
             .unwrap();
         assert!(batches.len() > 1);
         for batch in &batches {

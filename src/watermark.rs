@@ -1,12 +1,16 @@
 //! Built-in mask proposals from stationary overlays over changing nearby frames.
 //! Owns a background decoder; never seeks the visible player or writes media.
+mod reservoir;
 mod search;
 mod static_overlay;
 mod stroke_lift;
 use crate::probe::VideoInfo;
+use filmcraft_frame::VideoFrame;
 use rayon::prelude::*;
-use search::{DETECTOR_RADIUS, Region, Search};
+use reservoir::Reservoir;
+use search::{DETECTOR_BUDGET, DETECTOR_RADIUS, Region, Search};
 use std::{
+    borrow::Borrow,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -114,21 +118,61 @@ impl Range {
         self.samples_count(duration,fps,Some(64))
     }
     /// None means every frame in the selected range, not an unlimited sample cap.
-    pub fn samples_count(self,duration:f64,fps:f64,count:Option<usize>)->Result<Vec<f64>,String> {
-        if !duration.is_finite() || !fps.is_finite() || duration<=0. || fps<=0. || !self.start.is_finite() || !self.end.is_finite() || self.start<0. || self.end>duration || self.start>=self.end {return Err("Select a valid detection range inside the clip".into());}
-        let first=(self.start*fps-1e-7).ceil().max(0.) as usize;
-        let last=((self.end*fps+1e-7).floor() as usize).min((duration*fps-1e-7).ceil() as usize-1);
-        let available=last.saturating_sub(first)+1;
-        let n=count.unwrap_or(available).min(available);
-        if n<6 || last<first {return Err("Select at least six distinct frames for detection".into());}
-        if n>10_000_000 {return Err("Select a shorter detection range".into());}
-        let times=(0..n).map(|i|(first+i*(last-first)/(n-1)) as f64/fps).collect();
-        Ok(times)
+    pub fn samples_count(
+        self,
+        duration: f64,
+        fps: f64,
+        count: Option<usize>,
+    ) -> Result<Vec<f64>, String> {
+        let plan = self.sample_plan(duration, fps, count)?;
+        Ok((0..plan.count).map(|i| plan.at(i)).collect())
+    }
+
+    fn sample_plan(self, duration: f64, fps: f64, count: Option<usize>) -> Result<SamplePlan, String> {
+        if !duration.is_finite()
+            || !fps.is_finite()
+            || duration <= 0.
+            || fps <= 0.
+            || !self.start.is_finite()
+            || !self.end.is_finite()
+            || self.start < 0.
+            || self.end > duration
+            || self.start >= self.end
+        {
+            return Err("Select a valid detection range inside the clip".into());
+        }
+        let first = (self.start * fps - 1e-7).ceil().max(0.) as usize;
+        let last = ((self.end * fps + 1e-7).floor() as usize)
+            .min(((duration * fps - 1e-7).ceil() as usize).saturating_sub(1));
+        let available = last.saturating_sub(first).saturating_add(1);
+        let count = count.unwrap_or(available).min(available);
+        if count < 6 || last < first {
+            return Err("Select at least six distinct frames for detection".into());
+        }
+        if count > 10_000_000 {
+            return Err("Select a shorter detection range".into());
+        }
+        Ok(SamplePlan { first, last, count, fps })
     }
     pub fn set_edge(&mut self,end:bool,at:f64,duration:f64,fps:f64) {
         let minimum=(6./fps.max(1.)).min(duration);
         let t=(at*fps.max(1.)).round()/fps.max(1.);
         if end {self.end=t.clamp((self.start+minimum).min(duration),duration);}else{self.start=t.clamp(0.,(self.end-minimum).max(0.));}
+    }
+}
+
+/// The detection frame grid. Every frame advances it without allocating a time per frame.
+struct SamplePlan {
+    first: usize,
+    last: usize,
+    count: usize,
+    fps: f64,
+}
+
+impl SamplePlan {
+    fn at(&self, i: usize) -> f64 {
+        let offset = (i as u128 * (self.last - self.first) as u128 / (self.count - 1) as u128) as usize;
+        (self.first + offset) as f64 / self.fps
     }
 }
 
@@ -211,8 +255,8 @@ impl Task {
         samples: Option<usize>,
     ) -> Result<Self, String> {
         let region = detection_region(region, info.width as usize, info.height as usize)?;
-        let times = range.samples_count(info.duration, info.fps, samples)?;
-        let total=times.len();
+        let plan = range.sample_plan(info.duration, info.fps, samples)?;
+        let total = plan.count;
         let timeout=Duration::from_secs((total as u64*3).max(180));
         let cancel = Arc::new(AtomicBool::new(false));
         let flag = cancel.clone();
@@ -224,43 +268,17 @@ impl Task {
             .spawn(move || {
                 let result = filmcraft_media::cancel::with_cancel(&flag, || {
                     filmcraft_media::cancel::with_background(true, || {
-                        if samples.is_some() || total<=64 {
-                            analyze(
-                                info.path,
-                                info.width,
-                                info.height,
-                                &times,
-                                samples.map(|_| range),
-                                &flag,
-                                &count,
-                                Some(region),
-                                drawn,
-                            )
-                        } else {
-                            let groups=total.div_ceil(64);
-                            let mut votes=vec![0usize;info.width as usize*info.height as usize];
-                            let mut used=0;
-                            for group in 0..groups {
-                                if flag.load(Ordering::Relaxed) {return Err("Watermark detection stopped".into());}
-                                let batch:Vec<_>=times.iter().skip(group).step_by(groups).copied().collect();
-                                let local=AtomicUsize::new(0);
-                                let proposal = analyze(
-                                    info.path.clone(),
-                                    info.width,
-                                    info.height,
-                                    &batch,
-                                    None,
-                                    &flag,
-                                    &local,
-                                    Some(region),
-                                    drawn,
-                                )?;
-                                for (vote,pixel) in votes.iter_mut().zip(proposal.pixels) {if pixel>0 {*vote+=1;}}
-                                used+=proposal.samples;
-                                count.store(((group+1)*total/groups).min(total),Ordering::Relaxed);
-                            }
-                            Ok(Proposal{pixels:votes.into_iter().map(|n|if n*5>=groups*3 {255}else{0}).collect(),samples:used})
-                        }
+                        analyze(
+                            info.path,
+                            info.width,
+                            info.height,
+                            plan,
+                            samples.map(|_| range),
+                            &flag,
+                            &count,
+                            Some(region),
+                            drawn,
+                        )
                     })
                 });
                 let _ = sender.send(result);
@@ -334,15 +352,16 @@ fn analyze(
     path: PathBuf,
     w: u32,
     h: u32,
-    times: &[f64],
-    snap_range: Option<Range>,
+    plan: SamplePlan,
+    sparse_range: Option<Range>,
     cancel: &AtomicBool,
     progress: &AtomicUsize,
     region: Option<Region>,
     drawn: bool,
 ) -> Result<Proposal, String> {
     let region = detection_region(region, w as usize, h as usize)?;
-    let timeout = Duration::from_secs((times.len() as u64 * 3).max(180));
+    let total = plan.count;
+    let timeout = Duration::from_secs((total as u64 * 3).max(180));
     let started = Instant::now();
     let check = || {
         if cancel.load(Ordering::Relaxed) || started.elapsed() > timeout {
@@ -352,31 +371,59 @@ fn analyze(
         }
     };
     check()?;
-    let snapped = snap_range.and_then(|range| {
+    let snapped = sparse_range.and_then(|range| {
         let table = crate::fc::SyncTable::for_frame_requests(&path)?;
-        Some(snap_samples(times, table.in_range(range.start, range.end)))
+        let times: Vec<_> = (0..total).map(|i| plan.at(i)).collect();
+        Some(snap_samples(&times, table.in_range(range.start, range.end)))
     });
     let mut sampling = Sampling {
         path: &path,
         size: [w, h],
-        times,
+        plan,
         snapped,
         check: &check,
         #[cfg(test)]
         read_elapsed: started.elapsed(),
     };
     let size = [w as usize, h as usize];
-    let mut search = Search::new(size, region, times.len());
-    let scout_count = search.scout_count(times.len());
-    if scout_count < times.len() {
-        search = Search::new(size, region, scout_count);
+    let mut retained = if sparse_range.is_none() {
+        let mut retained = Reservoir::new(region, Search::context(size, region), DETECTOR_BUDGET / 2);
+        sampling.scan(total, |i, picture| {
+            retained.consider(i, picture);
+            progress.store(i + 1, Ordering::Relaxed);
+            Ok(())
+        })?;
+        retained.finish();
+        if retained.len() < 6 {
+            return Err("Too few distinct decoded frames to detect a watermark".into());
+        }
+        progress.store(total + 1, Ordering::Relaxed);
+        Some(retained)
+    } else {
+        None
+    };
+    let count = retained.as_ref().map_or(total, Reservoir::len);
+    let budget = DETECTOR_BUDGET - retained.as_ref().map_or(0, Reservoir::bytes);
+    let mut search = Search::new(size, region, count, budget);
+    let scout_count = search.scout_count(count, budget);
+    if scout_count < count {
+        search = Search::new(size, region, scout_count, budget);
     }
-    sampling.read(std::slice::from_mut(&mut search), scout_count, Some(progress))?;
+    let can_consume = search.scale == 1 && scout_count == count;
+    let base = std::slice::from_mut(&mut search);
+    if can_consume && let Some(retained) = retained.take() {
+        // Native analysis needs these pictures only once. Release each as it is converted.
+        sampling.read_retained(base, retained.origin(), retained.into_pictures())?;
+    } else if let Some(retained) = &retained {
+        sampling.read_retained(base, retained.origin(), retained.pictures(scout_count))?;
+    } else {
+        sampling.read(base, scout_count, Some(progress))?;
+    }
     let mut samples = search.frames.len();
     if samples < 6 {
         return Err("Too few distinct decoded frames to detect a watermark".into());
     }
-    progress.store(times.len() + 1, Ordering::Relaxed);
+    progress.store(total + 1, Ordering::Relaxed);
     let selected = detect_search(&search, &check)?;
     let mut pixels = vec![0; size[0] * size[1]];
     if search.scale == 1 {
@@ -391,7 +438,7 @@ fn analyze(
         };
         mark_region(&mut pixels, size[0], region, &selected);
     } else {
-        let batches = search.refinements(&selected, size, times.len(), &check)?;
+        let batches = search.refinements(&selected, size, count, budget, &check)?;
         #[cfg(test)]
         eprintln!(
             "Autodetect coarse scale: {}x, {} samples, {} refinement windows",
@@ -401,10 +448,14 @@ fn analyze(
         );
         drop(search);
         if !batches.is_empty() {
-            progress.store(times.len() + 2, Ordering::Relaxed);
+            progress.store(total + 2, Ordering::Relaxed);
         }
         for mut batch in batches {
-            sampling.read(&mut batch, times.len(), None)?;
+            if let Some(retained) = &retained {
+                sampling.read_retained(&mut batch, retained.origin(), retained.pictures(count))?;
+            } else {
+                sampling.read(&mut batch, count, None)?;
+            }
             for search in batch {
                 if search.frames.len() >= 6 {
                     samples = samples.max(search.frames.len());
@@ -447,7 +498,7 @@ fn detect_search(search: &Search, check: Check<'_>) -> Result<Vec<bool>, String>
 struct Sampling<'a> {
     path: &'a Path,
     size: [u32; 2],
-    times: &'a [f64],
+    plan: SamplePlan,
     snapped: Option<Vec<Option<f64>>>,
     check: Check<'a>,
     #[cfg(test)]
@@ -461,17 +512,64 @@ impl Sampling<'_> {
         count: usize,
         progress: Option<&AtomicUsize>,
     ) -> Result<(), String> {
+        let mut rgba = Vec::new();
+        self.scan(count, |i, picture| {
+            Self::prepare(&picture, &mut rgba, searches, [0, 0])?;
+            if let Some(progress) = progress {
+                progress.store(i + 1, Ordering::Relaxed);
+            }
+            Ok(())
+        })
+    }
+
+    fn read_retained(
+        &mut self,
+        searches: &mut [Search],
+        origin: [usize; 2],
+        pictures: impl Iterator<Item = impl Borrow<VideoFrame>>,
+    ) -> Result<(), String> {
+        #[cfg(test)]
+        let started = Instant::now();
+        let mut rgba = Vec::new();
+        for picture in pictures {
+            (self.check)()?;
+            Self::prepare(picture.borrow(), &mut rgba, searches, origin)?;
+        }
+        #[cfg(test)]
+        {
+            self.read_elapsed += started.elapsed();
+        }
+        Ok(())
+    }
+
+    fn prepare(
+        picture: &VideoFrame,
+        rgba: &mut Vec<u8>,
+        searches: &mut [Search],
+        origin: [usize; 2],
+    ) -> Result<(), String> {
+        let (w, h) = (picture.width, picture.height);
+        crate::fc::fit_rgba_into(picture, crate::fc::Fit::Exact { w, h }, rgba);
+        for search in searches {
+            search.add(rgba, w as usize, origin)?;
+        }
+        Ok(())
+    }
+
+    fn scan(
+        &mut self,
+        count: usize,
+        mut visit: impl FnMut(usize, Arc<VideoFrame>) -> Result<(), String>,
+    ) -> Result<(), String> {
         #[cfg(test)]
         let started = Instant::now();
         (self.check)()?;
         let source = crate::fc::open(self.path)?;
         let frame_s = crate::fc::timing(&source).map_or(0., |v| v.0);
-        let [w, h] = self.size;
-        let mut rgba = Vec::new();
         for sample in 0..count {
             (self.check)()?;
-            let i = sample * (self.times.len() - 1) / (count - 1);
-            let t = self.times[i];
+            let i = sample * (self.plan.count - 1) / (count - 1);
+            let t = self.plan.at(i);
             let request_time = self.snapped
                 .as_ref()
                 .and_then(|times| times[i])
@@ -481,19 +579,12 @@ impl Sampling<'_> {
                     filmcraft_time::Tick::from_seconds_f64(request_time),
                 ))
                 .map_err(|e| format!("Could not read a nearby frame: {e}"))?;
-            if (picture.width, picture.height) != (w, h) {
+            if [picture.width, picture.height] != self.size {
                 return Err("Sampled frame geometry does not match the mask".into());
             }
-            crate::fc::fit_rgba_into(&picture, crate::fc::Fit::Exact { w, h }, &mut rgba);
-            for search in searches.iter_mut() {
-                search.add(&rgba, w as usize)?;
-            }
-            if let Some(progress) = progress {
-                progress.store(sample + 1, Ordering::Relaxed);
-            }
+            visit(sample, picture)?;
         }
         drop(source);
-        drop(rgba);
         #[cfg(test)]
         {
             self.read_elapsed += started.elapsed();
@@ -580,10 +671,23 @@ mod tests {
             let values: Vec<usize> = box_coords.split(',').map(|value| value.parse().unwrap()).collect();
             <[usize; 4]>::try_from(values).expect("ABNER_DETECT_BOX must be x,y,w,h")
         });
-        let range = Range { start: 0., end: info.duration };
+        let range = std::env::var("ABNER_DETECT_RANGE").map_or(
+            Range { start: 0., end: info.duration },
+            |range| {
+                let (start, end) = range.split_once(',').expect("ABNER_DETECT_RANGE must be start,end");
+                Range { start: start.parse().unwrap(), end: end.parse().unwrap() }
+            },
+        );
         let (w, h) = (info.width, info.height);
+        let started = Instant::now();
+        let before = filmcraft_codecs::gop::gop_stats();
         let task = Task::spawn(info, 0, 0, 0, region, range, region.is_some(), count).unwrap();
         let proposal = task.receiver.recv_timeout(task.timeout).unwrap().unwrap();
+        let decode = filmcraft_codecs::gop::gop_stats() - before;
+        eprintln!(
+            "Autodetect total: {:.6}s, {} samples fed to decoders, {} decoder starts",
+            started.elapsed().as_secs_f64(), decode.decoded, decode.seeks,
+        );
         #[cfg(target_os = "macos")]
         {
             let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
@@ -611,7 +715,7 @@ mod tests {
             PathBuf::from("missing-video"),
             32,
             32,
-            &[0.; 16],
+            SamplePlan { first: 0, last: 15, count: 16, fps: 24. },
             None,
             &AtomicBool::new(true),
             &AtomicUsize::new(0),

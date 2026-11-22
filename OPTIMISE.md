@@ -5,7 +5,7 @@ Written 2026-11-23 from a read of `src/watermark.rs`, `src/watermark/static_over
 estimates are kept below. The first measurements and changes are in
 [the benchmark results](#2026-11-23-benchmark-results).
 
-How it works today, in one paragraph: `Task::spawn` picks evenly spaced sample times in
+The original pipeline, in one paragraph: `Task::spawn` picks evenly spaced sample times in
 the chosen range (8 to 512 frames, or every frame), a worker thread reads each one with an
 exact `video_frame` request, converts it to RGBA8 at full size and keeps the RGB of the
 search area plus a 96 px context border. `static_overlay::detect_checked` then computes a
@@ -28,6 +28,8 @@ drawn box when the temporal pass finds nothing.
 ## Performance
 
 ### P1. "Every frame" decodes the range once per batch
+
+Implemented with a bounded frame set. See [the one-pass benchmarks](#one-pass-every-frame).
 
 `watermark.rs:163-179`. With `samples == None` and more than 64 frames, the range is split
 into `groups = total.div_ceil(64)` interleaved batches (`skip(group).step_by(groups)`) and
@@ -319,8 +321,8 @@ The proposal contains pixels accepted by the native-resolution detector.
 | ProRes, All | 2× | 5.64 | 1.19 | 3931 |
 
 The memory estimate covers detector working data. Peak process RSS also includes
-the full-size decoder and its cache. Every frame still uses three interleaved
-batches on the 192-frame fixtures.
+the full-size decoder and its cache. These P3 measurements preceded P1, when
+Every frame used three interleaved batches on the 192-frame fixtures.
 
 A temporary full-resolution diagnostic with a 4 GiB detector budget gave a
 comparison at 64 samples. Peak RSS was 2800 MiB for H.264 and 4242 MiB for
@@ -347,3 +349,50 @@ ffmpeg -f lavfi -i 'color=gray:s=192x108:r=24:d=24' \
 ```
 
 For the isolated-stroke fixture, remove the first two `drawbox` filters.
+
+## One-pass Every frame
+
+Every frame opens FilmCraft once and advances through the existing detection
+frame grid. It keeps at most 64 distinct pictures in up to 768 MiB of native
+frame storage, choosing them by distance between 64×36 luma thumbnails of the
+search area. A new picture can replace a member of the closest pair if it is
+farther from the set. The temporal detector pools the retained frames in one
+estimate. Coarse and native refinement use the same retained pictures, so
+refinement avoids reopening or decoding the source. Small search areas keep a
+chroma-aligned crop with the detector halo. Fixed sample counts keep the P2/P3 path.
+
+Before is the `32b0238` implementation with the same diagnostic counters added.
+After is the one-pass implementation. One release process per case on the same
+M4 Pro, with `ABNER_DETECT_COUNT=all`. The timing is wall time through proposal
+delivery. Decoder input is FilmCraft's count of samples fed to decoders. RSS is
+peak process memory, including FilmCraft's cache and frame pool.
+
+| Fixture | Source frames | Retained after | Time s before → after | Decoder input before → after | Peak MiB before → after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1080p H.264, whole | 192 | 64 | 1.74 → 0.72 | 576 → 192 | 988 → 941 |
+| 1080p ProRes, whole | 192 | 64 | 1.63 → 0.60 | 192 → 192 | 1222 → 1474 |
+| 4K H.264, whole | 192 | 64 | 9.18 → 2.09 | 1152 → 192 | 1707 → 1704 |
+| 4K ProRes, whole | 192 | 24 | 6.68 → 1.04 | 384 → 192 | 3915 → 2819 |
+| 1080p H.264, 36 s box | 864 | 64 | 26.38 → 1.55 | 12,051 → 864 | 891 → 482 |
+| 4K H.264, 24 s thin-stroke box | 576 | 64 | 66.88 → 7.11 | 5,174 → 576 | 1244 → 991 |
+| 4K H.264, 24 s thin-stroke whole | 576 | 64 | 135.83 → 7.70 | 10,348 → 576 | 1490 → 1775 |
+
+Each H.264 after-run recorded one decoder start. The 1080p ProRes and whole
+thin-stroke cases had higher peak RSS while the native set was held. The frame
+grid still uses the clip's nominal rate, so on variable-rate sources a grid
+position can repeat a picture or skip one.
+
+The 10–20 s subrange of the 36 s clip completed in 0.58 s with one decoder
+start. FilmCraft consumed 293 samples for the 241 grid positions, including
+reference frames needed to decode the selected range.
+
+Pooling changes the proposal. Across both thin-stroke searches, all 928 drawn
+pixels belonging to the two-pixel strokes survived before and after. The box
+still covered 243 of 244 pixels of the one-pixel stroke. Whole-frame coverage
+went from 243 to 241. The 36 s H.264 box proposal changed from 5,837 to 6,656
+selected pixels. The 64-sample whole-frame checks on the two 4K H.264 fixtures
+matched their pre-change PNGs byte-for-byte.
+
+Use the earlier fixture commands to repeat the matrix. The two box rows use
+`ABNER_DETECT_BOX=56,56,400,200` and the other rows leave it unset. Set
+`ABNER_DETECT_RANGE=10,20` to run only that portion of a clip, in seconds.
