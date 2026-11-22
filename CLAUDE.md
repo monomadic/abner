@@ -621,7 +621,9 @@ Add Processor omits spatial controls until the processor is added. Missing requi
 masks show 􀇾 on the processor row and mask tile; either opens the mask editor, which
 works in place (`App::inplace_mask`: tools on the bar under the picture, the settings
 column as the mask inspector, the view kept; HISTORY 2026-11-22), and Done clears both
-warnings and renders the frame. `--processor-mask` opens it for captures. Later stages can edit source-based inputs, but
+warnings and renders the frame. Leaving it with strokes pending (Esc, M, a tab, another
+card) asks on the same bar first (`guard_leave`). `--processor-mask` opens it for
+captures, `--processor-mask-ask` with that question up. Later stages can edit source-based inputs, but
 rendering spatial bindings still requires the first enabled stage.
 The generic API lives in `crates/processor-api`; processor implementations are
 maintained independently. **`cargo build-with-plugins`** (alias → the committed,

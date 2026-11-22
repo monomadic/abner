@@ -230,6 +230,13 @@ pub struct App {
     mask_coverage: (u64, u64, f32),
     /// `--processor-mask`: open the focused stage's mask once it has fields.
     pending_processor_mask: bool,
+    /// `--processor-mask-ask`: paint one dab there and raise the question.
+    pending_mask_ask: bool,
+    /// The mask as the in-place editor opened it, to tell an edit from none.
+    editor_baseline: Option<std::sync::Arc<Vec<u8>>>,
+    /// Leaving the in-place editor with unapplied changes: the tool bar asks
+    /// first, and this is where the user was going.
+    leave_prompt: Option<Leave>,
     painting: bool,
     stroke_last: Option<(f32, f32)>,
     cursor_inside: bool,
@@ -760,7 +767,7 @@ impl App {
             masks: (0..videos.len()).map(|_| None).collect(),
             mask_mode: false,
             brush_diameter: cfg.mask.brush_size,
-            mask_erase: false, mask_view: 0, brush_slider_drag: false, mask_coverage: (0, 0, 0.), pending_processor_mask: false,
+            mask_erase: false, mask_view: 0, brush_slider_drag: false, mask_coverage: (0, 0, 0.), pending_processor_mask: false, pending_mask_ask: false, editor_baseline: None, leave_prompt: None,
             painting: false,
             stroke_last: None,
             cursor_inside: false,
@@ -899,12 +906,14 @@ impl App {
         self.detection_range=(!crop).then(||crate::watermark::Range{start:0.,end:self.videos[self.active].info.duration});
         self.mask_mode=true;self.playing=false;self.show_ui=true;self.ensure_mask();
         self.crop=if crop {Some(saved_crop.unwrap_or_else(||self.full_crop()))}else{None};
-        self.mask_erase=false;self.mask_view=0;
+        self.mask_erase=false;self.mask_view=0;self.leave_prompt=None;
+        self.editor_baseline=if crop {None} else {self.masks[self.active].as_ref().map(|m|m.pixels.clone())};
         // A mask painted on the Process page keeps the view it was opened from.
         if return_mode!=4 || crop {self.zoom=1.;self.center=(0.5,0.5);}
         self.seek_all(self.t,true);
     }
     fn finish_editor(&mut self, apply:bool) {
+        self.leave_prompt=None;self.editor_baseline=None;
         self.watermark_task = None;
         self.clear_mask_history();
         self.detection_range=None;self.detection_drag=None;
@@ -1221,7 +1230,7 @@ impl App {
     pub fn brush_cursor_visible(&self) -> bool {
         // The marquee owns the pointer while it is up — the brush would be
         // painting into a region the crop is about to throw away.
-        if !self.mask_mode || !self.cursor_inside || !self.ready() || self.active_marquee().is_some() {
+        if !self.mask_mode || !self.cursor_inside || !self.ready() || self.active_marquee().is_some() || self.leave_prompt.is_some() {
             return false;
         }
         if self.detection_panel && contains(self.detection_panel_rect(),self.cursor.0,self.cursor.1) {return false;}
@@ -2249,13 +2258,22 @@ impl App {
     /// `--processor-render`: what the panel's Render button does, for captures.
     /// `--processor-mask`, for captures: the tick that finds the stage's
     /// mask input opens its editor.
-    pub fn open_processor_mask(&mut self) { self.pending_processor_mask = true; }
+    pub fn open_processor_mask(&mut self, ask: bool) { self.pending_processor_mask = true; self.pending_mask_ask = ask; }
     pub fn render_processor_frame(&mut self) {
         self.processors.render_frame();
     }
     fn apply_processor_transport(&mut self) {
-        if self.editor.as_ref().is_some_and(|e| matches!(&e.owner, crate::spatial::Owner::Plugin { id, .. } if self.processors.focused_id() != Some(id.as_str()))) {
-            self.finish_editor(false);
+        if let Some(crate::spatial::Owner::Plugin { id, .. }) = self.editor.as_ref().map(|e| e.owner.clone())
+            && self.processors.focused_id() != Some(id.as_str()) {
+            // Another card was picked. With strokes pending the edited stage
+            // keeps the focus until the bar's question is answered.
+            let target = self.processors.focused_id().map(str::to_owned);
+            if let Some(target) = target.filter(|_| self.mask_dirty() || self.leave_prompt.is_some()) {
+                self.processors.focus_id(&id);
+                self.guard_leave(Leave::Focus(target));
+            } else {
+                self.finish_editor(false);
+            }
         }
         if let Some((id, key, crop)) = self.processors.editor_request.take() {
             let autodetect = std::mem::take(&mut self.processors.editor_autodetect) && !crop;
@@ -2330,6 +2348,12 @@ impl App {
         if self.processors.modal_open() { self.processors.key(k); return; }
         if self.export_page.editing_filename() && self.export_page.key(k) { return; }
         if self.editor.is_some() {
+            if self.leave_prompt.is_some() {
+                // The question is up: Enter applies and goes, Esc keeps editing.
+                match k { Key::Enter=>self.answer_leave(Some(true)), Key::Escape=>self.answer_leave(None), _=>{} }
+                return
+            }
+            if matches!(k,Key::Escape|Key::Char('m'|'M')) && self.guard_leave(Leave::Close) {return}
             if k==Key::Escape {self.finish_editor(false);return}
             if k==Key::Enter {self.activate(Action::ApplyEdit);return}
             if matches!(k,Key::Char('c'|'C')) && self.editor.as_ref().is_some_and(|e|!matches!(e.owner,crate::spatial::Owner::Source)) {return}
@@ -3437,6 +3461,11 @@ impl App {
         if self.pending_processor_mask && self.editor.is_none() && self.processors.request_mask(false) {
             self.pending_processor_mask = false;
             self.apply_processor_transport();
+            if std::mem::take(&mut self.pending_mask_ask) && let Some(m) = self.masks[self.active].as_mut() {
+                let at = (m.width as f32 * 0.75, m.height as f32 * 0.75);
+                m.stroke(at, at, m.height as f32 * 0.08, 255);
+                self.guard_leave(Leave::Tool(0));
+            }
         }
         self.processors.editor_bar = self.mask_mode && !self.inplace_mask();
         if self.inplace_mask() && !self.painting
@@ -3501,8 +3530,14 @@ impl App {
             for c in self.embedded_editor_controls() {
                 if !contains(bar.r, c.r.x, c.r.y) { continue; }
                 let hovered = self.cursor_inside && contains(c.r, self.cursor.0, self.cursor.1);
-                if inplace && matches!(c.action, Action::ApplyEdit) { ButtonBar::primary(&mut items, c.r, "Done", hovered, false); }
+                if inplace && matches!(c.action, Action::ApplyEdit | Action::LeaveApply) { ButtonBar::primary(&mut items, c.r, &c.label, hovered, false); }
                 else { c.draw(&mut items, hovered, self.control_dead(&c.action)); }
+            }
+            if inplace && self.leave_prompt.is_some() {
+                let c = bar.content();
+                let end = self.embedded_editor_controls().first().map_or(c.x + c.w, |d| d.r.x);
+                items.push(Item::Rect(RectItem { radius: 4., ..RectItem::new(RectPx { x: c.x + 2., y: c.y + c.h / 2. - 4., w: 8., h: 8. }, WARNING) }));
+                ui_label(&mut items, c.x + 18., c.y + c.h / 2., 12., WARNING, "Unapplied mask changes. Apply before leaving?", Align::Left, (end - c.x - 28.).max(1.));
             }
             items.push(Item::Clip(None));
             if inplace { self.draw_mask_inspector(&mut items); }
@@ -3780,6 +3815,33 @@ impl App {
     /// The Process page's mask editor works in place: the picture, zoom and
     /// playhead stay put, the bar under the picture carries the tools and the
     /// settings column becomes the mask inspector.
+    /// The in-place editor holds strokes its owner has not been given.
+    fn mask_dirty(&self) -> bool {
+        self.inplace_mask() && self.editor_baseline.as_ref().zip(self.masks[self.active].as_ref())
+            .is_some_and(|(was, m)| !std::sync::Arc::ptr_eq(was, &m.pixels) && **was != *m.pixels)
+    }
+    /// Asks before `to` drops unapplied strokes; true when it asked (or is
+    /// already asking), so the caller holds the move until the answer.
+    fn guard_leave(&mut self, to: Leave) -> bool {
+        if self.leave_prompt.is_some() { return true; }
+        if !self.mask_dirty() { return false; }
+        self.commit_stroke();
+        self.painting = false; self.stroke_last = None;
+        self.leave_prompt = Some(to);
+        true
+    }
+    fn answer_leave(&mut self, apply: Option<bool>) {
+        let Some(to) = self.leave_prompt.take() else { return; };
+        let Some(apply) = apply else { return; };
+        // Applying on the way out to Close is Done: it renders the frame.
+        if apply && matches!(to, Leave::Close) { self.activate(Action::ApplyEdit); return; }
+        self.finish_editor(apply);
+        match to {
+            Leave::Close => {}
+            Leave::Tool(t) => self.activate(Action::Tool(t)),
+            Leave::Focus(id) => self.processors.focus_id(&id),
+        }
+    }
     fn inplace_mask(&self) -> bool {
         self.processors.open && self.mask_mode && self.crop.is_none() && self.show_ui && self.editor.is_some()
     }
@@ -3881,6 +3943,17 @@ impl App {
             // Leading tools while they fit, the two decisions always: a
             // narrow bar drops a tool before it drops Cancel or Done.
             let bar = self.processors.tool_bar(self.vp);
+            if let Some(to) = &self.leave_prompt {
+                // One question in the tools' place; nothing else is offered.
+                let apply = bar.trailing(if matches!(to, Leave::Close) { 76. } else { 124. });
+                let keep = RectPx { x: apply.x - ButtonBar::GAP - 104., w: 104., ..apply };
+                let discard = RectPx { x: keep.x - ButtonBar::GAP - 76., w: 76., ..apply };
+                return vec![
+                    Control::new(discard, "Discard", false, Action::LeaveDiscard),
+                    Control::new(keep, "Keep editing", false, Action::LeaveKeep),
+                    Control::new(apply, if matches!(to, Leave::Close) { "Apply" } else { "Apply & switch" }, false, Action::LeaveApply),
+                ];
+            }
             let c = bar.content();
             let done = bar.trailing(84.);
             let cancel = RectPx { x: done.x - ButtonBar::GAP - 72., w: 72., ..done };
@@ -4064,6 +4137,7 @@ impl App {
 
     fn activate(&mut self, action: Action) {
         self.mouse_up();
+        if let Action::Tool(t) = action && self.editor.is_some() && self.guard_leave(Leave::Tool(t)) { return; }
         if matches!(action, Action::Tool(mode) if mode != self.workspace_mode()) {
             self.zoom = 1.0;
             self.center = (0.5, 0.5);
@@ -4077,6 +4151,9 @@ impl App {
                 self.finish_editor(true);
                 if render {self.processors.render_frame();}
                 return}
+            Action::LeaveDiscard=>{self.answer_leave(Some(false));return}
+            Action::LeaveKeep=>{self.answer_leave(None);return}
+            Action::LeaveApply=>{self.answer_leave(Some(true));return}
             Action::Erase(on)=>{self.mask_erase=on;return}
             Action::MaskView(v)=>{self.mask_view=v;return}
             Action::BrushPreset(px)=>{self.brush_diameter=px as f32;return}
@@ -4128,6 +4205,7 @@ impl App {
                 }
             }
             Action::LaunchEditor(_) | Action::ResetEdit | Action::ApplyEdit | Action::CancelEdit
+            | Action::LeaveDiscard | Action::LeaveKeep | Action::LeaveApply
             | Action::Erase(_) | Action::MaskView(_) | Action::BrushPreset(_) | Action::InvertMask | Action::ClearMask => unreachable!(),
             Action::RenderSource => self.render_source(),
             Action::Duplicate => self.duplicate_sources(),
@@ -7781,8 +7859,12 @@ impl Workspace {
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum SourceAction { Duplicate, Remove, Crop }
 
+/// Where the user was going when the in-place mask editor asked about
+/// unapplied strokes.
+#[derive(Clone, Debug, PartialEq)]
+enum Leave { Close, Tool(usize), Focus(String) }
 #[derive(Clone, Copy)]
-enum Action { LaunchEditor(bool), ResetEdit, ApplyEdit, CancelEdit, Erase(bool), MaskView(u8), BrushPreset(u16), InvertMask, ClearMask, Duplicate, RenderSource, OpenFiles, ToggleSources, ToggleInspector, ToggleDetail, Tool(usize), View(Mode), Autodetect, DetectionArea, UndoMask, RedoMask, Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
+enum Action { LaunchEditor(bool), ResetEdit, ApplyEdit, CancelEdit, LeaveDiscard, LeaveKeep, LeaveApply, Erase(bool), MaskView(u8), BrushPreset(u16), InvertMask, ClearMask, Duplicate, RenderSource, OpenFiles, ToggleSources, ToggleInspector, ToggleDetail, Tool(usize), View(Mode), Autodetect, DetectionArea, UndoMask, RedoMask, Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
 #[derive(Clone, Copy, PartialEq)]
 enum CutAction { TogglePosters, FrameChanges(bool), TimeDisplay(bool),
     // Set in / out: no key or button reaches these while the feature is disabled.
@@ -8148,6 +8230,8 @@ const CROP_DIM: [f32; 4] = [0.0, 0.0, 0.0, 0.95];
 /// (blending is linear, so this alpha leaves roughly a third of the picture).
 const SEARCH_DIM: [f32; 4] = [0.0, 0.0, 0.0, 0.88];
 const MASK_HISTORY: usize = 24;
+/// The amber of a pending decision (the unapplied-mask question).
+const WARNING: [f32; 4] = [240.0 / 255.0, 190.0 / 255.0, 110.0 / 255.0, 1.0];
 const CROP_LINE: [f32; 4] = [1.0, 1.0, 1.0, 0.95];
 const CROP_INK: [f32; 4] = [0.0, 0.0, 0.0, 0.75];
 const CROP_LINE_W: f32 = 1.5;
@@ -8386,12 +8470,50 @@ mod tests {
         assert!(styles(&mut app).is_empty());
         app.activate(Action::BrushPreset(32));
         assert_eq!(app.brush_diameter, 32.);
+        // Leaving with strokes pending asks first, in the tools' place.
+        assert!(app.mask_dirty());
+        app.key(Key::Escape);
+        assert_eq!(app.leave_prompt, Some(Leave::Close));
+        assert!(app.editor.is_some() && app.embedded_editor_controls().len() == 3);
+        app.mouse_down(cx, cy); app.mouse_up();
+        assert_eq!(count(&app), painted, "nothing paints while the question is up");
+        app.key(Key::Escape);
+        assert!(app.leave_prompt.is_none() && app.editor.is_some(), "Esc keeps editing");
+        app.activate(Action::Tool(0));
+        assert_eq!(app.leave_prompt, Some(Leave::Tool(0)));
+        assert!(app.processors.open && app.editor.is_some(), "the tab waits for the answer");
+        app.activate(Action::LeaveKeep);
+        assert!(app.leave_prompt.is_none() && app.editor.is_some());
+        app.activate(Action::UndoMask);
+        assert!(!app.mask_dirty(), "back at the opened mask there is nothing to ask about");
+        app.activate(Action::RedoMask);
         let done = app.embedded_editor_controls().into_iter().find(|c| matches!(c.action, Action::ApplyEdit)).unwrap();
         app.mouse_down(done.r.x + 5., done.r.y + 5.);
         assert!(app.processors.open && !app.mask_mode);
         assert_eq!(app.processors.binding("test.processor", "mask").unwrap().mask.unwrap().iter().filter(|&&p| p != 0).count(), painted);
         let after = app.content_rect(0);
         assert_eq!((before.x, before.y, before.w, before.h), (after.x, after.y, after.w, after.h), "and Done leaves the view where it was");
+    }
+
+    #[test]
+    fn leaving_a_painted_mask_applies_or_discards_on_the_answer() {
+        let clip = test_clip().expect("video test fixture");
+        for apply in [true, false] {
+            let mut app = mk_app(&clip, 1);
+            app.activate(Action::Tool(4));
+            app.tick(0., (1280., 800.), 1.);
+            app.begin_editor(false, Some(("test.processor".into(), "mask".into())));
+            app.tick(0., (1280., 800.), 1.);
+            // An untouched mask leaves without a question.
+            assert!(!app.guard_leave(Leave::Close));
+            let canvas = app.canvas();
+            app.mouse_down(canvas.x + canvas.w / 2., canvas.y + canvas.h / 2.); app.mouse_up();
+            app.activate(Action::Tool(0));
+            assert_eq!(app.leave_prompt, Some(Leave::Tool(0)));
+            app.activate(if apply { Action::LeaveApply } else { Action::LeaveDiscard });
+            assert!(app.editor.is_none() && !app.processors.open, "the held tab switch goes through");
+            assert_eq!(app.processors.binding("test.processor", "mask").is_some_and(|b| b.mask.is_some()), apply);
+        }
     }
 
     #[test]

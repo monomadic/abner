@@ -1,5 +1,25 @@
 # abner — history
 
+## 2026-11-22 — Process: leaving a painted mask asks first
+
+The in-place mask editor dropped its strokes without a word when the user pressed Esc
+or M, switched tabs, or picked another processor's card. With strokes pending
+(`App::mask_dirty`: the mask differs from `editor_baseline`, the pixels it opened with,
+so undoing back to them is not a change) those now raise one question in the tools'
+place on the bar under the picture (`guard_leave`, `leave_prompt`): "Unapplied mask
+changes. Apply before leaving?" with Discard, Keep editing and a primary Apply & switch
+(Apply when the move was only closing the editor). `Leave` remembers where the user was
+going (`Close`, `Tool(n)`, `Focus(id)`) and `answer_leave` completes it; a picked card
+hands the focus back to the edited stage until then (`Panel::focus_id`). While it is up
+nothing paints, Enter applies and Esc keeps editing. The Cancel button still discards
+at once: it says what it does. `--processor-mask-ask` reaches the state for captures.
+
+Validation: `process_mask_editor_works_in_place` (Esc asks, nothing paints, Esc keeps,
+a tab waits, undo clears the dirty state), `leaving_a_painted_mask_applies_or_discards_on_the_answer`
+(an untouched mask leaves freely; both answers complete the tab switch); the suite
+passes. Captured in the window. The other-card path (`Leave::Focus`) has no test: the
+fixture registers one processor.
+
 ## 2026-11-22 — Process: a processor's mask is painted in place
 
 Opening a mask from the Process page used to put a row of nine equal buttons over the

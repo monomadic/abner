@@ -1768,6 +1768,10 @@ impl Panel {
     pub(crate) fn set_crops(&mut self,crops:Vec<crate::spatial::ClipCrop>) {
         if self.inputs.crops!=crops {self.inputs.crops=crops;self.changed();}
     }
+    /// Focus the stage with this ID, as a click on its card does.
+    pub(crate) fn focus_id(&mut self, id: &str) {
+        if let Some(i) = self.descriptors.iter().position(|d| d.id == id) && i != self.selected { self.select(i); }
+    }
     pub(crate) fn name_of(&self, id: &str) -> Option<&str> {
         self.descriptors.iter().find(|d| d.id == id).map(|d| d.name.as_str())
     }
