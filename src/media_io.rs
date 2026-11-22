@@ -3048,6 +3048,7 @@ pub(crate) fn pipeline_export_with_inputs(
                 pool.settle(true);
                 let (mut sessions, dims, mut source) = registry.with(|registry| -> Result<_> {
                 let mut dims = [cw as usize, ch as usize];
+                let mut stage_rate = crate::processor_gui::rational(info.fps);
                 let mut sessions = Vec::new();
                 for (stage,(id, settings)) in chain.iter().enumerate() {
                     ensure!(stage==0 || inputs.bindings.get(id).is_none_or(|b|b.is_empty()), "Spatial inputs currently require the first enabled processor");
@@ -3057,7 +3058,9 @@ pub(crate) fn pipeline_export_with_inputs(
                     ensure!(!matches!(f.capabilities().input, InputRequirement::WholeClip),
                         "{}: whole-clip execution is not supported by export", f.descriptor().name);
                     let key = format!("{id}|{settings}|{}x{}", dims[0], dims[1]);
-                    let made = pool.take(key, || f.create(dims[0], dims[1], settings)).map_err(anyhow::Error::msg)?;
+                    let mut made = pool.take(key, || f.create(dims[0], dims[1], settings)).map_err(anyhow::Error::msg)?;
+                    made.configure_input_rate(stage_rate).map_err(anyhow::Error::msg)?;
+                    stage_rate = f.output_rate(settings, stage_rate).map_err(anyhow::Error::msg)?;
                     let mut session = abner_processor_api::bind(f, made, inputs.bindings.get(id).cloned().unwrap_or_default())
                         .map_err(anyhow::Error::msg)?;
                     if let Some(report) = stage_report {

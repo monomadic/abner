@@ -440,7 +440,7 @@ pub fn run(
     // Output frames at the chain's rate over the source's duration.
     let expected_frames = u64::try_from(
         (pts.len() as u128 * u128::from(rate[0]) * u128::from(delta)
-            + u128::from(rate[1]) * u128::from(vt.timescale) / 2)
+            + u128::from(rate[1]) * u128::from(vt.timescale) - 1)
             / (u128::from(rate[1]) * u128::from(vt.timescale)),
     )
     .map_err(err)?;
@@ -501,6 +501,7 @@ pub fn run(
         job.memory_bytes,
         cancel.clone(),
     )?;
+    chain.configure_input_rate(registry, &job.stages, [vt.timescale, delta])?;
     let tracker = crate::progress::ProgressTracker::new(chain.stages(), progress);
     chain.track(&tracker);
     tracker.frames(0, Some(expected_frames));

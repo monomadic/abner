@@ -381,7 +381,7 @@ fn defaults(fields: &[Field]) -> Value {
 }
 /// A probed rate as the rational the API speaks: integer and NTSC rates
 /// exactly, anything else to a thousandth.
-fn rational(fps: f64) -> Rate {
+pub(crate) fn rational(fps: f64) -> Rate {
     for den in [1u32, 1001, 1000] {
         let num = (fps * den as f64).round();
         if num >= 1.0 && num < u32::MAX as f64 && (num / den as f64 - fps).abs() < 1e-6 * fps.max(1.0) {
@@ -680,6 +680,7 @@ struct ReportingSession {
     call_boundary: Arc<dyn Fn() + Send + Sync>,
 }
 impl Session for ReportingSession {
+    fn configure_input_rate(&mut self, rate: abner_processor_api::Rate) -> Result<(), String> { self.inner.configure_input_rate(rate) }
     fn format_pairs(&self) -> Vec<abner_processor_api::FormatPair> { self.inner.format_pairs() }
     fn configure_format(&mut self, pair: abner_processor_api::FormatPair) -> Result<(), String> { self.inner.configure_format(pair) }
     fn process_video(&mut self, input: VideoFrame) -> Result<Vec<VideoFrame>, String> {
@@ -907,6 +908,7 @@ fn render_inner(
     let (mut sessions, dims) = registry.with(|registry| -> Result<_, String> {
     let mut sessions: Vec<Box<dyn Session>> = Vec::new();
     let mut dims = [w as usize, h as usize];
+    let mut stage_rate = rational(r.info.fps);
     for (index, (id, raw)) in r.chain.iter().enumerate() {
         let factory = registry.get(id)?;
         if index>0 && r.inputs.bindings.get(id).is_some_and(|b|!b.is_empty()) {return Err("Spatial inputs currently require the first enabled processor; move this processor first".into());}
@@ -962,7 +964,9 @@ fn render_inner(
         // Reset and reused when the last render had this stage with these
         // settings at this size; the spatial inputs are bound per render.
         let key = format!("{id}|{settings}|{}x{}", stage_dims[0], stage_dims[1]);
-        let made = kept.sessions.take(key, || factory.create(stage_dims[0], stage_dims[1], settings))?;
+        let mut made = kept.sessions.take(key, || factory.create(stage_dims[0], stage_dims[1], settings))?;
+        made.configure_input_rate(stage_rate)?;
+        stage_rate = factory.output_rate(settings, stage_rate)?;
         let mut session = abner_processor_api::bind(factory, made, r.inputs.bindings.get(id).cloned().unwrap_or_default())?;
         if let Some(target) = r.target {
             session.set_preview_target((target * 1e6).round() as i64, [1, 1_000_000]);
@@ -1228,6 +1232,7 @@ struct Downsized {
     factor: usize,
 }
 impl Session for Downsized {
+    fn configure_input_rate(&mut self, rate: abner_processor_api::Rate) -> Result<(), String> { self.inner.configure_input_rate(rate) }
     fn set_preview_target(&mut self, pts: i64, time_base: [u32; 2]) {
         self.inner.set_preview_target(pts, time_base);
     }

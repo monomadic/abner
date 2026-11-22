@@ -14,6 +14,10 @@ type Kept = Rc<RefCell<Box<dyn Session>>>;
 /// [`Pool`] keeps the session for the next job.
 struct Lent(Kept);
 impl Session for Lent {
+    fn configure_input_rate(&mut self, rate: abner_processor_api::Rate) -> Result<()> {
+        self.0.borrow_mut().configure_input_rate(rate)
+    }
+
     fn format_pairs(&self) -> Vec<FormatPair> {
         self.0.borrow().format_pairs()
     }
@@ -125,6 +129,9 @@ mod tests {
         cancel: Cancellation,
     }
     impl Session for Counting {
+        fn configure_input_rate(&mut self, rate: abner_processor_api::Rate) -> Result<()> {
+            if rate == [30000,1001] {Ok(())} else {Err("wrong nominal rate".into())}
+        }
         fn process(&mut self, input: Frame) -> Result<Vec<Frame>> {
             Ok(vec![input])
         }
@@ -155,7 +162,9 @@ mod tests {
         };
         let mut pool = Pool::default();
         for _ in 0..3 {
-            let a = pool.take("a".into(), make(true)).unwrap();
+            let mut a = pool.take("a".into(), make(true)).unwrap();
+            assert!(a.configure_input_rate([24,1]).is_err());
+            a.configure_input_rate([30000,1001]).unwrap();
             // A cancelled job leaves the token raised: reset must replace it.
             a.cancellation().cancel();
             drop(pool.take("b".into(), make(false)).unwrap());

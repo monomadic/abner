@@ -29,6 +29,7 @@ pub fn handle(registry: &Registry) -> anyhow::Result<bool> {
             let mut session = factory
                 .create(64, 64, &settings)
                 .map_err(anyhow::Error::msg)?;
+            session.configure_input_rate([24,1]).map_err(anyhow::Error::msg)?;
             let mut outputs = Vec::new();
             for i in 0..4 {
                 let input = Frame {

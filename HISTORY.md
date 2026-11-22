@@ -1,5 +1,17 @@
 # abner — history
 
+## 2026-11-23 — Exact retiming and reusable streamed interpolation
+
+Sessions now receive the same nominal rational input rate used to declare the
+chain rate, including through reuse and generic wrappers. Preview, export and
+headless processing configure it before binding/processing. Retiming no longer
+derives multiplier rates from rounded frame durations. Fractional final cells
+retain the exact source end and job frame totals include that partial cell.
+The built-in interpolation adapter bounds output intervals before inference,
+uses integer scheduling, resets without reloading its model, and batches phases
+through cached Metal frame features. Hardware and decode-to-mux regressions cover
+nominal rates, fractional tails, cancellation/reset and bounded failures.
+
 ## 2026-11-22 — Process preview keeps only the processed picture (audit P6, task 24 closed)
 
 The preview stored every frame as a before/after pair of full RGBA8 pictures, 66 MB
