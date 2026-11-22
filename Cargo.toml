@@ -88,6 +88,9 @@ abner-builtin-rife-metal = { path = "plugins/defaults/rife-metal" }
 [target.'cfg(target_os = "macos")'.build-dependencies]
 cc = "1"
 
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+libc = "0.2"
+
 [profile.dev]
 # wgpu + shader-heavy code is unusably slow at opt-level 0
 opt-level = 1

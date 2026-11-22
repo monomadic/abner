@@ -1,5 +1,6 @@
 //! Screen-space overlay proposals. No registration or scene trajectories are used.
-use super::Frame;
+use super::{Check, Frame, temporal_rows};
+use rayon::prelude::*;
 
 pub(super) struct Maps {
     pub opacity: Vec<f32>,
@@ -8,30 +9,16 @@ pub(super) struct Maps {
     pub variation: Vec<f32>,
 }
 
-/// Robust central temporal range, averaged over RGB. A fixed alpha overlay
-/// scales this range by (1-alpha), provided local background distributions agree.
-fn temporal(frames: &[Frame], x: usize, y: usize) -> ([f32; 3], f32) {
-    let mut median = [0.; 3];
-    let mut spread = 0.;
-    for (c, channel) in median.iter_mut().enumerate() {
-        let mut values: Vec<_> = frames.iter().map(|f| f.pixel(x, y)[c]).collect();
-        values.sort_by(f32::total_cmp);
-        *channel = values[values.len() / 2];
-        spread += (values[values.len() * 7 / 8] - values[values.len() / 8]) / 3.;
-    }
-    (median, spread)
-}
-
 #[cfg(test)]
 fn detect(frames: &[Frame], region: [usize; 4], radius: usize) -> Maps {
-    detect_checked(frames, region, radius, &mut || Ok(())).unwrap()
+    detect_checked(frames, region, radius, &|| Ok(())).unwrap()
 }
 
 pub(super) fn detect_checked(
     frames: &[Frame],
     region: [usize; 4],
     radius: usize,
-    checkpoint: &mut impl FnMut() -> Result<(), String>,
+    checkpoint: Check<'_>,
 ) -> Result<Maps, String> {
     checkpoint()?;
     let [ox, oy, w, h] = region;
@@ -47,14 +34,16 @@ pub(super) fn detect_checked(
     let ch = y1 - y0;
     let mut ranges = vec![0.; cw * ch];
     let mut medians = vec![[0.; 3]; cw * ch];
-    for y in y0..y1 {
-        checkpoint()?;
-        for x in x0..x1 {
-            let (m, s) = temporal(frames, x, y);
-            medians[(y - y0) * cw + x - x0] = m;
-            ranges[(y - y0) * cw + x - x0] = s;
-        }
-    }
+    temporal_rows(
+        frames,
+        [x0, y0, cw],
+        medians.par_chunks_mut(cw).zip(ranges.par_chunks_mut(cw)),
+        |(medians, ranges), x, median, range| {
+            medians[x] = median;
+            ranges[x] = range;
+        },
+        checkpoint,
+    )?;
     // Letterbox / pillarbox bars: constant rows or columns contiguous with the frame edge.
     let mut bar = vec![false; cw * ch];
     let quiet_row = |y: usize| (0..cw).filter(|&x| ranges[y * cw + x] < 0.012).count() * 50 >= cw * 49;

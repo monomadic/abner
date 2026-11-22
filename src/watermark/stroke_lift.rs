@@ -9,9 +9,8 @@
 //! must be strong, and lift counts only where there is no flicker to measure.
 //! It still cannot tell an opaque overlay from scenery of the same
 //! shape, which is why it is only used inside an explicit search area.
-use super::Frame;
-
-type Check<'a> = &'a mut dyn FnMut() -> Result<(), String>;
+use super::{Check, Frame, temporal_rows};
+use rayon::prelude::*;
 
 fn pass(src: &[f32], w: usize, h: usize, r: usize, horizontal: bool, min: bool) -> Vec<f32> {
     let mut out = vec![0.; w * h];
@@ -140,24 +139,22 @@ pub(super) fn detect_checked(
     let mut darkest = vec![0.; cw * ch];
     let mut lightest = vec![0.; cw * ch];
     let mut spread = vec![0f32; cw * ch];
-    let mut values = vec![0f32; frames.len()];
-    for y in 0..ch {
-        check()?;
-        for x in 0..cw {
-            let mut median = [0.; 3];
-            for (c, slot) in median.iter_mut().enumerate() {
-                for (value, frame) in values.iter_mut().zip(frames) {
-                    *value = frame.pixel(x0 + x, y0 + y)[c];
-                }
-                values.sort_unstable_by(f32::total_cmp);
-                *slot = values[values.len() / 2];
-                spread[y * cw + x] +=
-                    (values[values.len() * 7 / 8] - values[values.len() / 8]) / 3.;
-            }
-            darkest[y * cw + x] = median[0].min(median[1]).min(median[2]);
-            lightest[y * cw + x] = 1. - median[0].max(median[1]).max(median[2]);
-        }
-    }
+    temporal_rows(
+        frames,
+        [x0, y0, cw],
+        (
+            darkest.par_chunks_mut(cw),
+            lightest.par_chunks_mut(cw),
+            spread.par_chunks_mut(cw),
+        )
+            .into_par_iter(),
+        |(darkest, lightest, spread), x, median, range| {
+            darkest[x] = median[0].min(median[1]).min(median[2]);
+            lightest[x] = 1. - median[0].max(median[1]).max(median[2]);
+            spread[x] = range;
+        },
+        check,
+    )?;
     let (attenuation, flickers) = attenuation(&spread, cw, ch, coarse, check)?;
     let mut best: (f32, Vec<bool>) = (0., vec![false; w * h]);
     // A light overlay lifts the darkest channel; a dark one lowers the lightest.
@@ -297,7 +294,7 @@ mod tests {
     #[test]
     fn finds_translucent_light_and_dark_strokes_over_unchanging_scenery() {
         for tone in [1., 0.] {
-            let mask = detect_checked(&still(Some(tone)), REGION, &mut || Ok(())).unwrap();
+            let mask = detect_checked(&still(Some(tone)), REGION, &|| Ok(())).unwrap();
             let (hit, total, stray) = score(&mask);
             assert!(hit * 10 >= total * 9, "tone {tone}: {hit}/{total} stroke pixels");
             assert!(stray * 50 <= mask.len(), "tone {tone}: {stray} stray pixels");
@@ -333,18 +330,18 @@ mod tests {
 
     #[test]
     fn weak_lift_needs_damped_flicker_to_count() {
-        let found = detect_checked(&grainy(true, false), REGION, &mut || Ok(())).unwrap();
+        let found = detect_checked(&grainy(true, false), REGION, &|| Ok(())).unwrap();
         let (hit, total, stray) = score(&found);
         assert!(hit * 10 >= total * 8, "{hit}/{total} stroke pixels");
         assert!(stray * 50 <= found.len(), "{stray} stray pixels");
         // The same brightness as part of the scene flickers like its surroundings.
-        let scenery = detect_checked(&grainy(false, true), REGION, &mut || Ok(())).unwrap();
+        let scenery = detect_checked(&grainy(false, true), REGION, &|| Ok(())).unwrap();
         assert!(scenery.iter().all(|m| !m));
     }
 
     #[test]
     fn plain_scenery_yields_no_proposal() {
-        let mask = detect_checked(&still(None), REGION, &mut || Ok(())).unwrap();
+        let mask = detect_checked(&still(None), REGION, &|| Ok(())).unwrap();
         assert!(mask.iter().all(|m| !m));
     }
 }

@@ -1,5 +1,16 @@
 # abner — history
 
+## 2026-11-23 — Mask autodetect baseline and faster sampling and analysis
+
+Sparse MP4/MOV sampling reads nearby indexed keyframes where available and fills
+the remaining slots with exact requests. Both overlay detectors now reuse byte
+scratch for temporal quantiles and compute rows in parallel. Whole-frame 1080p
+analysis at 64 samples fell from about 2.8 s to 0.52 s on an M4 Pro. The analysis
+change preserved all 13 proposal PNGs for identical sample plans. The real-media
+diagnostic now covers Every frame and reports per-phase time and peak RSS.
+[Measurements and reproduction](OPTIMISE.md#2026-11-23-benchmark-results) include
+reference masks and the remaining 4K whole-frame memory limit.
+
 ## 2026-11-23 — Exact retiming and reusable streamed interpolation
 
 Sessions now receive the same nominal rational input rate used to declare the

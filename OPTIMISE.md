@@ -1,9 +1,9 @@
 # Mask autodetect: optimisation notes
 
 Written 2026-11-23 from a read of `src/watermark.rs`, `src/watermark/static_overlay.rs`,
-`src/watermark/stroke_lift.rs` and the callers in `src/app.rs`. **Nothing here is
-measured.** Every cost below is derived from the code; step 0 is to get numbers before
-changing anything.
+`src/watermark/stroke_lift.rs` and the callers in `src/app.rs`. The original cost
+estimates are kept below. The first measurements and changes are in
+[the benchmark results](#2026-11-23-benchmark-results).
 
 How it works today, in one paragraph: `Task::spawn` picks evenly spaced sample times in
 the chosen range (8 to 512 frames, or every frame), a worker thread reads each one with an
@@ -228,3 +228,63 @@ footage grain sits below both and the attenuation cue has nothing to measure.
 4. P1 with frame selection, bringing Q3 and Q4.
 5. Q2, then Q1 (both live in the review step that already exists).
 6. Q5, Q6 after reference masks exist to judge them against.
+
+## 2026-11-23 benchmark results
+
+Step 0 is complete. P2 is implemented for MP4/MOV family files with a video sync
+table. Each eligible keyframe replaces the closest target that chose it. Other
+targets retain their exact requests. Matroska Cues use segment timestamps, so
+MKV/WebM keep exact requests until the decoder's playable-track origin is available.
+The first part of P4 is also in place. Both detectors compute temporal quantiles
+on byte samples with reused scratch and parallel rows. The context grid and edge
+pass still run serially.
+
+One release test process per case on an Apple M4 Pro with 48 GB RAM, macOS 26.5.
+Reading includes conversion and sampling. Times for Every frame are summed across
+the three batches. Peak RSS is for the process and includes the decoder's cache.
+The fixtures are 8 s at 24 fps, with a translucent static mark on `testsrc2`.
+H.264 uses 96-frame GOPs. ProRes Proxy is transcoded from that H.264. The extra
+sparse run uses the same H.264 fixture recipe at 36 s.
+
+| Clip | Area | Samples | Read s before → after | Analyse s before → after | Peak MiB before → after |
+| --- | --- | --- | ---: | ---: | ---: |
+| 1080p H.264 | Box | 64 | 0.363 → 0.363 | 0.293 → 0.059 | 506 → 505 |
+| 1080p H.264 | Box | All | 1.054 → 1.048 | 0.882 → 0.181 | 552 → 544 |
+| 1080p H.264 | Whole | 64 | 0.410 → 0.358 | 2.733 → 0.523 | 933 → 933 |
+| 1080p H.264 | Whole | All | 1.049 → 1.052 | 7.983 → 1.601 | 965 → 964 |
+| 1080p ProRes | Box | 64 | 0.245 → 0.232 | 0.333 → 0.066 | 870 → 870 |
+| 1080p ProRes | Box | All | 0.738 → 0.662 | 0.999 → 0.199 | 916 → 895 |
+| 1080p ProRes | Whole | 64 | 0.336 → 0.329 | 2.858 → 0.516 | 1135 → 1136 |
+| 1080p ProRes | Whole | All | 0.991 → 0.944 | 8.436 → 1.610 | 1284 → 1233 |
+| 4K H.264 | Box | 64 | 1.334 → 1.346 | 0.228 → 0.058 | 1036 → 1035 |
+| 4K H.264 | Box | All | 4.001 → 4.089 | 0.689 → 0.171 | 1104 → 1070 |
+| 4K ProRes | Box | 64 | 0.922 → 0.852 | 0.271 → 0.062 | 3280 → 3280 |
+| 4K ProRes | Box | All | 2.551 → 2.465 | 0.814 → 0.179 | 3313 → 3315 |
+| 4K, both codecs | Whole | 64 and All | Memory guard | — | — |
+| 1080p H.264, 36 s | Box | 8 | 0.833 → 0.237 | 0.071 → 0.047 | 485 → 387 |
+
+P2 alone reduced the sparse read from 0.833 s to 0.233 s. The 8 s clips have only
+two H.264 keyframes, and nearby exact requests can share FilmCraft's running
+decoder, so the 64-frame runs saw little read-time change. P2 changed 4,016 mask
+pixels in the sparse run, 314 in the 1080p H.264 whole-frame 64-sample run and five
+in the 4K H.264 box 64-sample run. All other successful masks matched the baseline.
+P4 matched the P2 masks byte-for-byte across all 13 successful cases. The
+[reference PNGs](docs/evidence/autodetect-baseline/) contain the pre-change
+proposals for these synthetic clips.
+
+To recreate a test clip with FFmpeg 9.0.2, set `size` to `1920x1080` or `3840x2160`,
+and `seconds` to `8` or `36`.
+
+```sh
+ffmpeg -f lavfi -i "testsrc2=size=${size}:rate=24:duration=${seconds}" \
+  -vf 'drawbox=x=88:y=88:w=312:h=112:color=white@0.6:t=5,drawbox=x=102:y=105:w=284:h=8:color=white@0.6:t=fill,drawbox=x=102:y=125:w=180:h=8:color=white@0.6:t=fill,drawbox=x=102:y=145:w=244:h=8:color=white@0.6:t=fill' \
+  -an -c:v libx264 -preset ultrafast -g 96 -keyint_min 96 -sc_threshold 0 input.mp4
+ffmpeg -i input.mp4 -an -c:v prores_ks -profile:v 0 -threads 4 input.mov
+ABNER_DETECT_INPUT=input.mp4 ABNER_DETECT_OUTPUT=mask.png \
+  ABNER_DETECT_COUNT=64 ABNER_DETECT_BOX=56,56,400,200 \
+  cargo test --release --lib watermark::tests::inspect_detection_clip \
+  -- --exact --ignored --nocapture
+```
+
+Unset `ABNER_DETECT_BOX` for Whole frame and use `ABNER_DETECT_COUNT=all` for
+Every frame. The diagnostic prints per-batch timings and peak RSS on macOS.

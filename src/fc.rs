@@ -77,9 +77,23 @@ pub(crate) struct SyncTable {
 
 impl SyncTable {
     pub(crate) fn open(path: &Path) -> Option<Self> {
+        Self::read(path, true)
+    }
+
+    /// Sync times in FilmCraft's request coordinates. MP4 supplies edit-adjusted PTS
+    /// in its headers. Raw Matroska Cues lack the playable-track origin FilmCraft uses.
+    pub(crate) fn for_frame_requests(path: &Path) -> Option<Self> {
+        Self::read(path, false)
+    }
+
+    fn read(path: &Path, rebase: bool) -> Option<Self> {
         let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+        let meta = std::fs::metadata(path).ok()?;
+        if !meta.is_file() {
+            return None;
+        }
         let file = std::fs::File::open(path).ok()?;
-        let len = file.metadata().ok()?.len();
+        let len = meta.len();
         let src = FileReader { file, len };
         let mut times = match ext.as_str() {
             "mp4" | "m4v" | "mov" | "mp4v" | "m4a" => {
@@ -89,17 +103,21 @@ impl SyncTable {
                 if t.timescale == 0 {
                     return None;
                 }
-                let start = (0..t.samples.len())
-                    .filter_map(|k| t.presentation_pts(k))
-                    .min()
-                    .unwrap_or(0);
+                let start = if rebase {
+                    (0..t.samples.len())
+                        .filter_map(|k| t.presentation_pts(k))
+                        .min()
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
                 t.sync_samples()
                     .iter()
                     .filter_map(|&k| t.presentation_pts(k as usize))
-                    .map(|p| (p - start).max(0) as f64 / t.timescale as f64)
+                    .map(|p| p.saturating_sub(start) as f64 / t.timescale as f64)
                     .collect::<Vec<f64>>()
             }
-            "mkv" | "webm" | "mka" => {
+            "mkv" | "webm" | "mka" if rebase => {
                 let opts = filmcraft_matroska::OpenOptions {
                     index: false,
                     ..Default::default()
@@ -127,14 +145,10 @@ impl SyncTable {
         self.times[k.saturating_sub(1)]
     }
 
-    /// Closest indexed keyframe; ties prefer the earlier frame.
-    #[cfg(test)]
-    pub(crate) fn nearest(&self, t: f64) -> f64 {
-        let before = self.before(t);
-        match self.at_or_after(t) {
-            Some(after) if after - t < t - before => after,
-            _ => before,
-        }
+    pub(crate) fn in_range(&self, start: f64, end: f64) -> &[f64] {
+        let first = self.times.partition_point(|&t| t < start);
+        let end = self.times.partition_point(|&t| t <= end);
+        &self.times[first..end]
     }
 
     /// The smallest sync time ≥ `t`, if any.
@@ -540,14 +554,6 @@ fn resize_bilinear(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize, out: 
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn nearest_sync_prefers_closest_and_earlier_tie() {
-        let table = super::SyncTable { times: vec![0.0, 2.0, 5.0] };
-        for (time, expected) in [(0.0, 0.0), (1.0, 0.0), (1.1, 2.0),
-            (3.0, 2.0), (4.0, 5.0), (8.0, 5.0)] {
-            assert_eq!(table.nearest(time), expected);
-        }
-    }
     use super::*;
 
     #[test]
