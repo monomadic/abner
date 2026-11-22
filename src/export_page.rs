@@ -64,13 +64,13 @@ pub(crate) type StageReport = Arc<dyn Fn(&str, StageUpdate) + Send + Sync>;
 pub(crate) enum StageUpdate {
     /// The stage's phase-local detail.
     Phase(abner_processor_api::Progress),
-    /// Stage `.0` of `.1`'s current call (the frame bar); `None` once the
+    /// Stage `.0` of `.1`'s current call (folded into total progress); `None` once the
     /// call returns.
     Frame(usize, usize, Option<abner_processor_api::FrameProgress>),
 }
 /// The working stage's frame report: name, index, stage count, steps.
 type FrameReport = (String, usize, usize, abner_processor_api::FrameProgress);
-/// The frame bar's live report, and the total bar's high-water mark: a frame
+/// The working frame's live report, and total progress's high-water mark: a frame
 /// report cleared just before its frame lands never moves the bar back.
 #[derive(Default)]
 struct FrameState {
@@ -1094,13 +1094,8 @@ impl Page {
         let progress=RectPx{x:card.x+20.,y:card.y+card.h-if card.h<110.{32.}else{42.},w:card.w-40.,h:6.};
         surface(items,progress,0x202020,0.);
         surface(items,RectPx{w:progress.w*if self.path.is_some(){1.}else{done as f32},..progress},0x0059ff,0.);
-        // The frame bar: the working stage's steps through the frame in hand,
-        // for processors slow enough to report them.
-        if card.h>=110. && self.busy() && let Some((_,_,_,f))=self.frame_report() && let Some(step)=f.fraction() {
-            let lane=RectPx{y:progress.y+progress.h+3.,h:3.,..progress};
-            surface(items,lane,0x181818,0.);
-            surface(items,RectPx{w:lane.w*step as f32,..lane},0x2d5fa8,0.);
-        }
+        // Frame steps contribute to `done` above; keep their local detail in
+        // the footer instead of drawing a bar that restarts for every frame.
         let stats_y=card.y+card.h-24.;
         let third=(card.w-40.)/3.;
         for (i,text,align) in [(0,format!("{} of {} processed",duration_label(self.rendered_time),duration_label(self.duration)),Align::Left),
