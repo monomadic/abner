@@ -16,6 +16,7 @@ dependencies = [
  "filmcraft-prores",
  "filmcraft-time",
  "libc",
+ "rayon",
  "serde",
  "serde_json",
  "sha2",
