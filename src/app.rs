@@ -3453,7 +3453,12 @@ impl App {
 
         if self.ready() { self.export_page.reset_source(&self.videos[self.active].info); }
         self.export_page.poll(&mut uploads, n + 1);
-        if let Some(t) = self.export_page.seek.take().filter(|_| self.export_page.open) { self.seek_all(t,true);self.adopt_seek=false; }
+        // Only the original view (Tab) draws the source, so only it seeks there:
+        // following a running export would otherwise exact-seek every clip once
+        // per rendered frame, decoding the source a second time beside the job.
+        // The newest target waits in `seek` until Tab asks for it.
+        if self.export_page.open && self.export_page.original
+            && let Some(t) = self.export_page.seek.take() { self.seek_all(t,true);self.adopt_seek=false; }
         if self.export_page.open {
             self.update_export_copy_availability();
             items.clear();

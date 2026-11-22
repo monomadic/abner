@@ -112,6 +112,7 @@ fn sdr_transform(color: &filmcraft_color::ColorInfo) -> Option<InputTransform> {
 /// Convert encoded planes to encoded SDR Rec.709 RGB16. Rec.709 sources skip the display
 /// transfer/linear-light round trip; wide-gamut and HDR sources go through [`sdr_transform`].
 pub fn rgb16(frame: &VideoFrame) -> Result<Vec<u16>> {
+    use rayon::prelude::*;
     let (w, h) = (frame.width as usize, frame.height as usize);
     let transform = sdr_transform(&frame.color);
     if w == 0 || h == 0 || w > 8192 || h > 8192 || !(is_rec709(&frame.color) || transform.is_some())
@@ -119,7 +120,7 @@ pub fn rgb16(frame: &VideoFrame) -> Result<Vec<u16>> {
         return Err("requires Rec.709, BT.2020, Display P3, PQ or HLG video, dimensions 1..8192".into());
     }
     let mut out = vec![0; w * h * 3];
-    let mut pixel = |p: usize, y: u32, u: u32, v: u32, bits: u32| {
+    let pixel = |o: &mut [u16], y: u32, u: u32, v: u32, bits: u32| {
         let mut rgb = ycbcr_to_rgb(
             normalize_y(y, bits, frame.color.range),
             normalize_c(u, bits, frame.color.range),
@@ -132,22 +133,32 @@ pub fn rgb16(frame: &VideoFrame) -> Result<Vec<u16>> {
                 .map(|v| filmcraft_color::linear_to_srgb(v.clamp(0., 1.)));
         }
         for c in 0..3 {
-            out[p * 3 + c] = (rgb[c].clamp(0., 1.) * 65535.).round_ties_even() as u16;
+            o[c] = (rgb[c].clamp(0., 1.) * 65535.).round_ties_even() as u16;
         }
+    };
+    // One row per parallel task; each pixel's arithmetic is the serial loop's.
+    let rows = |out: &mut [u16], planes: &(dyn Fn(usize, usize) -> u32 + Sync), sx: u32, sy: u32, cw: usize, bits: u32| {
+        out.par_chunks_mut(w * 3).enumerate().for_each(|(y, row)| {
+            for x in 0..w {
+                let p = y * w + x;
+                let q = (y >> sy) * cw + (x >> sx);
+                pixel(&mut row[x * 3..x * 3 + 3], planes(0, p), planes(1, q), planes(2, q), bits);
+            }
+        })
     };
     match &frame.data {
         PixelData::Rgba8(data) => {
             if data.len() != w * h * 4 || transform.is_some() {
                 return Err("invalid RGBA frame".into());
             }
-            for (p, rgba) in data.as_chunks::<4>().0.iter().enumerate() {
-                if rgba[3] != 255 {
-                    return Err("alpha video is unsupported".into());
-                }
-                for c in 0..3 {
-                    out[p * 3 + c] = u16::from(rgba[c]) * 257;
-                }
+            if data.as_chunks::<4>().0.iter().any(|rgba| rgba[3] != 255) {
+                return Err("alpha video is unsupported".into());
             }
+            out.par_chunks_mut(3).zip(data.par_chunks(4)).for_each(|(o, rgba)| {
+                for c in 0..3 {
+                    o[c] = u16::from(rgba[c]) * 257;
+                }
+            });
         }
         PixelData::Yuv8 {
             planes,
@@ -164,19 +175,7 @@ pub fn rgb16(frame: &VideoFrame) -> Result<Vec<u16>> {
             {
                 return Err("invalid YUV planes".into());
             }
-            for y in 0..h {
-                for x in 0..w {
-                    let p = y * w + x;
-                    let q = (y >> sy) * cw + (x >> sx);
-                    pixel(
-                        p,
-                        u32::from(planes[0][p]),
-                        u32::from(planes[1][q]),
-                        u32::from(planes[2][q]),
-                        8,
-                    );
-                }
-            }
+            rows(&mut out, &|c, i| u32::from(planes[c][i]), sx as u32, sy as u32, cw, 8);
         }
         PixelData::Yuv16 {
             planes,
@@ -194,19 +193,7 @@ pub fn rgb16(frame: &VideoFrame) -> Result<Vec<u16>> {
             {
                 return Err("invalid YUV planes".into());
             }
-            for y in 0..h {
-                for x in 0..w {
-                    let p = y * w + x;
-                    let q = (y >> sy) * cw + (x >> sx);
-                    pixel(
-                        p,
-                        u32::from(planes[0][p]),
-                        u32::from(planes[1][q]),
-                        u32::from(planes[2][q]),
-                        *bits,
-                    );
-                }
-            }
+            rows(&mut out, &|c, i| u32::from(planes[c][i]), sx as u32, sy as u32, cw, *bits);
         }
         PixelData::RgbaF32(_) => {
             return Err("linear RGBA sources require an explicit SDR transform".into());
@@ -226,32 +213,22 @@ pub fn prores_frame(rgb: &[u16], w: usize, h: usize) -> Result<filmcraft_prores:
         10,
         false,
     );
-    for y in 0..h {
-        for x in (0..w).step_by(2) {
-            let mut uv = [0f32; 2];
-            let n = (w - x).min(2);
-            for dx in 0..n {
-                let p = (y * w + x + dx) * 3;
-                let c = rgb_to_ycbcr(
-                    f32::from(rgb[p]) / 65535.,
-                    f32::from(rgb[p + 1]) / 65535.,
-                    f32::from(rgb[p + 2]) / 65535.,
-                    Matrix::Bt709,
-                );
-                frame.y[y * w + x + dx] =
-                    (64. + 876. * c[0]).round_ties_even().clamp(64., 940.) as u16;
-                uv[0] += c[1];
-                uv[1] += c[2];
-            }
-            let q = y * w.div_ceil(2) + x / 2;
-            frame.cb[q] = (512. + 896. * uv[0] / n as f32)
-                .round_ties_even()
-                .clamp(64., 960.) as u16;
-            frame.cr[q] = (512. + 896. * uv[1] / n as f32)
-                .round_ties_even()
-                .clamp(64., 960.) as u16;
-        }
-    }
+    let [y, cb, cr] = crate::color::subsample(
+        w,
+        h,
+        (2, 1),
+        |p| {
+            let c = rgb_to_ycbcr(
+                f32::from(rgb[p * 3]) / 65535.,
+                f32::from(rgb[p * 3 + 1]) / 65535.,
+                f32::from(rgb[p * 3 + 2]) / 65535.,
+                Matrix::Bt709,
+            );
+            ((64. + 876. * c[0]).round_ties_even().clamp(64., 940.) as u16, [c[1], c[2]])
+        },
+        |uv, n| uv.map(|c| (512. + 896. * c / n as f32).round_ties_even().clamp(64., 960.) as u16),
+    );
+    (frame.y, frame.cb, frame.cr) = (y, cb, cr);
     Ok(frame)
 }
 fn box_children(file: &mut File, start: u64, end: u64) -> Result<Vec<([u8; 4], u64, u64)>> {

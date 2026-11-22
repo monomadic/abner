@@ -439,6 +439,7 @@ impl Player {
                 };
                 if failed && !reader_shared.closed.load(Ordering::Relaxed) {
                     reader_shared.failed.store(true, Ordering::Relaxed);
+                    wake(&reader_shared);
                 }
             })
             .ok()?;
@@ -832,7 +833,10 @@ fn reader(shared: &Arc<Shared>, cfg: &ReaderCfg) -> Result<(), String> {
         }
         if at_end {
             // Nothing more to decode until a command: park (the cache keeps what it has).
-            shared.eof.store(true, Ordering::Release);
+            // Reaching the end is news to a consumer waiting for its next frame.
+            if !shared.eof.swap(true, Ordering::AcqRel) {
+                wake(shared);
+            }
             let c = shared.cache.lock().unwrap();
             let _c = shared
                 .space

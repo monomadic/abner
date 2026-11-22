@@ -1,6 +1,7 @@
 //! Host-owned CPU conversions. Matching layouts return the original allocation.
 use abner_processor_api::{FramePixels, PixelFormat, Result, VideoFrame};
 use filmcraft_frame::{Chroma, PixelData};
+use rayon::prelude::*;
 use std::sync::Arc;
 
 /// Preserve supported Rec.709 decoder planes; other layouts, wide gamut and HDR take the
@@ -92,8 +93,111 @@ fn decoded(frame: &VideoFrame) -> Result<filmcraft_frame::VideoFrame> {
         pts: filmcraft_time::Tick::ZERO,
     })
 }
-pub fn convert(mut frame: VideoFrame, target: PixelFormat) -> Result<VideoFrame> {
+/// Rows of pixels per parallel task: big enough that scheduling is noise next
+/// to the arithmetic, small enough that a 4K frame splits across every core.
+const TASK_PIXELS: usize = 8192;
+
+/// Map packed `in_n`-sample pixels to packed `out_n`-sample pixels on every core.
+/// Pixel order and per-pixel arithmetic are the caller's, so results are identical
+/// to the serial loop.
+pub(crate) fn map_pixels<I: Sync, O: Send + Copy + Default>(
+    input: &[I],
+    in_n: usize,
+    out_n: usize,
+    f: impl Fn(&[I], &mut [O]) + Sync,
+) -> Vec<O> {
+    let mut out = vec![O::default(); input.len() / in_n * out_n];
+    out.par_chunks_mut(TASK_PIXELS * out_n)
+        .zip(input.par_chunks(TASK_PIXELS * in_n))
+        .for_each(|(o, i)| {
+            for (o, i) in o.chunks_exact_mut(out_n).zip(i.chunks_exact(in_n)) {
+                f(i, o)
+            }
+        });
+    out
+}
+
+/// Planar Y'CbCr at `(sx, sy)` subsampling, one chroma row per parallel task.
+/// `px(i)` returns pixel `i`'s luma code and its chroma contribution; `chroma`
+/// turns a block's summed contribution and pixel count into the two codes.
+/// Blocks are summed in the serial loop's order, so floats round identically.
+pub(crate) fn subsample(
+    w: usize,
+    h: usize,
+    (sx, sy): (usize, usize),
+    px: impl Fn(usize) -> (u16, [f32; 2]) + Sync,
+    chroma: impl Fn([f32; 2], usize) -> [u16; 2] + Sync,
+) -> [Vec<u16>; 3] {
+    let (cw, ch) = (w.div_ceil(sx), h.div_ceil(sy));
+    let mut planes = [vec![0u16; w * h], vec![0; cw * ch], vec![0; cw * ch]];
+    let [luma, u, v] = &mut planes;
+    luma.par_chunks_mut(w * sy)
+        .zip(u.par_chunks_mut(cw).zip(v.par_chunks_mut(cw)))
+        .enumerate()
+        .for_each(|(cy, (luma, (u, v)))| {
+            for cx in 0..cw {
+                let mut uv = [0f32; 2];
+                let mut count = 0;
+                for y in cy * sy..((cy + 1) * sy).min(h) {
+                    for x in cx * sx..((cx + 1) * sx).min(w) {
+                        let (l, c) = px(y * w + x);
+                        luma[(y - cy * sy) * w + x] = l;
+                        uv[0] += c[0];
+                        uv[1] += c[1];
+                        count += 1;
+                    }
+                }
+                [u[cx], v[cx]] = chroma(uv, count);
+            }
+        });
+    planes
+}
+
+fn narrow(planes: [Vec<u16>; 3]) -> FramePixels {
+    FramePixels::Yuv8(planes.map(|p| Arc::new(p.into_par_iter().map(|v| v as u8).collect())))
+}
+
+/// One Y'CbCr sample of a planar frame, whatever its storage depth.
+#[derive(Clone, Copy)]
+enum Planes<'a> {
+    U8(&'a [Arc<Vec<u8>>; 3]),
+    U16(&'a [Arc<Vec<u16>>; 3]),
+}
+impl Planes<'_> {
+    fn of(pixels: &FramePixels) -> Planes<'_> {
+        match pixels {
+            FramePixels::Yuv8(p) => Planes::U8(p),
+            FramePixels::Yuv16(p) => Planes::U16(p),
+            _ => unreachable!(),
+        }
+    }
+    #[inline(always)]
+    fn get(self, plane: usize, index: usize) -> u32 {
+        match self {
+            Planes::U8(p) => u32::from(p[plane][index]),
+            Planes::U16(p) => u32::from(p[plane][index]),
+        }
+    }
+}
+
+fn rgb16_to_rgba8(rgb: &[u16]) -> Vec<u8> {
+    map_pixels(rgb, 3, 4, |p, o: &mut [u8]| {
+        for c in 0..3 {
+            o[c] = ((u32::from(p[c]) + 128) / 257) as u8;
+        }
+        o[3] = 255;
+    })
+}
+
+pub fn convert(frame: VideoFrame, target: PixelFormat) -> Result<VideoFrame> {
     frame.validate()?;
+    convert_validated(frame, target)
+}
+
+/// [`convert`] for a frame the caller has already validated: validation reads
+/// every sample, as much as some conversions do, so a pipeline pays it once
+/// per frame rather than once per step.
+pub fn convert_validated(mut frame: VideoFrame, target: PixelFormat) -> Result<VideoFrame> {
     if frame.format == target {
         return Ok(frame);
     }
@@ -102,82 +206,68 @@ pub fn convert(mut frame: VideoFrame, target: PixelFormat) -> Result<VideoFrame>
         // no RGB clipping or matrix round trip is needed for a layout change.
         let (w, h) = (frame.width, frame.height);
         let (icw, ocw, och) = (w.div_ceil(ix), w.div_ceil(ox), h.div_ceil(oy));
-        let sample = |plane: usize, index: usize| -> u32 {
-            match &frame.pixels {
-                FramePixels::Yuv8(p) => u32::from(p[plane][index]),
-                FramePixels::Yuv16(p) => u32::from(p[plane][index]),
-                _ => unreachable!(),
-            }
-        };
+        let planes = Planes::of(&frame.pixels);
         let from_scale = 1u32 << (frame.format.depth() - 8);
         let to_scale = 1u32 << (target.depth() - 8);
         let quantize = |sum: u32, count: u32| -> u16 {
             ((sum * to_scale + count * from_scale / 2) / (count * from_scale))
                 .min((1 << target.depth()) - 1) as u16
         };
-        let mut p = [
-            (0..w * h)
-                .map(|i| quantize(sample(0, i), 1))
-                .collect::<Vec<_>>(),
-            vec![0; ocw * och],
-            vec![0; ocw * och],
-        ];
-        for cy in 0..och {
-            for cx in 0..ocw {
-                let mut sum = [0; 2];
-                let mut count = 0;
-                for y in cy * oy..((cy + 1) * oy).min(h) {
-                    for x in cx * ox..((cx + 1) * ox).min(w) {
-                        let index = (y / iy) * icw + x / ix;
-                        sum[0] += sample(1, index);
-                        sum[1] += sample(2, index);
-                        count += 1;
+        let luma: Vec<u16> = (0..w * h)
+            .into_par_iter()
+            .map(|i| quantize(planes.get(0, i), 1))
+            .collect();
+        let (mut u, mut v) = (vec![0; ocw * och], vec![0; ocw * och]);
+        u.par_chunks_mut(ocw)
+            .zip(v.par_chunks_mut(ocw))
+            .enumerate()
+            .for_each(|(cy, (ur, vr))| {
+                for cx in 0..ocw {
+                    let mut sum = [0; 2];
+                    let mut count = 0;
+                    for y in cy * oy..((cy + 1) * oy).min(h) {
+                        for x in cx * ox..((cx + 1) * ox).min(w) {
+                            let index = (y / iy) * icw + x / ix;
+                            sum[0] += planes.get(1, index);
+                            sum[1] += planes.get(2, index);
+                            count += 1;
+                        }
                     }
+                    ur[cx] = quantize(sum[0], count);
+                    vr[cx] = quantize(sum[1], count);
                 }
-                for c in 0..2 {
-                    p[c + 1][cy * ocw + cx] = quantize(sum[c], count);
-                }
-            }
-        }
-        frame.pixels = if target.depth() == 8 {
-            FramePixels::Yuv8(p.map(|p| Arc::new(p.into_iter().map(|v| v as u8).collect())))
-        } else {
-            FramePixels::Yuv16(p.map(Arc::new))
-        };
+            });
+        let p = [luma, u, v];
+        frame.pixels = if target.depth() == 8 { narrow(p) } else { FramePixels::Yuv16(p.map(Arc::new)) };
         frame.format = target;
         return Ok(frame);
     }
     if target == PixelFormat::RgbF32 {
         let samples = match &frame.pixels {
-            FramePixels::Rgb16(p) => p.iter().map(|&v| v as f32 / 65535.0).collect(),
-            FramePixels::Rgba8(p) => p
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .flat_map(|p| p[..3].iter().map(|&v| v as f32 / 255.0))
-                .collect(),
+            FramePixels::Rgb16(p) => p.par_iter().map(|&v| v as f32 / 65535.0).collect(),
+            FramePixels::Rgba8(p) => map_pixels(p, 4, 3, |p, o: &mut [f32]| {
+                for c in 0..3 {
+                    o[c] = p[c] as f32 / 255.0;
+                }
+            }),
             FramePixels::Yuv8(_) | FramePixels::Yuv16(_) => {
                 let (sx, sy) = frame.format.subsampling().unwrap();
-                let cw = frame.width.div_ceil(sx);
+                let (w, cw) = (frame.width, frame.width.div_ceil(sx));
                 let scale = if frame.format.depth() == 8 { 1.0 } else { 4.0 };
-                let sample = |c: usize, i: usize| match &frame.pixels {
-                    FramePixels::Yuv8(p) => p[c][i] as f32,
-                    FramePixels::Yuv16(p) => p[c][i] as f32,
-                    _ => unreachable!(),
-                };
-                let mut rgb = Vec::with_capacity(frame.width * frame.height * 3);
-                for y in 0..frame.height {
-                    for x in 0..frame.width {
-                        let l = (sample(0, y * frame.width + x) / scale - 16.0) / 219.0;
-                        let u = (sample(1, (y / sy) * cw + x / sx) / scale - 128.0) / 224.0;
-                        let v = (sample(2, (y / sy) * cw + x / sx) / scale - 128.0) / 224.0;
-                        rgb.extend_from_slice(&[
+                let planes = Planes::of(&frame.pixels);
+                let mut rgb = vec![0f32; w * frame.height * 3];
+                rgb.par_chunks_mut(w * 3).enumerate().for_each(|(y, row)| {
+                    for x in 0..w {
+                        let l = (planes.get(0, y * w + x) as f32 / scale - 16.0) / 219.0;
+                        let u = (planes.get(1, (y / sy) * cw + x / sx) as f32 / scale - 128.0) / 224.0;
+                        let v = (planes.get(2, (y / sy) * cw + x / sx) as f32 / scale - 128.0) / 224.0;
+                        row[x * 3..x * 3 + 3].copy_from_slice(&[
                             l + 1.5748 * v,
                             l - 0.187324 * u - 0.468124 * v,
                             l + 1.8556 * u,
                         ]);
                     }
-                }
+                });
                 rgb
             }
             FramePixels::RgbF32(_) => unreachable!(),
@@ -188,63 +278,39 @@ pub fn convert(mut frame: VideoFrame, target: PixelFormat) -> Result<VideoFrame>
     }
     if let FramePixels::RgbF32(rgb) = &frame.pixels {
         if target == PixelFormat::Rgba8 {
-            frame.pixels = FramePixels::Rgba8(Arc::new(
-                rgb.as_chunks::<3>()
-                    .0
-                    .iter()
-                    .flat_map(|p| {
-                        [
-                            (p[0].clamp(0.0, 1.0) * 255.0).round_ties_even() as u8,
-                            (p[1].clamp(0.0, 1.0) * 255.0).round_ties_even() as u8,
-                            (p[2].clamp(0.0, 1.0) * 255.0).round_ties_even() as u8,
-                            255,
-                        ]
-                    })
-                    .collect(),
-            ));
+            frame.pixels = FramePixels::Rgba8(Arc::new(map_pixels(rgb, 3, 4, |p, o: &mut [u8]| {
+                for c in 0..3 {
+                    o[c] = (p[c].clamp(0.0, 1.0) * 255.0).round_ties_even() as u8;
+                }
+                o[3] = 255;
+            })));
             frame.format = target;
             return Ok(frame);
         }
     }
     // Quantize float samples only at the requested sink, never via RGB16.
-    if let (FramePixels::RgbF32(rgb), Some((sx, sy))) = (&frame.pixels, target.subsampling()) {
-        let (w, h) = (frame.width, frame.height);
-        let (cw, ch) = (w.div_ceil(sx), h.div_ceil(sy));
+    if let (FramePixels::RgbF32(rgb), Some(sub)) = (&frame.pixels, target.subsampling()) {
         let scale = if target.depth() == 8 { 1.0 } else { 4.0 };
         let max = ((1u32 << target.depth()) - 1) as f32;
         let q = |v: f32| v.round_ties_even().clamp(0.0, max) as u16;
-        let mut planes = [vec![0u16; w * h], vec![0; cw * ch], vec![0; cw * ch]];
-        for cy in 0..ch {
-            for cx in 0..cw {
-                let mut uv = [0.0f32; 2];
-                let mut count = 0;
-                for y in cy * sy..((cy + 1) * sy).min(h) {
-                    for x in cx * sx..((cx + 1) * sx).min(w) {
-                        let i = (y * w + x) * 3;
-                        let [r, g, b] = [rgb[i], rgb[i + 1], rgb[i + 2]];
-                        let l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-                        planes[0][y * w + x] = q((16.0 + 219.0 * l) * scale);
-                        uv[0] += (b - l) / 1.8556;
-                        uv[1] += (r - l) / 1.5748;
-                        count += 1;
-                    }
-                }
-                for c in 0..2 {
-                    planes[c + 1][cy * cw + cx] = q((128.0 + 224.0 * uv[c] / count as f32) * scale);
-                }
-            }
-        }
-        frame.pixels = if target.depth() == 8 {
-            FramePixels::Yuv8(planes.map(|p| Arc::new(p.into_iter().map(|v| v as u8).collect())))
-        } else {
-            FramePixels::Yuv16(planes.map(Arc::new))
-        };
+        let planes = subsample(
+            frame.width,
+            frame.height,
+            sub,
+            |i| {
+                let [r, g, b] = [rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2]];
+                let l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                (q((16.0 + 219.0 * l) * scale), [(b - l) / 1.8556, (r - l) / 1.5748])
+            },
+            |uv, count| uv.map(|c| q((128.0 + 224.0 * c / count as f32) * scale)),
+        );
+        frame.pixels = if target.depth() == 8 { narrow(planes) } else { FramePixels::Yuv16(planes.map(Arc::new)) };
         frame.format = target;
         return Ok(frame);
     }
     let rgb = match &frame.pixels {
         FramePixels::RgbF32(p) => p
-            .iter()
+            .par_iter()
             .map(|v| (v.clamp(0.0, 1.0) * 65535.0).round_ties_even() as u16)
             .collect(),
         FramePixels::Rgb16(_) => {
@@ -257,68 +323,40 @@ pub fn convert(mut frame: VideoFrame, target: PixelFormat) -> Result<VideoFrame>
     };
     let pixels = match target {
         PixelFormat::Rgb16 => FramePixels::Rgb16(rgb),
-        PixelFormat::Rgba8 => FramePixels::Rgba8(Arc::new(
-            rgb.as_chunks::<3>()
-                .0
-                .iter()
-                .flat_map(|p| {
-                    [
-                        ((u32::from(p[0]) + 128) / 257) as u8,
-                        ((u32::from(p[1]) + 128) / 257) as u8,
-                        ((u32::from(p[2]) + 128) / 257) as u8,
-                        255,
-                    ]
-                })
-                .collect(),
-        )),
+        PixelFormat::Rgba8 => FramePixels::Rgba8(Arc::new(rgb16_to_rgba8(&rgb))),
         PixelFormat::Yuv422p10 => {
             // Preserve the established RGB16 -> ProRes numeric conversion.
             let p = crate::media::prores_frame(&rgb, frame.width, frame.height)?;
             FramePixels::Yuv16([Arc::new(p.y), Arc::new(p.cb), Arc::new(p.cr)])
         }
         _ => {
-            let (sx, sy) = target.subsampling().unwrap();
-            let (w, h) = (frame.width, frame.height);
-            let (cw, ch) = (w.div_ceil(sx), h.div_ceil(sy));
-            let mut planes = [vec![0u16; w * h], vec![0u16; cw * ch], vec![0u16; cw * ch]];
             let scale = if target.depth() == 8 { 1. } else { 4. };
-            for cy in 0..ch {
-                for cx in 0..cw {
-                    let mut uv = [0f32; 2];
-                    let mut count = 0;
-                    for y in cy * sy..((cy + 1) * sy).min(h) {
-                        for x in cx * sx..((cx + 1) * sx).min(w) {
-                            let p = (y * w + x) * 3;
-                            let c = filmcraft_color::rgb_to_ycbcr(
-                                rgb[p] as f32 / 65535.,
-                                rgb[p + 1] as f32 / 65535.,
-                                rgb[p + 2] as f32 / 65535.,
-                                filmcraft_color::Matrix::Bt709,
-                            );
-                            planes[0][y * w + x] = ((16. + 219. * c[0]) * scale)
-                                .round_ties_even()
-                                .clamp(16. * scale, 235. * scale)
-                                as u16;
-                            uv[0] += c[1];
-                            uv[1] += c[2];
-                            count += 1;
-                        }
-                    }
-                    for c in 0..2 {
-                        planes[c + 1][cy * cw + cx] = ((128. + 224. * uv[c] / count as f32) * scale)
+            let planes = subsample(
+                frame.width,
+                frame.height,
+                target.subsampling().unwrap(),
+                |i| {
+                    let p = i * 3;
+                    let c = filmcraft_color::rgb_to_ycbcr(
+                        rgb[p] as f32 / 65535.,
+                        rgb[p + 1] as f32 / 65535.,
+                        rgb[p + 2] as f32 / 65535.,
+                        filmcraft_color::Matrix::Bt709,
+                    );
+                    let l = ((16. + 219. * c[0]) * scale)
+                        .round_ties_even()
+                        .clamp(16. * scale, 235. * scale) as u16;
+                    (l, [c[1], c[2]])
+                },
+                |uv, count| {
+                    uv.map(|c| {
+                        ((128. + 224. * c / count as f32) * scale)
                             .round_ties_even()
-                            .clamp(16. * scale, 240. * scale)
-                            as u16;
-                    }
-                }
-            }
-            if target.depth() == 8 {
-                FramePixels::Yuv8(
-                    planes.map(|p| Arc::new(p.into_iter().map(|v| v as u8).collect())),
-                )
-            } else {
-                FramePixels::Yuv16(planes.map(Arc::new))
-            }
+                            .clamp(16. * scale, 240. * scale) as u16
+                    })
+                },
+            );
+            if target.depth() == 8 { narrow(planes) } else { FramePixels::Yuv16(planes.map(Arc::new)) }
         }
     };
     frame.format = target;
@@ -348,25 +386,74 @@ pub fn rgba8(frame: &VideoFrame) -> Result<Arc<Vec<u8>>> {
     frame.validate()?;
     match &frame.pixels {
         FramePixels::Rgba8(p) => Ok(p.clone()),
-        FramePixels::Rgb16(p) => Ok(Arc::new(
-            p.as_chunks::<3>()
-                .0
-                .iter()
-                .flat_map(|p| {
-                    [
-                        ((u32::from(p[0]) + 128) / 257) as u8,
-                        ((u32::from(p[1]) + 128) / 257) as u8,
-                        ((u32::from(p[2]) + 128) / 257) as u8,
-                        255,
-                    ]
-                })
-                .collect(),
-        )),
+        FramePixels::Rgb16(p) => Ok(Arc::new(rgb16_to_rgba8(p))),
         _ => {
-            let FramePixels::Rgba8(p) = convert(frame.clone(), PixelFormat::Rgba8)?.pixels else {
+            let FramePixels::Rgba8(p) = convert_validated(frame.clone(), PixelFormat::Rgba8)?.pixels else {
                 unreachable!()
             };
             Ok(p)
         }
+    }
+}
+
+#[cfg(test)]
+mod fingerprint {
+    use super::*;
+    use std::hash::{Hash, Hasher};
+    fn frame(format: PixelFormat, w: usize, h: usize, seed: u64) -> VideoFrame {
+        let mut s = seed;
+        let mut next = move || { s ^= s << 13; s ^= s >> 7; s ^= s << 17; s };
+        let n = w * h;
+        let pixels = match format {
+            PixelFormat::Rgb16 => FramePixels::Rgb16((0..n * 3).map(|_| next() as u16).collect()),
+            PixelFormat::RgbF32 => FramePixels::RgbF32(Arc::new((0..n * 3).map(|_| (next() % 1200) as f32 / 1000. - 0.1).collect())),
+            PixelFormat::Rgba8 => FramePixels::Rgba8(Arc::new((0..n * 4).map(|i| if i % 4 == 3 { 255 } else { next() as u8 }).collect())),
+            f => {
+                let (sx, sy) = f.subsampling().unwrap();
+                let c = w.div_ceil(sx) * h.div_ceil(sy);
+                if f.depth() == 8 {
+                    FramePixels::Yuv8([n, c, c].map(|len| Arc::new((0..len).map(|_| 16 + (next() % 220) as u8).collect())))
+                } else {
+                    FramePixels::Yuv16([n, c, c].map(|len| Arc::new((0..len).map(|_| 64 + (next() % 877) as u16).collect())))
+                }
+            }
+        };
+        VideoFrame { width: w, height: h, format, pixels, pts: 0, duration: 1, time_base: [1, 1] }
+    }
+    fn digest(f: &VideoFrame) -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        format!("{:?}", f.format).hash(&mut h);
+        match &f.pixels {
+            FramePixels::Rgb16(p) => p.hash(&mut h),
+            FramePixels::RgbF32(p) => p.iter().for_each(|v| v.to_bits().hash(&mut h)),
+            FramePixels::Rgba8(p) => p.hash(&mut h),
+            FramePixels::Yuv8(p) => p.iter().for_each(|p| p.hash(&mut h)),
+            FramePixels::Yuv16(p) => p.iter().for_each(|p| p.hash(&mut h)),
+        }
+        h.finish()
+    }
+    /// Conversion output digests, to prove a rewrite is bit-identical.
+    #[test]
+    #[ignore]
+    fn print_conversion_digests() {
+        use PixelFormat::*;
+        let all = [Rgb16, RgbF32, Rgba8, Yuv420p8, Yuv420p10, Yuv422p10, Yuv444p10];
+        let mut total = std::collections::hash_map::DefaultHasher::new();
+        for (w, h) in [(37, 23), (64, 48), (1, 1), (5, 2)] {
+            for (i, from) in all.iter().enumerate() {
+                let src = frame(*from, w, h, 0x9e3779b97f4a7c15 ^ (i as u64 * 7919 + w as u64));
+                for to in all {
+                    let out = convert(src.clone(), to).unwrap();
+                    let d = digest(&out);
+                    d.hash(&mut total);
+                    println!("{w}x{h} {from:?}->{to:?} {d:016x}");
+                }
+                let r = rgba8(&src).unwrap();
+                r.hash(&mut total);
+                let p = into_prores(src.clone()).unwrap();
+                (&p.y, &p.cb, &p.cr).hash(&mut total);
+            }
+        }
+        println!("TOTAL {:016x}", total.finish());
     }
 }

@@ -2,12 +2,22 @@
 //! exact decoder; playback and other processors keep the host's native reader.
 use crate::player::{NativeFrame, Player};
 use abner_processor_api::{Cancellation, FrameSource, Registry, Result, VideoFrame};
+use std::sync::{Arc, Condvar, Mutex};
 pub struct Source {
     custom: Option<Box<dyn FrameSource>>,
-    player: Option<Player>,
+    native: Option<NativeSource>,
+    dims: [usize; 2],
+}
+/// The host decoder half of [`Source`]: `Send`, so an export can decode and
+/// prepare frames on its own thread while the chain runs (a processor's own
+/// `FrameSource` makes no such promise and stays on the chain's thread).
+pub struct NativeSource {
+    player: Player,
     pending: Option<(f64, NativeFrame)>,
     fps: f64,
-    dims: [usize; 2],
+    /// Raised by the player whenever a frame becomes deliverable, the reader
+    /// reaches the end, or it fails: what `next` waits on instead of polling.
+    ready: Arc<(Mutex<bool>, Condvar)>,
 }
 impl Source {
     pub fn open(
@@ -24,49 +34,38 @@ impl Source {
                 .open_source(path, w as usize, h as usize)?,
             None => None,
         };
-        let player = if custom.is_none() {
-            Some(
-                Player::spawn_native(path, w, h, 16 * 1024 * 1024)
-                    .ok_or("Cannot open processing decoder")?,
-            )
+        let native = if custom.is_none() {
+            let player = Player::spawn_native(path, w, h, 16 * 1024 * 1024)
+                .ok_or("Cannot open processing decoder")?;
+            let ready = Arc::new((Mutex::new(false), Condvar::new()));
+            let signal = ready.clone();
+            player.set_notify(Arc::new(move || {
+                *signal.0.lock().unwrap() = true;
+                signal.1.notify_all();
+            }));
+            Some(NativeSource { player, pending: None, fps, ready })
         } else {
             None
         };
         Ok(Self {
             custom,
-            player,
-            pending: None,
-            fps,
+            native,
             dims: [w as usize, h as usize],
         })
     }
+    /// The host decoder on its own, when the first processor brought no source.
+    pub fn into_native(self) -> std::result::Result<NativeSource, Self> {
+        match self.native {
+            Some(n) if self.custom.is_none() => Ok(n),
+            native => Err(Self { native, ..self }),
+        }
+    }
     pub fn seek(&mut self, seconds: f64) -> Result<()> {
-        self.pending = None;
         if let Some(s) = &mut self.custom {
             s.seek(seconds)
         } else {
-            self.player.as_ref().unwrap().seek(seconds, true);
+            self.native.as_mut().unwrap().seek(seconds);
             Ok(())
-        }
-    }
-    fn native(&self, cancel: &Cancellation) -> Result<Option<(f64, NativeFrame)>> {
-        let player = self.player.as_ref().unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        loop {
-            cancel.check()?;
-            if let Some(f) = player.take_next_native() {
-                return Ok(Some(f));
-            }
-            if player.failed() {
-                return Err("Processing decode failed".into());
-            }
-            if player.exhausted() {
-                return Ok(None);
-            }
-            if std::time::Instant::now() > deadline {
-                return Err("Processing decoder timed out".into());
-            }
-            std::thread::sleep(std::time::Duration::from_millis(2));
         }
     }
     pub fn read(&mut self, cancel: &Cancellation) -> Result<Option<VideoFrame>> {
@@ -81,15 +80,55 @@ impl Source {
             }
             return Ok(frame);
         }
+        self.native.as_mut().unwrap().read(cancel)
+    }
+}
+impl NativeSource {
+    pub fn seek(&mut self, seconds: f64) {
+        self.pending = None;
+        self.player.seek(seconds, true);
+    }
+    fn next(&self, cancel: &Cancellation) -> Result<Option<(f64, NativeFrame)>> {
+        let player = &self.player;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            cancel.check()?;
+            // Lower the flag before looking: a frame landing after the look
+            // raises it again, so the wait below cannot miss it.
+            *self.ready.0.lock().unwrap() = false;
+            if let Some(f) = player.take_next_native() {
+                return Ok(Some(f));
+            }
+            if player.failed() {
+                return Err("Processing decode failed".into());
+            }
+            if player.exhausted() {
+                return Ok(None);
+            }
+            let now = std::time::Instant::now();
+            if now > deadline {
+                return Err("Processing decoder timed out".into());
+            }
+            // The timeout only bounds how late a cancel is noticed.
+            let raised = self.ready.0.lock().unwrap();
+            let _ = self
+                .ready
+                .1
+                .wait_timeout_while(raised, std::time::Duration::from_millis(50), |r| !*r)
+                .unwrap();
+        }
+    }
+    pub fn read(&mut self, cancel: &Cancellation) -> Result<Option<VideoFrame>> {
+        cancel.check()?;
         let next = if self.pending.is_some() {
             self.pending.take()
         } else {
-            self.native(cancel)?
+            self.next(cancel)?
         };
         let Some((pts, f)) = next else {
             return Ok(None);
         };
-        self.pending = self.native(cancel)?;
+        self.pending = self.next(cancel)?;
         let p = (pts * 1e6).round() as i64;
         let nominal = (1e6 / self.fps).round().max(1.0) as i64;
         let duration = self
@@ -102,7 +141,6 @@ impl Source {
         abner_processing::color::from_decoded(&f, p, duration, [1, 1_000_000]).map(Some)
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

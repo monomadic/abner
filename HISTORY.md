@@ -1,5 +1,30 @@
 # abner — history
 
+## 2026-11-22 — Faster processed export
+
+A processed export (`pipeline_export_with_inputs`) now runs on three threads with
+one frame queued at each hand-off. A reader decodes, crops and converts each frame
+to the first stage's input format. The chain thread runs only the processors. A
+writer converts for the encoder, encodes, muxes and reports progress. A processor's
+own `FrameSource` is not `Send`, so it still reads on the chain thread. The host
+conversions (`color::convert`, `media::rgb16`, `media::prores_frame`) use every
+core and produce bit-identical output (the ignored `print_conversion_digests` test
+fingerprints all format pairs). `VideoFrame::validate` vectorizes its sample scans,
+and the format plan scans each frame once, at the plugin's output, instead of about
+ten times per frame. The processing decoder waits on the player's wake instead of
+polling every 2 ms; the player now also wakes at end-of-stream and on failure. The
+Export page no longer exact-seeks every loaded clip on each rendered frame: it seeks
+only while Tab shows the original.
+
+HEVC was already hardware-encoded (VideoToolbox, hardware required, no software
+fallback). It remains 8-bit Main from RGBA8.
+
+Measured with the ignored `export_throughput` test (4K testsrc2, 2 s at 24 fps, HEVC
+40 Mbps, a float RGB stage that doubles the frame rate): with no stages, 2.06 s to
+0.97 s; with the doubling stage, 5.39 s to 1.72 s; with 40 ms of simulated plugin
+time per output frame (3.84 s in all), 9.54 s to 4.46 s. A real interpolation
+plugin was not measured.
+
 ## 2026-11-22 — Keep plugin controls inside their allocated bounds
 
 The shared pill switch now paints its outline inside its rectangle, keeping the

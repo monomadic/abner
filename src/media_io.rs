@@ -2632,7 +2632,7 @@ pub(crate) fn pipeline_export(
     info:&crate::probe::VideoInfo,dest:&Path,keeps:&[(f64,f64)],registry:&abner_processor_api::Registry,
     chain:&[(String,serde_json::Value)],prores:bool,crop:Option<(u32,u32,u32,u32)>,
     cancel:&abner_processor_api::Cancellation,active:&Mutex<Vec<abner_processor_api::Cancellation>>,
-    emit:impl FnMut(crate::export_page::Rendered)->Result<(),String>,
+    emit:impl FnMut(crate::export_page::Rendered)->Result<(),String>+Send,
 )->Result<()> {pipeline_export_with_inputs(&Default::default(),info,dest,keeps,&[],registry,chain,prores,None,crop,cancel,active,None,emit)}
 
 // Keep the explicit geometry/pipeline inputs at this boundary.
@@ -2653,7 +2653,7 @@ pub(crate) fn pipeline_export_with_inputs(
     // Each stage's own in-flight reports, by the stage's name: what the chain is
     // doing between the frames `emit` delivers.
     stage_report: Option<&crate::export_page::StageReport>,
-    mut emit: impl FnMut(crate::export_page::Rendered) -> Result<(), String>,
+    emit: impl FnMut(crate::export_page::Rendered) -> Result<(), String> + Send,
 ) -> Result<()> {
     use abner_processor_api::{VideoFrame, PixelFormat, InputRequirement, Role};
     inputs.validate_geometry(info.width,info.height).map_err(anyhow::Error::msg)?;
@@ -2712,7 +2712,7 @@ pub(crate) fn pipeline_export_with_inputs(
         mp4::Brand::Mp4
     });
     options.metadata = meta.mp4.clone();
-    let mut mux = mp4::Mp4Writer::new(file, options)?;
+    let mux = mp4::Mp4Writer::new(file, options)?;
     ensure!(
         info.fps.is_finite() && info.fps > 0. && info.fps <= 1000.,
         "Export requires a valid constant frame rate"
@@ -2725,210 +2725,166 @@ pub(crate) fn pipeline_export_with_inputs(
             && cy.checked_add(ch).is_some_and(|y| y <= info.height),
         "Crop lies outside the source"
     );
-    let mut encoder: Option<PipelineEncoder> = None;
-    let mut track = None;
-    let mut index = 0u64;
-    let mut output_time = 0.;
-    let mut expected_duration: Option<f64> = None;
-    for &(start, end) in keeps {
-        cancel.check().map_err(anyhow::Error::msg)?;
-        active.lock().unwrap().clear();
-        let mut dims = [cw as usize, ch as usize];
-        let mut sessions = Vec::new();
-        for (stage,(id, settings)) in chain.iter().enumerate() {
-            ensure!(stage==0 || inputs.bindings.get(id).is_none_or(|b|b.is_empty()), "Spatial inputs currently require the first enabled processor");
-            let f = registry.get(id).map_err(anyhow::Error::msg)?;
-            ensure!(matches!(f.capabilities().role, Role::Processor),
-                "{}: generator/post-processor execution is not supported by export", f.descriptor().name);
-            ensure!(!matches!(f.capabilities().input, InputRequirement::WholeClip),
-                "{}: whole-clip execution is not supported by export", f.descriptor().name);
-            let mut session = abner_processor_api::create_bound(f,dims[0],dims[1],settings,inputs.bindings.get(id).cloned().unwrap_or_default())
-                .map_err(anyhow::Error::msg)?;
-            if let Some(report) = stage_report {
-                use crate::export_page::StageUpdate;
-                let (count, name) = (chain.len(), f.descriptor().name);
-                let phase = (report.clone(), name.clone());
-                session.set_progress_reporter(std::sync::Arc::new(move |p| (phase.0)(&phase.1, StageUpdate::Phase(p))));
-                let frame = (report.clone(), name.clone());
-                session.set_frame_progress_reporter(std::sync::Arc::new(move |p| {
-                    (frame.0)(&frame.1, StageUpdate::Frame(stage, count, Some(p)))
-                }));
-                // The frame bar ends with the call it described.
-                let report = report.clone();
-                session = Box::new(abner_processing::progress::CallBoundary::new(session,
-                    std::sync::Arc::new(move || report(&name, StageUpdate::Frame(stage, count, None)))));
-            }
-            active.lock().unwrap().push(session.cancellation());
-            dims = session.output_dimensions();
-            ensure!(
-                dims.iter().all(|&d| (2..=8192).contains(&d)),
-                "Unsupported processor output size"
-            );
-            sessions.push(session);
-        }
-        let sink_format = if prores { PixelFormat::Yuv422p10 } else { PixelFormat::Rgba8 };
-        let mut format_plan: Option<abner_processing::negotiation::FormatPlan> = None;
-        let mut source=crate::processing_source::Source::open(registry,chain.first().map(|s|s.0.as_str()),&info.path,info.width,info.height,info.fps).map_err(anyhow::Error::msg)?;
-        source.seek(start).map_err(anyhow::Error::msg)?;
-        let mut previous_end: Option<f64> = None;
-        let mut accept = |frames: Vec<VideoFrame>| -> Result<()> {
-            for f in frames {
+    // Three threads, so the chain's processors never wait on the CPU work around
+    // them: a reader decodes, crops and converts to the first stage's format
+    // (when the host decoder is the source), this thread runs the chain, and a
+    // writer converts for the encoder, encodes, muxes and reports. One frame
+    // queues at each hand-off: enough to overlap, little enough that a 4K float
+    // chain holds a few frames, not a backlog.
+    let sink_format = if prores { PixelFormat::Yuv422p10 } else { PixelFormat::Rgba8 };
+    let mut mux = std::thread::scope(|scope| -> Result<_> {
+        let (to_writer, from_chain) = std::sync::mpsc::sync_channel::<Output>(1);
+        let writer = scope.spawn(move || write_frames(from_chain, mux, prores, bitrate_kbps, cancel, emit));
+        let mut writer_gone = false;
+        let chained = (|| -> Result<()> {
+            let mut expected_duration: Option<f64> = None;
+            for &(start, end) in keeps {
                 cancel.check().map_err(anyhow::Error::msg)?;
-                f.validate().map_err(anyhow::Error::msg)?;
-                ensure!(
-                    f.width == dims[0] && f.height == dims[1],
-                    "Processor changed declared dimensions"
-                );
-                let unit = f.time_base[0] as f64 / f.time_base[1] as f64;
-                let source_pts = f.pts as f64 * unit;
-                if source_pts < start - 1e-6 || source_pts >= end - 1e-6 {
-                    continue;
-                }
-                let duration = f.duration as f64 * unit;
-                ensure!(
-                    duration > 0. && duration.is_finite(),
-                    "Invalid processor output duration"
-                );
-                if let Some(previous) = previous_end {
-                    ensure!(
-                        (source_pts - previous).abs() < 0.002,
-                        "Processor returned missing, reordered, or discontinuous output timestamps"
-                    );
-                }
-                previous_end = Some(source_pts + duration);
-                if let Some(expected) = expected_duration {
-                    ensure!(
-                        (expected - duration).abs() < 0.00001,
-                        "Export currently requires constant-rate output"
-                    );
-                } else {
-                    expected_duration = Some(duration);
-                }
-                let rgba = abner_processing::color::rgba8(&f).map_err(anyhow::Error::msg)?;
-                if encoder.is_none() {
-                    encoder = Some(PipelineEncoder::new(
-                        f.width as u32,
-                        f.height as u32,
-                        duration,
-                        prores,
-                        bitrate_kbps.unwrap_or(40_000),
-                    )?);
-                }
-                let e = encoder.as_mut().unwrap();
-                ensure!(
-                    e.dims() == [f.width as u32, f.height as u32],
-                    "Output dimensions changed between segments"
-                );
-                let packets = e.encode(f, &rgba, index)?;
-                let ti = match track {
-                    Some(t) => t,
-                    None => {
-                        let mut config = cfg(e.entry(), "und");
-                        config.timescale = e.scale();
-                        let t = mux.add_track(config)?;
-                        track = Some(t);
-                        t
+                active.lock().unwrap().clear();
+                let mut dims = [cw as usize, ch as usize];
+                let mut sessions = Vec::new();
+                for (stage,(id, settings)) in chain.iter().enumerate() {
+                    ensure!(stage==0 || inputs.bindings.get(id).is_none_or(|b|b.is_empty()), "Spatial inputs currently require the first enabled processor");
+                    let f = registry.get(id).map_err(anyhow::Error::msg)?;
+                    ensure!(matches!(f.capabilities().role, Role::Processor),
+                        "{}: generator/post-processor execution is not supported by export", f.descriptor().name);
+                    ensure!(!matches!(f.capabilities().input, InputRequirement::WholeClip),
+                        "{}: whole-clip execution is not supported by export", f.descriptor().name);
+                    let mut session = abner_processor_api::create_bound(f,dims[0],dims[1],settings,inputs.bindings.get(id).cloned().unwrap_or_default())
+                        .map_err(anyhow::Error::msg)?;
+                    if let Some(report) = stage_report {
+                        use crate::export_page::StageUpdate;
+                        let (count, name) = (chain.len(), f.descriptor().name);
+                        let phase = (report.clone(), name.clone());
+                        session.set_progress_reporter(std::sync::Arc::new(move |p| (phase.0)(&phase.1, StageUpdate::Phase(p))));
+                        let frame = (report.clone(), name.clone());
+                        session.set_frame_progress_reporter(std::sync::Arc::new(move |p| {
+                            (frame.0)(&frame.1, StageUpdate::Frame(stage, count, Some(p)))
+                        }));
+                        // The frame bar ends with the call it described.
+                        let report = report.clone();
+                        session = Box::new(abner_processing::progress::CallBoundary::new(session,
+                            std::sync::Arc::new(move || report(&name, StageUpdate::Frame(stage, count, None)))));
                     }
+                    active.lock().unwrap().push(session.cancellation());
+                    dims = session.output_dimensions();
+                    ensure!(
+                        dims.iter().all(|&d| (2..=8192).contains(&d)),
+                        "Unsupported processor output size"
+                    );
+                    sessions.push(session);
+                }
+                let prep = Prep {
+                    full: (info.width, info.height),
+                    crop: (cx, cy, cw, ch),
+                    crops: inputs.crops.clone(),
+                    end,
+                    pairs: sessions.iter().map(|s| s.format_pairs()).collect(),
+                    sink: sink_format,
+                    target: None,
                 };
-                for packet in packets {
-                    write_packet_scaled(
-                        &mut mux,
-                        ti,
-                        e.scale(),
-                        &packet.data,
-                        packet.duration as f64 / e.scale() as f64,
-                        packet.composition_offset as f64 / e.scale() as f64,
-                        packet.key,
+                let mut source=crate::processing_source::Source::open(registry,chain.first().map(|s|s.0.as_str()),&info.path,info.width,info.height,info.fps).map_err(anyhow::Error::msg)?;
+                source.seek(start).map_err(anyhow::Error::msg)?;
+                let mut feed = match source.into_native() {
+                    Ok(mut native) => {
+                        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+                        let mut prep = prep;
+                        scope.spawn(move || loop {
+                            let next = prep.next(&mut |c| native.read(c), cancel);
+                            let last = !matches!(next, Ok(Some(_)));
+                            if tx.send(next).is_err() || last {
+                                break;
+                            }
+                        });
+                        Feed::Thread(rx)
+                    }
+                    Err(source) => Feed::Inline(source, prep),
+                };
+                let mut format_plan: Option<abner_processing::negotiation::FormatPlan> = None;
+                let mut previous_end: Option<f64> = None;
+                let mut send = |frames: Vec<VideoFrame>| -> Result<()> {
+                    for f in frames {
+                        cancel.check().map_err(anyhow::Error::msg)?;
+                        // The format plan validated every frame it returned.
+                        ensure!(
+                            f.width == dims[0] && f.height == dims[1],
+                            "Processor changed declared dimensions"
+                        );
+                        let unit = f.time_base[0] as f64 / f.time_base[1] as f64;
+                        let source_pts = f.pts as f64 * unit;
+                        if source_pts < start - 1e-6 || source_pts >= end - 1e-6 {
+                            continue;
+                        }
+                        let duration = f.duration as f64 * unit;
+                        ensure!(
+                            duration > 0. && duration.is_finite(),
+                            "Invalid processor output duration"
+                        );
+                        if let Some(previous) = previous_end {
+                            ensure!(
+                                (source_pts - previous).abs() < 0.002,
+                                "Processor returned missing, reordered, or discontinuous output timestamps"
+                            );
+                        }
+                        previous_end = Some(source_pts + duration);
+                        if let Some(expected) = expected_duration {
+                            ensure!(
+                                (expected - duration).abs() < 0.00001,
+                                "Export currently requires constant-rate output"
+                            );
+                        } else {
+                            expected_duration = Some(duration);
+                        }
+                        if to_writer.send(Output { frame: f, source_pts, duration }).is_err() {
+                            writer_gone = true;
+                            anyhow::bail!("Export writer stopped");
+                        }
+                    }
+                    Ok(())
+                };
+                while let Some(f) = feed.next(cancel)? {
+                    // Planned from the format the frame arrives in: the reader
+                    // already converted to the plan it predicted, so the first
+                    // stage normally takes it as is (and converts if not).
+                    if format_plan.is_none() {
+                        format_plan = Some(abner_processing::negotiation::FormatPlan::new(&mut sessions, f.format, sink_format)
+                            .map_err(anyhow::Error::msg)?);
+                    }
+                    send(
+                        format_plan.as_ref().unwrap().process_native(
+                            &mut sessions,
+                            0,
+                            vec![f],
+                            cancel,
+                            512 * 1024 * 1024,
+                        )
+                        .map_err(anyhow::Error::msg)?,
                     )?;
                 }
-                index += 1;
-                output_time += duration;
-                emit(crate::export_page::Rendered {
-                    pixels: rgba,
-                    dims: [dims[0] as u32, dims[1] as u32],
-                    source_pts,
-                    output_time,
-                    count: index,
-                    frame_duration: duration,
-                })
-                .map_err(anyhow::Error::msg)?;
+                for i in 0..sessions.len() {
+                    let Some(plan) = &format_plan else { break; };
+                    send(
+                        plan.finish_stage_native(
+                            &mut sessions,
+                            i,
+                            cancel,
+                            512 * 1024 * 1024,
+                        )
+                        .map_err(anyhow::Error::msg)?,
+                    )?;
+                }
             }
             Ok(())
-        };
-        // A rounded nominal duration cannot join independently rounded PTS values:
-        // 24 fps alternates between 41,666 and 41,667 microseconds. Look ahead
-        // once, as the Process preview does, so every input ends at the next PTS.
-        let mut read_next = || source.read(cancel).map_err(anyhow::Error::msg);
-        let mut next = read_next()?;
-        while let Some(decoded_frame) = next.take() {
-            let pts=decoded_frame.pts as f64*decoded_frame.time_base[0] as f64/decoded_frame.time_base[1] as f64;
-            cancel.check().map_err(anyhow::Error::msg)?;
-            if pts >= end - 1e-6 {
-                break;
-            }
-            next = read_next()?;
-            let mut f=decoded_frame;
-            if cx != 0 || cy != 0 || cw != info.width || ch != info.height {
-                // Arbitrary crop origins can split a chroma sample. Crop in RGB16
-                // rather than inventing chroma phase or reducing to display depth.
-                let mut rgb = abner_processing::color::convert(f, PixelFormat::Rgb16)
-                    .and_then(VideoFrame::into_rgb16).map_err(anyhow::Error::msg)?;
-                rgb.pixels = (cy..cy + ch).flat_map(|y| {
-                    let start = ((y * info.width + cx) * 3) as usize;
-                    rgb.pixels[start..start + (cw * 3) as usize].iter().copied()
-                }).collect();
-                rgb.width = cw as usize; rgb.height = ch as usize;
-                f = rgb.into();
-            }
-            if !inputs.crops.is_empty() {
-                let mut rgb = abner_processing::color::convert(f, PixelFormat::Rgb16)
-                    .and_then(VideoFrame::into_rgb16).map_err(anyhow::Error::msg)?;
-                crate::spatial::apply_crop(&mut rgb,&inputs.crops);
-                f = rgb.into();
-            }
-            if format_plan.is_none() {
-                format_plan = Some(abner_processing::negotiation::FormatPlan::new(&mut sessions, f.format, sink_format)
-                    .map_err(anyhow::Error::msg)?);
-            }
-            accept(
-                format_plan.as_ref().unwrap().process_native(
-                    &mut sessions,
-                    0,
-                    vec![f],
-                    cancel,
-                    512 * 1024 * 1024,
-                )
-                .map_err(anyhow::Error::msg)?,
-            )?;
+        })();
+        drop(to_writer);
+        let written = writer.join().map_err(|_| anyhow::anyhow!("Export writer panicked"))?;
+        match chained {
+            // The writer stopping is what broke the chain: its error is the cause.
+            Err(_) if writer_gone => written.and(Err(anyhow::anyhow!("Export writer stopped"))),
+            Err(e) => Err(e),
+            Ok(()) => written,
         }
-        for i in 0..sessions.len() {
-            let Some(plan) = &format_plan else { break; };
-            accept(
-                plan.finish_stage_native(
-                    &mut sessions,
-                    i,
-                    cancel,
-                    512 * 1024 * 1024,
-                )
-                .map_err(anyhow::Error::msg)?,
-            )?;
-        }
-    }
-    cancel.check().map_err(anyhow::Error::msg)?;
-    let e = encoder
-        .as_mut()
-        .context("Pipeline returned no output frames")?;
-    for packet in e.flush()? {
-        write_packet_scaled(
-            &mut mux,
-            track.unwrap(),
-            e.scale(),
-            &packet.data,
-            packet.duration as f64 / e.scale() as f64,
-            packet.composition_offset as f64 / e.scale() as f64,
-            packet.key,
-        )?;
-    }
+    })?;
     let source = crate::fc::open(&info.path).map_err(anyhow::Error::msg)?;
     // The existing audio path preserves kept-range timing and encodes AAC for all output containers.
     audio_encode_checked(&source, &mut mux, keeps, false, || {
@@ -2956,6 +2912,164 @@ pub(crate) fn pipeline_export_with_inputs(
         std::fs::hard_link(&temp.0, dest)?;
     }
     Ok(())
+}
+
+/// A chain output on its way to the writer, timing already checked.
+struct Output {
+    frame: abner_processor_api::VideoFrame,
+    source_pts: f64,
+    duration: f64,
+}
+
+/// What happens to a decoded frame before the chain sees it: the export crop,
+/// the timeline crops, and conversion to the first stage's input format (the
+/// plan the chain thread will choose, since selection is deterministic).
+struct Prep {
+    full: (u32, u32),
+    crop: (u32, u32, u32, u32),
+    crops: Vec<crate::spatial::ClipCrop>,
+    end: f64,
+    pairs: Vec<Vec<abner_processor_api::FormatPair>>,
+    sink: abner_processor_api::PixelFormat,
+    target: Option<abner_processor_api::PixelFormat>,
+}
+impl Prep {
+    /// The next frame before `end`, in the first stage's input format.
+    fn next(
+        &mut self,
+        read: &mut dyn FnMut(&abner_processor_api::Cancellation) -> abner_processor_api::Result<Option<abner_processor_api::VideoFrame>>,
+        cancel: &abner_processor_api::Cancellation,
+    ) -> std::result::Result<Option<abner_processor_api::VideoFrame>, String> {
+        use abner_processor_api::{PixelFormat, VideoFrame};
+        let Some(mut f) = read(cancel)? else { return Ok(None) };
+        cancel.check()?;
+        let pts = f.pts as f64 * f.time_base[0] as f64 / f.time_base[1] as f64;
+        if pts >= self.end - 1e-6 {
+            return Ok(None);
+        }
+        let ((width, height), (cx, cy, cw, ch)) = (self.full, self.crop);
+        if cx != 0 || cy != 0 || cw != width || ch != height {
+            // Arbitrary crop origins can split a chroma sample. Crop in RGB16
+            // rather than inventing chroma phase or reducing to display depth.
+            let mut rgb = abner_processing::color::convert(f, PixelFormat::Rgb16)
+                .and_then(VideoFrame::into_rgb16)?;
+            rgb.pixels = (cy..cy + ch).flat_map(|y| {
+                let start = ((y * width + cx) * 3) as usize;
+                rgb.pixels[start..start + (cw * 3) as usize].iter().copied()
+            }).collect();
+            rgb.width = cw as usize; rgb.height = ch as usize;
+            f = rgb.into();
+        }
+        if !self.crops.is_empty() {
+            let mut rgb = abner_processing::color::convert(f, PixelFormat::Rgb16)
+                .and_then(VideoFrame::into_rgb16)?;
+            crate::spatial::apply_crop(&mut rgb, &self.crops);
+            f = rgb.into();
+        }
+        let target = match self.target {
+            Some(t) => t,
+            None => {
+                let t = abner_processing::negotiation::FormatPlan::select(f.format, self.sink, &self.pairs)?.input_format();
+                *self.target.insert(t)
+            }
+        };
+        Ok(Some(abner_processing::color::convert_validated(f, target)?))
+    }
+}
+
+/// Where the chain's input comes from: a reader thread, or (for a processor's
+/// own `FrameSource`, which need not be `Send`) the chain's thread itself.
+enum Feed {
+    Thread(std::sync::mpsc::Receiver<std::result::Result<Option<abner_processor_api::VideoFrame>, String>>),
+    Inline(crate::processing_source::Source, Prep),
+}
+impl Feed {
+    fn next(&mut self, cancel: &abner_processor_api::Cancellation) -> Result<Option<abner_processor_api::VideoFrame>> {
+        match self {
+            Feed::Thread(rx) => match rx.recv() {
+                Ok(next) => next.map_err(anyhow::Error::msg),
+                Err(_) => anyhow::bail!("Export reader stopped"),
+            },
+            Feed::Inline(source, prep) => prep.next(&mut |c| source.read(c), cancel).map_err(anyhow::Error::msg),
+        }
+    }
+}
+
+/// The writer thread: display pixels, encode, mux and report each chain output
+/// in order, then flush the encoder. Returns the muxer for audio and finishing.
+fn write_frames<W: std::io::Write + std::io::Seek>(
+    frames: std::sync::mpsc::Receiver<Output>,
+    mut mux: mp4::Mp4Writer<W>,
+    prores: bool,
+    bitrate_kbps: Option<u32>,
+    cancel: &abner_processor_api::Cancellation,
+    mut emit: impl FnMut(crate::export_page::Rendered) -> Result<(), String>,
+) -> Result<mp4::Mp4Writer<W>> {
+    let mut encoder: Option<PipelineEncoder> = None;
+    let mut track = None;
+    let mut output_time = 0.;
+    for (index, Output { frame: f, source_pts, duration }) in (0u64..).zip(frames) {
+        cancel.check().map_err(anyhow::Error::msg)?;
+        let dims = [f.width as u32, f.height as u32];
+        let rgba = abner_processing::color::rgba8(&f).map_err(anyhow::Error::msg)?;
+        if encoder.is_none() {
+            encoder = Some(PipelineEncoder::new(
+                dims[0],
+                dims[1],
+                duration,
+                prores,
+                bitrate_kbps.unwrap_or(40_000),
+            )?);
+        }
+        let e = encoder.as_mut().unwrap();
+        ensure!(e.dims() == dims, "Output dimensions changed between segments");
+        let packets = e.encode(f, &rgba, index)?;
+        let ti = match track {
+            Some(t) => t,
+            None => {
+                let mut config = cfg(e.entry(), "und");
+                config.timescale = e.scale();
+                *track.insert(mux.add_track(config)?)
+            }
+        };
+        for packet in packets {
+            write_packet_scaled(
+                &mut mux,
+                ti,
+                e.scale(),
+                &packet.data,
+                packet.duration as f64 / e.scale() as f64,
+                packet.composition_offset as f64 / e.scale() as f64,
+                packet.key,
+            )?;
+        }
+        output_time += duration;
+        emit(crate::export_page::Rendered {
+            pixels: rgba,
+            dims,
+            source_pts,
+            output_time,
+            count: index + 1,
+            frame_duration: duration,
+        })
+        .map_err(anyhow::Error::msg)?;
+    }
+    cancel.check().map_err(anyhow::Error::msg)?;
+    let e = encoder
+        .as_mut()
+        .context("Pipeline returned no output frames")?;
+    for packet in e.flush()? {
+        write_packet_scaled(
+            &mut mux,
+            track.unwrap(),
+            e.scale(),
+            &packet.data,
+            packet.duration as f64 / e.scale() as f64,
+            packet.composition_offset as f64 / e.scale() as f64,
+            packet.key,
+        )?;
+    }
+    Ok(mux)
 }
 
 enum PipelineEncoder {

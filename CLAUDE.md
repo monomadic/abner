@@ -649,5 +649,8 @@ drops and the in-app picker always retain sources in their receiving window.
 Source thumbnails offer Figleaf Duplicate/Remove buttons on hover.
 `export_page::Page` retains per-job snapshots in its session queue across source
 changes; one worker runs at a time, and completed outputs have their own Player
-for full-file review. The HEVC target defaults to 40 Mbps; an explicit bitrate
+for full-file review. A processed export runs on three threads (reader: decode, crop,
+convert to the first stage's input; chain: the processors only; writer: RGBA, encode,
+mux, `emit`), so `emit` must be `Send`. Host conversions are rayon-parallel and must
+stay bit-identical (`print_conversion_digests`). The HEVC target defaults to 40 Mbps; an explicit bitrate
 forces conversion even with no processing stages. Copy is a separate selection.

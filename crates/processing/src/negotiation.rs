@@ -69,6 +69,12 @@ impl FormatPlan {
             stages,
         })
     }
+    /// What the first stage consumes (the sink, for an empty chain): the
+    /// format a host may convert chain input to on another thread, then plan
+    /// again from that format.
+    pub fn input_format(&self) -> PixelFormat {
+        self.stages.first().map_or(self.sink, |s| s.input)
+    }
     pub fn new(
         sessions: &mut [Box<dyn Session>],
         source: PixelFormat,
@@ -152,10 +158,18 @@ impl FormatPlan {
         self.validate(&frames, expected, None, budget)?;
         for (session, pair) in sessions[from..].iter_mut().zip(&self.stages[from..]) {
             let mut outputs = Vec::new();
+            // Every frame here was validated where it entered (the chain input
+            // above, or the previous stage's output below), and host
+            // conversions only make valid frames: scan each frame's samples
+            // once, at the plugin's output, and keep a running total for the
+            // batch budget instead of rescanning the batch per input.
+            let mut bytes = 0usize;
             for f in frames {
                 cancel.check()?;
-                let f = color::convert(f, pair.input)?;
-                self.validate(std::slice::from_ref(&f), pair.input, None, budget)?;
+                let f = color::convert_validated(f, pair.input)?;
+                if f.byte_len() > budget {
+                    return Err("Processor batch exceeds the memory budget".into());
+                }
                 let next = session.process_video(f)?;
                 self.validate(
                     &next,
@@ -163,13 +177,13 @@ impl FormatPlan {
                     Some(session.output_dimensions()),
                     budget,
                 )?;
+                for f in &next {
+                    bytes = bytes.checked_add(f.byte_len()).ok_or("batch size overflow")?;
+                }
+                if bytes > budget {
+                    return Err("Processor batch exceeds the memory budget".into());
+                }
                 outputs.extend(next);
-                self.validate(
-                    &outputs,
-                    pair.output,
-                    Some(session.output_dimensions()),
-                    budget,
-                )?;
             }
             frames = outputs;
         }

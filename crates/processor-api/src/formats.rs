@@ -104,6 +104,10 @@ impl VideoFrame {
             FramePixels::Yuv16(p) => p.iter().map(|p| p.len() * 2).sum(),
         }
     }
+    /// Checks geometry, timing and every sample (finite floats, opaque alpha,
+    /// 10-bit range): a full pass over the frame, so hosts call it once per
+    /// boundary a frame crosses, not once per step. The scans fold without
+    /// branching per sample so they vectorize.
     pub fn validate(&self) -> Result<()> {
         use PixelFormat::*;
         if self.width == 0
@@ -122,9 +126,9 @@ impl VideoFrame {
             .map(|(x, y)| self.width.div_ceil(x) * self.height.div_ceil(y));
         let valid = match (&self.pixels, self.format) {
             (FramePixels::Rgb16(p), Rgb16) => p.len() == n * 3,
-            (FramePixels::RgbF32(p), RgbF32) => p.len() == n * 3 && p.iter().all(|v| v.is_finite()),
+            (FramePixels::RgbF32(p), RgbF32) => p.len() == n * 3 && all_finite(p),
             (FramePixels::Rgba8(p), Rgba8) => {
-                p.len() == n * 4 && p.as_chunks::<4>().0.iter().all(|p| p[3] == 255)
+                p.len() == n * 4 && p.as_chunks::<4>().0.chunks(4096).all(|c| c.iter().fold(true, |ok, p| ok & (p[3] == 255)))
             }
             (FramePixels::Yuv8(p), Yuv420p8) => {
                 p[0].len() == n && p[1].len() == chroma.unwrap() && p[2].len() == chroma.unwrap()
@@ -133,7 +137,7 @@ impl VideoFrame {
                 p[0].len() == n
                     && p[1].len() == chroma.unwrap()
                     && p[2].len() == chroma.unwrap()
-                    && p.iter().all(|p| p.iter().all(|&v| v <= 1023))
+                    && p.iter().all(|p| p.chunks(4096).all(|c| c.iter().fold(0, |m, &v| m | v) <= 1023))
             }
             _ => false,
         };
@@ -143,4 +147,10 @@ impl VideoFrame {
             Err("frame storage does not match negotiated format (or contains alpha)".into())
         }
     }
+}
+
+/// Every sample finite, in branch-free blocks the compiler vectorizes (an
+/// early-exit `all` checks one float at a time).
+fn all_finite(p: &[f32]) -> bool {
+    p.chunks(4096).all(|c| c.iter().fold(true, |ok, v| ok & v.is_finite()))
 }

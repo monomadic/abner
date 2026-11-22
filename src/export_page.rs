@@ -1819,4 +1819,74 @@ mod tests {
         assert!(!dest.exists());
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    /// An interpolation-shaped stage: float RGB in and out, two output frames per
+    /// input, and `ABNER_BENCH_WORK_MS` of simulated accelerator time per output.
+    struct Interp;
+    struct InterpSession { dims: [usize; 2], work: std::time::Duration, cancel: Cancellation }
+    impl Factory for Interp {
+        fn descriptor(&self) -> Descriptor {
+            Descriptor { id: "test.interp".into(), name: "Interp".into(),
+                settings_schema: serde_json::json!({}), presets: vec![] }
+        }
+        fn output_rate(&self, _: &serde_json::Value, input: abner_processor_api::Rate)
+            -> Result<abner_processor_api::Rate, String> { Ok([input[0] * 2, input[1]]) }
+        fn create(&self, w: usize, h: usize, _: &serde_json::Value) -> Result<Box<dyn Session>, String> {
+            let ms = std::env::var("ABNER_BENCH_WORK_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+            Ok(Box::new(InterpSession { dims: [w, h], work: std::time::Duration::from_millis(ms),
+                cancel: Cancellation::default() }))
+        }
+    }
+    impl Session for InterpSession {
+        fn format_pairs(&self) -> Vec<abner_processor_api::FormatPair> {
+            vec![abner_processor_api::FormatPair::same(abner_processor_api::PixelFormat::RgbF32)]
+        }
+        fn configure_format(&mut self, _: abner_processor_api::FormatPair) -> Result<(), String> { Ok(()) }
+        fn process_video(&mut self, mut f: abner_processor_api::VideoFrame)
+            -> Result<Vec<abner_processor_api::VideoFrame>, String> {
+            std::thread::sleep(self.work * 2);
+            let half = f.duration / 2;
+            let mut second = f.clone();
+            second.pts += half;
+            second.duration -= half;
+            f.duration = half;
+            Ok(vec![f, second])
+        }
+        fn finish_video(&mut self) -> Result<Vec<abner_processor_api::VideoFrame>, String> { Ok(vec![]) }
+        fn output_dimensions(&self) -> [usize; 2] { self.dims }
+        fn cancellation(&self) -> Cancellation { self.cancel.clone() }
+        fn progress(&self) -> Progress { Progress { phase: "test".into(), completed: 0, total: None } }
+    }
+
+    /// `cargo test --release export_throughput -- --ignored --nocapture`
+    /// (`ABNER_BENCH_SIZE`, default 3840x2160; `ABNER_BENCH_WORK_MS`, default 0).
+    #[test]
+    #[ignore]
+    fn export_throughput() {
+        let size = std::env::var("ABNER_BENCH_SIZE").unwrap_or_else(|_| "3840x2160".into());
+        let dir = std::env::temp_dir().join(format!("abner-bench-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = dir.join(format!("bench-{size}.mp4"));
+        assert!(std::process::Command::new("ffmpeg")
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i"])
+            .arg(format!("testsrc2=size={size}:rate=24:duration=2"))
+            .args(["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-g", "24"])
+            .arg(&input).status().unwrap().success());
+        let info = crate::probe::probe(&input).unwrap();
+        let mut registry = Registry::default();
+        registry.register(Box::new(Interp)).unwrap();
+        for (label, chain) in [("hevc, no stages", vec![]),
+            ("hevc, interp stage", vec![("test.interp".to_string(), serde_json::json!({}))])] {
+            let dest = dir.join("out.mp4");
+            let _ = std::fs::remove_file(&dest);
+            let mut frames = 0;
+            let start = Instant::now();
+            crate::media_io::pipeline_export_with_inputs(&Default::default(), &info, &dest,
+                &[(0., 2.)], &[], &registry, &chain, false, Some(40_000), None,
+                &Cancellation::default(), &Mutex::default(), None, |_| { frames += 1; Ok(()) }).unwrap();
+            let s = start.elapsed().as_secs_f64();
+            eprintln!("{size} {label}: {frames} frames in {s:.2}s = {:.1} fps", frames as f64 / s);
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
