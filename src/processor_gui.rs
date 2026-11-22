@@ -488,6 +488,8 @@ struct Job {
 struct Mailbox {
     pending: Option<Request>,
     stop: bool,
+    /// Drop the sessions kept from the last render (`Worker::release`).
+    release: bool,
 }
 struct Worker {
     active: Arc<Mutex<Vec<Cancellation>>>,
@@ -728,6 +730,9 @@ impl Session for ReportingSession {
         if self.callbacks.load(Ordering::Relaxed) == before { (self.report)(self.inner.progress()); }
         result
     }
+    fn reset(&mut self) -> bool {
+        self.inner.reset()
+    }
     fn output_dimensions(&self) -> [usize; 2] {
         self.inner.output_dimensions()
     }
@@ -762,6 +767,7 @@ impl Worker {
             Mutex::new(Mailbox {
                 pending: None,
                 stop: false,
+                release: false,
             }),
             Condvar::new(),
         ));
@@ -773,23 +779,34 @@ impl Worker {
         let live = LiveProgress::default();
         let live_worker = live.clone();
         std::thread::spawn(move || {
+            // The last render's sessions, so the next press with the same
+            // settings resets them instead of creating them (sessions stay on
+            // the thread that made them, so this is the worker's own).
+            let mut pool = abner_processing::reuse::Pool::default();
             loop {
                 let request = {
                     let (lock, cv) = &*shared;
                     let mut m = lock.lock().unwrap();
-                    while m.pending.is_none() && !m.stop {
+                    while m.pending.is_none() && !m.stop && !m.release {
                         m = cv.wait(m).unwrap();
                     }
                     if m.stop {
                         break;
                     }
-                    m.pending.take().unwrap()
+                    if std::mem::take(&mut m.release) {
+                        pool.clear();
+                    }
+                    let Some(request) = m.pending.take() else { continue };
+                    request
                 };
                 let generation = request.generation;
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    render(&*registry, &request, &tx, Some(&active_worker), Some(&live_worker))
+                    render_with(&*registry, &request, &tx, Some(&active_worker), Some(&live_worker), &mut pool)
                 }))
-                .unwrap_or_else(|_| Err("Processor panicked; preview stopped".into()));
+                .unwrap_or_else(|_| {
+                    pool.clear();
+                    Err("Processor panicked; preview stopped".into())
+                });
                 active_worker.lock().unwrap().clear();
                 if tx.send(Event::Done(generation, result)).is_err() {
                     break;
@@ -808,6 +825,13 @@ impl Worker {
             c.cancel();
         }
     }
+    /// Drop the sessions kept for the next render: the sources changed, or
+    /// an export is about to create its own.
+    fn release(&self) {
+        let (lock, cv) = &*self.mailbox;
+        lock.lock().unwrap().release = true;
+        cv.notify_one();
+    }
     fn submit(&self, request: Request) {
         let (lock, cv) = &*self.mailbox;
         lock.lock().unwrap().pending = Some(request);
@@ -823,13 +847,38 @@ impl Drop for Worker {
         cv.notify_one();
     }
 }
+#[cfg(test)]
 fn render(
+    registry: &impl crate::processing_source::RegistryAccess,
+    r: &Request,
+    tx: &mpsc::SyncSender<Event>,
+    active: Option<&Mutex<Vec<Cancellation>>>,
+    live: Option<&LiveProgress>,
+) -> Result<(), String> {
+    render_with(registry, r, tx, active, live, &mut Default::default())
+}
+/// [`render_inner`], then keep the sessions it used for the next render
+/// unless it failed for a reason other than being cancelled.
+fn render_with(
+    registry: &impl crate::processing_source::RegistryAccess,
+    r: &Request,
+    tx: &mpsc::SyncSender<Event>,
+    active: Option<&Mutex<Vec<Cancellation>>>,
+    live: Option<&LiveProgress>,
+    pool: &mut abner_processing::reuse::Pool,
+) -> Result<(), String> {
+    let result = render_inner(registry, r, tx, active, live, pool);
+    pool.settle(result.is_ok() || r.cancel.check().is_err());
+    result
+}
+fn render_inner(
     // Locked only for set-up: sessions, the chain's rate, the source.
     registry: &impl crate::processing_source::RegistryAccess,
     r: &Request,
     tx: &mpsc::SyncSender<Event>,
     active: Option<&Mutex<Vec<Cancellation>>>,
     live: Option<&LiveProgress>,
+    pool: &mut abner_processing::reuse::Pool,
 ) -> Result<(), String> {
     r.cancel.check()?;
     // Process at native display dimensions. The first processor may provide an
@@ -895,7 +944,11 @@ fn render(
             move |progress| stage.phase(progress)
         });
         report(Progress { phase: "Preparing processor".into(), completed: 0, total: None });
-        let mut session = abner_processor_api::create_bound(factory,stage_dims[0],stage_dims[1],settings,r.inputs.bindings.get(id).cloned().unwrap_or_default())?;
+        // Reset and reused when the last render had this stage with these
+        // settings at this size; the spatial inputs are bound per render.
+        let key = format!("{id}|{settings}|{}x{}", stage_dims[0], stage_dims[1]);
+        let made = pool.take(key, || factory.create(stage_dims[0], stage_dims[1], settings))?;
+        let mut session = abner_processor_api::bind(factory, made, r.inputs.bindings.get(id).cloned().unwrap_or_default())?;
         if let Some(target) = r.target {
             session.set_preview_target((target * 1e6).round() as i64, [1, 1_000_000]);
         }
@@ -1132,6 +1185,9 @@ impl Session for Downsized {
     }
     fn finish(&mut self) -> Result<Vec<Frame>, String> {
         self.inner.finish()
+    }
+    fn reset(&mut self) -> bool {
+        self.inner.reset()
     }
     fn output_dimensions(&self) -> [usize; 2] {
         self.inner.output_dimensions()
@@ -1546,7 +1602,15 @@ impl Panel {
         if self.busy {
             self.cancel_preview();
         }
+        self.release_sessions();
         self.close();
+    }
+    /// Let go of the processor sessions the preview keeps between renders
+    /// (a loaded model, say): an export is about to create its own.
+    pub(crate) fn release_sessions(&self) {
+        if let Some(worker) = &self.worker {
+            worker.release();
+        }
     }
     /// Everything a render's pixels depend on: the previewed chain with its
     /// settings, the spatial inputs and crops, and the source and its edits.
@@ -4766,7 +4830,7 @@ mod tests {
         p.open = true;
         p.worker = Some(Worker {
             active: Arc::new(Mutex::new(Vec::new())),
-            mailbox: Arc::new((Mutex::new(Mailbox { pending: None, stop: false }), Condvar::new())),
+            mailbox: Arc::new((Mutex::new(Mailbox { pending: None, stop: false, release: false }), Condvar::new())),
             rx,
             live: LiveProgress::default(),
         });
@@ -4815,7 +4879,7 @@ mod tests {
             let (tx,rx) = mpsc::sync_channel(8);
             p.worker = Some(Worker {
                 active: Arc::new(Mutex::new(Vec::new())),
-                mailbox: Arc::new((Mutex::new(Mailbox { pending:None,stop:false }),Condvar::new())),
+                mailbox: Arc::new((Mutex::new(Mailbox { pending:None,stop:false,release:false }),Condvar::new())),
                 rx, live:LiveProgress::default(),
             });
             let mut uploads=vec![];
@@ -5643,6 +5707,79 @@ mod tests {
         assert!(!export.is_empty() && export.iter().all(|free| *free), "{export:?}");
     }
 
+    /// A processor that can reset is created once: across an export's kept
+    /// ranges and across preview renders with the same settings. `Buffered`
+    /// refuses discontinuous time, so a reset that kept its state would fail
+    /// the second range, and a preview stopped at its frame leaves a frame
+    /// buffered that the next render must not see.
+    #[test]
+    fn resettable_sessions_are_created_once_per_settings() {
+        type Count = Arc<std::sync::atomic::AtomicUsize>;
+        struct Reusable(Count, Count);
+        struct ReusableSession(Box<dyn Session>, [usize; 2], Count);
+        impl abner_processor_api::Factory for Reusable {
+            fn descriptor(&self) -> Descriptor { BufferedFactory.descriptor() }
+            fn create(&self, w: usize, h: usize, settings: &Value) -> Result<Box<dyn Session>, String> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Ok(Box::new(ReusableSession(BufferedFactory.create(w, h, settings)?, [w, h], self.1.clone())))
+            }
+        }
+        impl Session for ReusableSession {
+            fn process(&mut self, frame: Frame) -> Result<Vec<Frame>, String> { self.0.process(frame) }
+            fn finish(&mut self) -> Result<Vec<Frame>, String> { self.0.finish() }
+            fn reset(&mut self) -> bool {
+                self.2.fetch_add(1, Ordering::Relaxed);
+                self.0 = abner_processor_api::Factory::create(&BufferedFactory, self.1[0], self.1[1], &json!({})).unwrap();
+                true
+            }
+            fn output_dimensions(&self) -> [usize; 2] { self.0.output_dimensions() }
+            fn cancellation(&self) -> Cancellation { self.0.cancellation() }
+            fn progress(&self) -> Progress { self.0.progress() }
+        }
+        let (created, resets) = (Count::default(), Count::default());
+        let mut registry = Registry::default();
+        registry.register(Box::new(Reusable(created.clone(), resets.clone()))).unwrap();
+        let fixture = crate::native_decode_tests::Fixture::new();
+        let info = crate::probe::probe(&fixture.path).unwrap();
+        let chain = vec![("example.buffered".to_string(), json!({}))];
+        let period = 1001. / 24000.;
+        let mut frames = 0;
+        crate::media_io::pipeline_export(
+            &info, &fixture.dir.join("ranges.mov"), &[(0., 4. * period), (6. * period, 12. * period)],
+            &registry, &chain, true, None, &Cancellation::default(), &Mutex::default(),
+            |_| { frames += 1; Ok(()) },
+        ).unwrap();
+        assert_eq!(frames, 10);
+        assert_eq!((created.load(Ordering::Relaxed), resets.load(Ordering::Relaxed)), (1, 1));
+        let mut pool = abner_processing::reuse::Pool::default();
+        let request = |chain: &Vec<(String, Value)>, target: Option<f64>| Request {
+            inputs: Default::default(),
+            generation: 1, chain: chain.clone(), target,
+            info: info.clone(), start: 0.0, end: None, cancel: Cancellation::default(),
+            budget: DEFAULT_PREVIEW_BYTES,
+        };
+        let full = |pool: &mut abner_processing::reuse::Pool, chain: &Vec<(String, Value)>| {
+            let (tx, rx) = mpsc::sync_channel(64);
+            render_with(&registry, &request(chain, None), &tx, None, None, pool).unwrap();
+            drop(tx);
+            rx.iter().filter(|e| matches!(e, Event::Frame(..))).count()
+        };
+        // A targeted render stops with a frame buffered; the full render after it
+        // reuses the session and still sees every frame, from the start.
+        let (tx, _rx) = mpsc::sync_channel(64);
+        render_with(&registry, &request(&chain, Some(3. * period)), &tx, None, None, &mut pool).unwrap();
+        let fresh = full(&mut Default::default(), &chain);
+        let (made, reset) = (created.load(Ordering::Relaxed), resets.load(Ordering::Relaxed));
+        assert_eq!(full(&mut pool, &chain), fresh);
+        assert_eq!(full(&mut pool, &chain), fresh);
+        assert_eq!((created.load(Ordering::Relaxed) - made, resets.load(Ordering::Relaxed) - reset), (0, 2));
+        // Other settings are another session.
+        let other = vec![("example.buffered".to_string(), json!({"strength": 1.0}))];
+        assert_eq!(full(&mut pool, &other), fresh);
+        assert_eq!(created.load(Ordering::Relaxed) - made, 1);
+        assert_eq!(pool.len(), 1);
+    }
+
     #[test]
     fn preview_drains_buffered_tail_and_matches_fractional_rate_source() {
         let dir = std::env::temp_dir().join(format!(
@@ -5951,6 +6088,7 @@ mod tests {
                 Mutex::new(Mailbox {
                     pending: None,
                     stop: false,
+                    release: false,
                 }),
                 Condvar::new(),
             )),

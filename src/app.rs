@@ -2093,6 +2093,8 @@ impl App {
             .filter(|c| c.chapters_edited || !c.scanning())
             .map(|c| c.chapters.clone());
         let (registry, chain) = self.processors.export_setup();
+        // The preview's kept sessions would hold a second copy of each model.
+        self.processors.release_sessions();
         self.export_page.start(info, keeps, registry, chain);
     }
 

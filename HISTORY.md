@@ -1,5 +1,32 @@
 # abner — history
 
+## 2026-11-22 — Processor sessions kept across kept ranges and Render presses (audit E2, P3)
+
+An export created every stage's session again for each kept range, and the preview
+created them again on every Render press; for a processor that loads a model on
+creation that load was most of what a press cost. The processor API gains
+`Session::reset`: discard buffered input and temporal state, keep what is expensive,
+hand out a fresh cancellation token (a raised one is never lowered). It defaults to
+`false`, so a processor that does not implement it behaves exactly as before. Wrappers
+forward it (`BoundSession`, `CallBoundary`, `Rgb16Boundary`, which negotiates again,
+`ReportingSession`, `Downsized`).
+
+`abner_processing::reuse::Pool` keeps sessions by processor, settings and input size
+and lends them to a job (`Lent`, an `Rc<RefCell<…>>` on the thread that runs them); a
+kept one is reset when taken, and one that cannot reset, or whose token stays raised,
+is replaced. The export holds one for its ranges. The preview worker holds one between
+renders, settled after each (kept after success or cancellation, dropped after another
+failure or a panic) and cleared through a mailbox flag when an export starts
+(`Panel::release_sessions`, so a model is not held twice) or the clips go. The pool
+keys the unbound session and `abner_processor_api::bind` (split out of `create_bound`)
+adds the job's spatial inputs, so a mask edit keeps the model.
+
+Validation: `kept_sessions_are_reset_and_reused_by_key` (the pool) and
+`resettable_sessions_are_created_once_per_settings` (an export over two ranges creates
+once and resets once through a processor that refuses discontinuous time; a targeted
+render stopped with a frame buffered, then two full renders, all reuse one session and
+deliver what a fresh session does; other settings create another).
+
 ## 2026-11-22 — Export: audio beside the video, Matroska written directly (audit E7)
 
 Encoding exports used to encode the audio after the last video frame, and a processed

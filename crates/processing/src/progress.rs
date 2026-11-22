@@ -208,6 +208,9 @@ impl Session for CallBoundary {
     fn finish(&mut self) -> Result<Vec<Frame>> {
         self.call(|s| s.finish())
     }
+    fn reset(&mut self) -> bool {
+        self.inner.reset()
+    }
     fn output_dimensions(&self) -> [usize; 2] {
         self.inner.output_dimensions()
     }

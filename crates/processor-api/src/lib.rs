@@ -272,6 +272,21 @@ pub trait Session {
     fn finish(&mut self) -> Result<Vec<Frame>> {
         Err("session requires negotiated frames".into())
     }
+    /// Start an unrelated sequence: discard every buffered input and all
+    /// temporal state, as if the session had just been created with the same
+    /// settings and dimensions, but keep what is expensive to make (a loaded
+    /// model, device buffers). Return a fresh token from
+    /// [`cancellation`](Session::cancellation) afterwards: a raised one is
+    /// never lowered. The host calls this instead of creating a new session
+    /// between an export's kept ranges and between preview renders, then
+    /// negotiates the format again and sets the reporters and preview target
+    /// again. It may be called with frames still buffered (a preview stops at
+    /// its frame without `finish`). Return `false`, the default, when the
+    /// session cannot: the host drops it and creates a new one. Wrapping
+    /// sessions must forward it.
+    fn reset(&mut self) -> bool {
+        false
+    }
     fn output_dimensions(&self) -> [usize; 2];
     fn cancellation(&self) -> Cancellation;
     /// Completed output frames. The host owns timeline totals and job-wide

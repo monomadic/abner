@@ -2,7 +2,7 @@
 
 An audit of the processed export (`media_io::pipeline_export_with_inputs`) and the
 Process page's preview renderer (`processor_gui::render`), made the day the export
-went to three threads. Three items were fixed the same day and E7 after them; the rest are open and
+went to three threads. Three items were fixed the same day and E7, E2 and P3 after them; the rest are open and
 tracked as task 24 in [TASKS.md](../TASKS.md).
 
 **Summary.** With no plugin time, the export already runs at the hardware
@@ -63,14 +63,15 @@ container finishing on long files, the preview renderer end to end.
 roughly 22 ms per frame, which is below the encoder's ceiling, so a cropped export
 was reader-bound. It now copies whole rows (0.79 ms).
 
-### E2. Sessions are rebuilt for every kept range — open
+### E2. Sessions were rebuilt for every kept range — fixed for processors that opt in
 
-The loop over `keeps` creates every stage's session again for each range, and
-drops them at the range's end. A timeline with ten cuts creates each processor ten
-times. For a processor that loads a model on creation that is ten loads. The cost
-depends on the processor and was not measured. Reuse needs a rule in the API: a
-session survives `finish_video`, or gains a reset that clears temporal state.
-The same rule would serve P3.
+The loop over `keeps` created every stage's session again for each range. The
+processor API now has `Session::reset` (discard buffered input and temporal state,
+keep what is expensive, return a fresh cancellation token; `false` by default), and
+the export keeps each stage's session in an `abner_processing::reuse::Pool` across
+its ranges, resetting it instead of creating it. A processor that does not
+implement `reset` is created per range as before, so the gain arrives as
+processors adopt it. Not measured: no in-repo processor is expensive to create.
 
 ### E3. The registry lock was held for the whole export — fixed
 
@@ -175,14 +176,16 @@ re-validated the decoder's frame. `FormatPlan::to_sink` now uses
 and `color::rgba8_validated` serves frames a decoder or plan already checked (the
 export writer uses it too). Each scan was at most 1.35 ms at 4K.
 
-### P3. Every Render press creates the sessions from scratch — open
+### P3. Every Render press created the sessions from scratch — fixed for processors that opt in
 
-`render` creates each stage's session and drops it on return, so pressing Render
-after moving one slider pays every stage's creation again. For interactive use
-this is probably the largest cost on the page; it depends on the processor and was
-not measured. Needs the same API rule as E2, plus a cache keyed by processor,
-settings, dimensions and spatial bindings, bounded in count and dropped when the
-source set changes.
+The preview worker keeps the last render's sessions in its own `Pool`, keyed by
+processor, settings (after the Downsize overlay) and input size, and resets them
+for the next press. Spatial inputs are bound per render (`abner_processor_api::bind`),
+so a mask edit reuses the model too. The pool is settled after every render (kept
+after success or cancellation, dropped after any other failure or a panic) and
+cleared when an export starts (`Panel::release_sessions`, so a model is not held
+twice) and when the clips go. Same opt-in caveat as E2
+(`resettable_sessions_are_created_once_per_settings`).
 
 ### P4. Every press opens a decoder and cold-seeks — open
 

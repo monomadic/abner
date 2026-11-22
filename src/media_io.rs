@@ -3004,9 +3004,12 @@ pub(crate) fn pipeline_export_with_inputs(
         let mut writer_gone = false;
         let chained = (|| -> Result<()> {
             let mut expected_duration: Option<f64> = None;
+            // A stage that can reset is created once, not once per kept range.
+            let mut pool = abner_processing::reuse::Pool::default();
             for &(start, end) in keeps {
                 cancel.check().map_err(anyhow::Error::msg)?;
                 active.lock().unwrap().clear();
+                pool.settle(true);
                 let (mut sessions, dims, mut source) = registry.with(|registry| -> Result<_> {
                 let mut dims = [cw as usize, ch as usize];
                 let mut sessions = Vec::new();
@@ -3017,7 +3020,9 @@ pub(crate) fn pipeline_export_with_inputs(
                         "{}: generator/post-processor execution is not supported by export", f.descriptor().name);
                     ensure!(!matches!(f.capabilities().input, InputRequirement::WholeClip),
                         "{}: whole-clip execution is not supported by export", f.descriptor().name);
-                    let mut session = abner_processor_api::create_bound(f,dims[0],dims[1],settings,inputs.bindings.get(id).cloned().unwrap_or_default())
+                    let key = format!("{id}|{settings}|{}x{}", dims[0], dims[1]);
+                    let made = pool.take(key, || f.create(dims[0], dims[1], settings)).map_err(anyhow::Error::msg)?;
+                    let mut session = abner_processor_api::bind(f, made, inputs.bindings.get(id).cloned().unwrap_or_default())
                         .map_err(anyhow::Error::msg)?;
                     if let Some(report) = stage_report {
                         use crate::export_page::StageUpdate;

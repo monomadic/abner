@@ -280,6 +280,13 @@ impl Session for Rgb16Boundary {
     fn output_dimensions(&self) -> [usize; 2] {
         self.sessions[0].output_dimensions()
     }
+    fn reset(&mut self) -> bool {
+        // A reset session negotiates its format again.
+        self.sessions[0].reset()
+            && FormatPlan::new(&mut self.sessions, PixelFormat::Rgb16, PixelFormat::Rgb16)
+                .map(|plan| self.plan = plan)
+                .is_ok()
+    }
     fn cancellation(&self) -> Cancellation {
         self.sessions[0].cancellation()
     }

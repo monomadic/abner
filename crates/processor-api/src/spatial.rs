@@ -118,11 +118,26 @@ pub fn create_bound(
             return Err(format!("Configure {} first", d.title));
         }
     }
+    bind(factory, factory.create(width, height, settings)?, bindings)
+}
+/// [`create_bound`] for a session the host already has (one kept from an
+/// earlier job and reset): wrap it with this job's spatial inputs.
+pub fn bind(
+    factory: &dyn Factory,
+    session: Box<dyn Session>,
+    bindings: SpatialBindings,
+) -> Result<Box<dyn Session>> {
+    let declarations = factory.spatial_inputs();
+    for d in &declarations {
+        if d.required && !bindings.contains_key(&d.key) {
+            return Err(format!("Configure {} first", d.title));
+        }
+    }
     if bindings.is_empty() {
-        return factory.create(width, height, settings);
+        return Ok(session);
     }
     Ok(Box::new(BoundSession {
-        inner: factory.create(width, height, settings)?,
+        inner: session,
         declarations,
         bindings,
     }))
@@ -150,6 +165,9 @@ impl Session for BoundSession {
     }
     fn finish(&mut self) -> Result<Vec<Frame>> {
         self.inner.finish()
+    }
+    fn reset(&mut self) -> bool {
+        self.inner.reset()
     }
     fn output_dimensions(&self) -> [usize; 2] {
         self.inner.output_dimensions()

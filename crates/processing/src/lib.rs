@@ -5,6 +5,7 @@ pub mod color;
 pub mod media;
 pub mod negotiation;
 pub mod progress;
+pub mod reuse;
 use abner_processor_api::{Cancellation, Frame, InputRequirement, Registry, Result, Role, Session};
 use serde::{Deserialize, Serialize};
 
