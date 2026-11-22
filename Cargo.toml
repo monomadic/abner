@@ -36,29 +36,30 @@ figleaf = { path = "../figleaf", features = ["wgpu", "text-coretext"] }
 # Matroska tags and display rotation, edited after the remux without touching clusters.
 fastmkv = { git = "https://github.com/monomadic/fastmkv", rev = "dbcd85c93e14ad5f4ff679473e5f5efb065f44fc" }
 # FilmCraft's pure-Rust demuxers and decoders with its VideoToolbox path (H.264, HEVC, VP9,
-# AV1 on Apple silicon; `filmcraft-platform` holds the OS FFI). Same pin as switchblade: a fork
-# revision carrying the VP9 (storytold/filmcraft#2180) and AV1 (#2608) VideoToolbox decoders,
-# and the Cues-driven Matroska open (branch `mkv-cues-open`), until they merge upstream. Metadata, playback, thumbnails and waveforms run
+# AV1 on Apple silicon; `filmcraft-platform` holds the OS FFI). A fork revision carrying the
+# VP9 (storytold/filmcraft#2180) and AV1 (#2608) VideoToolbox decoders and the Cues-driven
+# Matroska open (branch `mkv-cues-open`, switchblade's pin), plus one commit on top for HEVC
+# Main 10 encoding (branch `abner-hevc-main10`), until they merge upstream. Metadata, playback, thumbnails and waveforms run
 # in-process, including timeline packet metadata; no FFmpeg/FFprobe runtime helper.
-filmcraft-codecs = { git = "https://github.com/monomadic/filmcraft", rev = "45c12135b8744ed150367d4aa9a0d7f3b5f47362" }
-filmcraft-media = { git = "https://github.com/monomadic/filmcraft", rev = "45c12135b8744ed150367d4aa9a0d7f3b5f47362" }
-filmcraft-frame = { git = "https://github.com/monomadic/filmcraft", rev = "45c12135b8744ed150367d4aa9a0d7f3b5f47362" }
-filmcraft-color = { git = "https://github.com/monomadic/filmcraft", rev = "45c12135b8744ed150367d4aa9a0d7f3b5f47362" }
-filmcraft-time = { git = "https://github.com/monomadic/filmcraft", rev = "45c12135b8744ed150367d4aa9a0d7f3b5f47362" }
-filmcraft-isobmff = { git = "https://github.com/monomadic/filmcraft", rev = "45c12135b8744ed150367d4aa9a0d7f3b5f47362" }
-filmcraft-matroska = { git = "https://github.com/monomadic/filmcraft", rev = "45c12135b8744ed150367d4aa9a0d7f3b5f47362" }
-filmcraft-h264 = { git = "https://github.com/monomadic/filmcraft", rev = "45c12135b8744ed150367d4aa9a0d7f3b5f47362" }
-filmcraft-hevc = { git = "https://github.com/monomadic/filmcraft", rev = "45c12135b8744ed150367d4aa9a0d7f3b5f47362" }
-filmcraft-av1 = { git = "https://github.com/monomadic/filmcraft", rev = "45c12135b8744ed150367d4aa9a0d7f3b5f47362" }
-filmcraft-bitstream = { git = "https://github.com/monomadic/filmcraft", rev = "45c12135b8744ed150367d4aa9a0d7f3b5f47362" }
-filmcraft-export = { git = "https://github.com/monomadic/filmcraft", rev = "45c12135b8744ed150367d4aa9a0d7f3b5f47362" }
-filmcraft-h264enc = { git = "https://github.com/monomadic/filmcraft", rev = "45c12135b8744ed150367d4aa9a0d7f3b5f47362" }
-filmcraft-prores = { git = "https://github.com/monomadic/filmcraft", rev = "45c12135b8744ed150367d4aa9a0d7f3b5f47362" }
-filmcraft-aac = { git = "https://github.com/monomadic/filmcraft", rev = "45c12135b8744ed150367d4aa9a0d7f3b5f47362" }
-filmcraft-avi = { git = "https://github.com/monomadic/filmcraft", rev = "45c12135b8744ed150367d4aa9a0d7f3b5f47362" }
-filmcraft-mxf = { git = "https://github.com/monomadic/filmcraft", rev = "45c12135b8744ed150367d4aa9a0d7f3b5f47362" }
-filmcraft-mpegts = { git = "https://github.com/monomadic/filmcraft", rev = "45c12135b8744ed150367d4aa9a0d7f3b5f47362" }
-filmcraft-mpeg2v = { git = "https://github.com/monomadic/filmcraft", rev = "45c12135b8744ed150367d4aa9a0d7f3b5f47362" }
+filmcraft-codecs = { git = "https://github.com/monomadic/filmcraft", rev = "c511b01027b107d088eb3a819affde36f831546d" }
+filmcraft-media = { git = "https://github.com/monomadic/filmcraft", rev = "c511b01027b107d088eb3a819affde36f831546d" }
+filmcraft-frame = { git = "https://github.com/monomadic/filmcraft", rev = "c511b01027b107d088eb3a819affde36f831546d" }
+filmcraft-color = { git = "https://github.com/monomadic/filmcraft", rev = "c511b01027b107d088eb3a819affde36f831546d" }
+filmcraft-time = { git = "https://github.com/monomadic/filmcraft", rev = "c511b01027b107d088eb3a819affde36f831546d" }
+filmcraft-isobmff = { git = "https://github.com/monomadic/filmcraft", rev = "c511b01027b107d088eb3a819affde36f831546d" }
+filmcraft-matroska = { git = "https://github.com/monomadic/filmcraft", rev = "c511b01027b107d088eb3a819affde36f831546d" }
+filmcraft-h264 = { git = "https://github.com/monomadic/filmcraft", rev = "c511b01027b107d088eb3a819affde36f831546d" }
+filmcraft-hevc = { git = "https://github.com/monomadic/filmcraft", rev = "c511b01027b107d088eb3a819affde36f831546d" }
+filmcraft-av1 = { git = "https://github.com/monomadic/filmcraft", rev = "c511b01027b107d088eb3a819affde36f831546d" }
+filmcraft-bitstream = { git = "https://github.com/monomadic/filmcraft", rev = "c511b01027b107d088eb3a819affde36f831546d" }
+filmcraft-export = { git = "https://github.com/monomadic/filmcraft", rev = "c511b01027b107d088eb3a819affde36f831546d" }
+filmcraft-h264enc = { git = "https://github.com/monomadic/filmcraft", rev = "c511b01027b107d088eb3a819affde36f831546d" }
+filmcraft-prores = { git = "https://github.com/monomadic/filmcraft", rev = "c511b01027b107d088eb3a819affde36f831546d" }
+filmcraft-aac = { git = "https://github.com/monomadic/filmcraft", rev = "c511b01027b107d088eb3a819affde36f831546d" }
+filmcraft-avi = { git = "https://github.com/monomadic/filmcraft", rev = "c511b01027b107d088eb3a819affde36f831546d" }
+filmcraft-mxf = { git = "https://github.com/monomadic/filmcraft", rev = "c511b01027b107d088eb3a819affde36f831546d" }
+filmcraft-mpegts = { git = "https://github.com/monomadic/filmcraft", rev = "c511b01027b107d088eb3a819affde36f831546d" }
+filmcraft-mpeg2v = { git = "https://github.com/monomadic/filmcraft", rev = "c511b01027b107d088eb3a819affde36f831546d" }
 rayon = "1"
 resvg = { version = "0.45", default-features = false }
 
@@ -66,7 +67,7 @@ resvg = { version = "0.45", default-features = false }
 # on macOS Tahoe (the ~1px window border is drawn with the shadow, so we
 # need setHasShadow(false)), and the embedded Dock icon.
 [target.'cfg(target_os = "macos")'.dependencies]
-filmcraft-platform = { git = "https://github.com/monomadic/filmcraft", rev = "45c12135b8744ed150367d4aa9a0d7f3b5f47362" }
+filmcraft-platform = { git = "https://github.com/monomadic/filmcraft", rev = "c511b01027b107d088eb3a819affde36f831546d" }
 objc2-app-kit = { version = "0.2", features = [
     "NSResponder",
     "NSView",

@@ -487,9 +487,10 @@ shadow, a gradient, round-capped lines, a text effect.
   a lone clip plays, the clock rewinds and the streams stay inside a frame period of each other).
   Keep it green — sync IS the product.
 - Building needs no ffmpeg headers or libraries: decoding is FilmCraft's pure-Rust codecs,
-  git-pinned in `Cargo.toml` to the same fork revision switchblade uses (it carries the VP9 and
-  AV1 VideoToolbox decoders until storytold/filmcraft#2180 and #2608 merge; move the pin to
-  upstream `main` once they do, together with switchblade's). Startup probing, preview
+  git-pinned in `Cargo.toml` to a fork revision one commit past switchblade's (it carries the
+  VP9 and AV1 VideoToolbox decoders until storytold/filmcraft#2180 and #2608 merge, and on
+  top, branch `abner-hevc-main10`, `VtProfile::HevcMain10` for the export's Main 10; move the
+  pin to upstream `main` once all of them are there, together with switchblade's). Startup probing, preview
   color validation, thumbnails and waveform decoding need no FFmpeg/FFprobe process.
   Native export, text subtitle extraction and decoded-frame inspection live in `src/media_io.rs`;
   see `docs/NATIVE-MEDIA.md` for supported containers/codecs and preservation limits.

@@ -257,7 +257,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-aac"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 dependencies = [
  "filmcraft-bitstream",
  "thiserror",
@@ -266,7 +266,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-ac3"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 dependencies = [
  "thiserror",
 ]
@@ -274,7 +274,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-apv"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 dependencies = [
  "filmcraft-bitstream",
  "rayon",
@@ -284,12 +284,12 @@ dependencies = [
 [[package]]
 name = "filmcraft-audio-dsp"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 
 [[package]]
 name = "filmcraft-av1"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 dependencies = [
  "filmcraft-bitstream",
  "rayon",
@@ -299,17 +299,17 @@ dependencies = [
 [[package]]
 name = "filmcraft-avi"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 
 [[package]]
 name = "filmcraft-bitstream"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 
 [[package]]
 name = "filmcraft-captions"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 dependencies = [
  "filmcraft-color",
  "filmcraft-project",
@@ -322,7 +322,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-codecs"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 dependencies = [
  "filmcraft-aac",
  "filmcraft-ac3",
@@ -359,7 +359,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-color"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 dependencies = [
  "serde",
 ]
@@ -367,7 +367,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-dng"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 dependencies = [
  "rayon",
  "thiserror",
@@ -376,7 +376,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-dnx"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 dependencies = [
  "filmcraft-bitstream",
  "rayon",
@@ -386,7 +386,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-export"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 dependencies = [
  "filmcraft-aac",
  "filmcraft-apv",
@@ -416,7 +416,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-flac"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 dependencies = [
  "filmcraft-bitstream",
  "thiserror",
@@ -425,7 +425,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-frame"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 dependencies = [
  "filmcraft-color",
  "filmcraft-time",
@@ -436,7 +436,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-geom"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 dependencies = [
  "serde",
 ]
@@ -444,7 +444,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-h264"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 dependencies = [
  "filmcraft-bitstream",
  "rayon",
@@ -454,7 +454,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-h264enc"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 dependencies = [
  "filmcraft-bitstream",
  "rayon",
@@ -464,7 +464,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-hevc"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 dependencies = [
  "filmcraft-bitstream",
  "rayon",
@@ -474,7 +474,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-isobmff"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 dependencies = [
  "filmcraft-bitstream",
  "thiserror",
@@ -483,12 +483,12 @@ dependencies = [
 [[package]]
 name = "filmcraft-matroska"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 
 [[package]]
 name = "filmcraft-media"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 dependencies = [
  "filmcraft-color",
  "filmcraft-dng",
@@ -503,7 +503,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-mpa"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 dependencies = [
  "filmcraft-bitstream",
  "thiserror",
@@ -512,7 +512,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-mpeg2v"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 dependencies = [
  "rayon",
  "thiserror",
@@ -521,7 +521,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-mpegts"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 dependencies = [
  "thiserror",
 ]
@@ -529,22 +529,22 @@ dependencies = [
 [[package]]
 name = "filmcraft-mxf"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 
 [[package]]
 name = "filmcraft-ogg"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 
 [[package]]
 name = "filmcraft-opus"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 
 [[package]]
 name = "filmcraft-platform"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 dependencies = [
  "filmcraft-bitstream",
  "filmcraft-codecs",
@@ -567,7 +567,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-project"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 dependencies = [
  "filmcraft-color",
  "filmcraft-geom",
@@ -581,7 +581,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-prores"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 dependencies = [
  "filmcraft-bitstream",
  "rayon",
@@ -591,7 +591,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-render"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 dependencies = [
  "filmcraft-audio-dsp",
  "filmcraft-captions",
@@ -610,7 +610,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-text"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 dependencies = [
  "filmcraft-color",
  "harfrust",
@@ -623,7 +623,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-time"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 dependencies = [
  "serde",
 ]
@@ -631,7 +631,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-vp8"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 dependencies = [
  "thiserror",
 ]
@@ -639,7 +639,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-vp9"
 version = "0.8.0"
-source = "git+https://github.com/monomadic/filmcraft?rev=45c12135b8744ed150367d4aa9a0d7f3b5f47362#45c12135b8744ed150367d4aa9a0d7f3b5f47362"
+source = "git+https://github.com/monomadic/filmcraft?rev=c511b01027b107d088eb3a819affde36f831546d#c511b01027b107d088eb3a819affde36f831546d"
 dependencies = [
  "filmcraft-bitstream",
  "rayon",
