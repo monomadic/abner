@@ -5819,6 +5819,11 @@ mod tests {
             render_with(&registry, &request(Some((30 + i) as f64 * period), pair), &tx, None, None, &mut kept).unwrap();
         }
         eprintln!("6 one-frame renders, kept decoder: {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
+        let t = Instant::now();
+        for _ in 0..6 {
+            check_processable(&info.path).unwrap();
+        }
+        eprintln!("6 metadata checks: {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
         drop(tx);
         drain.join().unwrap();
         let _ = std::fs::remove_dir_all(dir);

@@ -30,7 +30,8 @@ Effort estimates come from the 2026-09-04 comparison against switchblade.
    Open: a Main 10 HEVC path (E5, needs a FilmCraft change: profile and 10-bit pixel
    buffers in `VtEncoder`), a fixed-point planar → RGBA8 (E9's remaining 2.4 ms at 4K;
    changes rounding, so `print_conversion_digests` would need a new reference), storing
-   only the "after" picture (P6), cached source metadata (P7).
+   only the "after" picture (P6, a design choice: pair renders against the display
+   player's cache). P7 measured at 0.07 ms per check and closed.
 
 20. **Three-stream cold seek on FilmCraft.** `benchmark_three_4k_players` (cold exact
    seek to 3.5 s in a 4 s 4K H.264 GOP): one player lands in 690 ms against the libav

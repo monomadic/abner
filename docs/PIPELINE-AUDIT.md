@@ -2,7 +2,7 @@
 
 An audit of the processed export (`media_io::pipeline_export_with_inputs`) and the
 Process page's preview renderer (`processor_gui::render`), made the day the export
-went to three threads. Three items were fixed the same day and E7, E2, P3, E4, E6, E9, E8, P1 and P4 after them; the rest are open and
+went to three threads. Three items were fixed the same day and E7, E2, P3, E4, E6, E9, E8, P1 and P4 after them, and P7 was measured and closed; the rest are open and
 tracked as task 24 in [TASKS.md](../TASKS.md).
 
 **Summary.** With no plugin time, the export already runs at the hardware
@@ -264,8 +264,9 @@ can deliver again, so storing only the "after" would roughly double a section's
 length, at the cost of pairing against the player's cache (and of the retimed
 case, where one original pairs with several outputs and is already shared).
 
-### P7. Source metadata is re-read on every render — open, minor
+### P7. Source metadata is re-read on every render — measured, left as is
 
-`check_processable` and, for retimed chains, `require_constant_rate` read the
-container again on each press. Unmeasured; cache per path with the source's
-probe if a profile shows it.
+`check_processable` reads the container again on each press. Measured with
+`preview_throughput`: 0.07 ms per check on the 4K MP4 (a header-only read),
+against about 8 ms for a one-frame render with the kept decoder. Not worth a
+cache. `require_constant_rate` runs only for retimed chains and was not measured.
