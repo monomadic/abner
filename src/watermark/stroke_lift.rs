@@ -122,11 +122,11 @@ fn attenuation(
 }
 
 /// Mask over `region` (row-major, region-sized). Empty when nothing stroke-like stands out.
-pub(super) fn detect_checked(
+pub(super) fn scores_checked(
     frames: &[Frame],
     region: [usize; 4],
     check: Check,
-) -> Result<Vec<bool>, String> {
+) -> Result<Vec<u8>, String> {
     let [ox, oy, w, h] = region;
     let (fw, fh) = (frames[0].width, frames[0].height);
     // Widest stroke considered, and the finest detail kept, scale with the box.
@@ -156,7 +156,7 @@ pub(super) fn detect_checked(
         check,
     )?;
     let (attenuation, flickers) = attenuation(&spread, cw, ch, coarse, check)?;
-    let mut best: (f32, Vec<bool>) = (0., vec![false; w * h]);
+    let mut best = (0., vec![0; w * h]);
     // A light overlay lifts the darkest channel; a dark one lowers the lightest.
     for image in [darkest, lightest] {
         let kept = open(&image, cw, ch, fine, check)?;
@@ -180,7 +180,7 @@ pub(super) fn detect_checked(
             }
         };
         let at = |q: usize| (oy + q / w - y0) * cw + ox + q % w - x0;
-        let mut mask = vec![false; w * h];
+        let mut mask = vec![0; w * h];
         let mut seen = vec![false; w * h];
         let mut weight = 0.;
         for start in 0..w * h {
@@ -218,7 +218,7 @@ pub(super) fn detect_checked(
             if component.len() >= (coarse * coarse / 3).max(24) && peak >= 1. {
                 weight += total;
                 for q in component {
-                    mask[q] = true;
+                    mask[q] = super::evidence::relative_score(score(at(q)), 0.75);
                 }
             }
         }
@@ -230,20 +230,20 @@ pub(super) fn detect_checked(
             let grown: Vec<usize> = (0..w * h)
                 .filter(|&q| {
                     let (x, y) = (q % w, q / w);
-                    !mask[q]
+                    mask[q] == 0
                         && score(at(q)) >= 0.4
                         && lift[at(q)] >= 0.015
-                        && ((x > 0 && mask[q - 1])
-                            || (x + 1 < w && mask[q + 1])
-                            || (y > 0 && mask[q - w])
-                            || (y + 1 < h && mask[q + w]))
+                        && ((x > 0 && mask[q - 1] != 0)
+                            || (x + 1 < w && mask[q + 1] != 0)
+                            || (y > 0 && mask[q - w] != 0)
+                            || (y + 1 < h && mask[q + w] != 0))
                 })
                 .collect();
             if grown.is_empty() {
                 break;
             }
             for q in grown {
-                mask[q] = true;
+                mask[q] = super::evidence::relative_score(score(at(q)), 0.4);
             }
         }
         if weight > best.0 {
@@ -251,6 +251,11 @@ pub(super) fn detect_checked(
         }
     }
     Ok(best.1)
+}
+
+#[cfg(test)]
+fn detect_checked(frames: &[Frame], region: [usize; 4], check: Check<'_>) -> Result<Vec<bool>, String> {
+    Ok(scores_checked(frames, region, check)?.into_iter().map(super::evidence::selected_by_default).collect())
 }
 
 #[cfg(test)]

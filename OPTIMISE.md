@@ -138,6 +138,24 @@ reference masks cover that.
 
 ### Q1. Keep the maps; add a sensitivity control to the review step
 
+The Process review bar now has a Sensitivity slider from 0% to 100%, starting at
+50%. Each step thresholds the saved opacity and confidence values, removes
+small islands, and applies the current grow/shrink offset. Add to mask uses the
+same pixels as the orange preview. A run with only weaker candidates starts in
+review with a prompt to raise sensitivity. The worker keeps the detector's
+structural checks, and coarse searches scout for weak candidates before native
+refinement. Drawn-box stroke proposals retain their accepted stroke scores.
+
+`ABNER_DETECT_REVIEW=1` in the release diagnostic checks the saved 50% mask against
+the worker's default selection and reports the three settings below. FilmCraft's
+decode counters stay fixed while recalculating the masks.
+
+| Fixture | 0% pixels | 50% pixels | 100% pixels |
+| --- | ---: | ---: | ---: |
+| 1080p H.264, Every frame | 38,600 | 39,070 | 39,914 |
+| 4K thin-stroke fixture, whole frame, 64 samples | 1,483 | 1,680 | 1,831 |
+| 4K H.264, drawn box, 64 samples | 119 | 7,514 | 7,514 |
+
 `watermark.rs:213-221` thresholds `opacity` and `confidence` at fixed values and the
 `Proposal` carries only the binary result. In the in-place editor the result is already
 held for review (`Detection::Proposal`, `app.rs:1423`).

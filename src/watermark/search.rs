@@ -131,7 +131,7 @@ impl Search {
     /// beyond the coarse selection and overlaps boxes on opposite sides of a seam.
     pub fn refinements(
         &self,
-        selected: &[bool],
+        selected: &[u8],
         size: [usize; 2],
         samples: usize,
         budget: usize,
@@ -154,7 +154,7 @@ impl Search {
         for (row, flags) in selected.chunks_exact(lw).enumerate() {
             check()?;
             let top = self.context[1] + (ly + row) * self.scale;
-            for (col, _) in flags.iter().enumerate().filter(|(_, selected)| **selected) {
+            for (col, _) in flags.iter().enumerate().filter(|(_, selected)| **selected != 0) {
                 let left = self.context[0] + (lx + col) * self.scale;
                 let tile_x = (left.max(x) - x) / tile;
                 let tile_y = (top.max(y) - y) / tile;
@@ -218,7 +218,7 @@ mod tests {
             2
         );
         let [_, _, w, h] = search.local_region();
-        let selected = vec![true; w * h];
+        let selected = vec![255; w * h];
         let batches = search
             .refinements(&selected, size, 512, DETECTOR_BUDGET, &|| Ok(()))
             .unwrap();

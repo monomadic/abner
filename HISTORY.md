@@ -1,5 +1,14 @@
 # abner — history
 
+## 2026-11-23 — Adjust autodetect sensitivity in review
+
+The Process review bar thresholds saved opacity and confidence scores at 0% to
+100% sensitivity, with 50% as the default. It removes small islands, applies the
+current edge offset, and updates the orange preview without another decode or
+detection run. Weak-only results can be reviewed by raising sensitivity. Add to
+mask uses the current preview pixels. At narrow widths, Run again and Discard
+move to the inspector so the slider and edge stepper fit in the bar.
+
 ## 2026-11-23 — Grow and shrink autodetect proposals before adding
 
 The Process review bar steps from −2 to +8 image pixels and defaults to +1.

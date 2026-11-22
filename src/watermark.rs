@@ -1,10 +1,12 @@
 //! Built-in mask proposals from stationary overlays over changing nearby frames.
 //! Owns a background decoder; never seeks the visible player or writes media.
+mod evidence;
 mod reservoir;
 mod search;
 mod static_overlay;
 mod stroke_lift;
 use crate::probe::VideoInfo;
+pub(crate) use evidence::{DEFAULT_SENSITIVITY, Evidence, MAX_SENSITIVITY};
 use filmcraft_frame::VideoFrame;
 use rayon::prelude::*;
 use reservoir::Reservoir;
@@ -179,6 +181,7 @@ impl SamplePlan {
 pub(crate) struct Proposal {
     pub pixels: Vec<u8>,
     pub samples: usize,
+    pub evidence: Option<Evidence>,
 }
 pub(crate) struct Task {
     pub source: usize,
@@ -255,6 +258,7 @@ impl Task {
         range: Range,
         drawn: bool,
         samples: Option<usize>,
+        review: bool,
     ) -> Result<Self, String> {
         let region = detection_region(region, info.width as usize, info.height as usize)?;
         let plan = range.sample_plan(info.duration, info.fps, samples)?;
@@ -280,6 +284,7 @@ impl Task {
                             &count,
                             Some(region),
                             drawn,
+                            review,
                         )
                     })
                 });
@@ -310,11 +315,11 @@ fn detection_region(region: Option<[usize;4]>, w:usize, h:usize) -> Result<[usiz
     if x>=w || y>=h || rw==0 || rh==0 {return Err("The processing region is empty or outside the image".into());}
     Ok([x,y,rw.min(w-x),rh.min(h-y)])
 }
-fn mark_region(pixels: &mut [u8], width: usize, [x, y, w, h]: Region, selected: &[bool]) {
+fn mark_region(pixels: &mut [u8], width: usize, [x, y, w, h]: Region, selected: &[u8]) {
     for (row, flags) in selected.chunks_exact(w).take(h).enumerate() {
         let start = (y + row) * width + x;
         for (pixel, &mark) in pixels[start..start + w].iter_mut().zip(flags) {
-            if mark {
+            if mark != 0 {
                 *pixel = 255;
             }
         }
@@ -361,6 +366,7 @@ fn analyze(
     progress: &AtomicUsize,
     region: Option<Region>,
     drawn: bool,
+    review: bool,
 ) -> Result<Proposal, String> {
     let region = detection_region(region, w as usize, h as usize)?;
     let total = plan.count;
@@ -427,20 +433,27 @@ fn analyze(
         return Err("Too few distinct decoded frames to detect a watermark".into());
     }
     progress.store(total + 1, Ordering::Relaxed);
-    let selected = detect_search(&search, &check)?;
+    let mut evidence = review.then(Evidence::default);
+    let maps = detect_search(&search, &check)?;
     let mut pixels = vec![0; size[0] * size[1]];
     if search.scale == 1 {
-        // A tightly drawn box permits weaker evidence, even over stationary scenery.
-        let selected = if drawn
-            && !selected.contains(&true)
-            && region[2] * region[3] <= pixels.len() / 4
-        {
-            stroke_lift::detect_checked(&search.frames, search.local_region(), &check)?
-        } else {
-            selected
-        };
+        let mut selected = native_selection(maps, region, &mut evidence, &check)?;
+        // A tightly drawn box permits evidence over stationary scenery.
+        if drawn && !selected.contains(&255) && region[2] * region[3] <= pixels.len() / 4 {
+            let scores = stroke_lift::scores_checked(&search.frames, search.local_region(), &check)?;
+            selected = scores.iter().map(|&score| u8::from(evidence::selected_by_default(score)) * 255).collect();
+            if let Some(evidence) = &mut evidence && selected.contains(&255) {
+                evidence.set_strokes(region, scores);
+            }
+        }
         mark_region(&mut pixels, size[0], region, &selected);
     } else {
+        let level = if review { MAX_SENSITIVITY } else { DEFAULT_SENSITIVITY };
+        let mut selected = maps.selection(search.local_region()[2], level, &check)?;
+        for (pixel, &seed) in selected.iter_mut().zip(&maps.refine_seeds) {
+            if seed { *pixel = 255; }
+        }
+        drop(maps);
         let batches = search.refinements(&selected, size, count, budget, &check)?;
         #[cfg(test)]
         eprintln!(
@@ -462,7 +475,8 @@ fn analyze(
             for search in batch {
                 if search.frames.len() >= 6 {
                     samples = samples.max(search.frames.len());
-                    let selected = detect_search(&search, &check)?;
+                    let maps = detect_search(&search, &check)?;
+                    let selected = native_selection(maps, search.region, &mut evidence, &check)?;
                     mark_region(&mut pixels, size[0], search.region, &selected);
                 }
             }
@@ -475,27 +489,24 @@ fn analyze(
         sampling.read_elapsed.as_secs_f64(),
         started.elapsed().saturating_sub(sampling.read_elapsed).as_secs_f64(),
     );
-    Ok(Proposal { pixels, samples })
+    Ok(Proposal { pixels, samples, evidence })
 }
 
-fn detect_search(search: &Search, check: Check<'_>) -> Result<Vec<bool>, String> {
-    let maps = static_overlay::detect_checked(
-        &search.frames,
-        search.local_region(),
-        DETECTOR_RADIUS,
-        search.scale,
-        check,
-    )?;
-    Ok(maps
-        .opacity
-        .iter()
-        .zip(&maps.confidence)
-        .enumerate()
-        .map(|(i, (&opacity, &confidence))| {
-            (opacity >= 0.35 && confidence >= 0.25)
-                || maps.refine_seeds.get(i) == Some(&true)
-        })
-        .collect())
+fn detect_search(search: &Search, check: Check<'_>) -> Result<static_overlay::Maps, String> {
+    static_overlay::detect_checked(&search.frames, search.local_region(), DETECTOR_RADIUS, search.scale, check)
+}
+
+fn native_selection(
+    maps: static_overlay::Maps,
+    region: Region,
+    evidence: &mut Option<Evidence>,
+    check: Check<'_>,
+) -> Result<Vec<u8>, String> {
+    let selected = maps.selection(region[2], DEFAULT_SENSITIVITY, check)?;
+    if let Some(evidence) = evidence {
+        evidence.add_window(region, maps.opacity, maps.confidence, maps.min_component);
+    }
+    Ok(selected)
 }
 
 struct Sampling<'a> {
@@ -638,7 +649,7 @@ mod tests {
         let region = detection_region(Some([3,2,99,2]),8,6).unwrap();
         assert_eq!(region,[3,2,5,2]);
         let mut pixels = vec![0; 8 * 6];
-        mark_region(&mut pixels, 8, region, &[true; 10]);
+        mark_region(&mut pixels, 8, region, &[255; 10]);
         for y in 0..6 { for x in 0..8 {
             assert_eq!(pixels[y*8+x],if (2..4).contains(&y) && x>=3 {255}else{0});
         }}
@@ -684,13 +695,24 @@ mod tests {
         let (w, h) = (info.width, info.height);
         let started = Instant::now();
         let before = filmcraft_codecs::gop::gop_stats();
-        let task = Task::spawn(info, 0, 0, 0, region, range, region.is_some(), count).unwrap();
+        let review = std::env::var_os("ABNER_DETECT_REVIEW").is_some();
+        let task = Task::spawn(info, 0, 0, 0, region, range, region.is_some(), count, review).unwrap();
         let proposal = task.receiver.recv_timeout(task.timeout).unwrap().unwrap();
         let decode = filmcraft_codecs::gop::gop_stats() - before;
         eprintln!(
             "Autodetect total: {:.6}s, {} samples fed to decoders, {} decoder starts",
             started.elapsed().as_secs_f64(), decode.decoded, decode.seeks,
         );
+        if let Some(evidence) = &proposal.evidence {
+            let size = [w as usize, h as usize];
+            assert_eq!(evidence.select(size, DEFAULT_SENSITIVITY), proposal.pixels);
+            for level in [0, DEFAULT_SENSITIVITY, MAX_SENSITIVITY] {
+                let selection = evidence.select(size, level);
+                eprintln!("Sensitivity {}%: {} selected pixels", level * 10,
+                    selection.iter().filter(|&&pixel| pixel != 0).count());
+            }
+            assert_eq!(filmcraft_codecs::gop::gop_stats() - before, decode);
+        }
         #[cfg(target_os = "macos")]
         {
             let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
@@ -723,6 +745,7 @@ mod tests {
             &AtomicBool::new(true),
             &AtomicUsize::new(0),
             None,
+            false,
             false,
         )
         .err()

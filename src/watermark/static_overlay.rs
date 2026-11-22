@@ -1,5 +1,6 @@
 //! Screen-space overlay proposals. No registration or scene trajectories are used.
 use super::{Check, Frame, temporal_rows};
+use super::evidence::{CONFIDENCE, OPACITY, select_islands, threshold_factor};
 use rayon::prelude::*;
 
 pub(super) struct Maps {
@@ -8,11 +9,20 @@ pub(super) struct Maps {
     pub edge: Vec<f32>,
     pub variation: Vec<f32>,
     pub refine_seeds: Vec<bool>,
+    pub min_component: usize,
 }
 
 #[cfg(test)]
 fn detect(frames: &[Frame], region: [usize; 4], radius: usize) -> Maps {
-    detect_checked(frames, region, radius, 1, &|| Ok(())).unwrap()
+    let mut maps = detect_checked(frames, region, radius, 1, &|| Ok(())).unwrap();
+    let selected = maps.selection(region[2], super::evidence::DEFAULT_SENSITIVITY, &|| Ok(())).unwrap();
+    for (i, selected) in selected.into_iter().enumerate() {
+        if selected == 0 {
+            maps.opacity[i] = 0.;
+            maps.confidence[i] = 0.;
+        }
+    }
+    maps
 }
 
 pub(super) fn detect_checked(
@@ -114,6 +124,7 @@ pub(super) fn detect_checked(
         edge: vec![0.; w * h],
         variation: vec![0.; w * h],
         refine_seeds: Vec::new(),
+        min_component,
     };
     let mut wider_opacity = vec![0.; w * h];
     let mut wider_variation = vec![0.; w * h];
@@ -353,55 +364,18 @@ pub(super) fn detect_checked(
                 * (frames.len() as f32 / 16.).min(1.);
         }
     }
-    // Confidence thresholding can split tiny islands off a larger soft component.
-    // Filter at the exported mask threshold too, so those islands do not survive
-    // merely because weak low-confidence pixels connected them upstream.
-    let mut seen = vec![false; w * h];
-    for start in 0..w * h {
-        if start % 4096 == 0 {
-            checkpoint()?;
-        }
-        if seen[start] || maps.confidence[start] < 0.25 {
-            continue;
-        }
-        let mut component = vec![start];
-        seen[start] = true;
-        let mut cursor = 0;
-        while cursor < component.len() {
-            if cursor % 4096 == 0 {
-                checkpoint()?;
-            }
-            let p = component[cursor];
-            cursor += 1;
-            let (x, y) = (p % w, p / w);
-            for q in [
-                if x > 0 { Some(p - 1) } else { None },
-                if x + 1 < w { Some(p + 1) } else { None },
-                if y > 0 { Some(p - w) } else { None },
-                if y + 1 < h { Some(p + w) } else { None },
-            ]
-            .into_iter()
-            .flatten()
-            {
-                if !seen[q] && maps.confidence[q] >= 0.25 {
-                    seen[q] = true;
-                    component.push(q);
-                }
-            }
-        }
-        if component.len() < min_component {
-            for p in component {
-                maps.confidence[p] = 0.;
-            }
-        }
-    }
-    for p in 0..w * h {
-        if maps.confidence[p] < 0.25 {
-            maps.opacity[p] = 0.;
-            maps.confidence[p] = 0.;
-        }
-    }
+
     Ok(maps)
+}
+
+impl Maps {
+    pub fn selection(&self, width: usize, level: u8, check: Check<'_>) -> Result<Vec<u8>, String> {
+        let factor = threshold_factor(level);
+        select_islands(width, self.opacity.len(), self.min_component,
+            |i| self.opacity[i] >= OPACITY * factor && self.confidence[i] >= CONFIDENCE * factor,
+            check,
+        )
+    }
 }
 
 #[cfg(test)]
