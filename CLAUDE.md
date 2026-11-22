@@ -498,10 +498,13 @@ shadow, a gradient, round-capped lines, a text effect.
   `png`, for the wordmark texture, and `fastmkv` (git-pinned, the user's own crate), which
   writes Matroska exports' global tags and display rotation after the mux and reads Matroska
   sources' tags. Track names, track and chapter tags and attachments come from the Filmcraft demuxer
-  and are appended by `remux_mkv`, which lists every element it appends in the SeekHead
+  and are appended by `mkv_append` (after `remux_mkv` for packet-copy and crop exports, after
+  `MkvSink`, which writes a processed export's Matroska directly with no MP4 in between), which lists every element it appends in the SeekHead
   (`index_appended`) — an element after the clusters that the index does not name is
   invisible to ffmpeg and players. Exports read subtitles and tags once from the ORIGINAL source
-  (`subtitle_tracks`, `source_meta`) whatever the video goes through.
+  (`subtitle_tracks`, `source_meta`) whatever the video goes through. Encoding exports encode
+  audio beside the video (`AudioFeed`: a thread per stream, packets written once the video
+  reaches their time), never after it.
 - **`./packaging/build-app.sh [--open|--install]` builds `Abner.app`** — switchblade's
   recipe: release build, `assets/app-icon.png` → `AppIcon.icns`, `Info.plist.in` with
   version + a NUMERIC build stamp (`CFBundleVersion` = UTC `YYYYMMDD.HHMMSS`; the git

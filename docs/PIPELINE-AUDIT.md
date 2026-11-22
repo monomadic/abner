@@ -2,7 +2,7 @@
 
 An audit of the processed export (`media_io::pipeline_export_with_inputs`) and the
 Process page's preview renderer (`processor_gui::render`), made the day the export
-went to three threads. Three items were fixed the same day; the rest are open and
+went to three threads. Three items were fixed the same day and E7 after them; the rest are open and
 tracked as task 24 in [TASKS.md](../TASKS.md).
 
 **Summary.** With no plugin time, the export already runs at the hardware
@@ -111,13 +111,30 @@ those pixels as encoder input; ProRes does not, so for ProRes the conversion
 the page keeps only the newest frame between polls. Convert for the preview only
 when the page has taken the previous one, or at a bounded rate.
 
-### E7. Audio waits for video, and MKV is written twice — open, unmeasured
+### E7. Audio waited for video, and MKV was written twice — fixed
 
-Audio is encoded after the last video frame, on the calling thread. An MKV export
-is muxed as MP4 and then remuxed whole into Matroska, which doubles the disk
-writes. Both grow with duration. Measure on a long file before changing either;
-audio could run beside the video, and the remux could be replaced by a Matroska
-writer fed directly.
+Audio was encoded after the last video frame, on the calling thread, and an MKV
+export was muxed as MP4 and then remuxed whole into Matroska. Measured on a
+10-minute 1080p 24 fps source with stereo AAC (1.5 GB): the audio pass took 8.7 s
+and the remux 2.35 s.
+
+Encoding exports now encode audio beside the video (`AudioFeed`: one thread per
+stream, a bounded queue, each packet written once the video has reached its time,
+so the file is interleaved rather than all audio at the end). A processed export
+to MKV is written directly by `MkvSink`, which takes the MP4 writer's packets and
+timing (AAC priming becomes the codec delay) and appends chapters, attachments and
+tags through the same `mkv_append` the remux uses
+(`pipeline_matroska_is_written_directly_and_matches_mov` checks the packets and
+times against the MOV of the same job). The same 10-minute export, HEVC 20 Mbps,
+no stages:
+
+| Output | Before | After |
+|---|---|---|
+| MP4 | 75.97 s | 67.32 s |
+| MKV | 77.90 s | 67.28 s |
+
+Still remuxed: packet-copy and crop exports to MKV (`export_with_cancel`), whose
+packets come from any source container through the MP4 writer.
 
 ### E8. Every crop goes through RGB16 — open
 

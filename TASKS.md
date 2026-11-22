@@ -28,8 +28,8 @@ Effort estimates come from the 2026-09-04 comparison against switchblade.
    instead of RGBA and add a Main 10 path (E4, E5), a direct Y'CbCr → RGBA8 conversion
    (E9), plane-aligned crops without RGB16 (E8), a reader / chain / display split and a
    kept decoder for the preview (P1, P4), throttled preview pixels for ProRes exports
-   (E6), then the unmeasured ones: audio beside video and a direct Matroska writer (E7),
-   storing only the "after" picture (P6), cached source metadata (P7).
+   (E6), then the unmeasured ones: storing only the "after" picture (P6), cached source
+   metadata (P7). E7 (audio beside video, direct Matroska) landed 2026-11-22.
 
 20. **Three-stream cold seek on FilmCraft.** `benchmark_three_4k_players` (cold exact
    seek to 3.5 s in a 4 s 4K H.264 GOP): one player lands in 690 ms against the libav

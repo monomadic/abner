@@ -1,5 +1,25 @@
 # abner — history
 
+## 2026-11-22 — Export: audio beside the video, Matroska written directly (audit E7)
+
+Encoding exports used to encode the audio after the last video frame, and a processed
+MKV export was muxed as MP4 and then remuxed whole. `AudioFeed` now runs one encoder
+thread per audio stream from the start, a few seconds ahead in a bounded queue, and the
+writer takes each packet once the video has reached its time, so the audio costs nothing
+after the last frame and the file is interleaved. Both the processed export
+(`write_frames`) and the crop export (`encode_ranges`) use it. A processed export to MKV
+goes through `MkvSink`, a `PacketSink` beside the MP4 writer: it collects the tracks,
+starts the Matroska writer with the subtitle tracks after them at the first packet,
+interleaves the cues by time, and finishes through `mkv_append`, the remux's own tail
+(chapters, attachments, re-aimed tags, SeekHead), now shared. `mkv_track` is the one
+sample-entry → Matroska mapping.
+
+10-minute 1080p export, HEVC 20 Mbps, no stages: MP4 75.97 → 67.32 s, MKV 77.90 →
+67.28 s. `pipeline_matroska_is_written_directly_and_matches_mov` checks names, tags,
+attachment, chapters, both subtitle cues, the packets and their times against the MOV
+of the same ProRes job, and that the audio lies among the video. Packet-copy and crop
+exports to MKV still remux.
+
 ## 2026-11-22 — Process: Autodetect as three questions, with a reviewed result
 
 Inside the in-place mask editor Autodetect no longer opens a panel over the top of the
