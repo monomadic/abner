@@ -3217,22 +3217,32 @@ impl Prep {
         }
         let ((width, height), (cx, cy, cw, ch)) = (self.full, self.crop);
         if cx != 0 || cy != 0 || cw != width || ch != height {
-            // Arbitrary crop origins can split a chroma sample. Crop in RGB16
-            // rather than inventing chroma phase or reducing to display depth.
-            let mut rgb = abner_processing::color::convert(f, PixelFormat::Rgb16)
-                .and_then(VideoFrame::into_rgb16)?;
-            // Whole rows at a time: a per-sample iterator was 16 times slower
-            // at 4K and made the reader the export's slowest thread.
-            let (stride, row) = (width as usize * 3, cw as usize * 3);
-            let mut cropped = Vec::with_capacity(row * ch as usize);
-            for y in cy as usize..(cy + ch) as usize {
-                let start = y * stride + cx as usize * 3;
-                cropped.extend_from_slice(&rgb.pixels[start..start + row]);
-            }
-            rgb.pixels = cropped;
-            rgb.width = cw as usize; rgb.height = ch as usize;
-            f = rgb.into();
+            // On the chroma grid the planes are cut as they are (audit E8).
+            f = match crop_planes(f, (cx, cy, cw, ch)) {
+                Ok(cropped) => cropped,
+                Err(f) => {
+                    // Off the grid a cut would split a chroma sample. Crop in
+                    // RGB16 rather than inventing chroma phase or reducing to
+                    // display depth.
+                    let mut rgb = abner_processing::color::convert(f, PixelFormat::Rgb16)
+                        .and_then(VideoFrame::into_rgb16)?;
+                    // Whole rows at a time: a per-sample iterator was 16 times
+                    // slower at 4K and made the reader the slowest thread.
+                    let (stride, row) = (width as usize * 3, cw as usize * 3);
+                    let mut cropped = Vec::with_capacity(row * ch as usize);
+                    for y in cy as usize..(cy + ch) as usize {
+                        let start = y * stride + cx as usize * 3;
+                        cropped.extend_from_slice(&rgb.pixels[start..start + row]);
+                    }
+                    rgb.pixels = cropped;
+                    rgb.width = cw as usize;
+                    rgb.height = ch as usize;
+                    rgb.into()
+                }
+            };
         }
+        // The timeline's crop scales the cut back to the frame: a resample,
+        // so it stays in RGB16.
         if !self.crops.is_empty() {
             let mut rgb = abner_processing::color::convert(f, PixelFormat::Rgb16)
                 .and_then(VideoFrame::into_rgb16)?;
@@ -3248,6 +3258,47 @@ impl Prep {
         };
         Ok(Some(abner_processing::color::convert_validated(f, target)?))
     }
+}
+
+/// Cut a planar frame's planes to `(x, y, w, h)` when every edge lies on its
+/// chroma grid, so no chroma sample is split: each pixel keeps its own chroma
+/// sample and converts to what an RGB16 cut would hold, with no conversion here.
+/// Anything else comes back unchanged for the RGB16 cut.
+fn crop_planes(
+    f: abner_processor_api::VideoFrame,
+    (x, y, w, h): (u32, u32, u32, u32),
+) -> std::result::Result<abner_processor_api::VideoFrame, abner_processor_api::VideoFrame> {
+    use abner_processor_api::FramePixels;
+    let Some((sx, sy)) = f.format.subsampling() else { return Err(f) };
+    let (x, y, w, h) = (x as usize, y as usize, w as usize, h as usize);
+    if [x, w].iter().any(|v| v % sx != 0) || [y, h].iter().any(|v| v % sy != 0)
+        || x + w > f.width || y + h > f.height || w == 0 || h == 0
+    {
+        return Err(f);
+    }
+    fn cut<T: Copy>(plane: &[T], stride: usize, (x, y, w, h): (usize, usize, usize, usize)) -> Vec<T> {
+        let mut out = Vec::with_capacity(w * h);
+        for row in y..y + h {
+            out.extend_from_slice(&plane[row * stride + x..row * stride + x + w]);
+        }
+        out
+    }
+    let rects = [
+        (f.width, (x, y, w, h)),
+        (f.width.div_ceil(sx), (x / sx, y / sy, w / sx, h / sy)),
+    ];
+    let pixels = match &f.pixels {
+        FramePixels::Yuv8(p) => FramePixels::Yuv8(std::array::from_fn(|c| {
+            let (stride, r) = rects[c.min(1)];
+            Arc::new(cut(&p[c], stride, r))
+        })),
+        FramePixels::Yuv16(p) => FramePixels::Yuv16(std::array::from_fn(|c| {
+            let (stride, r) = rects[c.min(1)];
+            Arc::new(cut(&p[c], stride, r))
+        })),
+        _ => return Err(f),
+    };
+    Ok(abner_processor_api::VideoFrame { width: w, height: h, pixels, ..f })
 }
 
 /// Where the chain's input comes from: a reader thread, or (for a processor's
@@ -4382,6 +4433,38 @@ mod tests {
             let bias = a.iter().zip(b.iter()).map(|(x, y)| *x as f64 - *y as f64).sum::<f64>() / a.len() as f64;
             // Coding loss only: no shift a wrong matrix or range would add.
             assert!(mean < 2.5 && bias.abs() < 0.5, "plane {i}: mean {mean:.2}, bias {bias:.2}");
+        }
+    }
+    /// A crop on the chroma grid cuts the planes, and they convert to exactly
+    /// the RGB16 cut of the whole frame; one off the grid is left for RGB16.
+    #[test]
+    fn aligned_crops_cut_planes_like_rgb16() {
+        use abner_processor_api::{FramePixels, PixelFormat, VideoFrame};
+        let (w, h) = (37usize, 22usize);
+        let mut s = 0x2545f4914f6cdd1du64;
+        let mut next = move || { s ^= s << 13; s ^= s >> 7; s ^= s << 17; s };
+        for format in [PixelFormat::Yuv420p8, PixelFormat::Yuv420p10, PixelFormat::Yuv422p10] {
+            let (sx, sy) = format.subsampling().unwrap();
+            let (pw, ph) = (w.div_ceil(sx), h.div_ceil(sy));
+            let plane = |n: usize, next: &mut dyn FnMut() -> u64| -> Vec<u16> {
+                (0..n).map(|_| if format.depth() == 8 { 16 + next() as u16 % 220 } else { 64 + next() as u16 % 877 }).collect()
+            };
+            let p = [plane(w * h, &mut next), plane(pw * ph, &mut next), plane(pw * ph, &mut next)];
+            let pixels = if format.depth() == 8 {
+                FramePixels::Yuv8(p.map(|p| Arc::new(p.into_iter().map(|v| v as u8).collect())))
+            } else {
+                FramePixels::Yuv16(p.map(Arc::new))
+            };
+            let frame = VideoFrame { width: w, height: h, format, pixels, pts: 0, duration: 1, time_base: [1, 24] };
+            let rgb = |f: VideoFrame| abner_processing::color::convert(f, PixelFormat::Rgb16).unwrap().into_rgb16().unwrap();
+            let full = rgb(frame.clone());
+            let (x, y, cw, ch) = (4, 2, 30, 18);
+            let cut = crop_planes(frame.clone(), (x as u32, y as u32, cw as u32, ch as u32)).ok().unwrap();
+            assert_eq!(cut.format, format);
+            let expected: Vec<u16> = (y..y + ch).flat_map(|r| full.pixels[(r * w + x) * 3..(r * w + x + cw) * 3].to_vec()).collect();
+            assert_eq!(rgb(cut).pixels, expected, "{format:?}");
+            assert!(crop_planes(frame.clone(), (3, 2, 30, 18)).is_err());
+            assert!(crop_planes(frame, (4, 2, 29, 18)).is_err());
         }
     }
 }

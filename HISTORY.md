@@ -1,5 +1,15 @@
 # abner — history
 
+## 2026-11-22 — Export crops on the chroma grid cut the planes (audit E8)
+
+The export crop converted every frame to RGB16 before cutting it, so an odd origin
+could not split a chroma sample. `crop_planes` cuts planar frames directly when the
+crop's edges lie on the chroma grid (any 4:2:0 crop with even origin and size, which is
+what the crop marquee's export makes): the planes convert to exactly the RGB16 cut
+(`aligned_crops_cut_planes_like_rgb16`), and the chain or the encoder gets them in their
+own format. Cropped 4K benchmark (no pictures): user CPU 10.1 → 6.2 s. The timeline crop
+resamples, so it stays in RGB16. `export_throughput` takes `ABNER_BENCH_CROP=x,y,w,h`.
+
 ## 2026-11-22 — Planar → RGB in one pass, bit-identical (audit E9)
 
 Planar → RGBA8 (every preview and export-page picture) built a whole RGB16 frame

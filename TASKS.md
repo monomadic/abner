@@ -25,9 +25,10 @@ Effort estimates come from the 2026-09-04 comparison against switchblade.
    [PIPELINE-AUDIT.md](docs/PIPELINE-AUDIT.md). Landed the same day: E1, E3, P2, P5, E7
    (audio beside video, direct Matroska), E2/P3 (`Session::reset`, sessions kept across
    ranges and renders), E4/E6 (HEVC fed planes, page pictures only when taken), E9 (one-pass planar → RGB,
-   bit-identical; a fixed-point version waits on accepting new rounding). Open, in
+   bit-identical; a fixed-point version waits on accepting new rounding), E8 (export crops
+   on the chroma grid cut the planes). Open, in
    the order worth doing: a Main 10 HEVC path (E5, needs a FilmCraft change: profile and
-   10-bit pixel buffers in `VtEncoder`), plane-aligned crops without RGB16 (E8), a reader / chain / display split and a kept
+   10-bit pixel buffers in `VtEncoder`), a reader / chain / display split and a kept
    decoder for the preview (P1, P4), then the unmeasured ones: storing only the "after"
    picture (P6), cached source metadata (P7).
 

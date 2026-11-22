@@ -2,7 +2,7 @@
 
 An audit of the processed export (`media_io::pipeline_export_with_inputs`) and the
 Process page's preview renderer (`processor_gui::render`), made the day the export
-went to three threads. Three items were fixed the same day and E7, E2, P3, E4, E6 and E9 after them; the rest are open and
+went to three threads. Three items were fixed the same day and E7, E2, P3, E4, E6, E9 and E8 after them; the rest are open and
 tracked as task 24 in [TASKS.md](../TASKS.md).
 
 **Summary.** With no plugin time, the export already runs at the hardware
@@ -153,13 +153,19 @@ no stages:
 Still remuxed: packet-copy and crop exports to MKV (`export_with_cancel`), whose
 packets come from any source container through the MP4 writer.
 
-### E8. Every crop goes through RGB16 — open
+### E8. Every export crop went through RGB16 — fixed for crops on the chroma grid
 
-The export crop converts the frame to RGB16 (4.4 ms at 4K) so an odd origin cannot
-split a chroma sample, and a timeline crop converts again. A crop whose origin and
-size are multiples of the chroma subsampling can be cut from the planes directly,
-with no conversion in either direction. `E` in the crop marquee already floors to
-even sides.
+The export crop converted the frame to RGB16 (4.4 ms at 4K) so an odd origin
+could not split a chroma sample. `media_io::crop_planes` now cuts the planes
+directly when the crop's origin and size are multiples of the chroma subsampling
+(`E` in the crop marquee floors to even sides already); each pixel keeps its own
+chroma sample, so the planes convert to exactly the RGB16 cut
+(`aligned_crops_cut_planes_like_rgb16`). Off the grid the RGB16 cut remains.
+Cropped 4K benchmark (`ABNER_BENCH_CROP=120,80,3600,2000`, no pictures): user CPU
+10.1 s → 6.2 s, 54.8 → 56.7 fps with no stages.
+
+The timeline crop (`spatial::apply_crop`) is not a cut: it scales the cropped
+region back to the frame with a bilinear resample, so it stays in RGB16.
 
 ### E9. Y'CbCr → RGBA8 went through an RGB16 intermediate — fixed, bit-identical
 

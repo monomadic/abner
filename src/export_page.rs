@@ -1871,7 +1871,7 @@ mod tests {
     /// `cargo test --release export_throughput -- --ignored --nocapture`
     /// (`ABNER_BENCH_SIZE`, default 3840x2160; `ABNER_BENCH_WORK_MS`, default 0;
     /// `ABNER_BENCH_NO_PICTURE=1` converts no frame for the page, as when it
-    /// polls slower than the export runs).
+    /// polls slower than the export runs; `ABNER_BENCH_CROP=x,y,w,h` crops).
     #[test]
     #[ignore]
     fn export_throughput() {
@@ -1894,7 +1894,11 @@ mod tests {
             let mut frames = 0;
             let start = Instant::now();
             crate::media_io::pipeline_export_with_inputs(&Default::default(), &info, &dest,
-                &[(0., 2.)], &[], &registry, &chain, false, Some(40_000), None,
+                &[(0., 2.)], &[], &registry, &chain, false, Some(40_000),
+                std::env::var("ABNER_BENCH_CROP").ok().map(|c| {
+                    let v: Vec<u32> = c.split(',').map(|n| n.parse().unwrap()).collect();
+                    (v[0], v[1], v[2], v[3])
+                }),
                 &Cancellation::default(), &Mutex::default(), None,
                 std::env::var_os("ABNER_BENCH_NO_PICTURE").map(|_| &(|| false) as &(dyn Fn() -> bool + Sync)),
                 |_| { frames += 1; Ok(()) }).unwrap();
