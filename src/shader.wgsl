@@ -252,6 +252,13 @@ fn fs_main(in: Out) -> @location(0) vec4<f32> {
             let painted = textureLoad(tex_m, p, 0).r > 0.5;
             // p0 picks the look: 0 the red / blue wash, 1 only the painted
             // pixels over plain footage, 2 the mask itself, white on black.
+            // 3: a detection under review. The texture carries the mask at
+            // full value and the proposed pixels at a middle one, in orange.
+            if (in.p0 > 2.5) {
+                let v = textureLoad(tex_m, p, 0).r;
+                if (v > 0.75) { return vec4<f32>(0.0, 0.3, 1.0, 0.6); }
+                return vec4<f32>(1.0, 0.45, 0.0, select(0.0, 0.85, v > 0.2));
+            }
             if (in.p0 > 1.5) { return vec4<f32>(vec3<f32>(select(0.0, 1.0, painted)), 1.0); }
             if (in.p0 > 0.5) { return vec4<f32>(0.0, 0.3, 1.0, select(0.0, 0.6, painted)); }
             return vec4<f32>(select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), painted), 0.5);

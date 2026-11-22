@@ -77,6 +77,8 @@ processor previews:
   --processor-settings JSON         optional initial settings object
   --processor-render                render the current frame on open (captures)
   --processor-mask                  open the processor's mask editor (captures)
+  --processor-autodetect            the mask editor on its Autodetect setup;
+  --processor-autodetect-run        the same, with Detect pressed (captures)
   --processor-mask-ask              the same, with a stroke painted and the
                                     unapplied-changes question up (captures)
   --export                          open the minimal Export workspace
@@ -172,6 +174,7 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
     let mut processor_render = false;
     let mut processor_mask = false;
     let mut processor_mask_ask = false;
+    let mut processor_autodetect = 0u8;
     let mut add_processor = false;
     // The Sources sidebar hidden, as the header toggle leaves it: for captures.
     let mut no_sources = false;
@@ -207,6 +210,9 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
         } else if a == "--processor-mask" || a == "--processor-mask-ask" {
             processor_mask = true;
             processor_mask_ask = a == "--processor-mask-ask";
+        } else if a == "--processor-autodetect" || a == "--processor-autodetect-run" {
+            processor_mask = true;
+            processor_autodetect = if a == "--processor-autodetect" { 1 } else { 2 };
         } else if a == "--processor-settings" {
             processor_settings = serde_json::from_str(
                 it.next()
@@ -331,7 +337,7 @@ pub fn run(registry: abner_processor_api::Registry) -> anyhow::Result<()> {
         app.start_processor(&id, processor_settings)
             .map_err(anyhow::Error::msg)?;
         if processor_render { app.render_processor_frame(); }
-        if processor_mask { app.open_processor_mask(processor_mask_ask); }
+        if processor_mask { app.open_processor_mask(processor_mask_ask, processor_autodetect); }
     }
     if add_processor { app.open_processor_picker(); }
     if export_workspace || export_run.is_some() { app.select_workspace_mode(5); }

@@ -232,11 +232,15 @@ pub struct App {
     pending_processor_mask: bool,
     /// `--processor-mask-ask`: paint one dab there and raise the question.
     pending_mask_ask: bool,
+    /// `--processor-autodetect[-run]`: 1 opens the setup, 2 also runs it.
+    pending_autodetect: u8,
     /// The mask as the in-place editor opened it, to tell an edit from none.
     editor_baseline: Option<std::sync::Arc<Vec<u8>>>,
     /// Leaving the in-place editor with unapplied changes: the tool bar asks
     /// first, and this is where the user was going.
     leave_prompt: Option<Leave>,
+    /// What the last in-place detection returned, held for review.
+    detection_result: Option<Detection>,
     painting: bool,
     stroke_last: Option<(f32, f32)>,
     cursor_inside: bool,
@@ -767,7 +771,7 @@ impl App {
             masks: (0..videos.len()).map(|_| None).collect(),
             mask_mode: false,
             brush_diameter: cfg.mask.brush_size,
-            mask_erase: false, mask_view: 0, brush_slider_drag: false, mask_coverage: (0, 0, 0.), pending_processor_mask: false, pending_mask_ask: false, editor_baseline: None, leave_prompt: None,
+            mask_erase: false, mask_view: 0, brush_slider_drag: false, mask_coverage: (0, 0, 0.), pending_processor_mask: false, pending_mask_ask: false, pending_autodetect: 0, editor_baseline: None, leave_prompt: None, detection_result: None,
             painting: false,
             stroke_last: None,
             cursor_inside: false,
@@ -913,7 +917,7 @@ impl App {
         self.seek_all(self.t,true);
     }
     fn finish_editor(&mut self, apply:bool) {
-        self.leave_prompt=None;self.editor_baseline=None;
+        self.leave_prompt=None;self.editor_baseline=None;self.detection_result=None;
         self.watermark_task = None;
         self.clear_mask_history();
         self.detection_range=None;self.detection_drag=None;
@@ -1233,6 +1237,8 @@ impl App {
         if !self.mask_mode || !self.cursor_inside || !self.ready() || self.active_marquee().is_some() || self.leave_prompt.is_some() {
             return false;
         }
+        // Autodetect's setup owns the picture: a drag there is the search area's.
+        if self.autodetect_setup() {return false;}
         if self.detection_panel && contains(self.detection_panel_rect(),self.cursor.0,self.cursor.1) {return false;}
         let r = self.content_rect(self.active);
         let (x, y) = self.cursor;
@@ -1255,6 +1261,7 @@ impl App {
         let c=self.canvas();RectPx{x:c.x+10.,y:c.y+8.,w:c.w-20.,h:116.}
     }
     fn detection_track(&self)->RectPx {
+        if self.inplace_mask() { let t=self.processors.timeline(self.vp); return RectPx{y:t.y+12.,h:4.,..t}; }
         let p=self.detection_panel_rect();RectPx{x:p.x+16.,y:p.y+45.,w:p.w-32.,h:12.}
     }
     fn detection_whole(&self)->RectPx {
@@ -1267,6 +1274,7 @@ impl App {
         let p=self.detection_panel_rect();RectPx{x:p.x+p.w-132.,y:p.y+76.,w:120.,h:28.}
     }
     fn detection_samples_track(&self)->RectPx {
+        if self.inplace_mask() { let s=self.processors.side_rect(self.vp); return RectPx{x:s.x+16.,y:s.y+338.,w:(s.w-32.).max(1.),h:12.}; }
         let p=self.detection_panel_rect();RectPx{x:p.x+100.,y:p.y+84.,w:(p.w-254.).max(50.),h:12.}
     }
     fn detection_sample_count(&self)->Option<usize> {
@@ -1278,12 +1286,28 @@ impl App {
         if index!=self.detection_samples {self.watermark_task=None;self.mask_status.clear();self.detection_samples=index;}
     }
     fn toggle_detection_panel(&mut self) {
-        self.detection_panel= !self.detection_panel;
+        self.detection_panel= !self.detection_panel;self.detection_result=None;
         if !self.detection_panel {self.detection_area_visible=false;self.crop_drag=None;}
     }
     fn detection_press(&mut self,x:f32,y:f32)->bool {
         if !self.show_ui||!self.mask_mode||self.crop.is_some()||!self.detection_panel{return false;}
         let Some(range)=self.detection_range else{return false;};
+        if self.inplace_mask() {
+            // Only the frame slider and the two handles: the rest of the
+            // transport still scrubs, and a run or a review locks the setup.
+            if self.watermark_task.is_some()||self.detection_result.is_some()||self.leave_prompt.is_some() {return false;}
+            let count=self.detection_samples_track();
+            if contains(RectPx{x:count.x-6.,y:count.y-8.,w:count.w+12.,h:28.},x,y) {
+                self.detection_samples_drag=true;self.set_detection_samples(x);return true;
+            }
+            let t=self.detection_track();let duration=self.videos[self.active].info.duration.max(0.001);
+            let start=t.x+t.w*(range.start/duration) as f32;let end=t.x+t.w*(range.end/duration) as f32;
+            let (near_start,near_end)=((x-start).abs()<=8.,(x-end).abs()<=8.);
+            if y>=t.y-10.&&y<=t.y+t.h+12.&&(near_start||near_end) {
+                self.mask_status.clear();self.detection_drag=Some(near_end&&(!near_start||(x-end).abs()<(x-start).abs()));self.playing=false;return true;
+            }
+            return false;
+        }
         let duration=self.videos[self.active].info.duration;
         if contains(self.detection_whole(),x,y) {
             self.watermark_task=None;self.mask_status.clear();self.detection_range=Some(crate::watermark::Range{start:0.,end:duration});return true;
@@ -1302,7 +1326,7 @@ impl App {
         contains(self.detection_panel_rect(),x,y)
     }
     fn draw_detection_range(&self,items:&mut Vec<Item>) {
-        if !self.mask_mode||self.crop.is_some()||!self.detection_panel{return;}
+        if !self.mask_mode||self.crop.is_some()||!self.detection_panel||self.inplace_mask(){return;}
         let Some(range)=self.detection_range else{return;};
         let duration=self.videos[self.active].info.duration.max(0.001);let track=self.detection_track();let panel=self.detection_panel_rect();
         let x=|t:f64|track.x+track.w*(t/duration) as f32;
@@ -1337,6 +1361,7 @@ impl App {
         }
     }
     fn detect_watermark(&mut self) {
+        self.detection_result=None;
         if self.watermark_task.take().is_some() {
             self.mask_status="Watermark detection stopped".into();return;
         }
@@ -1373,18 +1398,32 @@ impl App {
         }
     }
     fn apply_watermark(&mut self,proposal:crate::watermark::Proposal) {
-        let mask=self.masks[self.active].as_mut().unwrap();
+        // In place the result is held for review; elsewhere it lands at once.
+        let review=self.inplace_mask();
+        let mask=self.masks[self.active].as_ref().unwrap();
         if proposal.pixels.len()!=mask.pixels.len() {self.mask_status="Detection returned the wrong mask size".into();return;}
         let found=proposal.pixels.iter().filter(|&&p|p!=0).count();
-        if found==0 {self.mask_status="No confident watermark found; try another point in the clip".into();return;}
+        if found==0 {
+            if review {self.mask_status.clear();self.detection_result=Some(Detection::Nothing(format!("Nothing static found in {} frames.",proposal.samples)));}
+            else {self.mask_status="No confident watermark found; try another point in the clip".into();}
+            return;
+        }
         let added=proposal.pixels.iter().zip(mask.pixels.iter()).filter(|(p,old)|**p!=0&&**old==0).count();
-        if added==0 {self.mask_status="Detected watermark is already masked".into();return;}
-        let previous=mask.pixels.clone();
-        let pixels=std::sync::Arc::make_mut(&mut mask.pixels);
-        for (dst,src) in pixels.iter_mut().zip(proposal.pixels) {if src!=0 {*dst=255;}}
-        mask.revision+=1;
-        self.record_mask(previous);
-        self.mask_status=format!("Added {added} pixels from {} nearby frames · inspect mask, ⌘Z to undo",proposal.samples);
+        if added==0 {
+            if review {self.mask_status.clear();self.detection_result=Some(Detection::Nothing("Everything it found is already in the mask.".into()));}
+            else {self.mask_status="Detected watermark is already masked".into();}
+            return;
+        }
+        if review {
+            // One texture shows both: the mask at 255, the proposal at 100.
+            let mut both=(*mask.pixels).clone();
+            for (dst,src) in both.iter_mut().zip(&proposal.pixels) {if *src!=0&&*dst==0 {*dst=100;}}
+            let mut preview=Mask::new(mask.width,mask.height);preview.pixels=std::sync::Arc::new(both);
+            self.mask_status.clear();
+            self.detection_result=Some(Detection::Proposal{preview,pixels:proposal.pixels,added,samples:proposal.samples});
+            return;
+        }
+        self.merge_detection(proposal.pixels,added,proposal.samples);
     }
     fn clear_mask_history(&mut self) {
         self.mask_undo.clear();self.mask_redo.clear();self.stroke_before=None;
@@ -1507,6 +1546,9 @@ impl App {
         } else if let Some(c) = self.active_marquee() {
             self.build_crop_layer(items, c);
             self.draw_aspect_buttons(items);
+        } else if let Some(Detection::Proposal { preview, .. }) = &self.detection_result {
+            items.push(Item::Mask { r, id: preview.id, revision: preview.revision,
+                width: preview.width, height: preview.height, pixels: preview.pixels.clone(), style: 3. });
         } else {
             if let Some(style) = self.mask_style() { items.push(Item::Mask { r, id: mask.id, revision: mask.revision,
                 width: mask.width, height: mask.height, pixels: mask.pixels.clone(), style }); }
@@ -2258,7 +2300,7 @@ impl App {
     /// `--processor-render`: what the panel's Render button does, for captures.
     /// `--processor-mask`, for captures: the tick that finds the stage's
     /// mask input opens its editor.
-    pub fn open_processor_mask(&mut self, ask: bool) { self.pending_processor_mask = true; self.pending_mask_ask = ask; }
+    pub fn open_processor_mask(&mut self, ask: bool, autodetect: u8) { self.pending_processor_mask = true; self.pending_mask_ask = ask; self.pending_autodetect = autodetect; }
     pub fn render_processor_frame(&mut self) {
         self.processors.render_frame();
     }
@@ -2352,6 +2394,18 @@ impl App {
                 // The question is up: Enter applies and goes, Esc keeps editing.
                 match k { Key::Enter=>self.answer_leave(Some(true)), Key::Escape=>self.answer_leave(None), _=>{} }
                 return
+            }
+            if self.autodetect_setup() {
+                // Inside Autodetect, Esc is back to the brush and Enter is
+                // the bar's primary: Detect, or Add to mask on a proposal.
+                match k {
+                    Key::Escape=>{self.toggle_detection_panel();return}
+                    Key::Enter=>{
+                        if matches!(self.detection_result,Some(Detection::Proposal{..})) {self.activate(Action::DetectAccept)}
+                        else if self.watermark_task.is_none()&&self.detection_result.is_none() {self.activate(Action::DetectRun)}
+                        return}
+                    _=>{}
+                }
             }
             if matches!(k,Key::Escape|Key::Char('m'|'M')) && self.guard_leave(Leave::Close) {return}
             if k==Key::Escape {self.finish_editor(false);return}
@@ -2725,7 +2779,7 @@ impl App {
         }
         if self.mask_mode && self.processors.open {
             self.cursor = (x,y); self.cursor_inside = true;
-            if self.inplace_mask() {
+            if self.inplace_mask() && !self.detection_panel {
                 let track = self.brush_slider();
                 if contains(RectPx { x: track.x - 8., y: track.y - 10., w: track.w + 16., h: 24. }, x, y) {
                     self.brush_slider_drag = true; self.set_brush_from_slider(x); return;
@@ -3466,6 +3520,10 @@ impl App {
                 m.stroke(at, at, m.height as f32 * 0.08, 255);
                 self.guard_leave(Leave::Tool(0));
             }
+            match std::mem::take(&mut self.pending_autodetect) {
+                0 => {}
+                run => { self.detection_panel = self.editor.is_some(); if run == 2 && self.detection_panel { self.detect_watermark(); } }
+            }
         }
         self.processors.editor_bar = self.mask_mode && !self.inplace_mask();
         if self.inplace_mask() && !self.painting
@@ -3530,7 +3588,8 @@ impl App {
             for c in self.embedded_editor_controls() {
                 if !contains(bar.r, c.r.x, c.r.y) { continue; }
                 let hovered = self.cursor_inside && contains(c.r, self.cursor.0, self.cursor.1);
-                if inplace && matches!(c.action, Action::ApplyEdit | Action::LeaveApply) { ButtonBar::primary(&mut items, c.r, &c.label, hovered, false); }
+                if inplace && (matches!(c.action, Action::ApplyEdit | Action::LeaveApply | Action::DetectAccept)
+                    || matches!(c.action, Action::DetectRun) && c.label == "Detect") { ButtonBar::primary(&mut items, c.r, &c.label, hovered, false); }
                 else { c.draw(&mut items, hovered, self.control_dead(&c.action)); }
             }
             if inplace && self.leave_prompt.is_some() {
@@ -3539,8 +3598,21 @@ impl App {
                 items.push(Item::Rect(RectItem { radius: 4., ..RectItem::new(RectPx { x: c.x + 2., y: c.y + c.h / 2. - 4., w: 8., h: 8. }, WARNING) }));
                 ui_label(&mut items, c.x + 18., c.y + c.h / 2., 12., WARNING, "Unapplied mask changes. Apply before leaving?", Align::Left, (end - c.x - 28.).max(1.));
             }
+            if inplace && self.leave_prompt.is_none() && self.detection_panel {
+                let c = bar.content();
+                let end = self.embedded_editor_controls().iter().filter(|d| contains(bar.r, d.r.x, d.r.y)).map(|d| d.r.x).fold(c.x + c.w, f32::min);
+                let (text, color, progress) = self.autodetect_bar_text();
+                let room = (end - c.x - 14.).max(1.);
+                let text_w = if progress.is_some() { room.min(250.) } else { room };
+                ui_label(&mut items, c.x + 2., c.y + c.h / 2., 12., color, text, Align::Left, text_w);
+                if let Some(f) = progress.filter(|_| room > 320.) {
+                    let track = RectPx { x: c.x + 262., y: c.y + c.h / 2. - 2., w: room - 262., h: 4. };
+                    items.push(Item::Rect(RectItem { radius: 2., ..RectItem::new(track, hex_color(0x1a1a1a)) }));
+                    items.push(Item::Rect(RectItem { radius: 2., ..RectItem::new(RectPx { w: track.w * f.clamp(0., 1.), ..track }, DETECT_ORANGE) }));
+                }
+            }
             items.push(Item::Clip(None));
-            if inplace { self.draw_mask_inspector(&mut items); }
+            if inplace { if self.detection_panel { self.draw_autodetect_setup(&mut items); } else { self.draw_mask_inspector(&mut items); } }
         }
         if self.show_ui {self.draw_detection_range(&mut items);}
         if self.processors.open && self.show_ui { self.draw_footer_end(&mut items, vp); self.processors.draw_picker(&mut items, vp); }
@@ -3842,6 +3914,155 @@ impl App {
             Leave::Focus(id) => self.processors.focus_id(&id),
         }
     }
+
+    /// Autodetect inside the in-place mask editor: the setup takes the
+    /// inspector column, the range sits on the transport and the bar under
+    /// the picture runs it. The picture is never covered.
+    fn autodetect_setup(&self) -> bool { self.inplace_mask() && self.detection_panel }
+    fn detection_range_whole(&self) -> bool {
+        let d = self.videos[self.active].info.duration;
+        self.detection_range.is_none_or(|r| r.start <= 1e-6 && r.end >= d - 1e-6)
+    }
+    fn detection_summary(&self) -> String {
+        let frames = self.detection_sample_count().map_or("all frames".into(), |n| format!("{n} frames"));
+        let range = if self.detection_range_whole() { "whole clip".into() }
+            else { let r = self.detection_range.unwrap(); format!("{}–{}", fmt_time(r.start), fmt_time(r.end)) };
+        let area = match self.detection_area.and(self.detection_search_region()) { Some([_, _, w, h]) => format!("{w}×{h} area"), None => "whole frame".into() };
+        format!("{frames} · {range} · {area}")
+    }
+    /// What the bar says beside its buttons, in which colour, and how far a
+    /// running detection has read.
+    fn autodetect_bar_text(&self) -> (String, [f32; 4], Option<f32>) {
+        if let Some(task) = &self.watermark_task {
+            let (n, total) = task.progress_counts();
+            return (task.status(), WORKSPACE_TEXT, Some(n as f32 / total.max(1) as f32));
+        }
+        match &self.detection_result {
+            Some(Detection::Proposal { added, preview, .. }) => (format!("Found {added} px · {:.2}% of the frame. Orange is not in the mask yet.",
+                *added as f32 * 100. / preview.pixels.len().max(1) as f32), hex_color(0xff9d3a), None),
+            Some(Detection::Nothing(why)) => (why.clone(), WARNING, None),
+            None if !self.mask_status.is_empty() => (self.mask_status.clone(), WORKSPACE_TEXT, None),
+            None => (format!("Autodetect · {}", self.detection_summary()), WORKSPACE_TEXT, None),
+        }
+    }
+    fn autodetect_controls(&self) -> Vec<Control> {
+        let bar = self.processors.tool_bar(self.vp);
+        let mut out = Vec::new();
+        // The bar: one decision per state, primary at the right end.
+        let mut x = { let c = bar.content(); c.x + c.w };
+        let mut trailing = |out: &mut Vec<Control>, label: &str, w: f32, action: Action| {
+            x -= w; out.push(Control::new(bar.control(x, w), label, false, action)); x -= ButtonBar::GAP;
+        };
+        if self.watermark_task.is_some() { trailing(&mut out, "Stop", 64., Action::DetectRun); }
+        else { match &self.detection_result {
+            Some(Detection::Proposal { .. }) => {
+                trailing(&mut out, "Add to mask", 108., Action::DetectAccept);
+                trailing(&mut out, "Run again", 88., Action::DetectRun);
+                trailing(&mut out, "Discard", 72., Action::DetectDiscard);
+            }
+            Some(Detection::Nothing(_)) => {
+                // Each one widens the search by a single setting and runs.
+                trailing(&mut out, "Back", 56., Action::DetectDiscard);
+                if self.detection_area.is_some() { trailing(&mut out, "Whole frame", 100., Action::DetectRetry(2)); }
+                if !self.detection_range_whole() { trailing(&mut out, "Whole clip", 92., Action::DetectRetry(1)); }
+                if self.detection_samples < 7 { trailing(&mut out, "More frames", 100., Action::DetectRetry(0)); }
+            }
+            None => trailing(&mut out, "Detect", 84., Action::DetectRun),
+        } }
+        // The column: back to the brush, then where and which part.
+        let s = self.processors.side_rect(self.vp);
+        let (cx, w) = (s.x + 16., (s.w - 32.).max(1.));
+        let half = |y: f32, i: usize| RectPx { x: cx + i as f32 * ((w - 4.) / 2. + 4.), y: s.y + y, w: (w - 4.) / 2., h: 26. };
+        out.push(Control::new(RectPx { x: cx, y: s.y + 12., w: 72., h: 26. }, "‹ Brush", false, Action::Autodetect));
+        let idle = self.watermark_task.is_none() && self.detection_result.is_none();
+        if idle {
+            out.push(Control::new(half(130., 0), "Whole frame", self.detection_area.is_none(), Action::DetectWhere(false)));
+            out.push(Control::new(half(130., 1), "Draw area", self.detection_area.is_some(), Action::DetectWhere(true)));
+            let v = &self.videos[self.active].info;
+            let near = crate::watermark::Range::near(self.t, v.duration);
+            let is_near = self.detection_range.is_some_and(|r| (r.start - near.start).abs() < 1e-6 && (r.end - near.end).abs() < 1e-6);
+            out.push(Control::new(half(224., 0), "Near playhead", is_near && !self.detection_range_whole(), Action::DetectRange(0)));
+            out.push(Control::new(half(224., 1), "Whole clip", self.detection_range_whole(), Action::DetectRange(1)));
+        }
+        out
+    }
+    fn draw_autodetect_setup(&self, items: &mut Vec<Item>) {
+        let s = self.processors.side_rect(self.vp);
+        if s.w > 0. {
+            items.push(Item::Clip(None));
+            items.push(Item::Rect(RectItem::new(s, WORKSPACE_PANEL)));
+            items.push(Item::Rect(RectItem::new(RectPx { w: 1., ..s }, WORKSPACE_RULE)));
+            items.push(Item::Clip(Some(s)));
+            let (x, w) = (s.x + 16., (s.w - 32.).max(1.));
+            let idle = self.watermark_task.is_none() && self.detection_result.is_none();
+            let ink = if idle { WORKSPACE_TEXT } else { WORKSPACE_MUTED };
+            let line = |items: &mut Vec<Item>, y: f32, px: f32, color: [f32; 4], t: &str| ui_label(items, x, s.y + y, px, color, t, Align::Left, w);
+            line(items, 62., 13., WORKSPACE_TEXT, "Autodetect");
+            line(items, 81., 10., WORKSPACE_MUTED, "Finds pixels that stay still while");
+            line(items, 95., 10., WORKSPACE_MUTED, "the picture changes.");
+            line(items, 118., 10., WORKSPACE_MUTED, "1 · WHERE TO LOOK");
+            match self.detection_area.and(self.detection_search_region()) {
+                Some([_, _, aw, ah]) => { line(items, 172., 10., WORKSPACE_MUTED, &format!("{aw} × {ah} px. Drag the box on the")); line(items, 186., 10., WORKSPACE_MUTED, "picture to adjust."); }
+                None => { line(items, 172., 10., WORKSPACE_MUTED, "Slowest, and a few stray pixels are"); line(items, 186., 10., WORKSPACE_MUTED, "possible. Draw an area to limit it."); }
+            }
+            line(items, 212., 10., WORKSPACE_MUTED, "2 · WHICH PART OF THE CLIP");
+            let d = self.videos[self.active].info.duration;
+            let r = self.detection_range.unwrap_or(crate::watermark::Range { start: 0., end: d });
+            line(items, 266., 10., ink, &format!("{} – {}", fmt_time(r.start), fmt_time(r.end)));
+            line(items, 280., 10., WORKSPACE_MUTED, "Drag the orange handles on the transport.");
+            line(items, 306., 10., WORKSPACE_MUTED, "3 · HOW MANY FRAMES");
+            line(items, 324., 11., ink, "Frames");
+            ui_label(items, x + w, s.y + 324., 11., ink, self.detection_sample_count().map_or("All".into(), |n| n.to_string()), Align::Right, 60.);
+            let t = self.detection_samples_track();
+            items.push(Item::Rect(RectItem { radius: 2., ..RectItem::new(RectPx { y: t.y + 4., h: 4., ..t }, hex_color(0x383838)) }));
+            for (i, label) in ["8", "16", "32", "64", "128", "256", "512", "All"].into_iter().enumerate() {
+                let tx = t.x + t.w * i as f32 / 7.;
+                items.push(Item::Rect(RectItem::new(RectPx { x: tx - 0.5, y: t.y + 1., w: 1., h: 10. }, WORKSPACE_MUTED)));
+                let align = if i == 0 { Align::Left } else if i == 7 { Align::Right } else { Align::Center };
+                ui_label(items, tx, t.y + 24., 9., if i == self.detection_samples { WORKSPACE_TEXT } else { WORKSPACE_MUTED }, label, align, 30.);
+            }
+            items.push(Item::Rect(RectItem { radius: 5., ..RectItem::new(RectPx { x: t.x + t.w * self.detection_samples as f32 / 7. - 5., y: t.y - 3., w: 10., h: 18. },
+                if idle { DETECT_ORANGE } else { WORKSPACE_MUTED }) }));
+            line(items, 384., 10., WORKSPACE_MUTED, "More frames find fainter marks and");
+            line(items, 398., 10., WORKSPACE_MUTED, "take longer. All reads every frame.");
+            let plate = RectPx { x, y: s.y + 420., w, h: 46. };
+            items.push(Item::Rect(RectItem { radius: 6., ..RectItem::new(plate, hex_color(0x0b1926)) }));
+            ui_label(items, plate.x + 10., plate.y + 15., 10., hex_color(0xb9d9f5), "Will read", Align::Left, w - 20.);
+            ui_label(items, plate.x + 10., plate.y + 31., 11., WORKSPACE_TEXT, self.detection_summary(), Align::Left, w - 20.);
+            for c in self.autodetect_controls() {
+                if !contains(s, c.r.x, c.r.y) { continue; }
+                c.draw(items, self.cursor_inside && contains(c.r, self.cursor.0, self.cursor.1), false);
+            }
+            items.push(Item::Clip(None));
+        }
+        // The range lives on the real transport: a band, the frames that will
+        // be read as ticks, and a handle at each end.
+        if let Some(range) = self.detection_range {
+            let v = &self.videos[self.active].info;
+            let track = self.detection_track();
+            let at = |t: f64| track.x + track.w * (t / v.duration.max(0.001)) as f32;
+            items.push(Item::Rect(RectItem { radius: 1.5, ..RectItem::new(RectPx { x: at(range.start), y: track.y + 7., w: (at(range.end) - at(range.start)).max(1.), h: 3. }, hex_color(0x68421e)) }));
+            if let Ok(samples) = range.samples_count(v.duration, v.fps, Some(self.detection_sample_count().unwrap_or(128).min(128))) {
+                for t in samples.iter().step_by(samples.len().div_ceil(128).max(1)) {
+                    items.push(Item::Rect(RectItem::new(RectPx { x: at(*t) - 0.5, y: track.y + 11., w: 1., h: 4. }, DETECT_ORANGE)));
+                }
+            }
+            for t in [range.start, range.end] {
+                items.push(Item::Rect(RectItem { radius: 2., ..RectItem::new(RectPx { x: at(t) - 3., y: track.y - 6., w: 6., h: 16. }, DETECT_ORANGE) }));
+            }
+        }
+        items.push(Item::Rect(RectItem::new(crate::processor_gui::Panel::rail_rect(self.vp), [0., 0., 0., 0.78])));
+    }
+    /// A reviewed detection joins the mask as one undo step.
+    fn merge_detection(&mut self, pixels: Vec<u8>, added: usize, samples: usize) {
+        let mask = self.masks[self.active].as_mut().unwrap();
+        let previous = mask.pixels.clone();
+        let dst = std::sync::Arc::make_mut(&mut mask.pixels);
+        for (dst, src) in dst.iter_mut().zip(pixels) { if src != 0 { *dst = 255; } }
+        mask.revision += 1;
+        self.record_mask(previous);
+        self.mask_status = format!("Added {added} pixels from {samples} nearby frames · inspect mask, ⌘Z to undo");
+    }
     fn inplace_mask(&self) -> bool {
         self.processors.open && self.mask_mode && self.crop.is_none() && self.show_ui && self.editor.is_some()
     }
@@ -3954,6 +4175,7 @@ impl App {
                     Control::new(apply, if matches!(to, Leave::Close) { "Apply" } else { "Apply & switch" }, false, Action::LeaveApply),
                 ];
             }
+            if self.detection_panel { return self.autodetect_controls(); }
             let c = bar.content();
             let done = bar.trailing(84.);
             let cancel = RectPx { x: done.x - ButtonBar::GAP - 72., w: 72., ..done };
@@ -4151,6 +4373,33 @@ impl App {
                 self.finish_editor(true);
                 if render {self.processors.render_frame();}
                 return}
+            Action::DetectRun=>{self.detect_watermark();return}
+            Action::DetectDiscard=>{self.detection_result=None;self.mask_status.clear();return}
+            Action::DetectAccept=>{
+                if let Some(Detection::Proposal{pixels,added,samples,..})=self.detection_result.take() {
+                    self.merge_detection(pixels,added,samples);
+                    // Back at the brush, where strays are erased.
+                    self.detection_panel=false;self.detection_area_visible=false;self.crop_drag=None;
+                }
+                return}
+            Action::DetectWhere(area)=>{
+                self.watermark_task=None;self.mask_status.clear();
+                if !area {self.detection_area=None;self.detection_area_visible=false;self.crop_drag=None;}
+                else if !self.detection_area_visible {self.toggle_detection_area();}
+                return}
+            Action::DetectRange(which)=>{
+                let (t,d)=(self.t,self.videos[self.active].info.duration);
+                self.watermark_task=None;self.mask_status.clear();
+                self.detection_range=Some(if which==0 {crate::watermark::Range::near(t,d)} else {crate::watermark::Range{start:0.,end:d}});
+                return}
+            Action::DetectRetry(what)=>{
+                match what {
+                    0=>self.detection_samples=(self.detection_samples+1).min(7),
+                    1=>self.detection_range=Some(crate::watermark::Range{start:0.,end:self.videos[self.active].info.duration}),
+                    _=>{self.detection_area=None;self.detection_area_visible=false;}
+                }
+                self.detect_watermark();
+                return}
             Action::LeaveDiscard=>{self.answer_leave(Some(false));return}
             Action::LeaveKeep=>{self.answer_leave(None);return}
             Action::LeaveApply=>{self.answer_leave(Some(true));return}
@@ -4206,6 +4455,7 @@ impl App {
             }
             Action::LaunchEditor(_) | Action::ResetEdit | Action::ApplyEdit | Action::CancelEdit
             | Action::LeaveDiscard | Action::LeaveKeep | Action::LeaveApply
+            | Action::DetectRun | Action::DetectDiscard | Action::DetectAccept | Action::DetectWhere(_) | Action::DetectRange(_) | Action::DetectRetry(_)
             | Action::Erase(_) | Action::MaskView(_) | Action::BrushPreset(_) | Action::InvertMask | Action::ClearMask => unreachable!(),
             Action::RenderSource => self.render_source(),
             Action::Duplicate => self.duplicate_sources(),
@@ -7863,8 +8113,14 @@ enum SourceAction { Duplicate, Remove, Crop }
 /// unapplied strokes.
 #[derive(Clone, Debug, PartialEq)]
 enum Leave { Close, Tool(usize), Focus(String) }
+/// An in-place detection's outcome, waiting on the user.
+enum Detection {
+    /// `preview` is the mask with the proposed pixels at 100 (`Item::Mask` style 3).
+    Proposal { preview: Mask, pixels: Vec<u8>, added: usize, samples: usize },
+    Nothing(String),
+}
 #[derive(Clone, Copy)]
-enum Action { LaunchEditor(bool), ResetEdit, ApplyEdit, CancelEdit, LeaveDiscard, LeaveKeep, LeaveApply, Erase(bool), MaskView(u8), BrushPreset(u16), InvertMask, ClearMask, Duplicate, RenderSource, OpenFiles, ToggleSources, ToggleInspector, ToggleDetail, Tool(usize), View(Mode), Autodetect, DetectionArea, UndoMask, RedoMask, Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
+enum Action { LaunchEditor(bool), ResetEdit, ApplyEdit, CancelEdit, DetectRun, DetectDiscard, DetectAccept, DetectWhere(bool), DetectRange(u8), DetectRetry(u8), LeaveDiscard, LeaveKeep, LeaveApply, Erase(bool), MaskView(u8), BrushPreset(u16), InvertMask, ClearMask, Duplicate, RenderSource, OpenFiles, ToggleSources, ToggleInspector, ToggleDetail, Tool(usize), View(Mode), Autodetect, DetectionArea, UndoMask, RedoMask, Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
 #[derive(Clone, Copy, PartialEq)]
 enum CutAction { TogglePosters, FrameChanges(bool), TimeDisplay(bool),
     // Set in / out: no key or button reaches these while the feature is disabled.
@@ -8230,6 +8486,8 @@ const CROP_DIM: [f32; 4] = [0.0, 0.0, 0.0, 0.95];
 /// (blending is linear, so this alpha leaves roughly a third of the picture).
 const SEARCH_DIM: [f32; 4] = [0.0, 0.0, 0.0, 0.88];
 const MASK_HISTORY: usize = 24;
+/// Autodetect's own colour: its range, its frames, its proposal.
+const DETECT_ORANGE: [f32; 4] = [1.0, 136.0 / 255.0, 0.0, 1.0];
 /// The amber of a pending decision (the unapplied-mask question).
 const WARNING: [f32; 4] = [240.0 / 255.0, 190.0 / 255.0, 110.0 / 255.0, 1.0];
 const CROP_LINE: [f32; 4] = [1.0, 1.0, 1.0, 0.95];
@@ -8390,7 +8648,9 @@ mod tests {
         app.cursor_moved(track.x+track.w*0.25,track.y+6.);app.mouse_up();
         let range=app.detection_range.unwrap();assert!(range.start>0.&&range.end<=duration);
         assert_eq!(app.t,playhead,"selection edits must not move the playhead");
-        let button=app.detection_whole();assert!(app.detection_press(button.x+10.,button.y+10.));
+        // On the Process page Whole clip is the setup column's button.
+        let whole=app.embedded_editor_controls().into_iter().find(|c|matches!(c.action,Action::DetectRange(1))).unwrap();
+        app.activate(whole.action);
         assert_eq!(app.detection_range,Some(crate::watermark::Range{start:0.,end:duration}));
         app.finish_editor(false);assert!(app.detection_range.is_none()&&app.detection_drag.is_none());
     }
@@ -8517,6 +8777,66 @@ mod tests {
     }
 
     #[test]
+    fn autodetect_in_place_sets_up_reviews_and_adds() {
+        let clip = test_clip().expect("video test fixture");
+        let mut app = mk_app(&clip, 1);
+        app.activate(Action::Tool(4));
+        app.tick(0., (1280., 800.), 1.);
+        let picture = app.content_rect(0);
+        app.begin_editor(false, Some(("test.processor".into(), "mask".into())));
+        app.activate(Action::Autodetect);
+        app.tick(0., (1280., 800.), 1.);
+        assert!(app.autodetect_setup());
+        let during = app.content_rect(0);
+        assert_eq!((picture.y, picture.h), (during.y, during.h), "the setup never moves or covers the picture");
+        // The range is on the real transport, the run on the bar under the picture.
+        let (track, timeline, bar) = (app.detection_track(), app.processors.timeline(app.vp), app.processors.tool_bar(app.vp).r);
+        assert_eq!((track.x, track.w), (timeline.x, timeline.w));
+        let detect = app.embedded_editor_controls().into_iter().find(|c| matches!(c.action, Action::DetectRun)).unwrap();
+        assert!(detect.label == "Detect" && contains(bar, detect.r.x, detect.r.y));
+        // A press away from the handles still scrubs; on one it drags the range.
+        assert!(!app.detection_press(track.x + track.w / 2., track.y));
+        assert!(app.detection_press(track.x + track.w, track.y));
+        app.cursor_moved(track.x + track.w / 2., track.y);
+        app.mouse_up();
+        assert!(!app.detection_range_whole());
+        app.activate(Action::DetectRange(1));
+        assert!(app.detection_range_whole());
+        app.activate(Action::DetectWhere(true));
+        assert!(app.detection_area.is_some() && app.detection_area_visible);
+        app.activate(Action::DetectWhere(false));
+        assert!(app.detection_area.is_none());
+        // No brush while the setup is up.
+        let canvas = app.canvas();
+        app.mouse_down(canvas.x + canvas.w / 2., canvas.y + canvas.h / 2.); app.mouse_up();
+        let count = |app: &App| app.masks[0].as_ref().unwrap().pixels.iter().filter(|&&p| p != 0).count();
+        assert_eq!(count(&app), 0);
+        // A miss offers the next move and leaves the mask alone.
+        let len = app.masks[0].as_ref().unwrap().pixels.len();
+        app.apply_watermark(crate::watermark::Proposal { pixels: vec![0; len], samples: 64 });
+        assert!(matches!(app.detection_result, Some(Detection::Nothing(_))));
+        assert!(app.embedded_editor_controls().iter().any(|c| matches!(c.action, Action::DetectRetry(0))));
+        app.activate(Action::DetectDiscard);
+        assert!(app.detection_result.is_none());
+        // A hit is held as a proposal until it is added.
+        let mut found = vec![0; len]; found[..500].fill(255);
+        app.apply_watermark(crate::watermark::Proposal { pixels: found, samples: 64 });
+        assert!(matches!(app.detection_result, Some(Detection::Proposal { added: 500, .. })));
+        assert_eq!(count(&app), 0, "nothing joins the mask before Add to mask");
+        let frame = app.tick(0., (1280., 800.), 1.);
+        assert!(frame.items.iter().any(|i| matches!(i, Item::Mask { style, .. } if *style == 3.)));
+        app.key(Key::Enter);
+        assert_eq!(count(&app), 500);
+        assert!(app.editor.is_some() && !app.detection_panel, "back at the brush, still editing");
+        app.activate(Action::UndoMask);
+        assert_eq!(count(&app), 0, "one undo removes the detection");
+        // Esc inside the setup is back to the brush, not out of the editor.
+        app.activate(Action::Autodetect);
+        app.key(Key::Escape);
+        assert!(app.editor.is_some() && !app.detection_panel);
+    }
+
+    #[test]
     fn repeated_processor_component_click_closes_its_editor() {
         use abner_processor_api::{Descriptor, Factory, Registry, Session};
         use serde_json::Value;
@@ -8580,6 +8900,9 @@ mod tests {
         app.key(Key::Char('d'));
         assert!(app.editor.as_ref().is_some_and(|e|matches!(e.owner,crate::spatial::Owner::Plugin{..})) && app.detection_panel);
         app.key(Key::Escape);
+        assert!(app.editor.is_some() && !app.detection_panel, "Esc inside Autodetect is back to the brush");
+        app.key(Key::Escape);
+        assert!(app.editor.is_none());
         app.key(Key::Char('m'));
         assert!(app.editor.as_ref().is_some_and(|e|matches!(e.owner,crate::spatial::Owner::Plugin{..})) && !app.detection_panel);
         app.key(Key::Escape);

@@ -452,7 +452,8 @@ pub enum Item {
     /// rounded rect of `radius` — the launch window's recent row.
     FrameIcon { x: f32, y: f32, index: usize },
     Thumb { r: RectPx, slot: usize, radius: f32, alpha: f32, cover: bool, clip_poster: bool },
-    /// `style`: 0 the red / blue wash, 1 painted pixels only, 2 white on black.
+    /// `style`: 0 the red / blue wash, 1 painted pixels only, 2 white on black,
+    /// 3 a detection under review (proposed pixels at value 100, in orange).
     Mask { r: RectPx, id: u64, revision: u64, width: u32, height: u32, pixels: Arc<Vec<u8>>, style: f32 },
     /// A triangle filling `r`, pointing right (or left): transport glyphs
     /// drawn as geometry, so they centre on their shape — a font's ▶ sits

@@ -623,7 +623,10 @@ works in place (`App::inplace_mask`: tools on the bar under the picture, the set
 column as the mask inspector, the view kept; HISTORY 2026-11-22), and Done clears both
 warnings and renders the frame. Leaving it with strokes pending (Esc, M, a tab, another
 card) asks on the same bar first (`guard_leave`). `--processor-mask` opens it for
-captures, `--processor-mask-ask` with that question up. Later stages can edit source-based inputs, but
+captures, `--processor-mask-ask` with that question up. Autodetect there is a sub-mode
+(`autodetect_setup`): the setup in the column, the range on the Process transport, the
+run on the bar, and the result held as an orange proposal until Add to mask
+(`Detection`); `--processor-autodetect[-run]` reach it. Later stages can edit source-based inputs, but
 rendering spatial bindings still requires the first enabled stage.
 The generic API lives in `crates/processor-api`; processor implementations are
 maintained independently. **`cargo build-with-plugins`** (alias → the committed,

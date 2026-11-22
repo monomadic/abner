@@ -1,5 +1,39 @@
 # abner — history
 
+## 2026-11-22 — Process: Autodetect as three questions, with a reviewed result
+
+Inside the in-place mask editor Autodetect no longer opens a panel over the top of the
+viewer (`draw_detection_range` is the other pages' only). `App::autodetect_setup` puts
+the setup in the inspector column (`draw_autodetect_setup`, `autodetect_controls`) as
+three questions with what each costs: where to look (Whole frame | Draw area, the
+existing search-area marquee), which part of the clip (Near playhead | Whole clip, or
+whatever the handles say) and how many frames (the same eight stops, now labelled).
+The range is on the real transport: `detection_track` is the Process seek track, with a
+band, the frames that will be read as ticks and an orange handle at each end; a press
+anywhere else on the transport still scrubs. The brush is off while the setup is up.
+
+The bar under the picture runs it: a summary and Detect; then the task's status, a
+progress bar (`Task::progress_counts`) and Stop; then the outcome. A detection is no
+longer merged on arrival here (`apply_watermark`): it is held as
+`Detection::Proposal` and drawn in orange over the blue mask (`Item::Mask` style 3: one
+texture, the mask at 255 and the proposed pixels at 100), with Discard, Run again and
+Add to mask. Adding is the same single undo step as before (`merge_detection`) and
+returns to the brush. A miss is `Detection::Nothing` and offers the moves that apply:
+More frames, Whole clip, Whole frame, each changing one setting and running again.
+Enter is the bar's primary and Esc is back to the brush. Outside the Process page the
+panel and the immediate merge are unchanged.
+
+Not built from the mockup: time estimates (there is nothing to base one on yet), and
+dragging on the bare picture to start an area (Draw area puts the marquee up).
+
+Validation: `autodetect_in_place_sets_up_reviews_and_adds` (picture unmoved, the range
+on the transport, handles drag while the rest scrubs, no brush, a miss, a proposal held
+then added and undone, Esc); two older tests follow the new behaviour (Whole clip is a
+column button there; Esc inside Autodetect returns to the brush). The suite passes.
+Run for real in the window with `--processor-autodetect-run` on a clip with a static
+overlay: it found the overlay and the still interior of the test pattern, shown in
+orange for review. The buttons were not clicked in the running app.
+
 ## 2026-11-22 — Process: leaving a painted mask asks first
 
 The in-place mask editor dropped its strokes without a word when the user pressed Esc

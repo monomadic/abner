@@ -39,7 +39,6 @@ impl Frame {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Range { pub start:f64, pub end:f64 }
 impl Range {
-    #[cfg(test)]
     pub fn near(at:f64,duration:f64)->Self { Self{start:(at-30.).max(0.),end:(at+30.).min(duration)} }
     #[cfg(test)]
     pub fn samples(self,duration:f64,fps:f64)->Result<Vec<f64>,String> {
@@ -113,6 +112,10 @@ impl Task {
         )
     }
 
+    /// Frames read so far, of how many.
+    pub fn progress_counts(&self) -> (usize, usize) {
+        (self.progress.load(Ordering::Relaxed).min(self.total), self.total)
+    }
     pub fn status(&self) -> String {
         let n = self.progress.load(Ordering::Relaxed);
         if n <= self.total {
