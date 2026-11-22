@@ -158,6 +158,15 @@ impl Chain {
             plan: None,
         })
     }
+    /// Supply the same nominal rates used to declare the chain's output rate.
+    pub fn configure_input_rate(&mut self, registry: &Registry, stages: &[Stage], mut rate: abner_processor_api::Rate) -> Result<()> {
+        if self.started || self.closed || stages.len() != self.sessions.len() { return Err("cannot configure chain rate".into()); }
+        for (session, stage) in self.sessions.iter_mut().zip(stages) {
+            session.configure_input_rate(rate)?;
+            rate = registry.get(&stage.processor)?.output_rate(&stage.settings, rate)?;
+        }
+        Ok(())
+    }
     /// Negotiate once before feeding a segment. Recreate the chain at format changes.
     pub fn negotiate(
         &mut self,

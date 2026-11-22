@@ -2,7 +2,7 @@
 
 An in-process Abner processor (`rife.metal`) using the native runtime from
 `rife-metal-rs`, RIFE Metal 0.1.7 / model 4.26. It keeps one loaded model, graph
-cache and two reusable input pixel buffers per session. No subprocesses, PNGs,
+cache, streaming frame features and two reusable input pixel buffers per session. No subprocesses, PNGs,
 video encoding or intermediate files are involved in processing.
 
 ## Setup
@@ -50,7 +50,8 @@ BGRA and returns 8-bit samples expanded to RGB16; this does not preserve 16-bit
 precision. Pass-through frames retain original samples. Geometry is limited to
 16–8192 by 16–4320, with internal model padding. Dimensions/time base cannot
 change mid-session and timestamps must increase. Recreate sessions at cuts,
-seeks or settings changes. Cancellation is checked around inference; in-flight
+seeks or settings changes. Abner resets sessions between ranges/renders while
+retaining the model and allocated stream buffers. Cancellation is checked around inference; in-flight
 GPU work completes before cancellation returns. Errors terminate the session.
 
 ## Validation
@@ -66,3 +67,40 @@ target/release/abner --check-processor rife.metal '{}'
 The hardware tests cover moving-bar reconstruction, midpoint synthesis, exact
 VFR phase selection, RGB channel order, non-aligned geometry, all quality tiers,
 short-stream flushing, terminal errors, and cancellation.
+
+## Scheduling and resource bounds
+
+The host calls `configure_input_rate` before feeding each segment, using the
+same nominal rational rate used by `Factory::output_rate`. Multipliers never
+infer a rate from rounded frame durations. Grid boundaries and matching source
+frames use integer arithmetic; only the model phase becomes float32. The last
+output cell is shortened when necessary to retain the exact source end.
+Rates are limited to 240 fps. A returned interval is capped at 16 frames and
+256 MiB of RGB16 pixels before any inference/allocation; a larger gap fails
+with an explicit error. This bound excludes Metal graphs/caches and transient
+native output buffers. Errors in either processing or flushing are terminal
+until reset; reset replaces the cancellation token and clears temporal state.
+
+Generated phases for a source interval are submitted together. In retime and
+in-between modes, the next interval reuses the previous frame's encoded Metal
+features. Leave-one-out uses distinct neighbour pairs and rebases the cache.
+RGB conversions run in sixteen independent row groups with unchanged integer
+rounding. Tests compare cached multi-phase outputs against the retained pair
+interface within one 8-bit sample step; on-grid frames remain bit-exact copies.
+
+## Sustained throughput benchmark
+
+```sh
+cargo run --release --locked --example throughput -- /path/to/input.mp4 60
+```
+
+The input must be 30 fps. The driver loops it, scales it to 1920×1080 and
+3840×2160, converts to in-memory RGB16, and retimes to 60 fps. Each tier runs for
+at least 60 seconds after three warmup frames. `process_output_fps` measures
+only session processing; `wall_output_fps` includes FFmpeg frame delivery and
+RGB16 unpacking. Output frames are consumed without encoding or disk writes.
+Half the output frames are source copies in this 30→60 case. These are plugin
+throughput numbers, not end-to-end hardware video export rates. Use
+`RIFE_BENCH_CASE=3840:fast` to run only one configuration.
+
+See [BENCHMARK.md](BENCHMARK.md) for measured before/after results and scope.

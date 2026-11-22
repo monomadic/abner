@@ -178,6 +178,7 @@ impl CallBoundary {
     }
 }
 impl Session for CallBoundary {
+    fn configure_input_rate(&mut self, rate: abner_processor_api::Rate) -> Result<()> { self.inner.configure_input_rate(rate) }
     fn format_pairs(&self) -> Vec<FormatPair> {
         self.inner.format_pairs()
     }

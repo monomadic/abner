@@ -225,6 +225,14 @@ pub struct Capabilities {
 /// through format_pairs/configure_format/process_video/finish_video. Conversion
 /// belongs to the host; plugins only implement their declared native layouts.
 pub trait Session {
+    /// Nominal source rate used by the host's Factory::output_rate declaration.
+    /// Called before processing each segment, including after reset. Retiming
+    /// implementations must use this rate rather than infer it from frame durations.
+    fn configure_input_rate(&mut self, rate: Rate) -> Result<()> {
+        if rate.contains(&0) { return Err("invalid input rate".into()); }
+        Ok(())
+    }
+
     fn format_pairs(&self) -> Vec<FormatPair> {
         vec![FormatPair::RGB16]
     }

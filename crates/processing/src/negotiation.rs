@@ -252,6 +252,7 @@ impl Rgb16Boundary {
     }
 }
 impl Session for Rgb16Boundary {
+    fn configure_input_rate(&mut self, rate: abner_processor_api::Rate) -> Result<()> { self.sessions[0].configure_input_rate(rate) }
     fn process(
         &mut self,
         input: abner_processor_api::Frame,

@@ -148,6 +148,7 @@ struct BoundSession {
     bindings: SpatialBindings,
 }
 impl Session for BoundSession {
+    fn configure_input_rate(&mut self, rate: crate::Rate) -> Result<()> { self.inner.configure_input_rate(rate) }
     fn configure_format(&mut self, pair: crate::FormatPair) -> Result<()> {
         if pair != crate::FormatPair::RGB16 || !self.inner.format_pairs().contains(&pair) {
             return Err("spatial inputs require an RGB16-capable session".into());

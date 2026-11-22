@@ -1,5 +1,18 @@
 # abner — history
 
+## 2026-11-23 — Exact retiming and reusable streamed interpolation
+
+Sessions now receive the same nominal rational input rate used to declare the
+chain rate, including through reuse and generic wrappers. Preview, export and
+headless processing configure it before binding/processing. Retiming no longer
+derives multiplier rates from rounded frame durations. Fractional final cells
+retain the exact source end and job frame totals include that partial cell.
+The built-in interpolation adapter bounds output intervals before inference,
+uses integer scheduling, resets without reloading its model, and batches phases
+through cached Metal frame features. Hardware and decode-to-mux regressions cover
+nominal rates, fractional tails, cancellation/reset and bounded failures.
+
+
 ## 2026-11-22 — HEVC Main 10 export (audit E5)
 
 The HEVC export quantised everything to 8 bits at the encoder. FilmCraft's fork gains
