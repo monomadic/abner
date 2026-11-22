@@ -1,5 +1,19 @@
 # abner — history
 
+## 2026-11-22 — HEVC Main 10 export (audit E5)
+
+The HEVC export quantised everything to 8 bits at the encoder. FilmCraft's fork gains
+`VtProfile::HevcMain10` and `VtEncoder::encode_10` (branch `abner-hevc-main10`, commit
+c511b010; P010-style buffers, 10-bit codes in `u16`, the NVENC convention), and the pin
+moves to it. The export chooses Main 10 when a source's pixel format is deeper than 8
+bits (`deep_pixel_format`, ffprobe names), or when a processor or timeline crop runs,
+since those work at 16 bits or float; an untouched 8-bit source stays Main. The sink
+becomes `Yuv420p10` (`PipelineEncoder::input_format`), so the plane path from E4 carries
+the 10 bits to `encode_10`. Should the session refuse Main 10, the export logs it and
+falls back to Main, converting the planes down. Same 4K speed.
+`ten_bit_sources_export_as_hevc_main10` checks the profiles ffprobe reports and that the
+low two bits of the 10-bit output are in use.
+
 ## 2026-11-22 — Preview: decoder kept between renders, reader thread for segments (audit P1, P4)
 
 The preview worker's `Kept` now holds its host decoder as well as its sessions:

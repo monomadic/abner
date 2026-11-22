@@ -2992,7 +2992,11 @@ pub(crate) fn pipeline_export_with_inputs(
     // writer converts for the encoder, encodes, muxes and reports. One frame
     // queues at each hand-off: enough to overlap, little enough that a 4K float
     // chain holds a few frames, not a backlog.
-    let sink_format = PipelineEncoder::input_format(prores);
+    // HEVC Main 10 when there is more than 8 bits to keep: a deeper source, or
+    // a chain or timeline crop working at 16 bits or float (audit E5). An
+    // untouched 8-bit source stays Main, the more widely decoded profile.
+    let ten_bit = !prores && (deep_pixel_format(&info.pix_fmt) || !chain.is_empty() || !inputs.crops.is_empty());
+    let sink_format = PipelineEncoder::input_format(prores, ten_bit);
     let check = || cancel.check().map_err(anyhow::Error::msg);
     let (mp4_out, mkv_out) = std::thread::scope(|scope| -> Result<_> {
         // AAC for every container, encoded beside the video.
@@ -3371,6 +3375,8 @@ fn write_frames<S: PacketSink>(
                 duration,
                 prores,
                 bitrate_kbps.unwrap_or(40_000),
+                // The plan ends in the encoder's format, so the first frame says it.
+                f.format == abner_processor_api::PixelFormat::Yuv420p10,
             )?);
         }
         let e = encoder.as_mut().unwrap();
@@ -3445,7 +3451,7 @@ enum PipelineEncoder {
     },
 }
 impl PipelineEncoder {
-    fn new(w: u32, h: u32, duration: f64, prores: bool, bitrate_kbps: u32) -> Result<Self> {
+    fn new(w: u32, h: u32, duration: f64, prores: bool, bitrate_kbps: u32, ten_bit: bool) -> Result<Self> {
         ensure!(
             w.is_multiple_of(2) && h.is_multiple_of(2),
             "Export requires even output dimensions"
@@ -3464,6 +3470,7 @@ impl PipelineEncoder {
                 bitrate_kbps,
                 ..Default::default()
             };
+            use filmcraft_platform::videotoolbox_encode::{VtConfig, VtEncoder, VtProfile};
             let config = filmcraft_platform::hardware_encode::config_for(
                 w,
                 h,
@@ -3471,8 +3478,17 @@ impl PipelineEncoder {
                 &settings,
             )
             .map_err(|why| anyhow::anyhow!("HEVC encoder unavailable on this machine: {why}"))?;
-            let vt = filmcraft_platform::videotoolbox_encode::VtEncoder::new(config)
-                .map_err(|why| anyhow::anyhow!("HEVC encoder unavailable on this machine: {why}"))?;
+            let main10 = ten_bit
+                .then(|| VtEncoder::new(VtConfig { profile: VtProfile::HevcMain10, ..config.clone() }))
+                .and_then(|made| {
+                    // `encode` converts 10-bit planes down for a Main session.
+                    made.map_err(|why| log::warn!("HEVC Main 10 unavailable, exporting 8-bit Main: {why}")).ok()
+                });
+            let vt = match main10 {
+                Some(vt) => vt,
+                None => VtEncoder::new(config)
+                    .map_err(|why| anyhow::anyhow!("HEVC encoder unavailable on this machine: {why}"))?,
+            };
             Ok(Self::Hevc { vt, dims: [w, h], returned: 0 })
         }
         #[cfg(not(target_os = "macos"))]
@@ -3495,11 +3511,11 @@ impl PipelineEncoder {
         }
     }
     /// The chain's output format this encoder takes.
-    fn input_format(prores: bool) -> abner_processor_api::PixelFormat {
-        if prores {
-            abner_processor_api::PixelFormat::Yuv422p10
-        } else {
-            abner_processor_api::PixelFormat::Yuv420p8
+    fn input_format(prores: bool, ten_bit: bool) -> abner_processor_api::PixelFormat {
+        match (prores, ten_bit) {
+            (true, _) => abner_processor_api::PixelFormat::Yuv422p10,
+            (false, true) => abner_processor_api::PixelFormat::Yuv420p10,
+            (false, false) => abner_processor_api::PixelFormat::Yuv420p8,
         }
     }
     fn entry(&self) -> SampleEntry {
@@ -3537,17 +3553,25 @@ impl PipelineEncoder {
                     [frame.width, frame.height] == [dims[0] as usize, dims[1] as usize],
                     "picture size differs from the encoder's"
                 );
-                // The plan ends in this format; host planar frames are BT.709
-                // limited range, what the session declares in its VUI.
+                // The plan ends in the session's format (a Main session that
+                // replaced an unavailable Main 10 one converts down here); host
+                // planar frames are BT.709 limited range, as its VUI declares.
+                let ten_bit = vt.config().profile.ten_bit();
                 let f = abner_processing::color::convert_validated(
                     frame,
-                    abner_processor_api::PixelFormat::Yuv420p8,
+                    if ten_bit {
+                        abner_processor_api::PixelFormat::Yuv420p10
+                    } else {
+                        abner_processor_api::PixelFormat::Yuv420p8
+                    },
                 )
                 .map_err(anyhow::Error::msg)?;
-                let abner_processor_api::FramePixels::Yuv8([y, u, v]) = &f.pixels else {
-                    anyhow::bail!("HEVC input is not 8-bit planar");
-                };
-                let packets = vt.encode(index, y, u, v).map_err(anyhow::Error::msg)?;
+                let packets = match &f.pixels {
+                    abner_processor_api::FramePixels::Yuv8([y, u, v]) => vt.encode(index, y, u, v),
+                    abner_processor_api::FramePixels::Yuv16([y, u, v]) => vt.encode_10(index, y, u, v),
+                    _ => anyhow::bail!("HEVC input is not planar"),
+                }
+                .map_err(anyhow::Error::msg)?;
                 if index == 0 {
                     // The muxer needs the parameter sets once the first frame is out.
                     let params = vt
@@ -3569,6 +3593,20 @@ impl PipelineEncoder {
             }
         }
     }
+}
+/// Whether a probed pixel format (ffprobe's names) has more than 8 bits per
+/// sample: `yuv420p10le`, `p010le`, `yuv422p12le`, `gbrpf32le`, `rgb48le`…
+fn deep_pixel_format(pix_fmt: &str) -> bool {
+    ["p010", "p016", "p210", "p216", "p410", "p416", "rgb48", "rgba64", "bgr48", "bgra64", "y210", "y212", "v210", "x2rgb10", "x2bgr10"]
+        .iter()
+        .any(|p| pix_fmt.starts_with(p))
+        || pix_fmt
+            .trim_end_matches("le")
+            .trim_end_matches("be")
+            .rsplit(|c: char| !c.is_ascii_digit())
+            .next()
+            .and_then(|d| d.parse::<u32>().ok())
+            .is_some_and(|bits| bits > 8 && pix_fmt.contains('p'))
 }
 /// The `hvcC` record VideoToolbox wrote for the stream, checked as FilmCraft's
 /// own wrapper checks it.
@@ -4484,5 +4522,60 @@ mod tests {
             assert!(crop_planes(frame.clone(), (3, 2, 30, 18)).is_err());
             assert!(crop_planes(frame, (4, 2, 29, 18)).is_err());
         }
+    }
+    #[test]
+    fn deep_pixel_formats_are_the_ones_past_eight_bits() {
+        for deep in ["yuv420p10le", "yuv422p10le", "yuv444p12le", "p010le", "gbrpf32le", "yuva444p16le", "rgb48le"] {
+            assert!(deep_pixel_format(deep), "{deep}");
+        }
+        for shallow in ["yuv420p", "yuvj420p", "nv12", "rgb24", "rgba", "pal8", "gbrp", "?", ""] {
+            assert!(!deep_pixel_format(shallow), "{shallow}");
+        }
+    }
+    /// A 10-bit source exports as HEVC Main 10 with its 10 bits (audit E5);
+    /// an untouched 8-bit one stays Main.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn ten_bit_sources_export_as_hevc_main10() {
+        let dir = Dir::new("main10");
+        let ffmpeg = |args: &[&str]| assert!(std::process::Command::new("ffmpeg").args(["-y", "-v", "error"]).args(args)
+            .current_dir(&dir.0).status().unwrap().success());
+        ffmpeg(&["-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24", "-t", "1", "-c:v", "libx265", "-x265-params", "log-level=error:lossless=1",
+            "-pix_fmt", "yuv420p10le", "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "deep.mp4"]);
+        ffmpeg(&["-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24", "-t", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", "shallow.mp4"]);
+        let registry = abner_processor_api::Registry::default();
+        let export = |name: &str| {
+            let src = dir.0.join(name);
+            let info = crate::probe::probe(&src).unwrap();
+            let dest = dir.0.join(format!("out-{name}"));
+            pipeline_export_with_inputs(&Default::default(), &info, &dest, &[(0., 1.)], &[], &registry, &[],
+                false, Some(40_000), None, &Default::default(), &Mutex::default(), None, None, |_| Ok(())).unwrap();
+            (src, dest)
+        };
+        let profile = |path: &Path| {
+            let out = std::process::Command::new("ffprobe").args(["-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=profile,pix_fmt", "-of", "csv=p=0"]).arg(path).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        };
+        let (_, out) = export("shallow.mp4");
+        assert_eq!(profile(&out), "Main,yuv420p");
+        let (src, out) = export("deep.mp4");
+        if !profile(&out).starts_with("Main 10") {
+            eprintln!("SKIPPED: no hardware HEVC Main 10 encoder ({})", profile(&out));
+            return;
+        }
+        assert_eq!(profile(&out), "Main 10,yuv420p10le");
+        let luma = |path: &Path| {
+            let frame = crate::fc::open(path).unwrap()
+                .video_frame(filmcraft_media::FrameRequest::full(filmcraft_time::Tick::from_seconds_f64(0.5)))
+                .unwrap();
+            let filmcraft_frame::PixelData::Yuv16 { planes, bits: 10, .. } = &frame.data else { panic!("not 10-bit") };
+            planes[0].clone()
+        };
+        let (a, b) = (luma(&src), luma(&out));
+        let mean = a.iter().zip(b.iter()).map(|(x, y)| (*x as f64 - *y as f64).abs()).sum::<f64>() / a.len() as f64;
+        let fine = b.iter().filter(|c| **c % 4 != 0).count() as f64 / b.len() as f64;
+        assert!(mean < 6.0, "mean luma error {mean:.2} (10-bit codes)");
+        assert!(fine > 0.5, "only {:.0}% of codes use the low two bits", fine * 100.);
     }
 }

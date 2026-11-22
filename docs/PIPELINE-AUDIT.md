@@ -2,7 +2,7 @@
 
 An audit of the processed export (`media_io::pipeline_export_with_inputs`) and the
 Process page's preview renderer (`processor_gui::render`), made the day the export
-went to three threads. Three items were fixed the same day and E7, E2, P3, E4, E6, E9, E8, P1 and P4 after them, and P7 was measured and closed; the rest are open and
+went to three threads. Three items were fixed the same day and E7, E2, P3, E4, E6, E9, E8, P1 and P4 after them, E5 with a FilmCraft change, and P7 was measured and closed; the rest are open and
 tracked as task 24 in [TASKS.md](../TASKS.md).
 
 **Summary.** With no plugin time, the export already runs at the hardware
@@ -100,14 +100,22 @@ output is converted once, at 16 bits or more, instead of through 8-bit RGBA.
 Wall-clock is unchanged while the encoder is the limit (50.0 and 54.8 fps on the
 4K benchmark); the CPU saving is below, with E6.
 
-### E5. HEVC output is 8-bit Main only — open, needs FilmCraft
+### E5. HEVC output was 8-bit Main only — fixed
 
-Ten-bit sources and float chains are quantised to 8 bits at the encoder. This is a
-quality limit, not a speed one, and the largest loss in the pipeline. FilmCraft's
-`VtEncoder` (pinned rev 45c1213) offers only `VtProfile::HevcMain` and NV12 input
-buffers: Main 10 needs a profile, 10-bit (`x420`) pixel buffers and a plane fill in
-FilmCraft itself. With that, the export's sink becomes `Yuv420p10` for 10-bit
-sources and chains, and E4's plane path carries it unchanged.
+Ten-bit sources and float chains were quantised to 8 bits at the encoder, the
+largest loss in the pipeline. FilmCraft's `VtEncoder` now has
+`VtProfile::HevcMain10` (Main 10 profile, P010-style `x420` buffers,
+`VtEncoder::encode_10` for 10-bit planes; fork branch `abner-hevc-main10`). The
+export picks Main 10 when there is more than 8 bits to keep: a source whose pixel
+format is deeper than 8 bits (`deep_pixel_format`), any processor in the chain, or
+a timeline crop (both work at 16 bits or float). An untouched 8-bit source stays
+Main, the more widely decoded profile. The sink is then `Yuv420p10`, which E4's
+plane path hands to the encoder unchanged. A machine whose encoder refuses Main 10
+logs a warning and exports Main, converting the planes down.
+
+`ten_bit_sources_export_as_hevc_main10`: a 10-bit source comes out as
+`Main 10, yuv420p10le` with its low bits in use; an 8-bit one as `Main, yuv420p`.
+4K benchmark with a stage (now Main 10): 55.6 fps, as before.
 
 ### E6. Every frame was converted to RGBA for the page — fixed
 

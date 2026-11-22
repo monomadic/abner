@@ -27,8 +27,8 @@ Effort estimates come from the 2026-09-04 comparison against switchblade.
    ranges and renders), E4/E6 (HEVC fed planes, page pictures only when taken), E9
    (one-pass planar → RGB, bit-identical), E8 (export crops on the chroma grid cut the
    planes), P1/P4 (preview reader thread for segments, decoder kept between renders).
-   Open: a Main 10 HEVC path (E5, needs a FilmCraft change: profile and 10-bit pixel
-   buffers in `VtEncoder`), a fixed-point planar → RGBA8 (E9's remaining 2.4 ms at 4K;
+   E5 (HEVC Main 10 for deep sources and processed chains, with FilmCraft's
+   `VtProfile::HevcMain10`). Open: a fixed-point planar → RGBA8 (E9's remaining 2.4 ms at 4K;
    changes rounding, so `print_conversion_digests` would need a new reference), storing
    only the "after" picture (P6, a design choice: pair renders against the display
    player's cache). P7 measured at 0.07 ms per check and closed.
