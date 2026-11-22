@@ -1,5 +1,14 @@
 # abner — history
 
+## 2026-11-22 — Keep plugin controls inside their allocated bounds
+
+The shared pill switch now paints its outline inside its rectangle, keeping the
+right edge intact in clipped plugin settings. Numeric sliders reserve their full
+hover-ring radius at both endpoints; painting and pointer mapping share the same
+span in both the picker and Process inspector. Settings keep their scroll clip.
+Validation: all 51 processor UI tests pass, including paint-bound and slider
+endpoint regression coverage. Native-window appearance was not checked.
+
 ## 2026-11-21 — Crop ratio buttons on the canvas
 
 With the crop marquee up, the canvas carries a row of ratio buttons on its bottom

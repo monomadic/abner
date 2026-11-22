@@ -272,9 +272,14 @@ impl Field {
             .unwrap_or_else(|| value.as_str().map(str::to_owned).unwrap_or_else(|| display_value(value)))
     }
 }
-// Small coverage cells keep previews independent of the editor's full-size mask texture.
+// Reserve the largest painted radius (the hover ring), not just the thumb.
+const SLIDER_HOVER_RADIUS: f32 = 10.0;
+fn slider_span(row: RectPx) -> (f32, f32) {
+    (row.x + SLIDER_HOVER_RADIUS, (row.w - 2.0 * SLIDER_HOVER_RADIUS).max(1.0))
+}
 fn slider_value(row:RectPx)->RectPx {RectPx{x:row.x+row.w-40.,y:row.y,w:40.,h:20.}}
 fn spatial_button(row:RectPx)->RectPx { RectPx{x:row.x,y:row.y+if row.w<122. {33.}else{21.},w:row.w.min(97.),h:62.} }
+// Small coverage cells keep previews independent of the editor's full-size mask texture.
 fn draw_mask_preview(items: &mut Vec<Item>, r: RectPx, dims: [usize;2], pixels: &[u8]) {
     let [w,h] = dims;
     if w == 0 || h == 0 || w.checked_mul(h) != Some(pixels.len()) { return; }
@@ -2759,8 +2764,8 @@ impl Panel {
         self.draw_info(items, vp);
     }
     fn slider_fraction(&self, row: RectPx, x: f32) -> f64 {
-        let inset = if self.picker.is_some() { 6.0 } else { 0.0 };
-        ((x - row.x - inset) / (row.w - 2.0 * inset)) as f64
+        let (start, width) = slider_span(row);
+        ((x - start) / width) as f64
     }
 
     fn draw_fields(&self, items: &mut Vec<Item>, vp: (f32, f32), clip: RectPx) {
@@ -2878,20 +2883,20 @@ impl Panel {
                 items.push(Item::Shape(
                     ui_shape(track, hex_color(0x303234)).radius(2.0),
                 ));
-                let inset = if in_picker { 6.0 } else { 0.0 };
-                let cx = track.x + inset + (track.w - 2.0 * inset) * amount;
+                let (start, width) = slider_span(row);
+                let cx = start + width * amount;
                 if hovered || focused || self.dragging == Some(i) {
                     items.push(Item::Shape(
                         ui_shape(
                             RectPx {
-                                x: cx - 10.0,
-                                y: row.y + 18.0,
-                                w: 20.0,
-                                h: 20.0,
+                                x: cx - SLIDER_HOVER_RADIUS,
+                                y: row.y + 28.0 - SLIDER_HOVER_RADIUS,
+                                w: 2.0 * SLIDER_HOVER_RADIUS,
+                                h: 2.0 * SLIDER_HOVER_RADIUS,
                             },
                             blue,
                         )
-                        .radius(10.0),
+                        .radius(SLIDER_HOVER_RADIUS),
                     ));
                 }
                 if amount > 0.0 {
@@ -4060,8 +4065,8 @@ fn draw_processor_switch(items: &mut Vec<Item>, r: RectPx, on: bool, position: f
         .align(Place::Center, Place::Center)));
 }
 /// The rail's pill switch, Figma "Processor card · toggle" Switch (143:5040),
-/// drawn by figleaf from Figma's own values: a 32x16 pill, fill FF9D00, a 1px
-/// white stroke outside; a 12px white thumb 2px in, with a drop shadow (Y 4,
+/// based on Figma's values: a 32x16 pill, fill FF9D00, a 1px white stroke
+/// placed inside the allocated bounds; a 12px white thumb 2px in, with a drop shadow (Y 4,
 /// blur 4, black 25%) that the pill clips. Figma only draws the on state;
 /// off keeps the grey track and outline the rail had, and the thumb slides.
 fn draw_rail_switch(items: &mut Vec<Item>, r: RectPx, position: f32) {
@@ -4069,7 +4074,7 @@ fn draw_rail_switch(items: &mut Vec<Item>, r: RectPx, position: f32) {
     let frame = Rect::new(r.x, r.y, r.w, r.h);
     items.push(Item::Shape(Shape::rect(frame).radius(17.0)
         .fill(mix(0x34373b, SOURCE_RING, position))
-        .stroke(1.0, mix(0xdcdcdc, 0xffffff, position), StrokeAlign::Outside)));
+        .stroke(1.0, mix(0xdcdcdc, 0xffffff, position), StrokeAlign::Inside)));
     let d = r.h - 4.0;
     let thumb = Rect::new(r.x + 2.0 + (r.w - d - 4.0) * position, r.y + 2.0, d, d);
     items.push(Item::Shape(Shape::rect(thumb).radius(d / 2.0)
@@ -4372,6 +4377,37 @@ mod tests {
         let mut p = Panel::new(registry);
         p.added.fill(true);
         p
+    }
+    #[test]
+    fn setting_controls_paint_within_their_allocated_width() {
+        let p = populated(registry());
+        for width in [110.0, 210.0, 258.0] {
+            let row = RectPx { x: 30.0, y: 20.0, w: width, h: 36.0 };
+            let (start, span) = slider_span(row);
+            for position in [0.0, 0.5, 1.0] {
+                let cx = start + span * position;
+                assert!(cx - SLIDER_HOVER_RADIUS >= row.x);
+                assert!(cx + SLIDER_HOVER_RADIUS <= row.x + row.w);
+                assert!((p.slider_fraction(row, cx) - f64::from(position)).abs() < 1e-6);
+
+                let r = RectPx { x: row.x + row.w - 32.0, y: row.y + 2.0, w: 32.0, h: 16.0 };
+                let mut items = Vec::new();
+                draw_rail_switch(&mut items, r, position);
+                for item in &items {
+                    let Item::Shape(shape) = item else { panic!("expected switch shape") };
+                    let mut layers = Vec::new();
+                    shape.layers(&mut layers);
+                    for layer in layers {
+                        // The thumb shadow is explicitly clipped to the track.
+                        let bounds = layer.clip.map_or_else(|| layer.extent(), |clip| clip.rect);
+                        assert!(bounds.x >= r.x && bounds.x + bounds.w <= r.x + r.w,
+                            "switch paints beyond allocated width: {bounds:?}");
+                        assert!(bounds.y >= r.y && bounds.y + bounds.h <= r.y + r.h,
+                            "switch paints beyond allocated height: {bounds:?}");
+                    }
+                }
+            }
+        }
     }
     #[test]
     fn switches_reverse_without_jumping_and_stop_redrawing() {
@@ -5407,7 +5443,8 @@ mod tests {
             .unwrap();
         let row = panel.row(i, vp);
         let old = panel.cancel.clone();
-        assert!(panel.click(row.x + row.w * 0.75, row.y + 25.0, vp));
+        let (start, width) = slider_span(row);
+        assert!(panel.click(start + width * 0.75, row.y + 25.0, vp));
         assert_eq!(panel.settings["strength"], json!(0.75));
         assert!(old.check().is_ok(), "a setting change leaves a render in flight alone");
         assert!(panel.pointer(row.x + row.w, row.y + 25.0, vp));
