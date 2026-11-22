@@ -557,7 +557,8 @@ The normal executable supplies an empty registry to the library's `run` entry po
 **Previews run at the source's native size** (2026-10-26; the 640×360 proxy
 made every plugin read as a quality loss): `processor_gui::render` decodes at the
 clip's display dimensions and `processors.preview_cache_mb` (default 1024) is the
-whole memory rule — paired frames per section, frames kept across the timeline.
+whole memory rule — processed frames per section, frames kept across the timeline (only
+the output is kept; the Source view is the display player's frame, audit P6).
 Processing preview/export now use `Player::spawn_native` and `take_next_native`:
 FilmCraft planes, bit depth and color metadata stay native through the cache;
 shared format negotiation converts only at plugin/geometry/sink boundaries.

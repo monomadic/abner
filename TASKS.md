@@ -21,18 +21,6 @@ Effort estimates come from the 2026-09-04 comparison against switchblade.
    processor. Current bindings are static and session-local; timeline crops are
    already saved with the edit.
 
-24. **Export and preview pipeline efficiency.** The 2026-11-22 audit is
-   [PIPELINE-AUDIT.md](docs/PIPELINE-AUDIT.md). Landed the same day: E1, E3, P2, P5, E7
-   (audio beside video, direct Matroska), E2/P3 (`Session::reset`, sessions kept across
-   ranges and renders), E4/E6 (HEVC fed planes, page pictures only when taken), E9
-   (one-pass planar → RGB, bit-identical), E8 (export crops on the chroma grid cut the
-   planes), P1/P4 (preview reader thread for segments, decoder kept between renders).
-   E5 (HEVC Main 10 for deep sources and processed chains, with FilmCraft's
-   `VtProfile::HevcMain10`). Open: a fixed-point planar → RGBA8 (E9's remaining 2.4 ms at 4K;
-   changes rounding, so `print_conversion_digests` would need a new reference), storing
-   only the "after" picture (P6, a design choice: pair renders against the display
-   player's cache). P7 measured at 0.07 ms per check and closed.
-
 20. **Three-stream cold seek on FilmCraft.** `benchmark_three_4k_players` (cold exact
    seek to 3.5 s in a 4 s 4K H.264 GOP): one player lands in 690 ms against the libav
    player's 824, three players in 947 against 861 (interleaved medians, 2026-10-21). The

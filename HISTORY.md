@@ -1,5 +1,19 @@
 # abner — history
 
+## 2026-11-22 — Process preview keeps only the processed picture (audit P6, task 24 closed)
+
+The preview stored every frame as a before/after pair of full RGBA8 pictures, 66 MB
+at 4K, though the "before" was never drawn: the Source view is the display player's
+own frame. It served only the "frames with changed pixels" count. `Preview` now
+carries the "after" and a `changed` flag set on the worker, and the budget
+(`processors.preview_cache_mb`), the segment's frame count and the stash price the
+"after" alone, so a section holds twice as many frames (30 at 4K under the default
+1024 MB). A stage that changes the size skips converting the original altogether.
+E9's fixed-point remainder (2.4 ms at 4K, changes rounding) was closed as not worth a
+new reference, which leaves nothing open in the
+[pipeline audit](docs/PIPELINE-AUDIT.md). Task 24 (export and preview pipeline
+efficiency) is done: E1–E9 and P1–P7 above.
+
 ## 2026-11-22 — HEVC Main 10 export (audit E5)
 
 The HEVC export quantised everything to 8 bits at the encoder. FilmCraft's fork gains

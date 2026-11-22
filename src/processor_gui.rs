@@ -463,7 +463,7 @@ struct Request {
     start: f64,
     end: Option<f64>,
     cancel: Cancellation,
-    /// Bytes allowed for the section's paired before/after frames
+    /// Bytes allowed for the section's processed frames
     /// (`processors.preview_cache_mb`); the frame count follows from it.
     budget: usize,
 }
@@ -744,9 +744,11 @@ impl Session for ReportingSession {
     }
 }
 struct Preview {
-    before: Rgba,
+    /// The processed picture. The original is not kept: the Source view
+    /// shows the display player's own frame (audit P6).
     after: Rgba,
-    input: [u32; 2],
+    /// Its pixels or size differ from the original it was paired with.
+    changed: bool,
     output: [u32; 2],
     /// Some stage was fed a downsized copy of its input.
     downsized: bool,
@@ -1013,13 +1015,18 @@ fn render_inner(
     if ow < 2 || oh < 2 || ow > 8192 || oh > 8192 {
         return Err("Unsupported preview output dimensions".into());
     }
-    let per_frame = (w as usize * h as usize + ow * oh) * 4;
+    // Only the processed picture is kept (audit P6): the original is the
+    // display player's own frame.
+    let per_frame = ow * oh * 4;
     if per_frame > r.budget {
         return Err(
-            "A native-size before/after pair exceeds the preview memory budget (processors.preview_cache_mb)"
+            "A native-size processed frame exceeds the preview memory budget (processors.preview_cache_mb)"
                 .into(),
         );
     }
+    // The original is converted only to tell whether the stage changed any
+    // pixel, which a change of size already answers.
+    let same_size = [w as usize, h as usize] == [ow, oh];
     let count = (r.budget / per_frame).max(1);
     let fps = r.info.fps;
     if !fps.is_finite() || fps <= 0.0 || fps > 1000.0 {
@@ -1044,7 +1051,7 @@ fn render_inner(
     let mut originals = BTreeMap::new();
     let received = std::cell::Cell::new(0usize);
     let mut emit = |frames: Vec<VideoFrame>,
-                    originals: &mut BTreeMap<i64, (Rgba, f64)>|
+                    originals: &mut BTreeMap<i64, (Option<Rgba>, f64)>|
      -> Result<bool, String> {
         let mut delivered = false;
         for frame in frames {
@@ -1094,10 +1101,9 @@ fn render_inner(
             tx.send(Event::Frame(
                 r.generation,
                 Preview {
-                    before,
+                    changed: before.is_none_or(|b| *b != *rgba),
                     after: rgba,
                     downsized,
-                    input: [w, h],
                     output: [ow as u32, oh as u32],
                     // Keep an isolated, timestamp-preserving preview attached
                     // to the playhead position that requested it. source_pts
@@ -1117,7 +1123,7 @@ fn render_inner(
     let decode_count = if r.target.is_some() { 1 } else { count };
     // The chain's side: each prepared input with its "before" picture and
     // source time, from the reader thread or read inline.
-    type Item = (VideoFrame, Rgba, f64);
+    type Item = (VideoFrame, Option<Rgba>, f64);
     let mut run = |next_item: &mut dyn FnMut() -> Result<Option<Item>, String>| -> Result<(), String> {
         for decoded in 0..decode_count {
             if r.target.is_some() {
@@ -1164,8 +1170,9 @@ fn render_inner(
         Ok(())
     };
     // The reader's side, the export's own preparation: the timeline's crops and
-    // the conversion to the first stage's format; the "before" picture is the
-    // decoded frame's display branch (the source validated it as it decoded).
+    // the conversion to the first stage's format; the "before" picture, there
+    // only to tell whether pixels changed, is the decoded frame's display branch
+    // (the source validated it as it decoded).
     let mut prep = crate::media_io::Prep::uncropped(
         (w, h),
         r.inputs.crops.clone(),
@@ -1179,7 +1186,7 @@ fn render_inner(
         if r.end.is_some_and(|end| source_pts >= end - 1e-6) {
             return Ok(None);
         }
-        let before = abner_processing::color::rgba8_validated(&f)?;
+        let before = if same_size { Some(abner_processing::color::rgba8_validated(&f)?) } else { None };
         Ok(prep.prepare(f)?.map(|input| (input, before, source_pts)))
     };
     match source.into_native() {
@@ -1676,7 +1683,7 @@ impl Panel {
             self.inputs.crops, self.context, self.input_owner)
     }
     fn frame_bytes(frames: &[Preview]) -> usize {
-        frames.iter().map(|f| f.before.len() + f.after.len()).sum()
+        frames.iter().map(|f| f.after.len()).sum()
     }
     /// Drop the oldest stashed chains until they, the live frames and
     /// `extra` more bytes fit the preview budget.
@@ -3596,7 +3603,7 @@ impl Panel {
                             });
                         }
                         self.preview_count += 1;
-                        if f.input != f.output || f.before != f.after { self.changed_count += 1; }
+                        if f.changed { self.changed_count += 1; }
                         if self.render_key != self.frames_key {
                             // The page moved on to another chain or source:
                             // the frame joins its own chain's stash.
@@ -3608,7 +3615,7 @@ impl Panel {
                             // Newest last, so the budget takes other chains first.
                             let mut entry = self.stash.remove(at);
                             entry.1.retain(|old| old.render != f.render || (old.pts - f.pts).abs() > 0.5 * f.duration);
-                            let needed = f.before.len() + f.after.len();
+                            let needed = f.after.len();
                             while !entry.1.is_empty() && Self::frame_bytes(&entry.1) + needed > self.budget {
                                 entry.1.remove(0);
                             }
@@ -3622,13 +3629,13 @@ impl Panel {
                         }
                         self.frames
                             .retain(|old| old.render != f.render || (old.pts - f.pts).abs() > 0.5 * f.duration);
-                        let needed = f.before.len() + f.after.len();
+                        let needed = f.after.len();
                         Self::trim_stash(&mut self.stash, Self::frame_bytes(&self.frames) + needed, self.budget);
                         while !self.frames.is_empty()
                             && self
                                 .frames
                                 .iter()
-                                .map(|f| f.before.len() + f.after.len())
+                                .map(|f| f.after.len())
                                 .sum::<usize>()
                                 + needed
                                 > self.budget
@@ -4641,7 +4648,7 @@ mod tests {
         p.settings.as_object_mut().unwrap().remove("$probe");
         p.changed();
         assert_eq!(p.frames.len(), 2, "settings put back are the same chain again");
-        p.set_budget(16 * 4);
+        p.set_budget(16 * 2);
         p.settings["$probe"] = json!(2);
         p.changed();
         p.frames = vec![mark(0.0), mark(1.0)];
@@ -4776,7 +4783,6 @@ mod tests {
         panel.open = true;
         panel.source_dims = [1920, 1080];
         let mut preview = mark(0.0);
-        preview.input = panel.source_dims;
         preview.output = [3840, 2160];
         panel.frames.push(preview);
         let vp = (1280.0, 800.0);
@@ -5695,7 +5701,7 @@ mod tests {
             registry.register(Box::new(Observe{format,frames:frames.clone()})).unwrap();
             let request=Request {inputs:Default::default(),generation:1,chain:vec![("fixture.observe".into(),json!({}))],target:None,info:info.clone(),start:0.,end:None,cancel:Cancellation::default(),budget:DEFAULT_PREVIEW_BYTES};
             let (tx,rx)=mpsc::sync_channel(FRAMES+2);render(&registry,&request,&tx,None,None).unwrap();
-            let mut displayed=0;while let Ok(Event::Frame(_,f))=rx.try_recv(){assert_eq!(f.before,f.after);displayed+=1;}assert_eq!(displayed,12);
+            let mut displayed=0;while let Ok(Event::Frame(_,f))=rx.try_recv(){assert!(!f.changed);displayed+=1;}assert_eq!(displayed,12);
             let frames=frames.lock().unwrap();assert_eq!(frames.len(),12);
             for (i,f) in frames.iter().enumerate() {
                 let expected=abner_processing::color::convert(reference(&fixture.path,i as u64),format).unwrap();
@@ -5851,7 +5857,7 @@ mod tests {
             render_with(&registry, &request, &tx, None, None, kept).unwrap();
             drop(tx);
             rx.iter().filter_map(|e| match e {
-                Event::Frame(_, p) => Some((p.pts, p.source_pts, p.before.to_vec(), p.after.to_vec())),
+                Event::Frame(_, p) => Some((p.pts, p.source_pts, p.changed, p.after.to_vec())),
                 _ => None,
             }).collect::<Vec<_>>()
         };
@@ -6002,10 +6008,9 @@ mod tests {
         let mut frames = vec![];
         while let Ok(Event::Frame(g, f)) = rx.try_recv() {
             assert_eq!(g, 7);
-            assert_eq!(f.before, f.after);
+            assert!(!f.changed);
             // Plugins get the source at its native size, never a proxy.
-            assert_eq!(f.input, [info.width, info.height]);
-            assert_eq!(f.before.len(), (info.width * info.height * 4) as usize);
+            assert_eq!(f.after.len(), (info.width * info.height * 4) as usize);
             frames.push(f);
         }
         assert_eq!(frames.len(), 6);
@@ -6034,7 +6039,7 @@ mod tests {
         let native = Request { chain:vec![("native".into(),json!({}))], inputs:Default::default(),generation:10,target:None,info:info.clone(),start:0.,end:None,cancel:Cancellation::default(),budget:DEFAULT_PREVIEW_BYTES };
         render(&native_registry,&native,&tx,None,None).unwrap();
         let mut native_count=0;
-        while let Ok(Event::Frame(_,f))=rx.try_recv() { assert_eq!(f.before,f.after);native_count+=1; }
+        while let Ok(Event::Frame(_,f))=rx.try_recv() { assert!(!f.changed);native_count+=1; }
         assert_eq!(native_count,6);
         // A budget too small for one native pair refuses, naming the config key.
         let starved = Request {
@@ -6076,8 +6081,6 @@ mod tests {
             }
             assert_eq!(got.len(), 1, "{settings}");
             assert_eq!(got[0].output, expect, "{settings}");
-            assert_eq!(got[0].input, [info.width, info.height], "the before is the untouched source");
-            assert_eq!(got[0].before.len(), (info.width * info.height * 4) as usize);
             assert_eq!(got[0].after.len(), (expect[0] * expect[1] * 4) as usize);
             assert_eq!(got[0].downsized, settings.get(DOWNSIZE_KEY).is_some());
         }
@@ -6126,7 +6129,7 @@ mod tests {
         }
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].pts, frames[2].pts);
-        assert_eq!(selected[0].before, selected[0].after);
+        assert!(!selected[0].changed);
         // An isolated input is flushed through a buffering stage without
         // feeding preceding history or starting a second batch.
         struct GuardFactory(Arc<std::sync::atomic::AtomicUsize>);
@@ -6295,9 +6298,7 @@ mod tests {
         panel.tick(&info, 0.2, None, &mut uploads, 1);
         assert!(panel.busy);
         let generation = panel.generation;
-        let mut unchanged = mark(0.0);
-        unchanged.after = unchanged.before.clone();
-        tx.send(Event::Frame(generation, unchanged)).unwrap();
+        tx.send(Event::Frame(generation, mark(0.0))).unwrap();
         tx.send(Event::Done(generation, Ok(()))).unwrap();
         let mut diagnostic = feedback(1, None);
         diagnostic.progress.phase = "12 unresolved pixels".into();
@@ -6335,9 +6336,8 @@ mod tests {
     fn mark(pts: f64) -> Preview {
         Preview {
             downsized: false,
-            before: Arc::new(vec![0; 16]),
             after: Arc::new(vec![0; 16]),
-            input: [2, 2],
+            changed: false,
             output: [2, 2],
             pts,
             duration: 1.0 / 24.0,
@@ -6476,14 +6476,13 @@ mod tests {
             assert!((pair[1].pts - (source + period / 2.0)).abs() < 1e-3, "new frame lands mid-period");
             // The new frame's A side is the original it follows, not a gap.
             assert!((pair[1].source_pts - source).abs() < 1e-3);
-            assert!(Arc::ptr_eq(&pair[0].before, &pair[1].before));
-            assert_ne!(pair[1].after, pair[1].before);
+            assert!(pair[1].changed, "the new frame differs from the original it follows");
         }
         let mut bounded = request(3, None);
-        bounded.budget = 5 * 64 * 64 * 8;
+        bounded.budget = 5 * 64 * 64 * 4;
         render(&reg, &bounded, &tx, None, None).unwrap();
         let bounded: Vec<_> = rx.try_iter().filter_map(|e| match e { Event::Frame(_, f) => Some(f), _ => None }).collect();
-        assert_eq!(bounded.len(), 5, "retiming must not exceed the output-pair budget");
+        assert_eq!(bounded.len(), 5, "retiming must not exceed the output budget");
         // A frame render returns every output frame its source frame owns.
         render(&reg, &request(2, Some(2.0 * period)), &tx, None, None).unwrap();
         let owned: Vec<Preview> = rx.try_iter().filter_map(|e| match e { Event::Frame(_, f) => Some(f), _ => None }).collect();
@@ -6524,14 +6523,14 @@ mod tests {
         let info = crate::probe::probe(&path).unwrap();
         let mut request = Request {
             inputs: Default::default(), generation: 1, chain: vec![], target: None,
-            info, start: 0., end: None, cancel: Cancellation::default(), budget: 32 * 64 * 64 * 8,
+            info, start: 0., end: None, cancel: Cancellation::default(), budget: 32 * 64 * 64 * 4,
         };
         let (tx, rx) = mpsc::sync_channel(64);
         render(&Registry::default(), &request, &tx, None, None).unwrap();
         let frames: Vec<_> = rx.try_iter().filter_map(|e| match e { Event::Frame(_, f) => Some(f), _ => None }).collect();
         assert_eq!(frames.len(), 32, "segment uses the budget, not the old 24-frame ceiling");
         assert!(frames.windows(2).all(|p| (p[0].pts + p[0].duration - p[1].pts).abs() < 0.00001));
-        assert!(frames.iter().map(|f| f.before.len() + f.after.len()).sum::<usize>() <= request.budget);
+        assert!(frames.iter().map(|f| f.after.len()).sum::<usize>() <= request.budget);
         request.start = 0.5;
         request.end = Some(1.0);
         render(&Registry::default(), &request, &tx, None, None).unwrap();

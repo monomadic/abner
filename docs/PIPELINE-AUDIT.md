@@ -2,8 +2,9 @@
 
 An audit of the processed export (`media_io::pipeline_export_with_inputs`) and the
 Process page's preview renderer (`processor_gui::render`), made the day the export
-went to three threads. Three items were fixed the same day and E7, E2, P3, E4, E6, E9, E8, P1 and P4 after them, E5 with a FilmCraft change, and P7 was measured and closed; the rest are open and
-tracked as task 24 in [TASKS.md](../TASKS.md).
+went to three threads. Three items were fixed the same day and E7, E2, P3, E4, E6, E9, E8, P1, P4
+and P6 after them, E5 with a FilmCraft change, and P7 was measured and closed. Nothing is
+open; task 24 is in [HISTORY.md](../HISTORY.md).
 
 **Summary.** With no plugin time, the export already runs at the hardware
 encoder's ceiling, so its remaining waste is in particular paths: cropped exports,
@@ -193,8 +194,8 @@ RGB16 rounding are unchanged, and RGBA8 is narrowed per sample as before.
 | yuv420p8 → rgb16 | 4.44 ms | 2.95 ms |
 
 The fixed-point sketch's 1.39 ms needs what remains: a float division per pixel
-(green) and a second rounding (RGB16 → RGBA8). Removing those changes output, so
-it waits for a decision that the new rounding is the reference.
+(green) and a second rounding (RGB16 → RGBA8). Removing those changes output, and
+the 2.4 ms left at 4K was judged not worth a new reference: closed as is.
 
 ## Process preview
 
@@ -264,13 +265,17 @@ A one-frame render still reads one frame ahead, for the first frame's duration.
 With E3. The page's output-rate query (`update_rate`, a `try_lock`) no longer
 fails for the length of a render, only while sessions are being created.
 
-### P6. A 4K before/after pair is 66 MB — open, design
+### P6. A 4K before/after pair was 66 MB — fixed
 
-Both pictures are kept as full RGBA8, so the default 1024 MB budget holds 15 pairs
-at 4K: about 0.6 s at 24 fps. The "before" is the source frame the display player
-can deliver again, so storing only the "after" would roughly double a section's
-length, at the cost of pairing against the player's cache (and of the retimed
-case, where one original pairs with several outputs and is already shared).
+Both pictures were kept as full RGBA8, so the default 1024 MB budget held 15 pairs
+at 4K: about 0.6 s at 24 fps. The stored "before" was never drawn: the Source view
+shows the display player's own frame. Its only use was the "N frames with changed
+pixels" count. A `Preview` now carries the "after" and a `changed` flag, which the
+worker sets while it still holds the original, and the budget, the frame count and
+the stash price the "after" alone: 30 frames at 4K, ~1.25 s. When a stage changes
+the size, the original is not converted at all (3.8 ms per 4K frame saved), since
+the frame has changed by definition. The originals waiting for a buffering stage's
+output are still held in flight, as before.
 
 ### P7. Source metadata is re-read on every render — measured, left as is
 
