@@ -17,12 +17,19 @@ use std::{
 
 #[derive(Clone)]
 pub(crate) struct Rendered {
+    /// RGBA8 at `dims`, or empty for a frame the worker counted but did not
+    /// convert (the page had not taken the previous picture yet).
     pub pixels: Rgba,
     pub dims: [u32; 2],
     pub source_pts: f64,
     pub output_time: f64,
     pub count: u64,
     pub frame_duration: f64,
+}
+impl Rendered {
+    pub fn has_picture(&self) -> bool {
+        !self.pixels.is_empty()
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Container {
@@ -595,9 +602,16 @@ impl Page {
                     &stop,
                     &worker_active,
                     Some(&report),
+                    // A picture only once the page has taken the last one.
+                    Some(&|| shared.lock().unwrap().as_ref().is_none_or(|f: &Rendered| !f.has_picture())),
                     |frame| {
                         stop.check()?;
-                        *shared.lock().unwrap() = Some(frame);
+                        let mut slot = shared.lock().unwrap();
+                        // A frame without a picture never displaces one the
+                        // page has not taken; it only moves the counters.
+                        if frame.has_picture() || slot.as_ref().is_none_or(|f| !f.has_picture()) {
+                            *slot = Some(frame);
+                        }
                         Ok(())
                     },
                 )
@@ -667,17 +681,20 @@ impl Page {
             {
                 self.count = frame.count;
                 self.rendered_time = frame.output_time;
-                self.frames.push_back(frame);
-                let mut bytes: usize = self.frames.iter().map(|f| f.pixels.len()).sum();
-                while bytes > 128 * 1024 * 1024 && self.frames.len() > 1 {
-                    bytes -= self.frames.pop_front().unwrap().pixels.len();
-                    self.selected = self.selected.saturating_sub(1);
-                }
-                if self.following {
-                    self.selected = self.frames.len() - 1;
-                    self.held = Some(self.frames[self.selected].clone());
-                    self.seek = Some(self.frames[self.selected].source_pts);
-                    self.dirty = true;
+                // A counted frame without a picture only moves the counters.
+                if frame.has_picture() {
+                    self.frames.push_back(frame);
+                    let mut bytes: usize = self.frames.iter().map(|f| f.pixels.len()).sum();
+                    while bytes > 128 * 1024 * 1024 && self.frames.len() > 1 {
+                        bytes -= self.frames.pop_front().unwrap().pixels.len();
+                        self.selected = self.selected.saturating_sub(1);
+                    }
+                    if self.following {
+                        self.selected = self.frames.len() - 1;
+                        self.held = Some(self.frames[self.selected].clone());
+                        self.seek = Some(self.frames[self.selected].source_pts);
+                        self.dirty = true;
+                    }
                 }
                 self.status = if job.cancel.check().is_err() {
                     "Cancelling export…"
@@ -1646,6 +1663,7 @@ mod tests {
                 &Cancellation::default(),
                 &Mutex::default(),
                 Some(&report),
+                None,
                 |f| {
                     previews += 1;
                     assert_eq!(&f.pixels[..4], &[255, 0, 0, 255]);
@@ -1708,7 +1726,7 @@ mod tests {
             let mut count = 0;
             crate::media_io::pipeline_export_with_inputs(&Default::default(), &info, &dest,
                 &[(0.,0.5)], &[], &registry, &[], false, Some(12_000), None,
-                &Cancellation::default(), &Mutex::default(), None, |_| { count += 1; Ok(()) }).unwrap();
+                &Cancellation::default(), &Mutex::default(), None, None, |_| { count += 1; Ok(()) }).unwrap();
             assert_eq!(count, 12, "explicit HEVC must encode even with no processing stages");
             assert!(crate::probe::probe(&dest).unwrap().codec.to_lowercase().contains("hevc"));
             let mut page = Page::default(); page.path = Some(dest.clone()); page.open = true;
@@ -1851,7 +1869,9 @@ mod tests {
     }
 
     /// `cargo test --release export_throughput -- --ignored --nocapture`
-    /// (`ABNER_BENCH_SIZE`, default 3840x2160; `ABNER_BENCH_WORK_MS`, default 0).
+    /// (`ABNER_BENCH_SIZE`, default 3840x2160; `ABNER_BENCH_WORK_MS`, default 0;
+    /// `ABNER_BENCH_NO_PICTURE=1` converts no frame for the page, as when it
+    /// polls slower than the export runs).
     #[test]
     #[ignore]
     fn export_throughput() {
@@ -1875,7 +1895,9 @@ mod tests {
             let start = Instant::now();
             crate::media_io::pipeline_export_with_inputs(&Default::default(), &info, &dest,
                 &[(0., 2.)], &[], &registry, &chain, false, Some(40_000), None,
-                &Cancellation::default(), &Mutex::default(), None, |_| { frames += 1; Ok(()) }).unwrap();
+                &Cancellation::default(), &Mutex::default(), None,
+                std::env::var_os("ABNER_BENCH_NO_PICTURE").map(|_| &(|| false) as &(dyn Fn() -> bool + Sync)),
+                |_| { frames += 1; Ok(()) }).unwrap();
             let s = start.elapsed().as_secs_f64();
             eprintln!("{size} {label}: {frames} frames in {s:.2}s = {:.1} fps", frames as f64 / s);
         }

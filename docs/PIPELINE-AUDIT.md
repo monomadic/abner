@@ -2,7 +2,7 @@
 
 An audit of the processed export (`media_io::pipeline_export_with_inputs`) and the
 Process page's preview renderer (`processor_gui::render`), made the day the export
-went to three threads. Three items were fixed the same day and E7, E2 and P3 after them; the rest are open and
+went to three threads. Three items were fixed the same day and E7, E2, P3, E4 and E6 after them; the rest are open and
 tracked as task 24 in [TASKS.md](../TASKS.md).
 
 **Summary.** With no plugin time, the export already runs at the hardware
@@ -86,31 +86,47 @@ A consequence to know about: an export and a preview render can now run their
 sessions at the same time. Before, the lock made them take turns. Two heavy
 processors running together share the accelerator and its memory.
 
-### E4. Untouched frames take a colour round trip — open
+### E4. Untouched frames took a colour round trip — fixed
 
-The HEVC encoder is given RGBA8. With no stages and a forced bitrate a frame goes
-decoder planes → RGB16 → RGBA8 in the reader, then FilmCraft's hardware encoder
-wrapper converts RGBA8 back to 4:2:0 on the CPU before VideoToolbox sees it.
-`filmcraft_platform::videotoolbox_encode::VtEncoder::encode` takes Y, U and V
-planes directly. Making `Yuv420p8` the HEVC sink would skip two conversions (about
-8 ms of CPU per 4K frame) and stop rounding pixels nothing touched. No wall-clock
-gain while encoder-bound. The on-page preview would then need its own RGBA branch
-(see E6 for throttling it).
+The HEVC encoder was given RGBA8: with no stages a frame went decoder planes →
+RGB16 → RGBA8 in the reader, then FilmCraft's `VideoEncoder` wrapper converted
+RGBA8 back to 4:2:0 on the CPU. The export now drives
+`filmcraft_platform::videotoolbox_encode::VtEncoder` itself and gives it the
+chain's `Yuv420p8` planes: host planar frames are always BT.709 limited range
+(`color::from_decoded` keeps planes only for those), which is what the session
+declares in its VUI. With no stages the decoder's planes go to the encoder as
+decoded (`hevc_export_takes_planes_and_pictures_are_optional`); a processor's
+output is converted once, at 16 bits or more, instead of through 8-bit RGBA.
+Wall-clock is unchanged while the encoder is the limit (50.0 and 54.8 fps on the
+4K benchmark); the CPU saving is below, with E6.
 
-### E5. HEVC output is 8-bit Main only — open
+### E5. HEVC output is 8-bit Main only — open, needs FilmCraft
 
 Ten-bit sources and float chains are quantised to 8 bits at the encoder. This is a
-quality limit, not a speed one, and the largest loss in the pipeline. It needs a
-Main 10 path in FilmCraft's VideoToolbox encoder (10-bit pixel buffers, profile,
-sample entry).
+quality limit, not a speed one, and the largest loss in the pipeline. FilmCraft's
+`VtEncoder` (pinned rev 45c1213) offers only `VtProfile::HevcMain` and NV12 input
+buffers: Main 10 needs a profile, 10-bit (`x420`) pixel buffers and a plane fill in
+FilmCraft itself. With that, the export's sink becomes `Yuv420p10` for 10-bit
+sources and chains, and E4's plane path carries it unchanged.
 
-### E6. ProRes builds a full RGBA frame per output frame for the preview only — open
+### E6. Every frame was converted to RGBA for the page — fixed
 
-`write_frames` converts every chain output to RGBA8 before encoding. HEVC uses
-those pixels as encoder input; ProRes does not, so for ProRes the conversion
-(about 5.7 ms at 4K from 4:2:2 10-bit) exists only for the on-page preview, and
-the page keeps only the newest frame between polls. Convert for the preview only
-when the page has taken the previous one, or at a bounded rate.
+`write_frames` converted every chain output to RGBA8, which the HEVC encoder used
+as input but ProRes did not, and the page keeps only the newest frame between
+polls. The encoders now take the chain's own format (E4), and the RGBA picture is
+made only when the page has taken the previous one
+(`pipeline_export_with_inputs`'s `want_picture`; a frame without one carries
+empty pixels and only moves the page's counters). Callers that pass no check get
+a picture for every frame, as before.
+
+User CPU for the whole 4K benchmark run (`export_throughput`, both chains, its
+ffmpeg fixture included), two runs each:
+
+| Build | User CPU |
+|---|---|
+| Before E4/E6 | 12.26 s, 13.53 s |
+| After, a picture for every frame | 11.62 s, 11.54 s |
+| After, no picture taken (`ABNER_BENCH_NO_PICTURE=1`) | 6.55 s, 6.67 s |
 
 ### E7. Audio waited for video, and MKV was written twice — fixed
 

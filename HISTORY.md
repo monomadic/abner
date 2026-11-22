@@ -1,5 +1,27 @@
 # abner — history
 
+## 2026-11-22 — HEVC export fed planes; page pictures only when taken (audit E4, E6)
+
+The HEVC export went through FilmCraft's `VideoEncoder` wrapper, which takes RGBA8 and
+converts it back to 4:2:0 on the CPU, so even an untouched frame went planes → RGB16 →
+RGBA8 → planes. `PipelineEncoder::Hevc` now drives `VtEncoder` itself (FilmCraft's
+`config_for` for the settings; the hvcC check and the no-reordering sample timing
+repeated from its wrapper as `hevc_record` and `vt_samples`) and takes the chain's
+`Yuv420p8`: host planar frames are BT.709 limited range by construction, as the
+session's VUI declares. The sink format is `PipelineEncoder::input_format`.
+
+The RGBA8 picture for the export page is no longer made per frame: the page's mailbox
+says whether it has taken the last one (`want_picture`), and a frame without a picture
+carries empty pixels (`Rendered::has_picture`) and only moves the counters; it never
+displaces a picture the page has not taken. Callers without the check (tests, the
+default `pipeline_export`) still get every picture.
+
+4K benchmark: wall-clock unchanged (encoder-bound); user CPU for the run 12.3–13.5 s
+before, 11.6 s with every picture, 6.6 s with none (`ABNER_BENCH_NO_PICTURE=1`, new).
+`hevc_export_takes_planes_and_pictures_are_optional` checks the output decodes to the
+source's planes within coding loss (no matrix or range shift) and that a job wanting
+no pictures counts every frame. Main 10 (E5) needs FilmCraft's encoder first.
+
 ## 2026-11-22 — Processor sessions kept across kept ranges and Render presses (audit E2, P3)
 
 An export created every stage's session again for each kept range, and the preview

@@ -2882,7 +2882,7 @@ pub(crate) fn pipeline_export(
     chain:&[(String,serde_json::Value)],prores:bool,crop:Option<(u32,u32,u32,u32)>,
     cancel:&abner_processor_api::Cancellation,active:&Mutex<Vec<abner_processor_api::Cancellation>>,
     emit:impl FnMut(crate::export_page::Rendered)->Result<(),String>+Send,
-)->Result<()> {pipeline_export_with_inputs(&Default::default(),info,dest,keeps,&[],registry,chain,prores,None,crop,cancel,active,None,emit)}
+)->Result<()> {pipeline_export_with_inputs(&Default::default(),info,dest,keeps,&[],registry,chain,prores,None,crop,cancel,active,None,None,emit)}
 
 // Keep the explicit geometry/pipeline inputs at this boundary.
 #[allow(clippy::too_many_arguments)]
@@ -2903,9 +2903,13 @@ pub(crate) fn pipeline_export_with_inputs(
     // Each stage's own in-flight reports, by the stage's name: what the chain is
     // doing between the frames `emit` delivers.
     stage_report: Option<&crate::export_page::StageReport>,
+    // Whether the next frame `emit` gets should carry its picture (RGBA8 at
+    // the output size, a conversion per frame). `None`: every frame does.
+    // The export page asks only when it has taken the last one.
+    want_picture: Option<&(dyn Fn() -> bool + Sync)>,
     emit: impl FnMut(crate::export_page::Rendered) -> Result<(), String> + Send,
 ) -> Result<()> {
-    use abner_processor_api::{VideoFrame, PixelFormat, InputRequirement, Role};
+    use abner_processor_api::{VideoFrame, InputRequirement, Role};
     inputs.validate_geometry(info.width,info.height).map_err(anyhow::Error::msg)?;
     ensure!(crop.is_none() || inputs.crops.is_empty(), "Use either the timeline crop or an export crop");
     validate_ranges(keeps)?;
@@ -2988,16 +2992,16 @@ pub(crate) fn pipeline_export_with_inputs(
     // writer converts for the encoder, encodes, muxes and reports. One frame
     // queues at each hand-off: enough to overlap, little enough that a 4K float
     // chain holds a few frames, not a backlog.
-    let sink_format = if prores { PixelFormat::Yuv422p10 } else { PixelFormat::Rgba8 };
+    let sink_format = PipelineEncoder::input_format(prores);
     let check = || cancel.check().map_err(anyhow::Error::msg);
     let (mp4_out, mkv_out) = std::thread::scope(|scope| -> Result<_> {
         // AAC for every container, encoded beside the video.
         let audio = AudioFeed::spawn(scope, &info.path, keeps, false, &check)?;
         let (to_writer, from_chain) = std::sync::mpsc::sync_channel::<Output>(1);
         let writer = scope.spawn(move || match (mp4_out, mkv_out) {
-            (Some(mux), _) => write_frames(from_chain, mux, audio, prores, bitrate_kbps, cancel, emit)
+            (Some(mux), _) => write_frames(from_chain, mux, audio, prores, bitrate_kbps, cancel, want_picture, emit)
                 .map(|m| (Some(m), None)),
-            (_, Some(mux)) => write_frames(from_chain, mux, audio, prores, bitrate_kbps, cancel, emit)
+            (_, Some(mux)) => write_frames(from_chain, mux, audio, prores, bitrate_kbps, cancel, want_picture, emit)
                 .map(|m| (None, Some(m))),
             _ => unreachable!(),
         });
@@ -3266,6 +3270,7 @@ impl Feed {
 
 /// The writer thread: display pixels, encode, mux and report each chain output
 /// in order, then flush the encoder. Returns the muxer for audio and finishing.
+#[allow(clippy::too_many_arguments)]
 fn write_frames<S: PacketSink>(
     frames: std::sync::mpsc::Receiver<Output>,
     mut mux: S,
@@ -3273,6 +3278,7 @@ fn write_frames<S: PacketSink>(
     prores: bool,
     bitrate_kbps: Option<u32>,
     cancel: &abner_processor_api::Cancellation,
+    want_picture: Option<&(dyn Fn() -> bool + Sync)>,
     mut emit: impl FnMut(crate::export_page::Rendered) -> Result<(), String>,
 ) -> Result<S> {
     let mut encoder: Option<PipelineEncoder> = None;
@@ -3282,7 +3288,13 @@ fn write_frames<S: PacketSink>(
         cancel.check().map_err(anyhow::Error::msg)?;
         let dims = [f.width as u32, f.height as u32];
         // Validated where it left the chain (or the reader, for an empty one).
-        let rgba = abner_processing::color::rgba8_validated(&f).map_err(anyhow::Error::msg)?;
+        // The encoders take the chain's own format; RGBA8 is for the page
+        // only, so a frame it would never see is not converted (audit E6).
+        let rgba = if want_picture.is_none_or(|wanted| wanted()) {
+            abner_processing::color::rgba8_validated(&f).map_err(anyhow::Error::msg)?
+        } else {
+            Arc::default()
+        };
         if encoder.is_none() {
             encoder = Some(PipelineEncoder::new(
                 dims[0],
@@ -3294,7 +3306,7 @@ fn write_frames<S: PacketSink>(
         }
         let e = encoder.as_mut().unwrap();
         ensure!(e.dims() == dims, "Output dimensions changed between segments");
-        let packets = e.encode(f, &rgba, index)?;
+        let packets = e.encode(f, index)?;
         let ti = match track {
             Some(t) => t,
             None => {
@@ -3352,10 +3364,15 @@ enum PipelineEncoder {
         dims: [u32; 2],
         duration: u32,
     },
+    /// VideoToolbox fed the chain's BT.709 limited 4:2:0 planes directly:
+    /// FilmCraft's `VideoEncoder` wrapper takes RGBA and converts it back on
+    /// the CPU, which rounded pixels nothing touched (audit E4).
     #[cfg(target_os = "macos")]
     Hevc {
-        encoder: Box<dyn filmcraft_export::VideoEncoder>,
+        vt: filmcraft_platform::videotoolbox_encode::VtEncoder,
         dims: [u32; 2],
+        /// Compressed frames returned so far.
+        returned: i64,
     },
 }
 impl PipelineEncoder {
@@ -3378,18 +3395,16 @@ impl PipelineEncoder {
                 bitrate_kbps,
                 ..Default::default()
             };
-            let encoder = filmcraft_platform::hardware_encode::videotoolbox_encoder_factory(
-                filmcraft_export::Format::Hevc,
+            let config = filmcraft_platform::hardware_encode::config_for(
                 w,
                 h,
                 filmcraft_time::FrameRate::new(1_000_000, (duration * 1e6).round() as i64),
                 &settings,
             )
-            .context("HEVC encoder unavailable on this machine")??;
-            Ok(Self::Hevc {
-                encoder,
-                dims: [w, h],
-            })
+            .map_err(|why| anyhow::anyhow!("HEVC encoder unavailable on this machine: {why}"))?;
+            let vt = filmcraft_platform::videotoolbox_encode::VtEncoder::new(config)
+                .map_err(|why| anyhow::anyhow!("HEVC encoder unavailable on this machine: {why}"))?;
+            Ok(Self::Hevc { vt, dims: [w, h], returned: 0 })
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -3407,7 +3422,15 @@ impl PipelineEncoder {
         match self {
             Self::ProRes { .. } => SCALE,
             #[cfg(target_os = "macos")]
-            Self::Hevc { encoder, .. } => encoder.timescale(),
+            Self::Hevc { vt, .. } => vt.config().timescale,
+        }
+    }
+    /// The chain's output format this encoder takes.
+    fn input_format(prores: bool) -> abner_processor_api::PixelFormat {
+        if prores {
+            abner_processor_api::PixelFormat::Yuv422p10
+        } else {
+            abner_processor_api::PixelFormat::Yuv420p8
         }
     }
     fn entry(&self) -> SampleEntry {
@@ -3416,10 +3439,14 @@ impl PipelineEncoder {
                 SampleEntry::prores(mp4::FourCc(*b"apcn"), dims[0] as u16, dims[1] as u16)
             }
             #[cfg(target_os = "macos")]
-            Self::Hevc { encoder, .. } => encoder.sample_entry(),
+            Self::Hevc { vt, dims, .. } => SampleEntry::hevc(
+                vt.parameter_sets().and_then(|p| hevc_record(&p).ok()).unwrap_or_default(),
+                dims[0] as u16,
+                dims[1] as u16,
+            ),
         }
     }
-    fn encode(&mut self, frame: abner_processor_api::VideoFrame, _display_rgba: &[u8], index: u64) -> Result<Vec<filmcraft_export::EncodedPacket>> {
+    fn encode(&mut self, frame: abner_processor_api::VideoFrame, index: u64) -> Result<Vec<filmcraft_export::EncodedPacket>> {
         match self {
             Self::ProRes {
                 encoder,
@@ -3436,15 +3463,30 @@ impl PipelineEncoder {
                 }])
             }
             #[cfg(target_os = "macos")]
-            Self::Hevc { encoder, dims } => {
-                // Reuse the preview pixels only for this RGBA8 encoder.
-                Ok(encoder.encode(&filmcraft_export::EncoderFrame {
-                    width: dims[0],
-                    height: dims[1],
-                    rgba: _display_rgba,
-                    hdr: None,
-                    index,
-                })?)
+            Self::Hevc { vt, dims, returned } => {
+                ensure!(
+                    [frame.width, frame.height] == [dims[0] as usize, dims[1] as usize],
+                    "picture size differs from the encoder's"
+                );
+                // The plan ends in this format; host planar frames are BT.709
+                // limited range, what the session declares in its VUI.
+                let f = abner_processing::color::convert_validated(
+                    frame,
+                    abner_processor_api::PixelFormat::Yuv420p8,
+                )
+                .map_err(anyhow::Error::msg)?;
+                let abner_processor_api::FramePixels::Yuv8([y, u, v]) = &f.pixels else {
+                    anyhow::bail!("HEVC input is not 8-bit planar");
+                };
+                let packets = vt.encode(index, y, u, v).map_err(anyhow::Error::msg)?;
+                if index == 0 {
+                    // The muxer needs the parameter sets once the first frame is out.
+                    let params = vt
+                        .parameter_sets()
+                        .context("VideoToolbox returned no parameter sets for the first frame")?;
+                    hevc_record(&params)?;
+                }
+                vt_samples(vt, returned, packets)
             }
         }
     }
@@ -3452,9 +3494,53 @@ impl PipelineEncoder {
         match self {
             Self::ProRes { .. } => Ok(vec![]),
             #[cfg(target_os = "macos")]
-            Self::Hevc { encoder, .. } => Ok(encoder.flush()?),
+            Self::Hevc { vt, returned, .. } => {
+                let packets = vt.flush().map_err(anyhow::Error::msg)?;
+                vt_samples(vt, returned, packets)
+            }
         }
     }
+}
+/// The `hvcC` record VideoToolbox wrote for the stream, checked as FilmCraft's
+/// own wrapper checks it.
+#[cfg(target_os = "macos")]
+fn hevc_record(
+    p: &filmcraft_platform::videotoolbox_encode::ParamSets,
+) -> Result<filmcraft_isobmff::HevcConfig> {
+    let record = p.hvcc.as_deref().context("VideoToolbox wrote no hvcC record for the stream")?;
+    let cfg = filmcraft_isobmff::HevcConfig::parse(record)
+        .map_err(|e| anyhow::anyhow!("unreadable hvcC record: {e}"))?;
+    ensure!(
+        !cfg.vps().is_empty() && !cfg.sps().is_empty() && !cfg.pps().is_empty() && cfg.length_size == 4,
+        "the hvcC record lacks a parameter set or does not use 4-byte NAL lengths"
+    );
+    Ok(cfg)
+}
+/// MP4 samples from VideoToolbox's frames. There is no reordering, so each
+/// frame is presented at its decode time, `n × duration` after the first; one
+/// that is not (dropped or reordered) is an error, never a file with wrong times.
+#[cfg(target_os = "macos")]
+fn vt_samples(
+    vt: &filmcraft_platform::videotoolbox_encode::VtEncoder,
+    returned: &mut i64,
+    packets: Vec<filmcraft_platform::videotoolbox_encode::VtPacket>,
+) -> Result<Vec<filmcraft_export::EncodedPacket>> {
+    let duration = vt.config().frame_duration;
+    packets
+        .into_iter()
+        .map(|p| {
+            let n = *returned;
+            *returned += 1;
+            ensure!(
+                n.checked_mul(i64::from(duration)) == Some(p.pts) && p.pts == p.dts,
+                "VideoToolbox returned frame {n} at time {} (decode time {}), expected {}",
+                p.pts,
+                p.dts,
+                n.saturating_mul(i64::from(duration))
+            );
+            Ok(filmcraft_export::EncodedPacket { data: p.data, key: p.key, duration, composition_offset: 0 })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -4213,7 +4299,7 @@ mod tests {
         let run = |name: &str| {
             let dest = dir.0.join(name);
             pipeline_export_with_inputs(&Default::default(), &info, &dest, &keeps, &chapters, &registry, &[],
-                true, None, None, &Default::default(), &Mutex::default(), None, |_| Ok(())).unwrap();
+                true, None, None, &Default::default(), &Mutex::default(), None, None, |_| Ok(())).unwrap();
             dest
         };
         let (mkv, mov) = (run("out.mkv"), run("out.mov"));
@@ -4257,5 +4343,45 @@ mod tests {
             .arg(&mkv).output().unwrap();
         let text = String::from_utf8_lossy(&probe.stdout);
         assert_eq!(text.lines().count(), 2, "{text}");
+    }
+    /// An untouched HEVC export hands the decoder's BT.709 planes to
+    /// VideoToolbox (no RGBA round trip): the output decodes to the source's
+    /// colours, and a job that wants no pictures still counts every frame.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn hevc_export_takes_planes_and_pictures_are_optional() {
+        let dir = Dir::new("hevcplanes");
+        assert!(std::process::Command::new("ffmpeg").args(["-y", "-v", "error", "-f", "lavfi", "-i",
+            "testsrc2=size=320x180:rate=24", "-t", "1", "-c:v", "libx264", "-crf", "12", "-pix_fmt", "yuv420p",
+            "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "src.mp4"])
+            .current_dir(&dir.0).status().unwrap().success());
+        let src = dir.0.join("src.mp4");
+        let info = crate::probe::probe(&src).unwrap();
+        let registry = abner_processor_api::Registry::default();
+        let dest = dir.0.join("out.mp4");
+        let (mut frames, mut pictures) = (0, 0);
+        pipeline_export_with_inputs(&Default::default(), &info, &dest, &[(0., 1.)], &[], &registry, &[],
+            false, Some(20_000), None, &Default::default(), &Mutex::default(), None,
+            Some(&|| false), |f| {
+                frames += 1;
+                pictures += usize::from(f.has_picture());
+                Ok(())
+            }).unwrap();
+        assert_eq!((frames, pictures), (24, 0));
+        let planes = |path: &Path| {
+            let frame = crate::fc::open(path).unwrap()
+                .video_frame(filmcraft_media::FrameRequest::full(filmcraft_time::Tick::from_seconds_f64(0.5)))
+                .unwrap();
+            let filmcraft_frame::PixelData::Yuv8 { planes, .. } = &frame.data else { panic!("not 8-bit planar") };
+            planes.clone()
+        };
+        let (a, b) = (planes(&src), planes(&dest));
+        for (i, (a, b)) in a.iter().zip(&b).enumerate() {
+            assert_eq!(a.len(), b.len());
+            let mean = a.iter().zip(b.iter()).map(|(x, y)| (*x as f64 - *y as f64).abs()).sum::<f64>() / a.len() as f64;
+            let bias = a.iter().zip(b.iter()).map(|(x, y)| *x as f64 - *y as f64).sum::<f64>() / a.len() as f64;
+            // Coding loss only: no shift a wrong matrix or range would add.
+            assert!(mean < 2.5 && bias.abs() < 0.5, "plane {i}: mean {mean:.2}, bias {bias:.2}");
+        }
     }
 }
