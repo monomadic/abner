@@ -154,6 +154,10 @@ held for review (`Detection::Proposal`, `app.rs:1423`).
 
 ### Q2. Grow the proposal
 
+The Process review bar now offsets proposals from −2 to +8 image pixels, starting
+at +1. Each step filters the original selection inside the detection area. The
+orange preview shows the exact pixels Add to mask will commit in one undo step.
+
 The mask is a hard cut, so the antialiased rim of a logo and the compression ringing
 around it are left outside, and a processor that inpaints the mask leaves an outline.
 

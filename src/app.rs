@@ -1385,9 +1385,10 @@ impl App {
         if task.expired() {self.watermark_task=None;self.mask_status="Watermark detection timed out; try a shorter clip".into();return;}
         match task.receiver.try_recv() {
             Ok(result)=>{
+                let region = task.region;
                 self.watermark_task=None;
                 match result {
-                    Ok(proposal)=>self.apply_watermark(proposal),
+                    Ok(proposal)=>self.apply_watermark(proposal, region),
                     Err(e)=>self.mask_status=format!("Detection failed: {e}"),
                 }
             }
@@ -1397,7 +1398,11 @@ impl App {
             }
         }
     }
-    fn apply_watermark(&mut self,proposal:crate::watermark::Proposal) {
+    fn apply_watermark(
+        &mut self,
+        proposal: crate::watermark::Proposal,
+        region: Option<[usize; 4]>,
+    ) {
         // In place the result is held for review; elsewhere it lands at once.
         let review=self.inplace_mask();
         let mask=self.masks[self.active].as_ref().unwrap();
@@ -1408,19 +1413,25 @@ impl App {
             else {self.mask_status="No confident watermark found; try another point in the clip".into();}
             return;
         }
-        let added=proposal.pixels.iter().zip(mask.pixels.iter()).filter(|(p,old)|**p!=0&&**old==0).count();
-        if added==0 {
-            if review {self.mask_status.clear();self.detection_result=Some(Detection::Nothing("Everything it found is already in the mask.".into()));}
-            else {self.mask_status="Detected watermark is already masked".into();}
+        if review {
+            let region = region.unwrap_or([0, 0, mask.width as usize, mask.height as usize]);
+            let mut review = DetectionReview {
+                preview: mask.clone(),
+                original: proposal.pixels,
+                region,
+                offset: 1,
+                added: 0,
+                samples: proposal.samples,
+            };
+            review.refresh(mask);
+            self.mask_status.clear();
+            self.detection_result = Some(Detection::Proposal(review));
             return;
         }
-        if review {
-            // One texture shows both: the mask at 255, the proposal at 100.
-            let mut both=(*mask.pixels).clone();
-            for (dst,src) in both.iter_mut().zip(&proposal.pixels) {if *src!=0&&*dst==0 {*dst=100;}}
-            let mut preview=Mask::new(mask.width,mask.height);preview.pixels=std::sync::Arc::new(both);
-            self.mask_status.clear();
-            self.detection_result=Some(Detection::Proposal{preview,pixels:proposal.pixels,added,samples:proposal.samples});
+        let added = proposal.pixels.iter().zip(mask.pixels.iter())
+            .filter(|(p, old)| **p != 0 && **old == 0).count();
+        if added == 0 {
+            self.mask_status = "Detected watermark is already masked".into();
             return;
         }
         self.merge_detection(proposal.pixels,added,proposal.samples);
@@ -1450,11 +1461,25 @@ impl App {
         let mask=self.masks[self.active].as_mut().unwrap();
         let current=std::mem::replace(&mut mask.pixels,pixels);mask.revision+=1;
         if redo {self.mask_undo.push(current);}else{self.mask_redo.push(current);}
+        self.refresh_detection_review();
         self.mask_status=if redo {"Mask edit redone"}else{"Mask edit undone"}.into();
+    }
+    fn refresh_detection_review(&mut self) {
+        if let Some(Detection::Proposal(review)) = &mut self.detection_result {
+            review.refresh(self.masks[self.active].as_ref().unwrap());
+        }
     }
     /// A finished stroke becomes one undo step, if it painted anything.
     fn control_dead(&self,action:&Action)->bool {
-        matches!(action, Action::RenderSource) && self.source_render.is_some() || matches!(action,Action::UndoMask)&&!self.can_undo_mask()||matches!(action,Action::RedoMask)&&!self.can_redo_mask()
+        match action {
+            Action::RenderSource => self.source_render.is_some(),
+            Action::UndoMask => !self.can_undo_mask(),
+            Action::RedoMask => !self.can_redo_mask(),
+            Action::DetectAccept => !matches!(&self.detection_result, Some(Detection::Proposal(review)) if review.added > 0),
+            Action::DetectOffset(delta) => !matches!(&self.detection_result, Some(Detection::Proposal(review))
+                if (DETECT_OFFSET_MIN..=DETECT_OFFSET_MAX).contains(&(review.offset + delta))),
+            _ => false,
+        }
     }
     fn commit_stroke(&mut self) {
         let Some((id,revision,previous))=self.stroke_before.take() else{return;};
@@ -1546,7 +1571,7 @@ impl App {
         } else if let Some(c) = self.active_marquee() {
             self.build_crop_layer(items, c);
             self.draw_aspect_buttons(items);
-        } else if let Some(Detection::Proposal { preview, .. }) = &self.detection_result {
+        } else if let Some(Detection::Proposal(DetectionReview { preview, .. })) = &self.detection_result {
             items.push(Item::Mask { r, id: preview.id, revision: preview.revision,
                 width: preview.width, height: preview.height, pixels: preview.pixels.clone(), style: 3. });
         } else {
@@ -2403,7 +2428,7 @@ impl App {
                 match k {
                     Key::Escape=>{self.toggle_detection_panel();return}
                     Key::Enter=>{
-                        if matches!(self.detection_result,Some(Detection::Proposal{..})) {self.activate(Action::DetectAccept)}
+                        if matches!(self.detection_result,Some(Detection::Proposal(_))) {self.activate(Action::DetectAccept)}
                         else if self.watermark_task.is_none()&&self.detection_result.is_none() {self.activate(Action::DetectRun)}
                         return}
                     _=>{}
@@ -3587,24 +3612,48 @@ impl App {
             let bar = if inplace { self.processors.tool_bar(vp) } else { ButtonBar::at(canvas.x,HEADER_H,canvas.w) };
             items.push(Item::Clip(Some(bar.r)));
             if inplace { bar.draw_radii(&mut items, [0., 0., CANVAS_RADIUS, CANVAS_RADIUS]); } else { bar.draw(&mut items); }
-            for c in self.embedded_editor_controls() {
+            let controls = self.embedded_editor_controls();
+            for c in &controls {
                 if !contains(bar.r, c.r.x, c.r.y) { continue; }
                 let hovered = self.cursor_inside && contains(c.r, self.cursor.0, self.cursor.1);
-                if inplace && (matches!(c.action, Action::ApplyEdit | Action::LeaveApply | Action::DetectAccept)
-                    || matches!(c.action, Action::DetectRun) && c.label == "Detect") { ButtonBar::primary(&mut items, c.r, &c.label, hovered, false); }
-                else { c.draw(&mut items, hovered, self.control_dead(&c.action)); }
+                let disabled = self.control_dead(&c.action);
+                let primary = inplace && (matches!(c.action, Action::ApplyEdit | Action::LeaveApply | Action::DetectAccept)
+                    || matches!(c.action, Action::DetectRun) && c.label == "Detect");
+                let compact_review = matches!(&self.detection_result, Some(Detection::Proposal(_)))
+                    && bar.content().w < DETECT_REVIEW_WIDE_W
+                    && matches!(c.action, Action::DetectAccept | Action::DetectRun | Action::DetectDiscard);
+                if compact_review || matches!(c.action, Action::DetectOffset(_)) {
+                    ButtonBar::compact(&mut items, c.r, &c.label, hovered, disabled, primary);
+                }
+                else if primary { ButtonBar::primary(&mut items, c.r, &c.label, hovered, disabled); }
+                else { c.draw(&mut items, hovered, disabled); }
+            }
+            if let Some(Detection::Proposal(review)) = &self.detection_result
+                && let Some(shrink) = controls.iter().find(|c| matches!(c.action, Action::DetectOffset(-1)))
+                && let Some(grow) = controls.iter().find(|c| matches!(c.action, Action::DetectOffset(1)))
+            {
+                let left = shrink.r.x + shrink.r.w + ButtonBar::GAP;
+                let right = grow.r.x - ButtonBar::GAP;
+                let offset = match review.offset {
+                    0 => "0 px".into(),
+                    n if n < 0 => format!("−{} px", -n),
+                    n => format!("+{n} px"),
+                };
+                let label = if right - left >= 72. { format!("Edge {offset}") } else { offset };
+                ui_label(&mut items, (left + right) / 2., grow.r.y + grow.r.h / 2., 12.,
+                    WORKSPACE_TEXT, label, Align::Center, right - left);
             }
             if inplace && self.leave_prompt.is_some() {
                 let c = bar.content();
-                let end = self.embedded_editor_controls().first().map_or(c.x + c.w, |d| d.r.x);
+                let end = controls.first().map_or(c.x + c.w, |d| d.r.x);
                 items.push(Item::Rect(RectItem { radius: 4., ..RectItem::new(RectPx { x: c.x + 2., y: c.y + c.h / 2. - 4., w: 8., h: 8. }, WARNING) }));
                 ui_label(&mut items, c.x + 18., c.y + c.h / 2., 12., WARNING, "Unapplied mask changes. Apply before leaving?", Align::Left, (end - c.x - 28.).max(1.));
             }
             if inplace && self.leave_prompt.is_none() && self.detection_panel {
                 let c = bar.content();
-                let end = self.embedded_editor_controls().iter().filter(|d| contains(bar.r, d.r.x, d.r.y)).map(|d| d.r.x).fold(c.x + c.w, f32::min);
-                let (text, color, progress) = self.autodetect_bar_text();
+                let end = controls.iter().filter(|d| contains(bar.r, d.r.x, d.r.y)).map(|d| d.r.x).fold(c.x + c.w, f32::min);
                 let room = (end - c.x - 14.).max(1.);
+                let (text, color, progress) = self.autodetect_bar_text(room);
                 let text_w = if progress.is_some() { room.min(250.) } else { room };
                 ui_label(&mut items, c.x + 2., c.y + c.h / 2., 12., color, text, Align::Left, text_w);
                 if let Some(f) = progress.filter(|_| room > 320.) {
@@ -3934,14 +3983,23 @@ impl App {
     }
     /// What the bar says beside its buttons, in which colour, and how far a
     /// running detection has read.
-    fn autodetect_bar_text(&self) -> (String, [f32; 4], Option<f32>) {
+    fn autodetect_bar_text(&self, room: f32) -> (String, [f32; 4], Option<f32>) {
         if let Some(task) = &self.watermark_task {
             let (n, total) = task.progress_counts();
             return (task.status(), WORKSPACE_TEXT, Some(n as f32 / total.max(1) as f32));
         }
         match &self.detection_result {
-            Some(Detection::Proposal { added, preview, .. }) => (format!("Found {added} px · {:.2}% of the frame. Orange is not in the mask yet.",
-                *added as f32 * 100. / preview.pixels.len().max(1) as f32), hex_color(0xff9d3a), None),
+            Some(Detection::Proposal(review)) => {
+                let text = if review.added == 0 {
+                    "No new pixels".into()
+                } else if room >= 150. {
+                    let percent = review.added as f32 * 100. / review.preview.pixels.len() as f32;
+                    format!("{} px to add · {percent:.2}%", review.added)
+                } else {
+                    format!("{} px to add", review.added)
+                };
+                (text, hex_color(0xff9d3a), None)
+            }
             Some(Detection::Nothing(why)) => (why.clone(), WARNING, None),
             None if !self.mask_status.is_empty() => (self.mask_status.clone(), WORKSPACE_TEXT, None),
             None => (format!("Autodetect · {}", self.detection_summary()), WORKSPACE_TEXT, None),
@@ -3951,25 +4009,35 @@ impl App {
         let bar = self.processors.tool_bar(self.vp);
         let mut out = Vec::new();
         // The bar: one decision per state, primary at the right end.
-        let mut x = { let c = bar.content(); c.x + c.w };
-        let mut trailing = |out: &mut Vec<Control>, label: &str, w: f32, action: Action| {
-            x -= w; out.push(Control::new(bar.control(x, w), label, false, action)); x -= ButtonBar::GAP;
+        let content = bar.content();
+        let mut x = content.x + content.w;
+        let trailing = |out: &mut Vec<Control>, x: &mut f32, label: &str, w: f32, action: Action| {
+            *x -= w; out.push(Control::new(bar.control(*x, w), label, false, action)); *x -= ButtonBar::GAP;
         };
-        if self.watermark_task.is_some() { trailing(&mut out, "Stop", 64., Action::DetectRun); }
+        if self.watermark_task.is_some() { trailing(&mut out, &mut x, "Stop", 64., Action::DetectRun); }
         else { match &self.detection_result {
-            Some(Detection::Proposal { .. }) => {
-                trailing(&mut out, "Add to mask", 108., Action::DetectAccept);
-                trailing(&mut out, "Run again", 88., Action::DetectRun);
-                trailing(&mut out, "Discard", 72., Action::DetectDiscard);
+            Some(Detection::Proposal(_)) => {
+                let compact = content.w < DETECT_REVIEW_WIDE_W;
+                let (add, retry, discard, step, value) = if compact {
+                    (86., 42., 50., 24., 40.)
+                } else {
+                    (108., 88., 72., 28., 72.)
+                };
+                trailing(&mut out, &mut x, "Add to mask", add, Action::DetectAccept);
+                trailing(&mut out, &mut x, if compact { "Retry" } else { "Run again" }, retry, Action::DetectRun);
+                trailing(&mut out, &mut x, "Discard", discard, Action::DetectDiscard);
+                trailing(&mut out, &mut x, "+", step, Action::DetectOffset(1));
+                x -= value + ButtonBar::GAP;
+                trailing(&mut out, &mut x, "−", step, Action::DetectOffset(-1));
             }
             Some(Detection::Nothing(_)) => {
                 // Each one widens the search by a single setting and runs.
-                trailing(&mut out, "Back", 56., Action::DetectDiscard);
-                if self.detection_area.is_some() { trailing(&mut out, "Whole frame", 100., Action::DetectRetry(2)); }
-                if !self.detection_range_whole() { trailing(&mut out, "Whole clip", 92., Action::DetectRetry(1)); }
-                if self.detection_samples < 7 { trailing(&mut out, "More frames", 100., Action::DetectRetry(0)); }
+                trailing(&mut out, &mut x, "Back", 56., Action::DetectDiscard);
+                if self.detection_area.is_some() { trailing(&mut out, &mut x, "Whole frame", 100., Action::DetectRetry(2)); }
+                if !self.detection_range_whole() { trailing(&mut out, &mut x, "Whole clip", 92., Action::DetectRetry(1)); }
+                if self.detection_samples < 7 { trailing(&mut out, &mut x, "More frames", 100., Action::DetectRetry(0)); }
             }
-            None => trailing(&mut out, "Detect", 84., Action::DetectRun),
+            None => trailing(&mut out, &mut x, "Detect", 84., Action::DetectRun),
         } }
         // The column: back to the brush, then where and which part.
         let s = self.processors.side_rect(self.vp);
@@ -4056,7 +4124,7 @@ impl App {
         items.push(Item::Rect(RectItem::new(crate::processor_gui::Panel::rail_rect(self.vp), [0., 0., 0., 0.78])));
     }
     /// A reviewed detection joins the mask as one undo step.
-    fn merge_detection(&mut self, pixels: Vec<u8>, added: usize, samples: usize) {
+    fn merge_detection(&mut self, pixels: impl IntoIterator<Item = u8>, added: usize, samples: usize) {
         let mask = self.masks[self.active].as_mut().unwrap();
         let previous = mask.pixels.clone();
         let dst = std::sync::Arc::make_mut(&mut mask.pixels);
@@ -4158,6 +4226,7 @@ impl App {
         mask.pixels = std::sync::Arc::new(next);
         mask.revision += 1;
         self.record_mask(previous);
+        self.refresh_detection_review();
         self.mask_status = status.into();
     }
 
@@ -4377,13 +4446,27 @@ impl App {
                 return}
             Action::DetectRun=>{self.detect_watermark();return}
             Action::DetectDiscard=>{self.detection_result=None;self.mask_status.clear();return}
-            Action::DetectAccept=>{
-                if let Some(Detection::Proposal{pixels,added,samples,..})=self.detection_result.take() {
-                    self.merge_detection(pixels,added,samples);
-                    // Back at the brush, where strays are erased.
-                    self.detection_panel=false;self.detection_area_visible=false;self.crop_drag=None;
+            Action::DetectOffset(delta) => {
+                if let Some(Detection::Proposal(review)) = &mut self.detection_result {
+                    let offset = (review.offset + delta).clamp(DETECT_OFFSET_MIN, DETECT_OFFSET_MAX);
+                    if review.offset != offset {
+                        review.offset = offset;
+                        review.refresh(self.masks[self.active].as_ref().unwrap());
+                    }
                 }
-                return}
+                return;
+            }
+            Action::DetectAccept => {
+                if self.control_dead(&action) { return; }
+                if let Some(Detection::Proposal(review)) = self.detection_result.take() {
+                    let pixels = review.preview.pixels.iter().map(|&p| u8::from(p == DETECT_PREVIEW_PIXEL));
+                    self.merge_detection(pixels, review.added, review.samples);
+                    self.detection_panel = false;
+                    self.detection_area_visible = false;
+                    self.crop_drag = None;
+                }
+                return;
+            }
             Action::DetectWhere(area)=>{
                 self.watermark_task=None;self.mask_status.clear();
                 if !area {self.detection_area=None;self.detection_area_visible=false;self.crop_drag=None;}
@@ -4457,7 +4540,7 @@ impl App {
             }
             Action::LaunchEditor(_) | Action::ResetEdit | Action::ApplyEdit | Action::CancelEdit
             | Action::LeaveDiscard | Action::LeaveKeep | Action::LeaveApply
-            | Action::DetectRun | Action::DetectDiscard | Action::DetectAccept | Action::DetectWhere(_) | Action::DetectRange(_) | Action::DetectRetry(_)
+            | Action::DetectRun | Action::DetectDiscard | Action::DetectAccept | Action::DetectOffset(_) | Action::DetectWhere(_) | Action::DetectRange(_) | Action::DetectRetry(_)
             | Action::Erase(_) | Action::MaskView(_) | Action::BrushPreset(_) | Action::InvertMask | Action::ClearMask => unreachable!(),
             Action::RenderSource => self.render_source(),
             Action::Duplicate => self.duplicate_sources(),
@@ -8117,12 +8200,49 @@ enum SourceAction { Duplicate, Remove, Crop }
 enum Leave { Close, Tool(usize), Focus(String) }
 /// An in-place detection's outcome, waiting on the user.
 enum Detection {
-    /// `preview` is the mask with the proposed pixels at 100 (`Item::Mask` style 3).
-    Proposal { preview: Mask, pixels: Vec<u8>, added: usize, samples: usize },
+    Proposal(DetectionReview),
     Nothing(String),
 }
+
+const DETECT_OFFSET_MIN: i8 = -2;
+const DETECT_OFFSET_MAX: i8 = 8;
+const DETECT_PREVIEW_PIXEL: u8 = 100;
+const DETECT_REVIEW_WIDE_W: f32 = 460.;
+
+struct DetectionReview {
+    preview: Mask,
+    original: Vec<u8>,
+    region: [usize; 4],
+    offset: i8,
+    added: usize,
+    samples: usize,
+}
+
+impl DetectionReview {
+    fn refresh(&mut self, mask: &Mask) {
+        let [x, y, w, h] = self.region;
+        let stride = mask.width as usize;
+        let adjusted = mask::offset_proposal(&self.original, stride, self.region, self.offset);
+        // Reserve the intermediate value for new pixels, including when the
+        // existing processor mask carries fractional coverage.
+        let mut preview: Vec<_> = mask.pixels.iter().map(|&p| if p == 0 { 0 } else { 255 }).collect();
+        self.added = 0;
+        for (row, adjusted) in preview.chunks_exact_mut(stride).skip(y).take(h)
+            .zip(adjusted.chunks_exact(w))
+        {
+            for (pixel, &mark) in row[x..x + w].iter_mut().zip(adjusted) {
+                if mark != 0 && *pixel == 0 {
+                    *pixel = DETECT_PREVIEW_PIXEL;
+                    self.added += 1;
+                }
+            }
+        }
+        self.preview.pixels = std::sync::Arc::new(preview);
+        self.preview.revision += 1;
+    }
+}
 #[derive(Clone, Copy)]
-enum Action { LaunchEditor(bool), ResetEdit, ApplyEdit, CancelEdit, DetectRun, DetectDiscard, DetectAccept, DetectWhere(bool), DetectRange(u8), DetectRetry(u8), LeaveDiscard, LeaveKeep, LeaveApply, Erase(bool), MaskView(u8), BrushPreset(u16), InvertMask, ClearMask, Duplicate, RenderSource, OpenFiles, ToggleSources, ToggleInspector, ToggleDetail, Tool(usize), View(Mode), Autodetect, DetectionArea, UndoMask, RedoMask, Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
+enum Action { LaunchEditor(bool), ResetEdit, ApplyEdit, CancelEdit, DetectRun, DetectDiscard, DetectAccept, DetectOffset(i8), DetectWhere(bool), DetectRange(u8), DetectRetry(u8), LeaveDiscard, LeaveKeep, LeaveApply, Erase(bool), MaskView(u8), BrushPreset(u16), InvertMask, ClearMask, Duplicate, RenderSource, OpenFiles, ToggleSources, ToggleInspector, ToggleDetail, Tool(usize), View(Mode), Autodetect, DetectionArea, UndoMask, RedoMask, Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
 #[derive(Clone, Copy, PartialEq)]
 enum CutAction { TogglePosters, FrameChanges(bool), TimeDisplay(bool),
     // Set in / out: no key or button reaches these while the feature is disabled.
@@ -8815,15 +8935,16 @@ mod tests {
         assert_eq!(count(&app), 0);
         // A miss offers the next move and leaves the mask alone.
         let len = app.masks[0].as_ref().unwrap().pixels.len();
-        app.apply_watermark(crate::watermark::Proposal { pixels: vec![0; len], samples: 64 });
+        app.apply_watermark(crate::watermark::Proposal { pixels: vec![0; len], samples: 64 }, None);
         assert!(matches!(app.detection_result, Some(Detection::Nothing(_))));
         assert!(app.embedded_editor_controls().iter().any(|c| matches!(c.action, Action::DetectRetry(0))));
         app.activate(Action::DetectDiscard);
         assert!(app.detection_result.is_none());
         // A hit is held as a proposal until it is added.
         let mut found = vec![0; len]; found[..500].fill(255);
-        app.apply_watermark(crate::watermark::Proposal { pixels: found, samples: 64 });
-        assert!(matches!(app.detection_result, Some(Detection::Proposal { added: 500, .. })));
+        app.apply_watermark(crate::watermark::Proposal { pixels: found, samples: 64 }, None);
+        app.activate(Action::DetectOffset(-1));
+        assert!(matches!(app.detection_result, Some(Detection::Proposal(DetectionReview { added: 500, .. }))));
         assert_eq!(count(&app), 0, "nothing joins the mask before Add to mask");
         let frame = app.tick(0., (1280., 800.), 1.);
         assert!(frame.items.iter().any(|i| matches!(i, Item::Mask { style, .. } if *style == 3.)));
@@ -8838,35 +8959,117 @@ mod tests {
         assert!(app.editor.is_some() && !app.detection_panel);
     }
 
-    #[test]
-    fn repeated_processor_component_click_closes_its_editor() {
-        use abner_processor_api::{Descriptor, Factory, Registry, Session};
-        use serde_json::Value;
-
-        struct TestProcessor;
-        impl Factory for TestProcessor {
-            fn descriptor(&self) -> Descriptor {
-                Descriptor {
-                    id: "test.processor".into(),
-                    name: "Test processor".into(),
-                    settings_schema: serde_json::json!({}),
-                    presets: vec![],
-                }
-            }
-            fn spatial_inputs(&self) -> Vec<abner_processor_api::SpatialInputDescriptor> {
-                vec![abner_processor_api::SpatialInputDescriptor {
-                    key: "input".into(), title: "Mask".into(),
-                    kind: abner_processor_api::SpatialInputKind::Mask, required: true,
-                }]
-            }
-            fn create(&self, _: usize, _: usize, _: &Value) -> Result<Box<dyn Session>, String> {
-                unreachable!("editing a spatial input does not render")
+    struct TestProcessor;
+    impl abner_processor_api::Factory for TestProcessor {
+        fn descriptor(&self) -> abner_processor_api::Descriptor {
+            abner_processor_api::Descriptor {
+                id: "test.processor".into(),
+                name: "Test processor".into(),
+                settings_schema: serde_json::json!({}),
+                presets: vec![],
             }
         }
+        fn spatial_inputs(&self) -> Vec<abner_processor_api::SpatialInputDescriptor> {
+            vec![abner_processor_api::SpatialInputDescriptor {
+                key: "input".into(), title: "Mask".into(),
+                kind: abner_processor_api::SpatialInputKind::Mask, required: true,
+            }]
+        }
+        fn create(&self, _: usize, _: usize, _: &serde_json::Value) -> Result<Box<dyn abner_processor_api::Session>, String> {
+            unreachable!("editing a spatial input does not render")
+        }
+    }
 
+    #[test]
+    fn autodetect_review_offsets_the_preview_and_applies_only_its_orange_pixels() {
         let clip = test_clip().expect("video test fixture");
         let mut app = mk_app(&clip, 1);
-        let mut registry = Registry::default();
+        let mut registry = abner_processor_api::Registry::default();
+        registry.register(Box::new(TestProcessor)).unwrap();
+        app.set_processors(registry);
+        app.processors.start("test.processor", serde_json::json!({})).unwrap();
+        app.begin_editor(false, Some(("test.processor".into(), "input".into())));
+        app.activate(Action::Autodetect);
+
+        let mask = app.masks[0].as_mut().unwrap();
+        let stride = mask.width as usize;
+        let at = |x, y| y * stride + x;
+        std::sync::Arc::make_mut(&mut mask.pixels)[at(10, 11)] = 255;
+        std::sync::Arc::make_mut(&mut mask.pixels)[at(20, 20)] = DETECT_PREVIEW_PIXEL;
+        let before = mask.pixels.clone();
+        let mut original = vec![0; before.len()];
+        for y in 11..14 {
+            original[at(10, y)..at(13, y)].fill(255);
+        }
+        let (mut task, send, _) = crate::watermark::Task::test_pending(
+            app.videos[0].spatial_id, mask.id, mask.revision,
+        );
+        task.region = Some([10, 10, 8, 8]);
+        app.watermark_task = Some(task);
+        send.send(Ok(crate::watermark::Proposal { pixels: original, samples: 64 })).unwrap();
+        app.poll_watermark();
+
+        let vp = (720., 480.);
+        let click = |app: &mut App, predicate: fn(Action) -> bool| {
+            let r = app.embedded_editor_controls().iter().find(|c| predicate(c.action)).unwrap().r;
+            let bar = app.processors.tool_bar(app.vp).content();
+            assert!(r.x >= bar.x && r.x + r.w <= bar.x + bar.w);
+            app.mouse_down(r.x + r.w / 2., r.y + r.h / 2.);
+            app.mouse_up();
+        };
+        let preview = |app: &mut App| {
+            app.tick(0., vp, 1.).items.into_iter().find_map(|item| match item {
+                Item::Mask { id, revision, pixels, style: 3., .. } => Some((id, revision, pixels)),
+                _ => None,
+            }).unwrap()
+        };
+        let (id, revision, pixels) = preview(&mut app);
+        assert_eq!(pixels[at(13, 10)], DETECT_PREVIEW_PIXEL, "the default grows one pixel");
+        assert_eq!(pixels[at(9, 12)], 0, "growth stays inside the worker's search area");
+        assert_eq!(pixels[at(10, 11)], 255, "existing paint stays blue");
+
+        click(&mut app, |action| matches!(action, Action::DetectOffset(1)));
+        let (grown_id, grown_revision, grown) = preview(&mut app);
+        assert_eq!(grown_id, id);
+        assert_ne!(grown_revision, revision, "the renderer must upload the changed preview");
+        assert_eq!(grown[at(14, 12)], DETECT_PREVIEW_PIXEL);
+        assert_eq!(grown[at(9, 12)], 0);
+        assert_eq!(*app.masks[0].as_ref().unwrap().pixels, *before);
+
+        for _ in 0..6 {
+            click(&mut app, |action| matches!(action, Action::DetectOffset(1)));
+        }
+        assert!(app.control_dead(&Action::DetectOffset(1)));
+        for _ in 0..10 {
+            click(&mut app, |action| matches!(action, Action::DetectOffset(-1)));
+        }
+        let (_, _, empty) = preview(&mut app);
+        assert!(empty.iter().zip(before.iter()).all(|(&shown, &old)| shown == if old == 0 { 0 } else { 255 }));
+        assert!(app.control_dead(&Action::DetectOffset(-1)));
+        assert!(app.control_dead(&Action::DetectAccept));
+        app.key(Key::Enter);
+        assert!(app.detection_result.is_some());
+        assert!(!app.can_undo_mask());
+
+        click(&mut app, |action| matches!(action, Action::DetectOffset(1)));
+        let (_, _, shrunk) = preview(&mut app);
+        assert_eq!(shrunk[at(11, 12)], DETECT_PREVIEW_PIXEL);
+        assert_eq!(shrunk[at(12, 12)], 0);
+        click(&mut app, |action| matches!(action, Action::DetectAccept));
+        let committed = app.masks[0].as_ref().unwrap().pixels.clone();
+        for (&actual, (&old, &shown)) in committed.iter().zip(before.iter().zip(shrunk.iter())) {
+            assert_eq!(actual, if shown == DETECT_PREVIEW_PIXEL { 255 } else { old });
+        }
+        assert_eq!(app.mask_undo.len(), 1);
+        app.key(Key::Undo);
+        assert_eq!(*app.masks[0].as_ref().unwrap().pixels, *before);
+    }
+
+    #[test]
+    fn repeated_processor_component_click_closes_its_editor() {
+        let clip = test_clip().expect("video test fixture");
+        let mut app = mk_app(&clip, 1);
+        let mut registry = abner_processor_api::Registry::default();
         registry.register(Box::new(TestProcessor)).unwrap();
         app.set_processors(registry);
         app.activate(Action::Tool(4));
@@ -8948,7 +9151,7 @@ mod tests {
         app.set_cut_mode(true);app.begin_editor(false,None);
         assert!(matches!(app.editor.as_ref().unwrap().owner,crate::spatial::Owner::Source));
         let mut pixels=vec![0;app.masks[0].as_ref().unwrap().pixels.len()];pixels[500]=255;
-        app.apply_watermark(crate::watermark::Proposal{pixels,samples:16});
+        app.apply_watermark(crate::watermark::Proposal{pixels,samples:16}, None);
         app.finish_editor(true);
         assert_eq!(app.masks[0].as_ref().unwrap().pixels[500],255);
         assert!(app.cut_mode,"returns to the timeline after applying the source mask");
@@ -8971,12 +9174,12 @@ mod tests {
         mask.paint((10.,10.),(10.,10.),3.);
         let before=mask.pixels.clone();
         let mut proposal=vec![0;before.len()];proposal[500]=255;
-        app.apply_watermark(crate::watermark::Proposal{pixels:proposal.clone(),samples:16});
+        app.apply_watermark(crate::watermark::Proposal{pixels:proposal.clone(),samples:16}, None);
         assert_eq!(app.masks[0].as_ref().unwrap().pixels[500],255);
         assert!(before.iter().zip(app.masks[0].as_ref().unwrap().pixels.iter()).all(|(&a,&b)|a==0||b==255));
         app.key(Key::Undo);
         assert_eq!(*app.masks[0].as_ref().unwrap().pixels,*before);
-        app.apply_watermark(crate::watermark::Proposal{pixels:proposal,samples:16});
+        app.apply_watermark(crate::watermark::Proposal{pixels:proposal,samples:16}, None);
         app.finish_editor(false);
         assert!(app.masks[0].is_none(),"cancel restores pre-editor state");
     }
@@ -8994,7 +9197,7 @@ mod tests {
         let stroke=app.masks[0].as_ref().unwrap().pixels.clone();
         assert_ne!(*stroke,*empty);assert_eq!(app.mask_undo.len(),1,"one step per stroke");
         let mut proposal=vec![0;stroke.len()];proposal[0]=255;
-        app.apply_watermark(crate::watermark::Proposal{pixels:proposal,samples:16});
+        app.apply_watermark(crate::watermark::Proposal{pixels:proposal,samples:16}, None);
         let detected=app.masks[0].as_ref().unwrap().pixels.clone();
         app.activate(Action::UndoMask);assert_eq!(*app.masks[0].as_ref().unwrap().pixels,*stroke);
         app.activate(Action::UndoMask);assert_eq!(*app.masks[0].as_ref().unwrap().pixels,*empty);

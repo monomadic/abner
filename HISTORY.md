@@ -1,5 +1,13 @@
 # abner — history
 
+## 2026-11-23 — Grow and shrink autodetect proposals before adding
+
+The Process review bar steps from −2 to +8 image pixels and defaults to +1.
+Each step filters the original proposal inside the worker's search region and
+refreshes the orange preview. Add to mask applies those same pixels as one undo
+step. The compact bar keeps both buttons and the signed pixel offset visible
+with the inspector open at the minimum window size.
+
 ## 2026-11-23 — Every frame autodetect decodes once
 
 The worker scans forward through the selected range with one source and keeps

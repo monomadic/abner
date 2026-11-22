@@ -8,6 +8,12 @@ pub(crate) struct ButtonBar {
     pub r: RectPx,
 }
 
+enum ButtonStyle {
+    Standard,
+    Primary,
+    Compact { primary: bool },
+}
+
 /// A bottom attachment may span beyond the video's columns (Timeline does).
 #[derive(Clone, Copy)]
 pub(crate) struct TimelineAttachment {
@@ -227,11 +233,15 @@ impl ButtonBar {
         hovered: bool,
         disabled: bool,
     ) {
-        Self::paint_button(items, r, label, selected, hovered, disabled, false);
+        Self::paint_button(items, r, label, selected, hovered, disabled, ButtonStyle::Standard);
     }
     /// Prominent action in the same bar, using the same figleaf text/shape path.
     pub fn primary(items: &mut Vec<Item>, r: RectPx, label: &str, hovered: bool, disabled: bool) {
-        Self::paint_button(items, r, label, false, hovered, disabled, true);
+        Self::paint_button(items, r, label, false, hovered, disabled, ButtonStyle::Primary);
+    }
+    /// Center labels in controls that share a narrow bar.
+    pub fn compact(items: &mut Vec<Item>, r: RectPx, label: &str, hovered: bool, disabled: bool, primary: bool) {
+        Self::paint_button(items, r, label, false, hovered, disabled, ButtonStyle::Compact { primary });
     }
     fn paint_button(
         items: &mut Vec<Item>,
@@ -240,9 +250,11 @@ impl ButtonBar {
         selected: bool,
         hovered: bool,
         disabled: bool,
-        primary: bool,
+        style: ButtonStyle,
     ) {
         use figleaf::{Rect, Shadow, Shape, StrokeAlign, Text, paint::Align as Place};
+        let primary = matches!(style, ButtonStyle::Primary | ButtonStyle::Compact { primary: true });
+        let compact = matches!(style, ButtonStyle::Compact { .. });
         let selected = selected && !disabled;
         let hovered = hovered && !disabled;
         // The attached Figma bar: filled grey buttons with dark outlines; the
@@ -280,14 +292,15 @@ impl ButtonBar {
         } else {
             0xbab8b8
         };
-        let label_rect = Rect::new(r.x + 10.0, r.y, (r.w - 18.0).max(1.0), r.h);
+        let (inset, padding) = if compact { (4., 8.) } else { (10., 18.) };
+        let label_rect = Rect::new(r.x + inset, r.y, (r.w - padding).max(1.0), r.h);
         items.push(Item::Label(
             Text::new(label, label_rect)
                 .font(1)
                 .size(12.0, 16.0)
                 .color(hex_color(ink))
                 .align(
-                    if primary { Place::Center } else { Place::Start },
+                    if primary || compact { Place::Center } else { Place::Start },
                     Place::Center,
                 )
                 .clip(label_rect),

@@ -67,6 +67,62 @@ impl Mask {
     }
 }
 
+/// Offset a binary proposal in image pixels. The result is local to the search
+/// region, whose exterior is treated as clear in both passes.
+pub(crate) fn offset_proposal(
+    pixels: &[u8],
+    stride: usize,
+    [x, y, w, h]: [usize; 4],
+    offset: i8,
+) -> Vec<u8> {
+    if w == 0 || h == 0 {
+        return Vec::new();
+    }
+    let rows = pixels.chunks_exact(stride).skip(y).take(h).map(|row| &row[x..x + w]);
+    if offset == 0 {
+        return rows.flatten().copied().collect();
+    }
+    let radius = usize::from(offset.unsigned_abs());
+    let selected = |count| if offset > 0 { count > 0 } else { count == 2 * radius + 1 };
+    // A running count gives the binary max or min along each axis.
+    let mut horizontal = vec![0; w * h];
+    for (src, dst) in rows.zip(horizontal.chunks_exact_mut(w)) {
+        let mut count = src.iter().take(radius).filter(|&&p| p != 0).count();
+        for (i, out) in dst.iter_mut().enumerate() {
+            count += usize::from(src.get(i + radius).is_some_and(|&p| p != 0));
+            *out = u8::from(selected(count));
+            if i >= radius {
+                count -= usize::from(src[i - radius] != 0);
+            }
+        }
+    }
+    let mut counts = vec![0; w];
+    for row in horizontal.chunks_exact(w).take(radius) {
+        for (count, &p) in counts.iter_mut().zip(row) {
+            *count += usize::from(p);
+        }
+    }
+    let mut adjusted = vec![0; w * h];
+    for (j, dst) in adjusted.chunks_exact_mut(w).enumerate() {
+        let entering = (j + radius) * w;
+        if let Some(row) = horizontal.get(entering..entering + w) {
+            for (count, &p) in counts.iter_mut().zip(row) {
+                *count += usize::from(p);
+            }
+        }
+        for (out, &count) in dst.iter_mut().zip(&counts) {
+            *out = if selected(count) { 255 } else { 0 };
+        }
+        if j >= radius {
+            let leaving = (j - radius) * w;
+            for (count, &p) in counts.iter_mut().zip(&horizontal[leaving..leaving + w]) {
+                *count -= usize::from(p);
+            }
+        }
+    }
+    adjusted
+}
+
 /// The crop marquee, in image pixels — the same grid the mask uses, so a
 /// crop cuts the mask and the video frame to identical rectangles. App owns
 /// the dragging (screen space); this owns the geometry and the pixels.
@@ -400,6 +456,28 @@ pub fn export_prores(source: &Path, dest: &Path, rect: (u32, u32, u32, u32)) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proposal_offset_matches_a_square_window_clipped_to_the_search_area() {
+        let stride = 12;
+        let pixels: Vec<_> = (0..stride * 10).map(|i| if i % 11 < 8 { 255 } else { 0 }).collect();
+        for [x, y, w, h] in [[1, 2, 9, 7], [0, 0, 1, 5], [10, 9, 2, 1]] {
+            for offset in -2i8..=8 {
+                let radius = isize::from(offset.abs());
+                let result = offset_proposal(&pixels, stride, [x, y, w, h], offset);
+                for (index, &pixel) in result.iter().enumerate() {
+                    let (cx, cy) = ((index % w) as isize, (index / w) as isize);
+                    let mut window = (-radius..=radius).flat_map(|dy| (-radius..=radius).map(move |dx| (cx + dx, cy + dy))).map(|(px, py)| {
+                        px >= 0 && py >= 0 && px < w as isize && py < h as isize
+                            && pixels[(y + py as usize) * stride + x + px as usize] != 0
+                    });
+                    let mark = if offset >= 0 { window.any(|p| p) } else { window.all(|p| p) };
+                    assert_eq!(pixel, if mark { 255 } else { 0 }, "offset {offset}, at ({cx},{cy})");
+                }
+            }
+        }
+    }
+
     #[test]
     fn swept_circle_is_connected_clipped_and_binary() {
         let mut mask = Mask::new(32, 16);
