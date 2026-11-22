@@ -881,7 +881,7 @@ pub(crate) fn inspect(
     Ok(())
 }
 
-/// Removes unpublished output on every failure, including encoder errors and cancellation.
+/// Disposable internal scratch work, never the only copy of an interrupted export.
 struct Pending(std::path::PathBuf);
 impl Drop for Pending {
     fn drop(&mut self) {
@@ -897,6 +897,35 @@ fn pending(dest: &Path) -> Result<Pending> {
         .create_new(true)
         .open(&p)?;
     Ok(Pending(p))
+}
+/// Export bytes survive cancellation, errors, unwinding and process termination.
+/// Only a successfully published export removes its working file.
+struct ExportOutput(PathBuf);
+impl ExportOutput {
+    fn new(dest: &Path) -> Result<Self> {
+        loop {
+            let n = NEXT.fetch_add(1, Ordering::Relaxed);
+            let mut name = dest.file_stem().unwrap_or_default().to_os_string();
+            name.push(format!(".partial.{}.{}", std::process::id(), n));
+            if let Some(ext) = dest.extension() {
+                name.push(".");
+                name.push(ext);
+            }
+            let path = dest.with_file_name(name);
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(_) => return Ok(Self(path)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+    fn published(self) {
+        // A rename may already have consumed the working path.
+        if let Err(e) = std::fs::remove_file(&self.0)
+            && e.kind() != std::io::ErrorKind::NotFound {
+            log::warn!("Could not remove published export staging file {}: {e}", self.0.display());
+        }
+    }
 }
 const SCALE: u32 = 1_000_000;
 fn cancelled(cancel: &AtomicBool) -> Result<()> {
@@ -1983,7 +2012,7 @@ pub(crate) fn export_with_cancel(
     } else { None };
     let input = if let Some(work) = &repaired { Input::open(&work.0)? } else { input };
     let copy = crop.is_none();
-    let temp = pending(dest)?;
+    let temp = ExportOutput::new(dest)?;
     let mut mux = new_mux(&meta, &temp.0, dest)?;
     if copy {
         copy_ranges(&input, &mut mux, keeps, cancel, false)?;
@@ -2010,6 +2039,7 @@ pub(crate) fn export_with_cancel(
     } else {
         std::fs::rename(&temp.0, dest)?;
     }
+    temp.published();
     Ok(())
 }
 fn ebml(id: u32, data: &[u8]) -> Vec<u8> {
@@ -2928,14 +2958,12 @@ pub(crate) fn pipeline_export_with_inputs(
     if bitrate_kbps.is_none() && chain.is_empty() && crop.is_none() && inputs.crops.is_empty() && !prores {
         // Keep the packet path available through the Export workspace. Repair
         // only boundary GOPs, and never pass untouched HDR through the SDR host.
-        // Publish after checking cancellation; RAII removes unpublished work.
-        let reservation = pending(dest)?;
-        let work_path = reservation.0.with_extension(&extension);
-        ensure!(!work_path.exists(), "Export working file already exists");
-        let work = Pending(work_path);
+        // Keep interrupted bytes beside the destination until publication succeeds.
+        let work = ExportOutput::new(dest)?;
         export(&info.path, &work.0, keeps, false, &[], None)?;
         cancel.check().map_err(anyhow::Error::msg)?;
         std::fs::rename(&work.0, dest)?;
+        work.published();
         return Ok(());
     }
     crate::media_metadata::read(&info.path)
@@ -2954,7 +2982,7 @@ pub(crate) fn pipeline_export_with_inputs(
             (Vec::new(), SourceMeta::default())
         }
     };
-    let temp = pending(dest)?;
+    let temp = ExportOutput::new(dest)?;
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -3174,6 +3202,7 @@ pub(crate) fn pipeline_export_with_inputs(
         let seated = finish_mkv(&temp.0, dest, &meta, None)?;
         cancel.check().map_err(anyhow::Error::msg)?;
         std::fs::hard_link(seated.as_ref().map_or(&temp.0, |s| &s.0), dest)?;
+        temp.published();
         return Ok(());
     }
     let mut mux = mp4_out.context("no MP4 writer")?;
@@ -3183,6 +3212,7 @@ pub(crate) fn pipeline_export_with_inputs(
     let tags: &[(String, String)] = if mp4_brand(dest) { &meta.mp4 } else { &[] };
     finish_mp4(&temp.0, chapters, true, tags)?;
     std::fs::hard_link(&temp.0, dest)?;
+    temp.published();
     Ok(())
 }
 
@@ -3670,6 +3700,46 @@ mod tests {
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
+    #[test]
+    fn cancelled_packet_export_keeps_its_partial_file() {
+        let dir = Dir::new("partial-copy");
+        let source = dir.0.join("source.mp4");
+        fixture(&source);
+        let dest = dir.0.join("copy.mp4");
+        assert!(export_with_cancel(&source, &dest, &[(0., 0.5)], true, &[], None,
+            &AtomicBool::new(true)).is_err());
+        assert!(!dest.exists());
+        let partials: Vec<_> = std::fs::read_dir(&dir.0).unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("copy.partial."))
+            .collect();
+        assert_eq!(partials.len(), 1);
+        assert!(std::fs::metadata(&partials[0]).unwrap().len() > 0);
+    }
+
+    #[test]
+    fn partial_export_survives_unwinding_and_cleans_up_only_after_publication() {
+        let dir = Dir::new("partial-export");
+        let dest = dir.0.join("video.mp4");
+        let work = ExportOutput::new(&dest).unwrap();
+        let partial = work.0.clone();
+        std::fs::write(&partial, b"encoded video bytes").unwrap();
+        assert!(std::panic::catch_unwind(move || {
+            let _work = work;
+            panic!("interrupted export");
+        }).is_err());
+        assert_eq!(std::fs::read(&partial).unwrap(), b"encoded video bytes");
+        let next = ExportOutput::new(&dest).unwrap();
+        assert_ne!(next.0, partial);
+        let next_path = next.0.clone();
+        std::fs::write(&next.0, b"complete video").unwrap();
+        std::fs::hard_link(&next.0, &dest).unwrap();
+        next.published();
+        assert!(!next_path.exists());
+        assert!(partial.exists());
+        assert_eq!(std::fs::read(dest).unwrap(), b"complete video");
+    }
+
     fn fixture(path: &Path) {
         let mut mux = mp4::Mp4Writer::new(
             std::fs::File::create(path).unwrap(),

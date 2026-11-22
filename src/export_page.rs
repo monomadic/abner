@@ -1808,6 +1808,22 @@ mod tests {
             assert!(error.to_string().contains(message), "{error}");
             assert!(!dest.exists());
         }
+        for ext in ["mp4", "mov", "mkv"] {
+            let dest = dir.join(format!("interrupted.{ext}"));
+            let cancelled = Cancellation::default();
+            let result = crate::media_io::pipeline_export(
+                &info, &dest, &[(0., 0.5)], &registry,
+                &[("test.red".into(), serde_json::json!({}))], ext == "mov", None,
+                &cancelled, &Mutex::default(), |_| { cancelled.cancel(); Ok(()) },
+            );
+            assert!(result.is_err());
+            assert!(!dest.exists());
+            let partials: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path())
+                .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("interrupted.partial.")
+                    && p.extension().is_some_and(|e| e == ext)).collect();
+            assert_eq!(partials.len(), 1, "{ext}: retain cancelled export");
+            assert!(std::fs::metadata(&partials[0]).unwrap().len() > 0);
+        }
         let cancelled = Cancellation::default();
         cancelled.cancel();
         let dest = dir.join("cancelled.mp4");
