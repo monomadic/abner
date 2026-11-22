@@ -209,6 +209,52 @@ component filters to a weaker map. Falls out of P1: one detector run over one po
 
 ### Q5. Reject static scenery with the blend model
 
+Implemented in the native-resolution component pass. Two halves of the moving
+band must agree before their mean can stand in for the background. A single
+transmission slope is fitted to RGB with a separate intercept per channel.
+A candidate below 90% median estimated opacity is rejected if the fit has
+R² below 0.45 or misses the expected transmission by more than 0.10 or 55% of
+the expectation, whichever is larger. The tolerance accounts for
+display-encoded RGB and the use of nearby pixels as a proxy. The drawn-box
+stroke fallback also discards components that overlap a blend rejection.
+
+On the labeled clip below, the default proposal retained all 832 translucent
+logo pixels and reduced the fixed scenery patch from 832 proposed pixels to 0.
+The whole-frame result matched the [ground-truth PNG](docs/evidence/autodetect-baseline/q5-blend-expected.png)
+pixel for pixel. The [pre-Q5 PNG](docs/evidence/autodetect-baseline/q5-blend-pre-q5.png)
+includes both rectangles. A drawn box around the scenery alone also went from
+832 proposed pixels to 0, including the stroke fallback.
+
+All 12 existing 1080p and 4K checks matched the `6ef038e` detector masks
+byte-for-byte, including the ten archived reference cases. Seven of those ten
+also matched the committed PNGs byte-for-byte. The other three already differed
+at `6ef038e`. The thin and isolated stroke cases retained the same pixels.
+The test-pattern false positives that were already in the whole-frame masks
+remained. Opaque components and components with an unreliable background proxy
+are left to the existing checks and review.
+
+To recreate the labeled 160×96 clip, use a colored background with a common
+temporal signal, a logo at 65% opacity on the left, and an independently lit
+fixed patch on the right.
+
+```sh
+python3 - <<'PY' | ffmpeg -f rawvideo -pixel_format rgb24 -video_size 160x96 -framerate 8 -i - \
+  -c:v libx264 -pix_fmt yuv420p -crf 10 -preset fast -g 32 q5-blend.mp4
+import sys
+
+for t in range(64):
+    bg = bytes(24 + (t * k % 208) for k in (53, 89, 127))
+    logo = bytes(round(0.35 * b + 0.65 * color) for b, color in zip(bg, (225, 218, 210)))
+    scenery = bytes(110 + (t * k % 67) for k in (17, 23, 31))
+    for y in range(96):
+        row = bg * 30 + logo * 16 + bg * 60 + scenery * 16 + bg * 38 if 22 <= y < 74 else bg * 160
+        sys.stdout.buffer.write(row)
+PY
+```
+
+Use `ABNER_DETECT_COUNT=64`. Set `ABNER_DETECT_BOX=96,16,40,66` for the
+scenery-only check or leave it unset for the whole-frame check.
+
 HISTORY 2026-11-22 records the false positive: the still interior of a test pattern was
 proposed along with the overlay. The island test (`surrounded`, 70 % of the band moving)
 cannot tell a static object in moving scenery from a logo.

@@ -125,6 +125,7 @@ fn attenuation(
 pub(super) fn scores_checked(
     frames: &[Frame],
     region: [usize; 4],
+    blend_veto: &[bool],
     check: Check,
 ) -> Result<Vec<u8>, String> {
     let [ox, oy, w, h] = region;
@@ -156,6 +157,7 @@ pub(super) fn scores_checked(
         check,
     )?;
     let (attenuation, flickers) = attenuation(&spread, cw, ch, coarse, check)?;
+    let vetoed = |p| blend_veto.get(p) == Some(&true);
     let mut best = (0., vec![0; w * h]);
     // A light overlay lifts the darkest channel; a dark one lowers the lightest.
     for image in [darkest, lightest] {
@@ -215,7 +217,11 @@ pub(super) fn scores_checked(
                     }
                 }
             }
-            if component.len() >= (coarse * coarse / 3).max(24) && peak >= 1. {
+            // Stroke evidence can find a different mark in the box. A whole
+            // fallback component touching a veto would otherwise restore its rim.
+            if component.len() >= (coarse * coarse / 3).max(24) && peak >= 1.
+                && !component.iter().copied().any(vetoed)
+            {
                 weight += total;
                 for q in component {
                     mask[q] = super::evidence::relative_score(score(at(q)), 0.75);
@@ -231,6 +237,7 @@ pub(super) fn scores_checked(
                 .filter(|&q| {
                     let (x, y) = (q % w, q / w);
                     mask[q] == 0
+                        && !vetoed(q)
                         && score(at(q)) >= 0.4
                         && lift[at(q)] >= 0.015
                         && ((x > 0 && mask[q - 1] != 0)
@@ -255,7 +262,7 @@ pub(super) fn scores_checked(
 
 #[cfg(test)]
 fn detect_checked(frames: &[Frame], region: [usize; 4], check: Check<'_>) -> Result<Vec<bool>, String> {
-    Ok(scores_checked(frames, region, check)?.into_iter().map(super::evidence::selected_by_default).collect())
+    Ok(scores_checked(frames, region, &[], check)?.into_iter().map(super::evidence::selected_by_default).collect())
 }
 
 #[cfg(test)]

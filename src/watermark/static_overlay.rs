@@ -1,5 +1,5 @@
 //! Screen-space overlay proposals. No registration or scene trajectories are used.
-use super::{Check, Frame, temporal_rows};
+use super::{Check, Frame, blend, temporal_rows};
 use super::evidence::{CONFIDENCE, OPACITY, select_islands, threshold_factor};
 use rayon::prelude::*;
 
@@ -9,6 +9,7 @@ pub(super) struct Maps {
     pub edge: Vec<f32>,
     pub variation: Vec<f32>,
     pub refine_seeds: Vec<bool>,
+    pub blend_veto: Vec<bool>,
     pub min_component: usize,
 }
 
@@ -124,6 +125,7 @@ pub(super) fn detect_checked(
         edge: vec![0.; w * h],
         variation: vec![0.; w * h],
         refine_seeds: Vec::new(),
+        blend_veto: Vec::new(),
         min_component,
     };
     let mut wider_opacity = vec![0.; w * h];
@@ -356,6 +358,23 @@ pub(super) fn detect_checked(
             }
             continue;
         }
+        if scale == 1 && blend::contradicts(
+            frames, &component, &maps.opacity, [ox, oy, w],
+            frontier.iter().filter_map(|&(p, d)| {
+                (d > 0 && !bar[p] && ranges[p] >= 0.04).then(|| [x0 + p % cw, y0 + p / cw])
+            }),
+            checkpoint,
+        )? {
+            if maps.blend_veto.is_empty() {
+                maps.blend_veto.resize(w * h, false);
+            }
+            for p in component {
+                // Zero confidence keeps it out of review. Preserve opacity so
+                // later components still exclude it from their background band.
+                maps.blend_veto[p] = true;
+            }
+            continue;
+        }
         for p in component {
             let dynamic = ((maps.variation[p] - 0.06) / 0.12).clamp(0., 1.);
             maps.confidence[p] = edge_evidence
@@ -381,6 +400,41 @@ impl Maps {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blend_check_keeps_translucent_logos_and_rejects_independent_scenery() {
+        let blend = |bg: u8, fg: u8, linear: bool| {
+            let (bg, fg) = (f32::from(bg) / 255., f32::from(fg) / 255.);
+            // Approximate display transfer for the linear-light fixture.
+            let value = if linear {
+                (0.35 * bg.powf(2.2) + 0.65 * fg.powf(2.2)).powf(1. / 2.2)
+            } else {
+                0.35 * bg + 0.65 * fg
+            };
+            (255. * value).round() as u8
+        };
+        for linear in [false, true] {
+            let frames: Vec<_> = (0..64).map(|t| {
+                let bg = [53, 89, 127].map(|k| (24 + t * k % 208) as u8);
+                let logo = std::array::from_fn(|c| blend(bg[c], [225, 218, 210][c], linear));
+                let scenery = [17, 23, 31].map(|k| (110 + t * k % 67) as u8);
+                let rgb = (0..160 * 96).flat_map(|p| match (p % 160, p / 160) {
+                    (30..=45, 22..=73) => logo,
+                    (106..=121, 22..=73) => scenery,
+                    _ => bg,
+                }).collect();
+                Frame::new(160, 96, rgb).unwrap()
+            }).collect();
+            let maps = detect(&frames, [0, 0, 160, 96], 32);
+            for y in 22..74 {
+                for x in 30..46 {
+                    assert!(maps.confidence[y * 160 + x] >= 0.25, "logo pixel {x},{y}, linear={linear}");
+                    assert_eq!(maps.confidence[y * 160 + x + 76], 0., "scenery pixel {x},{y}, linear={linear}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn finds_static_strokes_over_unregistered_backgrounds() {
         let mut state = 17u32;

@@ -1,5 +1,6 @@
 //! Built-in mask proposals from stationary overlays over changing nearby frames.
 //! Owns a background decoder; never seeks the visible player or writes media.
+mod blend;
 mod evidence;
 mod reservoir;
 mod search;
@@ -434,13 +435,14 @@ fn analyze(
     }
     progress.store(total + 1, Ordering::Relaxed);
     let mut evidence = review.then(Evidence::default);
-    let maps = detect_search(&search, &check)?;
+    let mut maps = detect_search(&search, &check)?;
     let mut pixels = vec![0; size[0] * size[1]];
     if search.scale == 1 {
+        let blend_veto = std::mem::take(&mut maps.blend_veto);
         let mut selected = native_selection(maps, region, &mut evidence, &check)?;
         // A tightly drawn box permits evidence over stationary scenery.
         if drawn && !selected.contains(&255) && region[2] * region[3] <= pixels.len() / 4 {
-            let scores = stroke_lift::scores_checked(&search.frames, search.local_region(), &check)?;
+            let scores = stroke_lift::scores_checked(&search.frames, search.local_region(), &blend_veto, &check)?;
             selected = scores.iter().map(|&score| u8::from(evidence::selected_by_default(score)) * 255).collect();
             if let Some(evidence) = &mut evidence && selected.contains(&255) {
                 evidence.set_strokes(region, scores);

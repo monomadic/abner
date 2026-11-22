@@ -1,5 +1,14 @@
 # abner — history
 
+## 2026-11-23 — Check translucent autodetect proposals against their surroundings
+
+Native-resolution autodetect now fits a component's RGB variation to the
+surrounding motion when both halves of the band agree. The labeled clip retained
+all 832 translucent logo pixels and dropped all 832 scenery pixels, including in
+the drawn-box fallback. Existing reference cases kept their pre-Q5 masks.
+[Fixtures and results](OPTIMISE.md#q5-reject-static-scenery-with-the-blend-model)
+include the opaque and unreliable-background limits of the check.
+
 ## 2026-11-23 — Adjust autodetect sensitivity in review
 
 The Process review bar thresholds saved opacity and confidence scores at 0% to
