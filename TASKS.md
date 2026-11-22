@@ -24,13 +24,13 @@ Effort estimates come from the 2026-09-04 comparison against switchblade.
 24. **Export and preview pipeline efficiency.** The 2026-11-22 audit is
    [PIPELINE-AUDIT.md](docs/PIPELINE-AUDIT.md). Landed the same day: E1, E3, P2, P5, E7
    (audio beside video, direct Matroska), E2/P3 (`Session::reset`, sessions kept across
-   ranges and renders), E4/E6 (HEVC fed planes, page pictures only when taken), E9 (one-pass planar → RGB,
-   bit-identical; a fixed-point version waits on accepting new rounding), E8 (export crops
-   on the chroma grid cut the planes). Open, in
-   the order worth doing: a Main 10 HEVC path (E5, needs a FilmCraft change: profile and
-   10-bit pixel buffers in `VtEncoder`), a reader / chain / display split and a kept
-   decoder for the preview (P1, P4), then the unmeasured ones: storing only the "after"
-   picture (P6), cached source metadata (P7).
+   ranges and renders), E4/E6 (HEVC fed planes, page pictures only when taken), E9
+   (one-pass planar → RGB, bit-identical), E8 (export crops on the chroma grid cut the
+   planes), P1/P4 (preview reader thread for segments, decoder kept between renders).
+   Open: a Main 10 HEVC path (E5, needs a FilmCraft change: profile and 10-bit pixel
+   buffers in `VtEncoder`), a fixed-point planar → RGBA8 (E9's remaining 2.4 ms at 4K;
+   changes rounding, so `print_conversion_digests` would need a new reference), storing
+   only the "after" picture (P6), cached source metadata (P7).
 
 20. **Three-stream cold seek on FilmCraft.** `benchmark_three_4k_players` (cold exact
    seek to 3.5 s in a 4 s 4K H.264 GOP): one player lands in 690 ms against the libav

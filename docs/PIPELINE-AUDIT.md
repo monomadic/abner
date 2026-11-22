@@ -2,7 +2,7 @@
 
 An audit of the processed export (`media_io::pipeline_export_with_inputs`) and the
 Process page's preview renderer (`processor_gui::render`), made the day the export
-went to three threads. Three items were fixed the same day and E7, E2, P3, E4, E6, E9 and E8 after them; the rest are open and
+went to three threads. Three items were fixed the same day and E7, E2, P3, E4, E6, E9, E8, P1 and P4 after them; the rest are open and
 tracked as task 24 in [TASKS.md](../TASKS.md).
 
 **Summary.** With no plugin time, the export already runs at the hardware
@@ -190,15 +190,28 @@ it waits for a decision that the new rounding is the reference.
 
 ## Process preview
 
-### P1. One thread does everything — open
+### P1. One thread did everything — split for segment renders
 
-`render` decodes, builds the "before" RGBA frame, crops, runs the chain and
-converts for display on the worker thread. Summed from the table, that is roughly
-12 to 15 ms of host work per 4K frame that the processor waits on (not measured
-end to end). The export's reader / chain / writer split applies here unchanged: a
-reader thread for decode, "before" and crop, the chain thread, and the display
-conversion after it. Worth it for segment renders through fast processors; noise
-for a processor that takes a second per frame.
+`render` decoded, built the "before" RGBA frame, cropped, ran the chain and
+converted for display on the worker thread. A segment render now decodes, builds
+the "before" picture and prepares the input (the timeline's crops, conversion to
+the first stage's format: the export's own `media_io::Prep`) on a reader thread
+while the worker runs the chain; a one-frame render, with nothing to overlap,
+stays on one thread. The display conversion of the "after" picture is still on
+the chain's thread.
+
+`preview_throughput` (4K, 24-frame segment through a one-frame-delay RGB16
+stage, two runs each):
+
+| Stage time per frame | Before | After |
+|---|---|---|
+| 0 ms | 297 ms | 309 ms |
+| 20 ms | 890, 874 ms | 693, 667 ms |
+
+With an instant stage the reader is the slower side and nothing changes; the
+gain grows with the processor's own time, up to the reader's ~14 ms per 4K frame.
+The chain now plans from the first stage's format, as the export does, instead
+of the decoder's.
 
 ### P2. Output frames were validated four times — fixed
 
@@ -220,14 +233,23 @@ cleared when an export starts (`Panel::release_sessions`, so a model is not held
 twice) and when the clips go. Same opt-in caveat as E2
 (`resettable_sessions_are_created_once_per_settings`).
 
-### P4. Every press opens a decoder and cold-seeks — open
+### P4. Every press opened a decoder and cold-seeked — fixed
 
-`Source::open` spawns a new native player per render and exact-seeks it (a cold
-jump inside a long GOP is 285 to 470 ms at 1080p, per the player's own figures).
-A one-frame render also reads two frames: the second only supplies the first
-one's duration, which a targeted render could take from the frame rate. Keeping
-one processing decoder per source between renders would turn most presses into a
-seek inside its cache.
+`Source::open` spawned a new native player per render. The preview worker now
+keeps its decoder between renders (`Kept::decoder`, `Source::open_kept`: reused
+for the same file at the same size, dropped on a release like the sessions), so a
+press near the last one seeks inside what it has decoded. Six one-frame 4K
+renders stepping forward one frame: 792 ms with a fresh decoder each, 49 ms with
+the kept one (`preview_throughput`).
+
+Reusing a reader exposed a player bug that a fresh one never hit:
+`take_next_native` read on to the first cached frame past the position, which
+could be a frame from an older span beyond frames not decoded yet. It now takes
+only the frame that follows in the same decoded span
+(`kept_decoder_renders_what_a_fresh_one_does` fails without it). The app's own
+`take_next` calls follow a seek and were not affected.
+
+A one-frame render still reads one frame ahead, for the first frame's duration.
 
 ### P5. The registry lock was held for the whole render — fixed
 

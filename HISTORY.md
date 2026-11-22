@@ -1,5 +1,22 @@
 # abner — history
 
+## 2026-11-22 — Preview: decoder kept between renders, reader thread for segments (audit P1, P4)
+
+The preview worker's `Kept` now holds its host decoder as well as its sessions:
+`Source::open_kept` reuses it for the same file at the same size, so a Render press
+seeks inside what the last one decoded instead of opening a decoder and cold-seeking
+(six one-frame 4K renders stepping forward: 792 → 49 ms, `preview_throughput`). A
+segment render decodes, builds the "before" picture and prepares the input on a reader
+thread through the export's `media_io::Prep` (`Prep::uncropped`, `Prep::prepare`), so
+the chain plans from the first stage's format as the export does; with a 20 ms stage a
+4K 24-frame segment went 880 → 680 ms. One-frame renders stay on one thread.
+
+Kept readers exposed a player bug: `take_next_native`, reading on from a delivered frame,
+took the first cached frame past the position even when it belonged to an older span
+beyond frames not decoded yet. It now takes only the next frame of the same span.
+`kept_decoder_renders_what_a_fresh_one_does` (targeted and segment renders, forwards and
+back, byte-equal to a fresh decoder's) fails without it.
+
 ## 2026-11-22 — Export crops on the chroma grid cut the planes (audit E8)
 
 The export crop converted every frame to RGB16 before cutting it, so an odd origin

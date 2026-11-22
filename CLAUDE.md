@@ -590,7 +590,9 @@ token; default `false`) is created once per processor, settings and input size, 
 per kept range or Render press. `abner_processing::reuse::Pool` holds them on the thread
 that runs them (the export's chain thread for one job; the preview worker between renders,
 settled after each and cleared by `Panel::release_sessions` when an export starts or the
-clips go). The pool keys the UNBOUND session; spatial inputs are bound per job
+clips go). The worker keeps its host decoder the same way (`Kept::decoder`,
+`Source::open_kept`), and a segment render decodes and prepares on a reader thread through
+the export's `media_io::Prep`. The pool keys the UNBOUND session; spatial inputs are bound per job
 (`abner_processor_api::bind`), so editing a mask does not recreate a model.
 **Settings explain themselves**: a property's `description` is its hover tooltip,
 and `oneOf: [{const, title, description}]` names and explains each choice of a

@@ -782,7 +782,7 @@ impl Worker {
             // The last render's sessions, so the next press with the same
             // settings resets them instead of creating them (sessions stay on
             // the thread that made them, so this is the worker's own).
-            let mut pool = abner_processing::reuse::Pool::default();
+            let mut kept = Kept::default();
             loop {
                 let request = {
                     let (lock, cv) = &*shared;
@@ -794,17 +794,17 @@ impl Worker {
                         break;
                     }
                     if std::mem::take(&mut m.release) {
-                        pool.clear();
+                        kept.clear();
                     }
                     let Some(request) = m.pending.take() else { continue };
                     request
                 };
                 let generation = request.generation;
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    render_with(&*registry, &request, &tx, Some(&active_worker), Some(&live_worker), &mut pool)
+                    render_with(&*registry, &request, &tx, Some(&active_worker), Some(&live_worker), &mut kept)
                 }))
                 .unwrap_or_else(|_| {
-                    pool.clear();
+                    kept.clear();
                     Err("Processor panicked; preview stopped".into())
                 });
                 active_worker.lock().unwrap().clear();
@@ -857,6 +857,19 @@ fn render(
 ) -> Result<(), String> {
     render_with(registry, r, tx, active, live, &mut Default::default())
 }
+/// What the preview worker keeps from one render to the next: the sessions
+/// (audit P3) and the host decoder (P4), each reused only when it matches.
+#[derive(Default)]
+struct Kept {
+    sessions: abner_processing::reuse::Pool,
+    decoder: Option<crate::processing_source::NativeSource>,
+}
+impl Kept {
+    fn clear(&mut self) {
+        self.sessions.clear();
+        self.decoder = None;
+    }
+}
 /// [`render_inner`], then keep the sessions it used for the next render
 /// unless it failed for a reason other than being cancelled.
 fn render_with(
@@ -865,10 +878,10 @@ fn render_with(
     tx: &mpsc::SyncSender<Event>,
     active: Option<&Mutex<Vec<Cancellation>>>,
     live: Option<&LiveProgress>,
-    pool: &mut abner_processing::reuse::Pool,
+    kept: &mut Kept,
 ) -> Result<(), String> {
-    let result = render_inner(registry, r, tx, active, live, pool);
-    pool.settle(result.is_ok() || r.cancel.check().is_err());
+    let result = render_inner(registry, r, tx, active, live, kept);
+    kept.sessions.settle(result.is_ok() || r.cancel.check().is_err());
     result
 }
 fn render_inner(
@@ -878,7 +891,7 @@ fn render_inner(
     tx: &mpsc::SyncSender<Event>,
     active: Option<&Mutex<Vec<Cancellation>>>,
     live: Option<&LiveProgress>,
-    pool: &mut abner_processing::reuse::Pool,
+    kept: &mut Kept,
 ) -> Result<(), String> {
     r.cancel.check()?;
     // Process at native display dimensions. The first processor may provide an
@@ -947,7 +960,7 @@ fn render_inner(
         // Reset and reused when the last render had this stage with these
         // settings at this size; the spatial inputs are bound per render.
         let key = format!("{id}|{settings}|{}x{}", stage_dims[0], stage_dims[1]);
-        let made = pool.take(key, || factory.create(stage_dims[0], stage_dims[1], settings))?;
+        let made = kept.sessions.take(key, || factory.create(stage_dims[0], stage_dims[1], settings))?;
         let mut session = abner_processor_api::bind(factory, made, r.inputs.bindings.get(id).cloned().unwrap_or_default())?;
         if let Some(target) = r.target {
             session.set_preview_target((target * 1e6).round() as i64, [1, 1_000_000]);
@@ -1019,7 +1032,9 @@ fn render_inner(
         crate::media_metadata::require_constant_rate(&r.info.path)?;
     }
     let mut last_out: Option<i64> = None;
-    let mut source = registry.with(|registry| crate::processing_source::Source::open(registry,r.chain.first().map(|s|s.0.as_str()),&r.info.path,w,h,fps))?;
+    // The decoder the last render left, when it is for this file and size.
+    let mut source = registry.with(|registry| crate::processing_source::Source::open_kept(registry,r.chain.first().map(|s|s.0.as_str()),&r.info.path,w,h,fps,&mut kept.decoder))?;
+    let pairs = sessions.iter().map(|s| s.format_pairs()).collect();
     // A frame preview is an isolated input, including for recurrent/batch models.
     // finish() lets implementations pad their own short input without replaying
     // the segment. Segment rendering retains the normal streaming contract.
@@ -1099,66 +1114,103 @@ fn render_inner(
         }
         Ok(delivered)
     };
-    let mut read_frame = || source.read(&r.cancel);
-    let mut next = read_frame()?;
     let decode_count = if r.target.is_some() { 1 } else { count };
-    for decoded in 0..decode_count {
-        if r.target.is_some() {
-            let _ = tx.try_send(Event::Progress(r.generation, decoded, decode_count));
+    // The chain's side: each prepared input with its "before" picture and
+    // source time, from the reader thread or read inline.
+    type Item = (VideoFrame, Rgba, f64);
+    let mut run = |next_item: &mut dyn FnMut() -> Result<Option<Item>, String>| -> Result<(), String> {
+        for decoded in 0..decode_count {
+            if r.target.is_some() {
+                let _ = tx.try_send(Event::Progress(r.generation, decoded, decode_count));
+            }
+            let Some((input, before, source_pts)) = next_item()? else {
+                break;
+            };
+            let pts = (source_pts * 1e6).round() as i64;
+            if originals.len() >= count { return Err("Processor buffered too many frames for preview".into()); }
+            originals.insert(pts, (before, source_pts));
+            if format_plan.is_none() {
+                format_plan = Some(abner_processing::negotiation::FormatPlan::new(&mut sessions, input.format, PixelFormat::Rgba8)?);
+            }
+            let delivered = emit(
+                format_plan.as_ref().unwrap().process(
+                    &mut sessions,
+                    0,
+                    vec![input],
+                    &r.cancel,
+                    r.budget,
+                )?,
+                &mut originals,
+            )?;
+            // A targeted preview is complete once its output arrives. Dropping the
+            // sessions here avoids starting another batch or flushing unwanted tails.
+            if delivered && (r.target.is_some() || received.get() >= count) { return Ok(()); }
         }
-        let Some(decoded_frame) = next.take() else {
-            break;
-        };
-        let source_pts=decoded_frame.pts as f64*decoded_frame.time_base[0] as f64/decoded_frame.time_base[1] as f64;
+        r.cancel.check()?;
+        for i in 0..sessions.len() {
+            let Some(plan) = &format_plan else { break; };
+            let delivered = emit(
+                plan.finish_stage(&mut sessions, i, &r.cancel, r.budget)?,
+                &mut originals,
+            )?;
+            if delivered && (r.target.is_some() || received.get() >= count) { return Ok(()); }
+        }
+        if received.get() == 0 {
+            return Err("No preview frames at this position".into());
+        }
+        if !retimed && !originals.is_empty() {
+            return Err("Processor did not return all preview frames".into());
+        }
+        Ok(())
+    };
+    // The reader's side, the export's own preparation: the timeline's crops and
+    // the conversion to the first stage's format; the "before" picture is the
+    // decoded frame's display branch (the source validated it as it decoded).
+    let mut prep = crate::media_io::Prep::uncropped(
+        (w, h),
+        r.inputs.crops.clone(),
+        r.end.unwrap_or(f64::INFINITY),
+        pairs,
+        PixelFormat::Rgba8,
+    );
+    let prepared = |prep: &mut crate::media_io::Prep, read: &mut dyn FnMut() -> Result<Option<VideoFrame>, String>| -> Result<Option<Item>, String> {
+        let Some(f) = read()? else { return Ok(None) };
+        let source_pts = f.pts as f64 * f.time_base[0] as f64 / f.time_base[1] as f64;
         if r.end.is_some_and(|end| source_pts >= end - 1e-6) {
-            break;
+            return Ok(None);
         }
-        next = read_frame()?;
-        let pts = (source_pts * 1e6).round() as i64;
-        if originals.len() >= count { return Err("Processor buffered too many frames for preview".into()); }
-        let mut input = decoded_frame;
-        // Before/after presentation is a separate display branch of the native frame.
-        // The source validated the frame as it decoded it.
-        let before = abner_processing::color::rgba8_validated(&input)?;
-        originals.insert(pts, (before, source_pts));
-        if !r.inputs.crops.is_empty() {
-            let mut rgb = abner_processing::color::convert(input, PixelFormat::Rgb16)?.into_rgb16()?;
-            crate::spatial::apply_crop(&mut rgb,&r.inputs.crops);
-            input = rgb.into();
+        let before = abner_processing::color::rgba8_validated(&f)?;
+        Ok(prep.prepare(f)?.map(|input| (input, before, source_pts)))
+    };
+    match source.into_native() {
+        // A segment decodes and prepares on its own thread while the chain
+        // runs (audit P1); one frame has nothing to overlap.
+        Ok(mut native) if r.target.is_none() => {
+            let result = std::thread::scope(|scope| {
+                let (to_chain, from_reader) = mpsc::sync_channel(1);
+                let reader = &mut native;
+                let cancel = &r.cancel;
+                let prepared = &prepared;
+                scope.spawn(move || loop {
+                    let item = prepared(&mut prep, &mut || reader.read(cancel));
+                    let last = !matches!(item, Ok(Some(_)));
+                    if to_chain.send(item).is_err() || last {
+                        break;
+                    }
+                });
+                // Returning drops `from_reader`, which stops the reader.
+                run(&mut || from_reader.recv().unwrap_or_else(|_| Err("Preview reader stopped".into())))
+            });
+            kept.decoder = Some(native);
+            result
         }
-        if format_plan.is_none() {
-            format_plan = Some(abner_processing::negotiation::FormatPlan::new(&mut sessions, input.format, PixelFormat::Rgba8)?);
+        Ok(mut native) => {
+            let result = run(&mut || prepared(&mut prep, &mut || native.read(&r.cancel)));
+            kept.decoder = Some(native);
+            result
         }
-        let delivered = emit(
-            format_plan.as_ref().unwrap().process(
-                &mut sessions,
-                0,
-                vec![input],
-                &r.cancel,
-                r.budget,
-            )?,
-            &mut originals,
-        )?;
-        // A targeted preview is complete once its output arrives. Dropping the
-        // sessions here avoids starting another batch or flushing unwanted tails.
-        if delivered && (r.target.is_some() || received.get() >= count) { return Ok(()); }
+        Err(mut source) => run(&mut || prepared(&mut prep, &mut || source.read(&r.cancel))),
     }
-    r.cancel.check()?;
-    for i in 0..sessions.len() {
-        let Some(plan) = &format_plan else { break; };
-        let delivered = emit(
-            plan.finish_stage(&mut sessions, i, &r.cancel, r.budget)?,
-            &mut originals,
-        )?;
-        if delivered && (r.target.is_some() || received.get() >= count) { return Ok(()); }
-    }
-    if received.get() == 0 {
-        return Err("No preview frames at this position".into());
-    }
-    if !retimed && !originals.is_empty() {
-        return Err("Processor did not return all preview frames".into());
-    }
-    Ok(())
 }
 /// A stage fed a spline-shrunk copy of its input (the Downsize input row):
 /// the frame goes in at 1/factor and the stage's own factor-x model brings
@@ -5707,6 +5759,107 @@ mod tests {
         assert!(!export.is_empty() && export.iter().all(|free| *free), "{export:?}");
     }
 
+    /// `cargo test --release --lib preview_throughput -- --ignored --nocapture`:
+    /// a 4K segment render through a one-frame-delay RGB16 stage, then
+    /// one-frame renders stepping forward with a fresh and a kept decoder.
+    #[test]
+    #[ignore]
+    fn preview_throughput() {
+        let dir = std::env::temp_dir().join(format!("abner-preview-bench-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("bench.mp4");
+        assert!(std::process::Command::new("ffmpeg")
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=3840x2160:rate=24:duration=3",
+                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-g", "48"])
+            .arg(&input).status().unwrap().success());
+        let info = crate::probe::probe(&input).unwrap();
+        // ABNER_BENCH_WORK_MS: what the stage spends per frame (default 0).
+        struct Slow(u64);
+        struct SlowSession(Box<dyn Session>, u64);
+        impl abner_processor_api::Factory for Slow {
+            fn descriptor(&self) -> Descriptor { BufferedFactory.descriptor() }
+            fn create(&self, w: usize, h: usize, settings: &Value) -> Result<Box<dyn Session>, String> {
+                Ok(Box::new(SlowSession(BufferedFactory.create(w, h, settings)?, self.0)))
+            }
+        }
+        impl Session for SlowSession {
+            fn process(&mut self, frame: Frame) -> Result<Vec<Frame>, String> {
+                std::thread::sleep(Duration::from_millis(self.1));
+                self.0.process(frame)
+            }
+            fn finish(&mut self) -> Result<Vec<Frame>, String> { self.0.finish() }
+            fn output_dimensions(&self) -> [usize; 2] { self.0.output_dimensions() }
+            fn cancellation(&self) -> Cancellation { self.0.cancellation() }
+            fn progress(&self) -> Progress { self.0.progress() }
+        }
+        let work = std::env::var("ABNER_BENCH_WORK_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        let mut registry = Registry::default();
+        registry.register(Box::new(Slow(work))).unwrap();
+        let chain = vec![("example.buffered".to_string(), json!({}))];
+        let pair = 3840 * 2160 * 4 * 2;
+        let request = |target: Option<f64>, budget: usize| Request {
+            inputs: Default::default(), generation: 1, chain: chain.clone(), target,
+            info: info.clone(), start: 0.0, end: None, cancel: Cancellation::default(), budget,
+        };
+        let (tx, rx) = mpsc::sync_channel(64);
+        let drain = std::thread::spawn(move || rx.iter().filter(|e| matches!(e, Event::Frame(..))).count());
+        let t = Instant::now();
+        render(&registry, &request(None, 24 * pair), &tx, None, None).unwrap();
+        eprintln!("segment, 24 frames: {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
+        let period = 1. / 24.;
+        let t = Instant::now();
+        for i in 0..6 {
+            render(&registry, &request(Some((30 + i) as f64 * period), pair), &tx, None, None).unwrap();
+        }
+        eprintln!("6 one-frame renders, fresh decoder: {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
+        let mut kept = Kept::default();
+        render_with(&registry, &request(Some(29. * period), pair), &tx, None, None, &mut kept).unwrap();
+        let t = Instant::now();
+        for i in 0..6 {
+            render_with(&registry, &request(Some((30 + i) as f64 * period), pair), &tx, None, None, &mut kept).unwrap();
+        }
+        eprintln!("6 one-frame renders, kept decoder: {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
+        drop(tx);
+        drain.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The preview worker keeps its decoder between renders (audit P4): from
+    /// wherever the last render left it, every render delivers exactly what a
+    /// fresh decoder does, targeted or segment, forwards or back.
+    #[test]
+    fn kept_decoder_renders_what_a_fresh_one_does() {
+        let mut registry = Registry::default();
+        registry.register(Box::new(BufferedFactory)).unwrap();
+        let fixture = crate::native_decode_tests::Fixture::new();
+        let info = crate::probe::probe(&fixture.path).unwrap();
+        let chain = vec![("example.buffered".to_string(), json!({}))];
+        let period = 1001. / 24000.;
+        let run = |kept: &mut Kept, target: Option<f64>, start: f64| {
+            let request = Request {
+                inputs: Default::default(),
+                generation: 1, chain: chain.clone(), target,
+                info: info.clone(), start, end: None, cancel: Cancellation::default(),
+                budget: DEFAULT_PREVIEW_BYTES,
+            };
+            let (tx, rx) = mpsc::sync_channel(64);
+            render_with(&registry, &request, &tx, None, None, kept).unwrap();
+            drop(tx);
+            rx.iter().filter_map(|e| match e {
+                Event::Frame(_, p) => Some((p.pts, p.source_pts, p.before.to_vec(), p.after.to_vec())),
+                _ => None,
+            }).collect::<Vec<_>>()
+        };
+        let mut kept = Kept::default();
+        for (target, start) in [(Some(3. * period), 0.), (Some(2. * period), 0.), (None, 0.),
+            (Some(8. * period), 0.), (None, 5. * period), (Some(9. * period), 0.), (None, 0.)] {
+            let fresh = run(&mut Kept::default(), target, start);
+            assert!(!fresh.is_empty());
+            assert!(run(&mut kept, target, start) == fresh, "{target:?} from {start}");
+            assert!(kept.decoder.is_some());
+        }
+    }
+
     /// A processor that can reset is created once: across an export's kept
     /// ranges and across preview renders with the same settings. `Buffered`
     /// refuses discontinuous time, so a reset that kept its state would fail
@@ -5751,14 +5904,14 @@ mod tests {
         ).unwrap();
         assert_eq!(frames, 10);
         assert_eq!((created.load(Ordering::Relaxed), resets.load(Ordering::Relaxed)), (1, 1));
-        let mut pool = abner_processing::reuse::Pool::default();
+        let mut pool = Kept::default();
         let request = |chain: &Vec<(String, Value)>, target: Option<f64>| Request {
             inputs: Default::default(),
             generation: 1, chain: chain.clone(), target,
             info: info.clone(), start: 0.0, end: None, cancel: Cancellation::default(),
             budget: DEFAULT_PREVIEW_BYTES,
         };
-        let full = |pool: &mut abner_processing::reuse::Pool, chain: &Vec<(String, Value)>| {
+        let full = |pool: &mut Kept, chain: &Vec<(String, Value)>| {
             let (tx, rx) = mpsc::sync_channel(64);
             render_with(&registry, &request(chain, None), &tx, None, None, pool).unwrap();
             drop(tx);
@@ -5777,7 +5930,9 @@ mod tests {
         let other = vec![("example.buffered".to_string(), json!({"strength": 1.0}))];
         assert_eq!(full(&mut pool, &other), fresh);
         assert_eq!(created.load(Ordering::Relaxed) - made, 1);
-        assert_eq!(pool.len(), 1);
+        assert_eq!(pool.sessions.len(), 1);
+        // The decoder stayed with the worker for the next render.
+        assert!(pool.decoder.is_some());
     }
 
     #[test]

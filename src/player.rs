@@ -604,6 +604,15 @@ impl Player {
     pub fn take_next_native(&self) -> Option<(f64, NativeFrame)> {
         let mut c = self.shared.cache.lock().unwrap();
         let key = c.next_key()?;
+        // Reading on from a delivered frame, take only the frame that follows
+        // it in its decoded span. A reader kept between jobs (the Process
+        // preview's) can hold an older span further on, and the first cached
+        // frame past the position may lie beyond frames not decoded yet.
+        if c.pending.is_none()
+            && c.run_of(c.position).is_some_and(|i| !(c.runs[i].0 <= key && key <= c.runs[i].1))
+        {
+            return None;
+        }
         let CachedFrame::Native(frame) = c.frames.get(&key)? else { return None; };
         let frame = frame.clone();
         c.took(key);

@@ -3192,7 +3192,7 @@ struct Output {
 /// What happens to a decoded frame before the chain sees it: the export crop,
 /// the timeline crops, and conversion to the first stage's input format (the
 /// plan the chain thread will choose, since selection is deterministic).
-struct Prep {
+pub(crate) struct Prep {
     full: (u32, u32),
     crop: (u32, u32, u32, u32),
     crops: Vec<crate::spatial::ClipCrop>,
@@ -3202,15 +3202,33 @@ struct Prep {
     target: Option<abner_processor_api::PixelFormat>,
 }
 impl Prep {
+    /// No export crop: the timeline's crops and the conversion only (the
+    /// preview's reader).
+    pub(crate) fn uncropped(
+        full: (u32, u32),
+        crops: Vec<crate::spatial::ClipCrop>,
+        end: f64,
+        pairs: Vec<Vec<abner_processor_api::FormatPair>>,
+        sink: abner_processor_api::PixelFormat,
+    ) -> Self {
+        Self { full, crop: (0, 0, full.0, full.1), crops, end, pairs, sink, target: None }
+    }
     /// The next frame before `end`, in the first stage's input format.
     fn next(
         &mut self,
         read: &mut dyn FnMut(&abner_processor_api::Cancellation) -> abner_processor_api::Result<Option<abner_processor_api::VideoFrame>>,
         cancel: &abner_processor_api::Cancellation,
     ) -> std::result::Result<Option<abner_processor_api::VideoFrame>, String> {
-        use abner_processor_api::{PixelFormat, VideoFrame};
-        let Some(mut f) = read(cancel)? else { return Ok(None) };
+        let Some(f) = read(cancel)? else { return Ok(None) };
         cancel.check()?;
+        self.prepare(f)
+    }
+    /// A decoded frame cropped and converted for the chain; `None` past `end`.
+    pub(crate) fn prepare(
+        &mut self,
+        mut f: abner_processor_api::VideoFrame,
+    ) -> std::result::Result<Option<abner_processor_api::VideoFrame>, String> {
+        use abner_processor_api::{PixelFormat, VideoFrame};
         let pts = f.pts as f64 * f.time_base[0] as f64 / f.time_base[1] as f64;
         if pts >= self.end - 1e-6 {
             return Ok(None);

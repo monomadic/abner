@@ -30,6 +30,9 @@ pub struct Source {
 /// prepare frames on its own thread while the chain runs (a processor's own
 /// `FrameSource` makes no such promise and stays on the chain's thread).
 pub struct NativeSource {
+    /// What it decodes, so a kept one is only used for the same file and size.
+    path: std::path::PathBuf,
+    dims: [u32; 2],
     player: Player,
     pending: Option<(f64, NativeFrame)>,
     fps: f64,
@@ -46,13 +49,34 @@ impl Source {
         h: u32,
         fps: f64,
     ) -> Result<Self> {
+        Self::open_kept(registry, first, path, w, h, fps, &mut None)
+    }
+    /// [`open`](Self::open), taking the host decoder from `kept` when it was
+    /// opened for this file at this size: no new decoder, and a seek near
+    /// where the last job left it lands in what it has cached. Anything else
+    /// in `kept` is dropped.
+    pub fn open_kept(
+        registry: &Registry,
+        first: Option<&str>,
+        path: &std::path::Path,
+        w: u32,
+        h: u32,
+        fps: f64,
+        kept: &mut Option<NativeSource>,
+    ) -> Result<Self> {
         let custom = match first {
             Some(id) => registry
                 .get(id)?
                 .open_source(path, w as usize, h as usize)?,
             None => None,
         };
-        let native = if custom.is_none() {
+        let kept = kept.take().filter(|k| k.path == path && k.dims == [w, h] && !k.player.failed());
+        let native = if custom.is_some() {
+            None
+        } else if let Some(mut native) = kept {
+            native.fps = fps;
+            Some(native)
+        } else {
             let player = Player::spawn_native(path, w, h, 16 * 1024 * 1024)
                 .ok_or("Cannot open processing decoder")?;
             let ready = Arc::new((Mutex::new(false), Condvar::new()));
@@ -61,9 +85,7 @@ impl Source {
                 *signal.0.lock().unwrap() = true;
                 signal.1.notify_all();
             }));
-            Some(NativeSource { player, pending: None, fps, ready })
-        } else {
-            None
+            Some(NativeSource { path: path.to_owned(), dims: [w, h], player, pending: None, fps, ready })
         };
         Ok(Self {
             custom,
