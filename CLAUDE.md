@@ -618,8 +618,10 @@ Completion autoplays only if that render is still selected. The 1f · 5f · 1s �
 buttons choose preview length; Render segment runs to the segment/cache limit.
 `loop_range` and timeline marks use the same selected cache as the displayed image.
 Add Processor omits spatial controls until the processor is added. Missing required
-masks show 􀇾 on the processor row and mask tile; either opens the embedded editor,
-and Apply clears both warnings. Later stages can edit source-based inputs, but
+masks show 􀇾 on the processor row and mask tile; either opens the mask editor, which
+works in place (`App::inplace_mask`: tools on the bar under the picture, the settings
+column as the mask inspector, the view kept; HISTORY 2026-11-22), and Done clears both
+warnings and renders the frame. `--processor-mask` opens it for captures. Later stages can edit source-based inputs, but
 rendering spatial bindings still requires the first enabled stage.
 The generic API lives in `crates/processor-api`; processor implementations are
 maintained independently. **`cargo build-with-plugins`** (alias → the committed,

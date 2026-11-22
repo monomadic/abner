@@ -1768,6 +1768,19 @@ impl Panel {
     pub(crate) fn set_crops(&mut self,crops:Vec<crate::spatial::ClipCrop>) {
         if self.inputs.crops!=crops {self.inputs.crops=crops;self.changed();}
     }
+    pub(crate) fn name_of(&self, id: &str) -> Option<&str> {
+        self.descriptors.iter().find(|d| d.id == id).map(|d| d.name.as_str())
+    }
+    /// The bar under the picture, which the in-place mask editor takes over.
+    pub(crate) fn tool_bar(&self, vp: (f32, f32)) -> ButtonBar { self.canvas_layout(vp).button_bar.unwrap() }
+    /// The settings column, which becomes the mask inspector while painting.
+    pub(crate) fn side_rect(&self, vp: (f32, f32)) -> RectPx {
+        let w = self.right(vp);
+        RectPx { x: vp.0 - w, y: HEADER_H, w, h: (Self::bottom(vp) - HEADER_H).max(0.) }
+    }
+    pub(crate) fn rail_rect(vp: (f32, f32)) -> RectPx {
+        RectPx { x: 0., y: HEADER_H, w: Self::left(vp), h: (Self::bottom(vp) - HEADER_H).max(0.) }
+    }
     pub(crate) fn focused_id(&self) -> Option<&str> {
         self.descriptors.get(self.selected).map(|d| d.id.as_str())
     }

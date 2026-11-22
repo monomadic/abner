@@ -1,5 +1,42 @@
 # abner — history
 
+## 2026-11-22 — Process: a processor's mask is painted in place
+
+Opening a mask from the Process page used to put a row of nine equal buttons over the
+top of the viewer, refit the picture under it and reset the zoom. It now edits in place
+(`App::inplace_mask`): the picture, zoom and playhead stay where they were (`editor_bar`
+is off, `begin_editor_for` keeps the view), a 2px `ACCENT` ring and an "EDITING MASK ·
+<processor>" line mark the canvas, and the rail is set back under a dim.
+
+The bar under the picture carries the tools in place of the format line and the
+Source | Rendered switch (`Panel::tool_bar`, `embedded_editor_controls`): Paint | Erase,
+Undo, Redo, Autodetect, then Cancel and a primary Done. A narrow bar drops tools from
+the right before it drops Cancel or Done. The settings column becomes the mask
+inspector (`draw_mask_inspector`, `mask_inspector_controls`): a log-scale size slider
+(4 to 512 px) with 16 / 32 / 64 / 128 presets, the view (Overlay / Mask / Hidden), the
+painted share of the frame, Invert / Clear / Export, and the shortcuts.
+
+New behaviour behind those controls: an eraser (`Mask::stroke` writes 0, `E` / `B`
+switch), Invert and Clear as single undo steps (`edit_mask`), and three looks for the
+mask layer (`Item::Mask::style`, shader mode 8's `p0`): the old red / blue wash
+everywhere else, painted pixels only over plain footage here, white on black for Mask.
+Done on a processor's mask applies it and queues a frame render (`Panel::render_frame`).
+The crop / region editor is unchanged and keeps its top bar. `--processor-mask` opens
+the focused stage's mask editor for captures.
+
+Not built from the mockup: the leave-with-unapplied-changes question (another
+processor's card still cancels the edit), PNG import, overlay opacity, and the new
+Autodetect setup. The Autodetect panel still draws over the top of the viewer, and with
+the picture no longer pushed down it now covers the top of a picture that fills the
+viewer.
+
+Validation: `process_mask_editor_works_in_place` (view kept across open and Done, tools
+on the bar, paint / erase / undo / invert, the three styles, the applied binding); the
+suite passes. `inspector_grip_folds_the_detail_panel_and_the_list_takes_the_room`
+failed in 2 of 7 runs, before and after this change's tests were added; it times the
+Sources rail's slide against the wall clock. Captured in the window; painting, the
+slider and Done were not driven in the running app.
+
 ## 2026-11-22 — Process: the mask input is a full-width tile with Paint mask / Autodetect
 
 A processor's mask input was one 97×62 tile paired beside its crop tile, and the only

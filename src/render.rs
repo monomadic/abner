@@ -452,7 +452,8 @@ pub enum Item {
     /// rounded rect of `radius` — the launch window's recent row.
     FrameIcon { x: f32, y: f32, index: usize },
     Thumb { r: RectPx, slot: usize, radius: f32, alpha: f32, cover: bool, clip_poster: bool },
-    Mask { r: RectPx, id: u64, revision: u64, width: u32, height: u32, pixels: Arc<Vec<u8>> },
+    /// `style`: 0 the red / blue wash, 1 painted pixels only, 2 white on black.
+    Mask { r: RectPx, id: u64, revision: u64, width: u32, height: u32, pixels: Arc<Vec<u8>>, style: f32 },
     /// A triangle filling `r`, pointing right (or left): transport glyphs
     /// drawn as geometry, so they centre on their shape — a font's ▶ sits
     /// wherever its metrics put it, which is never the middle of a disc.
@@ -1365,9 +1366,9 @@ impl Gpu {
                         pad: 0.0,
                     });
                 }
-                Item::Mask { r, .. } => push(&mut data, &mut batches, clip, None, Instance {
+                Item::Mask { r, style, .. } => push(&mut data, &mut batches, clip, None, Instance {
                     pos: [r.x, r.y], size: [r.w, r.h], uv: [0.0, 0.0, 1.0, 1.0],
-                    color: [0.0; 4], mode: 8.0, p0: 0.0, p1: 0.0, pad: 0.0,
+                    color: [0.0; 4], mode: 8.0, p0: *style, p1: 0.0, pad: 0.0,
                 }),
                 Item::Triangle { r, color, left, radius } => push(&mut data, &mut batches, clip, None, Instance {
                     pos: [r.x, r.y],

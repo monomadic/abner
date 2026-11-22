@@ -32,7 +32,12 @@ impl Mask {
     }
 
     /// A swept circle (capsule), so sparse pointer events cannot leave gaps.
+    #[cfg(test)]
     pub fn paint(&mut self, from: (f32, f32), to: (f32, f32), radius: f32) {
+        self.stroke(from, to, radius, 255);
+    }
+    /// The same capsule writing `value`: 255 paints, 0 erases.
+    pub fn stroke(&mut self, from: (f32, f32), to: (f32, f32), radius: f32, value: u8) {
         let x0 = (from.0.min(to.0) - radius).floor().max(0.0) as u32;
         let y0 = (from.1.min(to.1) - radius).floor().max(0.0) as u32;
         let x1 = ((from.0.max(to.0) + radius).ceil().max(0.0) as u32).min(self.width);
@@ -51,8 +56,8 @@ impl Mask {
                 };
                 if (px - t * dx).powi(2) + (py - t * dy).powi(2) <= radius * radius {
                     let p = &mut pixels[(y * self.width + x) as usize];
-                    changed |= *p != 255;
-                    *p = 255;
+                    changed |= *p != value;
+                    *p = value;
                 }
             }
         }

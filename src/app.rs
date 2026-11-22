@@ -222,6 +222,14 @@ pub struct App {
     masks: Vec<Option<Mask>>,
     mask_mode: bool,
     brush_diameter: f32,
+    /// The in-place mask editor: the brush erases; 0 overlay / 1 mask only /
+    /// 2 hidden; the size slider is held; (mask id, revision, painted share).
+    mask_erase: bool,
+    mask_view: u8,
+    brush_slider_drag: bool,
+    mask_coverage: (u64, u64, f32),
+    /// `--processor-mask`: open the focused stage's mask once it has fields.
+    pending_processor_mask: bool,
     painting: bool,
     stroke_last: Option<(f32, f32)>,
     cursor_inside: bool,
@@ -752,6 +760,7 @@ impl App {
             masks: (0..videos.len()).map(|_| None).collect(),
             mask_mode: false,
             brush_diameter: cfg.mask.brush_size,
+            mask_erase: false, mask_view: 0, brush_slider_drag: false, mask_coverage: (0, 0, 0.), pending_processor_mask: false,
             painting: false,
             stroke_last: None,
             cursor_inside: false,
@@ -890,7 +899,10 @@ impl App {
         self.detection_range=(!crop).then(||crate::watermark::Range{start:0.,end:self.videos[self.active].info.duration});
         self.mask_mode=true;self.playing=false;self.show_ui=true;self.ensure_mask();
         self.crop=if crop {Some(saved_crop.unwrap_or_else(||self.full_crop()))}else{None};
-        self.zoom=1.;self.center=(0.5,0.5);self.seek_all(self.t,true);
+        self.mask_erase=false;self.mask_view=0;
+        // A mask painted on the Process page keeps the view it was opened from.
+        if return_mode!=4 || crop {self.zoom=1.;self.center=(0.5,0.5);}
+        self.seek_all(self.t,true);
     }
     fn finish_editor(&mut self, apply:bool) {
         self.watermark_task = None;
@@ -1225,7 +1237,7 @@ impl App {
         let mask = self.masks[self.active].as_mut().unwrap();
         let point = ((self.cursor.0 - r.x) / r.w * mask.width as f32,
                      (self.cursor.1 - r.y) / r.h * mask.height as f32);
-        mask.paint(self.stroke_last.unwrap_or(point), point, self.brush_diameter * 0.5);
+        mask.stroke(self.stroke_last.unwrap_or(point), point, self.brush_diameter * 0.5, if self.mask_erase { 0 } else { 255 });
         self.stroke_last = Some(point);
         self.mask_status.clear();
     }
@@ -1480,15 +1492,15 @@ impl App {
         // is being analysed is the only thing lit.
         let analysing = self.detection_area.filter(|_| self.watermark_task.is_some() && self.crop.is_none());
         if let Some(c) = analysing {
-            items.push(Item::Mask { r, id: mask.id, revision: mask.revision,
-                width: mask.width, height: mask.height, pixels: mask.pixels.clone() });
+            if let Some(style) = self.mask_style() { items.push(Item::Mask { r, id: mask.id, revision: mask.revision,
+                width: mask.width, height: mask.height, pixels: mask.pixels.clone(), style }); }
             self.build_marquee(items, c, SEARCH_DIM, false);
         } else if let Some(c) = self.active_marquee() {
             self.build_crop_layer(items, c);
             self.draw_aspect_buttons(items);
         } else {
-            items.push(Item::Mask { r, id: mask.id, revision: mask.revision,
-                width: mask.width, height: mask.height, pixels: mask.pixels.clone() });
+            if let Some(style) = self.mask_style() { items.push(Item::Mask { r, id: mask.id, revision: mask.revision,
+                width: mask.width, height: mask.height, pixels: mask.pixels.clone(), style }); }
         }
         if self.brush_cursor_visible() {
             let diameter = self.brush_diameter * r.w / mask.width as f32;
@@ -2235,6 +2247,9 @@ impl App {
     }
     pub(crate) fn open_processor_picker(&mut self) { self.select_workspace_mode(4); self.processors.open_picker(); }
     /// `--processor-render`: what the panel's Render button does, for captures.
+    /// `--processor-mask`, for captures: the tick that finds the stage's
+    /// mask input opens its editor.
+    pub fn open_processor_mask(&mut self) { self.pending_processor_mask = true; }
     pub fn render_processor_frame(&mut self) {
         self.processors.render_frame();
     }
@@ -2316,7 +2331,7 @@ impl App {
         if self.export_page.editing_filename() && self.export_page.key(k) { return; }
         if self.editor.is_some() {
             if k==Key::Escape {self.finish_editor(false);return}
-            if k==Key::Enter {self.finish_editor(true);return}
+            if k==Key::Enter {self.activate(Action::ApplyEdit);return}
             if matches!(k,Key::Char('c'|'C')) && self.editor.as_ref().is_some_and(|e|!matches!(e.owner,crate::spatial::Owner::Source)) {return}
         }
         // On the Process page M and D belong to the focused stage's mask:
@@ -2445,6 +2460,8 @@ impl App {
                 Key::Char('c' | 'C') => { self.toggle_crop(); return; }
                 Key::Char('s' | 'S') => { self.save_mask(); return; }
                 Key::Char('d' | 'D') if self.crop.is_none() => { self.toggle_detection_panel(); return; }
+                Key::Char('e' | 'E') if self.inplace_mask() => { self.mask_erase = true; return; }
+                Key::Char('b' | 'B') if self.inplace_mask() => { self.mask_erase = false; return; }
                 Key::Undo if self.crop.is_none() => { self.step_mask_history(false); return; }
                 Key::Redo if self.crop.is_none() => { self.step_mask_history(true); return; }
                 Key::Char('e' | 'E') if self.crop.is_some() => { self.export_crop(); return; }
@@ -2544,6 +2561,7 @@ impl App {
 
     pub fn cursor_moved(&mut self, x: f32, y: f32) {
         if self.detection_samples_drag {self.set_detection_samples(x);self.cursor=(x,y);return;}
+        if self.brush_slider_drag {self.set_brush_from_slider(x);self.cursor=(x,y);return;}
         if let Some(end)=self.detection_drag {
             let track=self.detection_track();let info=&self.videos[self.active].info;let duration=info.duration;
             if let Some(range)=&mut self.detection_range {range.set_edge(end,((x-track.x)/track.w).clamp(0.,1.) as f64*duration,duration,info.fps);}
@@ -2683,9 +2701,17 @@ impl App {
         }
         if self.mask_mode && self.processors.open {
             self.cursor = (x,y); self.cursor_inside = true;
+            if self.inplace_mask() {
+                let track = self.brush_slider();
+                if contains(RectPx { x: track.x - 8., y: track.y - 10., w: track.w + 16., h: 24. }, x, y) {
+                    self.brush_slider_drag = true; self.set_brush_from_slider(x); return;
+                }
+            }
             if let Some(c) = self.embedded_editor_controls().into_iter().find(|c| c.contains(x,y)) {
                 self.activate(c.action); return;
             }
+            // The tool bar and the inspector cover the page's own controls.
+            if self.inplace_mask() && (contains(self.processors.tool_bar(self.vp).r, x, y) || contains(self.processors.side_rect(self.vp), x, y)) { return; }
         }
         if self.show_ui && self.ready() && !(self.mask_mode && contains(self.canvas(),x,y)) && self.processors.click(x, y, self.vp) {
             self.apply_processor_transport();
@@ -2793,7 +2819,7 @@ impl App {
 
     pub fn mouse_up(&mut self) {
         self.export_page.release_text();
-        self.detection_drag=None;self.detection_samples_drag=false;
+        self.detection_drag=None;self.detection_samples_drag=false;self.brush_slider_drag=false;
         // Dragged shut: the toggle reopens the rail at the width it had.
         if let Some((_, from)) = self.source_resize.take()
             && !self.show_sources { self.source_width = Some(from); }
@@ -3408,7 +3434,16 @@ impl App {
         let preview_end = segment.map(|s| s.end);
         self.processors.input_owner(self.videos[self.active].spatial_id);
         self.processors.set_crops(self.crop_schedule());
-        self.processors.editor_bar = self.mask_mode;
+        if self.pending_processor_mask && self.editor.is_none() && self.processors.request_mask(false) {
+            self.pending_processor_mask = false;
+            self.apply_processor_transport();
+        }
+        self.processors.editor_bar = self.mask_mode && !self.inplace_mask();
+        if self.inplace_mask() && !self.painting
+            && let Some(m) = self.masks[self.active].as_ref() && (m.id, m.revision) != (self.mask_coverage.0, self.mask_coverage.1) {
+            let painted = m.pixels.iter().filter(|&&p| p != 0).count();
+            self.mask_coverage = (m.id, m.revision, painted as f32 / m.pixels.len().max(1) as f32);
+        }
         self.processors.source(
             self.active,
             [
@@ -3443,21 +3478,34 @@ impl App {
                     let v = &self.videos[self.active];
                     crate::processor_gui::draw_region_preview(&mut items,picture,[v.info.width as usize,v.info.height as usize],region);
                 }
+            let inplace = self.inplace_mask();
+            if inplace {
+                // A ring and a line name what is being edited, where the
+                // picture is: nothing else about the page has changed.
+                items.push(Item::Rect(RectItem { radius: CANVAS_RADIUS, border_w: 2., border_color: ACCENT, ..RectItem::new(canvas, [0.; 4]) }));
+                items.push(Item::Rect(RectItem { radius: 3., ..RectItem::new(RectPx { x: canvas.x + 14., y: canvas.y + 15., w: 6., h: 6. }, ACCENT) }));
+                ui_label(&mut items, canvas.x + 28., canvas.y + 18., 10., hex_color(0x9fd0ff),
+                    format!("EDITING MASK · {}", self.mask_owner_name().to_uppercase()), Align::Left, canvas.w - 40.);
+            } else {
             let mode_label = if self.crop.is_some() { "Processing region mode" } else { "Mask mode" };
             let label_y = (picture.y - 18.).max(canvas.y + 18.).min(canvas.y + canvas.h - 18.);
             ui_label(&mut items,canvas.x+canvas.w/2.,label_y,13.,WORKSPACE_TEXT,mode_label,Align::Center,canvas.w-24.);
+            }
             if !self.mask_status.is_empty() {
                 ui_label(&mut items,canvas.x+canvas.w/2.,canvas.y+canvas.h-if self.detection_range.is_some()||self.crop.is_some(){42.}else{16.},10.,WORKSPACE_TEXT,&self.mask_status,Align::Center,canvas.w-24.);
             }
             board.recess(&mut items);
-            let bar = ButtonBar::at(canvas.x,HEADER_H,canvas.w);
+            let bar = if inplace { self.processors.tool_bar(vp) } else { ButtonBar::at(canvas.x,HEADER_H,canvas.w) };
             items.push(Item::Clip(Some(bar.r)));
-            bar.draw(&mut items);
+            if inplace { bar.draw_radii(&mut items, [0., 0., CANVAS_RADIUS, CANVAS_RADIUS]); } else { bar.draw(&mut items); }
             for c in self.embedded_editor_controls() {
+                if !contains(bar.r, c.r.x, c.r.y) { continue; }
                 let hovered = self.cursor_inside && contains(c.r, self.cursor.0, self.cursor.1);
-                c.draw(&mut items, hovered, self.control_dead(&c.action));
+                if inplace && matches!(c.action, Action::ApplyEdit) { ButtonBar::primary(&mut items, c.r, "Done", hovered, false); }
+                else { c.draw(&mut items, hovered, self.control_dead(&c.action)); }
             }
             items.push(Item::Clip(None));
+            if inplace { self.draw_mask_inspector(&mut items); }
         }
         if self.show_ui {self.draw_detection_range(&mut items);}
         if self.processors.open && self.show_ui { self.draw_footer_end(&mut items, vp); self.processors.draw_picker(&mut items, vp); }
@@ -3729,7 +3777,131 @@ impl App {
         }).unwrap_or(self.videos.len())
     }
 
+    /// The Process page's mask editor works in place: the picture, zoom and
+    /// playhead stay put, the bar under the picture carries the tools and the
+    /// settings column becomes the mask inspector.
+    fn inplace_mask(&self) -> bool {
+        self.processors.open && self.mask_mode && self.crop.is_none() && self.show_ui && self.editor.is_some()
+    }
+    /// How the mask layer is drawn, `None` for hidden (`Item::Mask::style`).
+    fn mask_style(&self) -> Option<f32> {
+        if !self.inplace_mask() { return Some(0.); }
+        match self.mask_view { 0 => Some(1.), 1 => Some(2.), _ => None }
+    }
+    fn mask_owner_name(&self) -> String {
+        match self.editor.as_ref().map(|e| &e.owner) {
+            Some(crate::spatial::Owner::Plugin { id, .. }) => self.processors.name_of(id).unwrap_or(id).to_owned(),
+            _ => "Source".into(),
+        }
+    }
+    /// The brush slider's track; 4 to 512 image pixels on a log scale.
+    fn brush_slider(&self) -> RectPx {
+        let s = self.processors.side_rect(self.vp);
+        RectPx { x: s.x + 16., y: s.y + 104., w: (s.w - 32.).max(1.), h: 4. }
+    }
+    fn set_brush_from_slider(&mut self, x: f32) {
+        let r = self.brush_slider();
+        let t = ((x - r.x) / r.w).clamp(0., 1.);
+        self.brush_diameter = 2f32.powf(2. + 7. * t).round();
+    }
+    fn mask_inspector_controls(&self) -> Vec<Control> {
+        let s = self.processors.side_rect(self.vp);
+        let (x, w) = (s.x + 16., (s.w - 32.).max(1.));
+        let row = |y: f32, n: usize, i: usize| { let bw = (w - 4. * (n - 1) as f32) / n as f32; RectPx { x: x + i as f32 * (bw + 4.), y: s.y + y, w: bw, h: 26. } };
+        let mut out = Vec::new();
+        for (i, px) in [16u16, 32, 64, 128].into_iter().enumerate() {
+            out.push(Control::new(row(120., 4, i), &px.to_string(), (self.brush_diameter - px as f32).abs() < 0.5, Action::BrushPreset(px)));
+        }
+        for (i, label) in ["Overlay", "Mask", "Hidden"].into_iter().enumerate() {
+            out.push(Control::new(row(186., 3, i), label, self.mask_view == i as u8, Action::MaskView(i as u8)));
+        }
+        for (i, (label, action)) in [("Invert", Action::InvertMask), ("Clear", Action::ClearMask), ("Export", Action::Save)].into_iter().enumerate() {
+            out.push(Control::new(row(356., 3, i), label, false, action));
+        }
+        out
+    }
+    fn draw_mask_inspector(&self, items: &mut Vec<Item>) {
+        let s = self.processors.side_rect(self.vp);
+        if s.w > 0. {
+            items.push(Item::Clip(None));
+            items.push(Item::Rect(RectItem::new(s, WORKSPACE_PANEL)));
+            items.push(Item::Rect(RectItem::new(RectPx { w: 1., ..s }, WORKSPACE_RULE)));
+            items.push(Item::Clip(Some(s)));
+            let (x, w) = (s.x + 16., (s.w - 32.).max(1.));
+            let head = |items: &mut Vec<Item>, y: f32, t: &str| ui_label(items, x, s.y + y, 10., WORKSPACE_MUTED, t, Align::Left, w);
+            ui_label(items, x, s.y + 24., 13., WORKSPACE_TEXT, "Mask", Align::Left, w);
+            ui_label(items, x, s.y + 43., 10., WORKSPACE_MUTED, self.mask_owner_name(), Align::Left, w);
+            head(items, 72., "BRUSH");
+            ui_label(items, x, s.y + 90., 11., WORKSPACE_TEXT, if self.mask_erase { "Eraser size" } else { "Size" }, Align::Left, w - 70.);
+            ui_label(items, x + w, s.y + 90., 11., WORKSPACE_TEXT, format!("{:.0} px", self.brush_diameter), Align::Right, 70.);
+            let track = self.brush_slider();
+            let t = ((self.brush_diameter.max(1.).log2() - 2.) / 7.).clamp(0., 1.);
+            items.push(Item::Rect(RectItem { radius: 2., ..RectItem::new(track, hex_color(0x2a2a2a)) }));
+            items.push(Item::Rect(RectItem { radius: 2., ..RectItem::new(RectPx { w: track.w * t, ..track }, ACCENT) }));
+            items.push(Item::Rect(RectItem { radius: 6., ..RectItem::new(RectPx { x: track.x + track.w * t - 6., y: track.y - 4., w: 12., h: 12. }, WORKSPACE_TEXT) }));
+            head(items, 168., "VIEW");
+            head(items, 234., "COVERAGE");
+            let (id, w_px, h_px) = self.masks[self.active].as_ref().map_or((0, 0, 0), |m| (m.id, m.width, m.height));
+            let share = if self.mask_coverage.0 == id { self.mask_coverage.2 * 100. } else { 0. };
+            ui_label(items, x, s.y + 254., 12., WORKSPACE_TEXT, if share > 0. { format!("{share:.1}% of frame") } else { "Nothing painted yet".into() }, Align::Left, w);
+            ui_label(items, x, s.y + 271., 10., WORKSPACE_MUTED, format!("{w_px}×{h_px} · same mask on every frame"), Align::Left, w);
+            ui_label(items, x, s.y + 288., 10., WORKSPACE_MUTED, "Scrub the transport to check it holds.", Align::Left, w);
+            head(items, 338., "MASK FILE");
+            for c in self.mask_inspector_controls() {
+                let hovered = self.cursor_inside && contains(c.r, self.cursor.0, self.cursor.1);
+                c.draw(items, hovered, false);
+            }
+            head(items, 408., "SHORTCUTS");
+            for (i, (k, a)) in [("drag", "paint"), ("B  E", "brush, eraser"), ("[  ]", "brush size"), ("⌘Z", "undo"), ("D", "autodetect"), ("Enter", "done, render frame"), ("esc", "cancel")].into_iter().enumerate() {
+                let y = s.y + 428. + i as f32 * 17.;
+                ui_label(items, x, y, 10., WORKSPACE_TEXT, k, Align::Left, 60.);
+                ui_label(items, x + 64., y, 10., WORKSPACE_MUTED, a, Align::Left, (w - 64.).max(1.));
+            }
+            items.push(Item::Clip(None));
+        }
+        // The chain and the renders stay visible, set back while editing.
+        items.push(Item::Rect(RectItem::new(crate::processor_gui::Panel::rail_rect(self.vp), [0., 0., 0., 0.78])));
+    }
+    /// One undo step that rewrites every mask pixel (invert, clear).
+    fn edit_mask(&mut self, status: &str, f: impl Fn(u8) -> u8) {
+        self.commit_stroke();
+        self.watermark_task = None;
+        let Some(mask) = self.masks.get_mut(self.active).and_then(|m| m.as_mut()) else { return; };
+        let previous = mask.pixels.clone();
+        let next: Vec<u8> = previous.iter().map(|&p| f(p)).collect();
+        if *previous == next { return; }
+        mask.pixels = std::sync::Arc::new(next);
+        mask.revision += 1;
+        self.record_mask(previous);
+        self.mask_status = status.into();
+    }
+
     fn embedded_editor_controls(&self) -> Vec<Control> {
+        if self.inplace_mask() {
+            // Leading tools while they fit, the two decisions always: a
+            // narrow bar drops a tool before it drops Cancel or Done.
+            let bar = self.processors.tool_bar(self.vp);
+            let c = bar.content();
+            let done = bar.trailing(84.);
+            let cancel = RectPx { x: done.x - ButtonBar::GAP - 72., w: 72., ..done };
+            let mut out = Vec::new();
+            let mut x = c.x;
+            for (label, w, action, selected, gap) in [
+                ("Paint", 60., Action::Erase(false), !self.mask_erase, ButtonBar::GAP),
+                ("Erase", 60., Action::Erase(true), self.mask_erase, ButtonBar::GROUP_GAP),
+                ("Undo", 52., Action::UndoMask, false, ButtonBar::GAP),
+                ("Redo", 52., Action::RedoMask, false, ButtonBar::GROUP_GAP),
+                ("Autodetect", 96., Action::Autodetect, self.detection_panel, 0.),
+            ] {
+                if x + w > cancel.x - ButtonBar::GROUP_GAP { break; }
+                out.push(Control::new(RectPx { x, w, ..c }, label, selected, action));
+                x += w + gap;
+            }
+            out.push(Control::new(cancel, "Cancel", false, Action::CancelEdit));
+            out.push(Control::new(done, "Done", false, Action::ApplyEdit));
+            out.extend(self.mask_inspector_controls());
+            return out;
+        }
         let v = self.canvas();
         let mut buttons = if self.crop.is_some() { vec![("Save still",Action::Save)] } else {
             vec![("Autodetect",Action::Autodetect),("−",Action::Brush(false)),("+",Action::Brush(true)),("Save mask",Action::Save)]
@@ -3899,7 +4071,17 @@ impl App {
         match action {
             Action::LaunchEditor(crop)=>{self.begin_editor(crop,None);return}
             Action::ResetEdit=>{self.watermark_task=None;self.clear_mask_history();if self.crop.is_some(){self.crop=Some(self.full_crop())}else{let v=&self.videos[self.active];self.masks[self.active]=Some(Mask::new(v.info.width,v.info.height));}return}
-            Action::ApplyEdit=>{self.finish_editor(true);return}
+            Action::ApplyEdit=>{
+                // Done on a processor's mask shows what the mask does.
+                let render=self.inplace_mask()&&self.editor.as_ref().is_some_and(|e|matches!(e.owner,crate::spatial::Owner::Plugin{..}));
+                self.finish_editor(true);
+                if render {self.processors.render_frame();}
+                return}
+            Action::Erase(on)=>{self.mask_erase=on;return}
+            Action::MaskView(v)=>{self.mask_view=v;return}
+            Action::BrushPreset(px)=>{self.brush_diameter=px as f32;return}
+            Action::InvertMask=>{self.edit_mask("Mask inverted",|p|255-p);return}
+            Action::ClearMask=>{self.edit_mask("Mask cleared",|_|0);return}
             Action::CancelEdit=>{self.finish_editor(false);return}
             Action::Tool(1|2)=>{if self.workspace_mode()!=if matches!(action,Action::Tool(2)){2}else{1}{self.begin_editor(matches!(action,Action::Tool(2)),None);}return}
             _=>{}
@@ -3945,7 +4127,8 @@ impl App {
                     self.toggle_crop();
                 }
             }
-            Action::LaunchEditor(_) | Action::ResetEdit | Action::ApplyEdit | Action::CancelEdit => unreachable!(),
+            Action::LaunchEditor(_) | Action::ResetEdit | Action::ApplyEdit | Action::CancelEdit
+            | Action::Erase(_) | Action::MaskView(_) | Action::BrushPreset(_) | Action::InvertMask | Action::ClearMask => unreachable!(),
             Action::RenderSource => self.render_source(),
             Action::Duplicate => self.duplicate_sources(),
             Action::OpenFiles => self.cmds.push(Cmd::OpenFiles),
@@ -7599,7 +7782,7 @@ impl Workspace {
 enum SourceAction { Duplicate, Remove, Crop }
 
 #[derive(Clone, Copy)]
-enum Action { LaunchEditor(bool), ResetEdit, ApplyEdit, CancelEdit, Duplicate, RenderSource, OpenFiles, ToggleSources, ToggleInspector, ToggleDetail, Tool(usize), View(Mode), Autodetect, DetectionArea, UndoMask, RedoMask, Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
+enum Action { LaunchEditor(bool), ResetEdit, ApplyEdit, CancelEdit, Erase(bool), MaskView(u8), BrushPreset(u16), InvertMask, ClearMask, Duplicate, RenderSource, OpenFiles, ToggleSources, ToggleInspector, ToggleDetail, Tool(usize), View(Mode), Autodetect, DetectionArea, UndoMask, RedoMask, Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
 #[derive(Clone, Copy, PartialEq)]
 enum CutAction { TogglePosters, FrameChanges(bool), TimeDisplay(bool),
     // Set in / out: no key or button reaches these while the feature is disabled.
@@ -8151,6 +8334,64 @@ mod tests {
         app.mouse_down(apply.r.x + apply.r.w/2.,apply.r.y + apply.r.h/2.);
         assert!(app.processors.open && !app.mask_mode);
         assert!(app.processors.binding("test.processor","mask").unwrap().mask.is_some());
+    }
+
+    #[test]
+    fn process_mask_editor_works_in_place() {
+        let clip = test_clip().expect("video test fixture");
+        let mut app = mk_app(&clip, 1);
+        app.activate(Action::Tool(4));
+        app.tick(0., (1280., 800.), 1.);
+        app.zoom = 2.;
+        let before = app.content_rect(0);
+        app.begin_editor(false, Some(("test.processor".into(), "mask".into())));
+        app.tick(0., (1280., 800.), 1.);
+        assert!(app.inplace_mask());
+        let during = app.content_rect(0);
+        assert_eq!((before.x, before.y, before.w, before.h), (during.x, during.y, during.w, during.h), "the picture and its zoom stay put");
+        // The tools sit on the bar under the picture, never over it.
+        let (bar, canvas) = (app.processors.tool_bar(app.vp).r, app.canvas());
+        assert!(bar.y >= canvas.y + canvas.h - 0.5);
+        let controls = app.embedded_editor_controls();
+        let on_bar = |want: fn(&Action) -> bool| {
+            let c = controls.iter().find(|c| want(&c.action)).unwrap();
+            contains(bar, c.r.x, c.r.y) && c.r.x + c.r.w <= bar.x + bar.w
+        };
+        assert!(on_bar(|a| matches!(a, Action::Erase(true))) && on_bar(|a| matches!(a, Action::UndoMask))
+            && on_bar(|a| matches!(a, Action::Autodetect)) && on_bar(|a| matches!(a, Action::CancelEdit))
+            && on_bar(|a| matches!(a, Action::ApplyEdit)));
+        let count = |app: &App| app.masks[0].as_ref().unwrap().pixels.iter().filter(|&&p| p != 0).count();
+        let (cx, cy) = (canvas.x + canvas.w / 2., canvas.y + canvas.h / 2.);
+        app.mouse_down(cx, cy); app.mouse_up();
+        let painted = count(&app);
+        assert!(painted > 0);
+        app.key(Key::Char('e'));
+        app.mouse_down(cx, cy); app.mouse_up();
+        assert_eq!(count(&app), 0, "the eraser takes the same footprint back");
+        app.activate(Action::UndoMask);
+        assert_eq!(count(&app), painted);
+        app.key(Key::Char('b'));
+        let total = app.masks[0].as_ref().unwrap().pixels.len();
+        app.activate(Action::InvertMask);
+        assert_eq!(count(&app), total - painted);
+        app.activate(Action::UndoMask);
+        assert_eq!(count(&app), painted, "invert is one undo step");
+        // Overlay shows only the painted pixels; Hidden draws no mask at all.
+        let styles = |app: &mut App| app.tick(0., (1280., 800.), 1.).items.iter().filter_map(|i| match i { Item::Mask { style, .. } => Some(*style), _ => None }).collect::<Vec<_>>();
+        let all = |v: Vec<f32>, want: f32| !v.is_empty() && v.iter().all(|s| *s == want);
+        assert!(all(styles(&mut app), 1.));
+        app.activate(Action::MaskView(1));
+        assert!(all(styles(&mut app), 2.));
+        app.activate(Action::MaskView(2));
+        assert!(styles(&mut app).is_empty());
+        app.activate(Action::BrushPreset(32));
+        assert_eq!(app.brush_diameter, 32.);
+        let done = app.embedded_editor_controls().into_iter().find(|c| matches!(c.action, Action::ApplyEdit)).unwrap();
+        app.mouse_down(done.r.x + 5., done.r.y + 5.);
+        assert!(app.processors.open && !app.mask_mode);
+        assert_eq!(app.processors.binding("test.processor", "mask").unwrap().mask.unwrap().iter().filter(|&&p| p != 0).count(), painted);
+        let after = app.content_rect(0);
+        assert_eq!((before.x, before.y, before.w, before.h), (after.x, after.y, after.w, after.h), "and Done leaves the view where it was");
     }
 
     #[test]
