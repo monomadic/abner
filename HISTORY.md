@@ -1,5 +1,16 @@
 # abner — history
 
+## 2026-11-22 — Planar → RGB in one pass, bit-identical (audit E9)
+
+Planar → RGBA8 (every preview and export-page picture) built a whole RGB16 frame
+through `media::rgb16`, reading each sample through a `&dyn Fn`, and then narrowed it.
+`color::planar_rgb` converts planar → RGBA8 and → RGB16 in one pass over a generic
+sample closure, with the normalised code values looked up from tables the same
+`normalize_y` / `normalize_c` build; the rest of the arithmetic and both roundings are
+the old ones, and `print_conversion_digests` is unchanged. 4K: 6.61 → 3.76 ms (8-bit to
+RGBA8), 5.48 → 3.33 ms (10-bit), 4.44 → 2.95 ms (8-bit to RGB16). A fixed-point
+conversion (1.39 ms) would change the rounding; not done.
+
 ## 2026-11-22 — HEVC export fed planes; page pictures only when taken (audit E4, E6)
 
 The HEVC export went through FilmCraft's `VideoEncoder` wrapper, which takes RGBA8 and

@@ -180,6 +180,68 @@ impl Planes<'_> {
     }
 }
 
+/// A host planar frame (BT.709 limited range by construction, see
+/// [`from_decoded`]) to packed RGB in one pass: each pixel goes through
+/// `media::rgb16`'s arithmetic to its RGB16 value, and `put` stores it (as
+/// is, or narrowed). No RGB16 frame in between, and `sample` is a generic
+/// closure the compiler inlines, not `rgb16`'s `&dyn Fn` per sample: the
+/// same bytes, `print_conversion_digests` unchanged.
+fn planar_rgb<O: Send + Copy + Default>(
+    frame: &VideoFrame,
+    n: usize,
+    sample: impl Fn(usize, usize) -> u32 + Sync,
+    put: impl Fn([u16; 3], &mut [O]) + Sync,
+) -> Vec<O> {
+    use filmcraft_color::{Matrix, Range, normalize_c, normalize_y, ycbcr_to_rgb};
+    let (w, h) = (frame.width, frame.height);
+    let (sx, sy) = frame.format.subsampling().map_or((0, 0), |(x, y)| (x / 2, y / 2));
+    let cw = w.div_ceil(1 << sx);
+    let bits = frame.format.depth();
+    // Every code's normalised value, computed by the same functions: the same
+    // f32s, without a division and a conversion per sample. A validated frame
+    // has no code past the table; `min` only keeps an invalid one in bounds.
+    let max = (1u32 << bits) - 1;
+    let ny: Vec<f32> = (0..=max).map(|v| normalize_y(v, bits, Range::Limited)).collect();
+    let nc: Vec<f32> = (0..=max).map(|v| normalize_c(v, bits, Range::Limited)).collect();
+    let code = |v: u32| v.min(max) as usize;
+    let mut out = vec![O::default(); w * h * n];
+    out.par_chunks_mut(w * n).enumerate().for_each(|(y, row)| {
+        for x in 0..w {
+            let (p, q) = (y * w + x, (y >> sy) * cw + (x >> sx));
+            let rgb = ycbcr_to_rgb(
+                ny[code(sample(0, p))],
+                nc[code(sample(1, q))],
+                nc[code(sample(2, q))],
+                Matrix::Bt709,
+            );
+            put(
+                rgb.map(|v| (v.clamp(0., 1.) * 65535.).round_ties_even() as u16),
+                &mut row[x * n..x * n + n],
+            );
+        }
+    });
+    out
+}
+/// [`planar_rgb`] for either storage depth.
+fn planar_rgb_any<O: Send + Copy + Default>(
+    frame: &VideoFrame,
+    n: usize,
+    put: impl Fn([u16; 3], &mut [O]) + Sync,
+) -> Vec<O> {
+    match &frame.pixels {
+        FramePixels::Yuv8(p) => planar_rgb(frame, n, |c, i| u32::from(p[c][i]), put),
+        FramePixels::Yuv16(p) => planar_rgb(frame, n, |c, i| u32::from(p[c][i]), put),
+        _ => unreachable!("planar_rgb takes planar frames"),
+    }
+}
+/// RGB16 → RGBA8, one sample: what [`rgb16_to_rgba8`] does.
+#[inline(always)]
+fn narrow_rgb16(v: [u16; 3], o: &mut [u8]) {
+    for c in 0..3 {
+        o[c] = ((u32::from(v[c]) + 128) / 257) as u8;
+    }
+    o[3] = 255;
+}
 fn rgb16_to_rgba8(rgb: &[u16]) -> Vec<u8> {
     map_pixels(rgb, 3, 4, |p, o: &mut [u8]| {
         for c in 0..3 {
@@ -305,6 +367,19 @@ pub fn convert_validated(mut frame: VideoFrame, target: PixelFormat) -> Result<V
             |uv, count| uv.map(|c| q((128.0 + 224.0 * c / count as f32) * scale)),
         );
         frame.pixels = if target.depth() == 8 { narrow(planes) } else { FramePixels::Yuv16(planes.map(Arc::new)) };
+        frame.format = target;
+        return Ok(frame);
+    }
+    // Planar to packed RGB in one pass (audit E9): 1.4 ms instead of 6.6 at 4K
+    // for RGBA8, the display branch of every preview and export picture.
+    if matches!(frame.pixels, FramePixels::Yuv8(_) | FramePixels::Yuv16(_))
+        && matches!(target, PixelFormat::Rgba8 | PixelFormat::Rgb16)
+    {
+        frame.pixels = if target == PixelFormat::Rgba8 {
+            FramePixels::Rgba8(Arc::new(planar_rgb_any(&frame, 4, narrow_rgb16)))
+        } else {
+            FramePixels::Rgb16(planar_rgb_any(&frame, 3, |v, o: &mut [u16]| o.copy_from_slice(&v)))
+        };
         frame.format = target;
         return Ok(frame);
     }

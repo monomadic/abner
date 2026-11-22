@@ -2,7 +2,7 @@
 
 An audit of the processed export (`media_io::pipeline_export_with_inputs`) and the
 Process page's preview renderer (`processor_gui::render`), made the day the export
-went to three threads. Three items were fixed the same day and E7, E2, P3, E4 and E6 after them; the rest are open and
+went to three threads. Three items were fixed the same day and E7, E2, P3, E4, E6 and E9 after them; the rest are open and
 tracked as task 24 in [TASKS.md](../TASKS.md).
 
 **Summary.** With no plugin time, the export already runs at the hardware
@@ -161,15 +161,26 @@ size are multiples of the chroma subsampling can be cut from the planes directly
 with no conversion in either direction. `E` in the crop marquee already floors to
 even sides.
 
-### E9. Y'CbCr → RGBA8 goes through an RGB16 intermediate — open
+### E9. Y'CbCr → RGBA8 went through an RGB16 intermediate — fixed, bit-identical
 
-`color::convert` has no direct planar → RGBA8 path: it builds a 48-bit-per-pixel
-RGB16 frame (50 MB at 4K) and narrows it. `media::rgb16` also reads each sample
-through a `&dyn Fn`, three indirect calls per pixel, which blocks vectorization. A
-direct fixed-point loop measured 1.39 ms against 5.07. This is the conversion
-behind every preview "before" frame and every 8-bit display branch. A direct path
-rounds once instead of twice, so `print_conversion_digests` will change: decide
-that the new rounding is the reference before landing it.
+`color::convert` had no direct planar → RGBA8 path: it built a 48-bit-per-pixel
+RGB16 frame (50 MB at 4K) through `media::rgb16`, which reads each sample through a
+`&dyn Fn`, and then narrowed it. `color::planar_rgb` now does planar → RGBA8 and
+planar → RGB16 in one pass with the same per-pixel arithmetic: the normalised code
+values come from a table built by the same `normalize_y` / `normalize_c` (the same
+`f32`s without a division and a conversion per sample), `ycbcr_to_rgb` and the
+RGB16 rounding are unchanged, and RGBA8 is narrowed per sample as before.
+`print_conversion_digests` is unchanged (TOTAL `dc5c45cd6fd143d8` before and after).
+
+| 4K, mean of 8 | Before | After |
+|---|---|---|
+| yuv420p8 → rgba8 | 6.61 ms | 3.76 ms |
+| yuv420p10 → rgba8 | 5.48 ms | 3.33 ms |
+| yuv420p8 → rgb16 | 4.44 ms | 2.95 ms |
+
+The fixed-point sketch's 1.39 ms needs what remains: a float division per pixel
+(green) and a second rounding (RGB16 → RGBA8). Removing those changes output, so
+it waits for a decision that the new rounding is the reference.
 
 ## Process preview
 
