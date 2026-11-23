@@ -1383,7 +1383,6 @@ impl App {
         if !self.watermark_matches(task.source,task.mask_id,task.revision) {
             self.watermark_task=None;self.mask_status="Detection discarded because the mask changed".into();return;
         }
-        if task.expired() {self.watermark_task=None;self.mask_status="Watermark detection timed out; try a shorter clip".into();return;}
         match task.receiver.try_recv() {
             Ok(result)=>{
                 let region = task.region;
@@ -1392,6 +1391,10 @@ impl App {
                     Ok(proposal)=>self.apply_watermark(proposal, region),
                     Err(e)=>self.mask_status=format!("Detection failed: {e}"),
                 }
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) if task.expired() => {
+                self.watermark_task = None;
+                self.mask_status = "Autodetect stalled. Try a shorter range.".into();
             }
             Err(std::sync::mpsc::TryRecvError::Empty)=>self.mask_status=task.status(),
             Err(std::sync::mpsc::TryRecvError::Disconnected)=>{
@@ -1414,8 +1417,19 @@ impl App {
             !evidence.is_empty() && evidence.select(size, crate::watermark::MAX_SENSITIVITY).contains(&255)
         });
         if !found && !weak {
-            if review {self.mask_status.clear();self.detection_result=Some(Detection::Nothing(format!("Nothing static found in {} frames.",proposal.samples)));}
-            else {self.mask_status="No confident watermark found; try another point in the clip".into();}
+            let message = if proposal.barely_changes {
+                "The picture barely changes in this range.".into()
+            } else {
+                format!("Nothing static found in {} frames.", proposal.samples)
+            };
+            if review {
+                self.mask_status.clear();
+                self.detection_result = Some(Detection::Nothing(message));
+            } else if proposal.barely_changes {
+                self.mask_status = message;
+            } else {
+                self.mask_status = "No confident watermark found; try another point in the clip".into();
+            }
             return;
         }
         if review {
@@ -1430,6 +1444,7 @@ impl App {
                 weak,
                 added: 0,
                 samples: proposal.samples,
+                barely_changes: proposal.barely_changes,
             };
             review.refresh(mask);
             self.mask_status = if weak { "Weak candidates · raise sensitivity".into() } else { String::new() };
@@ -4034,6 +4049,11 @@ impl App {
                     format!("{} px to add · {percent:.2}%", review.added)
                 } else {
                     format!("{} px to add", review.added)
+                };
+                let text = if review.barely_changes && room >= 280. {
+                    format!("{text} · Little motion")
+                } else {
+                    text
                 };
                 (text, hex_color(0xff9d3a), None)
             }
@@ -8305,6 +8325,7 @@ struct DetectionReview {
     weak: bool,
     added: usize,
     samples: usize,
+    barely_changes: bool,
 }
 
 impl DetectionReview {
@@ -9024,14 +9045,17 @@ mod tests {
         assert_eq!(count(&app), 0);
         // A miss offers the next move and leaves the mask alone.
         let len = app.masks[0].as_ref().unwrap().pixels.len();
-        app.apply_watermark(crate::watermark::Proposal { pixels: vec![0; len], samples: 64, evidence: None }, None);
-        assert!(matches!(app.detection_result, Some(Detection::Nothing(_))));
+        let duration = app.videos[0].info.duration;
+        app.detection_range = Some(crate::watermark::Range { start: 0., end: duration * 0.5 });
+        app.apply_watermark(crate::watermark::Proposal { pixels: vec![0; len], samples: 1, evidence: None, barely_changes: true }, None);
+        assert!(matches!(&app.detection_result, Some(Detection::Nothing(why)) if why.contains("barely changes")));
         assert!(app.embedded_editor_controls().iter().any(|c| matches!(c.action, Action::DetectRetry(0))));
+        assert!(app.embedded_editor_controls().iter().any(|c| matches!(c.action, Action::DetectRetry(1)) && c.label == "Whole clip"));
         app.activate(Action::DetectDiscard);
         assert!(app.detection_result.is_none());
         // A hit is held as a proposal until it is added.
         let mut found = vec![0; len]; found[..500].fill(255);
-        app.apply_watermark(crate::watermark::Proposal { pixels: found, samples: 64, evidence: None }, None);
+        app.apply_watermark(crate::watermark::Proposal { pixels: found, samples: 64, evidence: None, barely_changes: false }, None);
         app.activate(Action::DetectOffset(-1));
         assert!(matches!(app.detection_result, Some(Detection::Proposal(DetectionReview { added: 500, .. }))));
         assert_eq!(count(&app), 0, "nothing joins the mask before Add to mask");
@@ -9099,7 +9123,7 @@ mod tests {
         task.region = Some(region);
         app.watermark_task = Some(task);
         send.send(Ok(crate::watermark::Proposal {
-            pixels: vec![0; mask.pixels.len()], samples: 64, evidence: Some(evidence),
+            pixels: vec![0; mask.pixels.len()], samples: 64, evidence: Some(evidence), barely_changes: false,
         })).unwrap();
         app.poll_watermark();
         assert!(app.mask_status.contains("Weak candidates"));
@@ -9178,7 +9202,7 @@ mod tests {
         );
         task.region = Some([10, 10, 8, 8]);
         app.watermark_task = Some(task);
-        send.send(Ok(crate::watermark::Proposal { pixels: original, samples: 64, evidence: None })).unwrap();
+        send.send(Ok(crate::watermark::Proposal { pixels: original, samples: 64, evidence: None, barely_changes: false })).unwrap();
         app.poll_watermark();
 
         let vp = (720., 480.);
@@ -9323,7 +9347,7 @@ mod tests {
         app.set_cut_mode(true);app.begin_editor(false,None);
         assert!(matches!(app.editor.as_ref().unwrap().owner,crate::spatial::Owner::Source));
         let mut pixels=vec![0;app.masks[0].as_ref().unwrap().pixels.len()];pixels[500]=255;
-        app.apply_watermark(crate::watermark::Proposal{pixels,samples:16, evidence: None}, None);
+        app.apply_watermark(crate::watermark::Proposal{pixels,samples:16, evidence: None, barely_changes: false}, None);
         app.finish_editor(true);
         assert_eq!(app.masks[0].as_ref().unwrap().pixels[500],255);
         assert!(app.cut_mode,"returns to the timeline after applying the source mask");
@@ -9346,12 +9370,12 @@ mod tests {
         mask.paint((10.,10.),(10.,10.),3.);
         let before=mask.pixels.clone();
         let mut proposal=vec![0;before.len()];proposal[500]=255;
-        app.apply_watermark(crate::watermark::Proposal{pixels:proposal.clone(),samples:16, evidence: None}, None);
+        app.apply_watermark(crate::watermark::Proposal{pixels:proposal.clone(),samples:16, evidence: None, barely_changes: false}, None);
         assert_eq!(app.masks[0].as_ref().unwrap().pixels[500],255);
         assert!(before.iter().zip(app.masks[0].as_ref().unwrap().pixels.iter()).all(|(&a,&b)|a==0||b==255));
         app.key(Key::Undo);
         assert_eq!(*app.masks[0].as_ref().unwrap().pixels,*before);
-        app.apply_watermark(crate::watermark::Proposal{pixels:proposal,samples:16, evidence: None}, None);
+        app.apply_watermark(crate::watermark::Proposal{pixels:proposal,samples:16, evidence: None, barely_changes: false}, None);
         app.finish_editor(false);
         assert!(app.masks[0].is_none(),"cancel restores pre-editor state");
     }
@@ -9369,7 +9393,7 @@ mod tests {
         let stroke=app.masks[0].as_ref().unwrap().pixels.clone();
         assert_ne!(*stroke,*empty);assert_eq!(app.mask_undo.len(),1,"one step per stroke");
         let mut proposal=vec![0;stroke.len()];proposal[0]=255;
-        app.apply_watermark(crate::watermark::Proposal{pixels:proposal,samples:16, evidence: None}, None);
+        app.apply_watermark(crate::watermark::Proposal{pixels:proposal,samples:16, evidence: None, barely_changes: false}, None);
         let detected=app.masks[0].as_ref().unwrap().pixels.clone();
         app.activate(Action::UndoMask);assert_eq!(*app.masks[0].as_ref().unwrap().pixels,*stroke);
         app.activate(Action::UndoMask);assert_eq!(*app.masks[0].as_ref().unwrap().pixels,*empty);
@@ -9408,7 +9432,7 @@ mod tests {
         app.watermark_task=Some(task);
         let mask=app.masks[0].as_mut().unwrap();mask.paint((10.,10.),(10.,10.),3.);
         let painted=mask.pixels.clone();
-        sender.send(Ok(crate::watermark::Proposal{pixels:vec![255;painted.len()],samples:16, evidence: None})).unwrap();
+        sender.send(Ok(crate::watermark::Proposal{pixels:vec![255;painted.len()],samples:16, evidence: None, barely_changes: false})).unwrap();
         app.poll_watermark();assert_eq!(*app.masks[0].as_ref().unwrap().pixels,*painted);
         assert!(cancel.load(std::sync::atomic::Ordering::Relaxed));
         let mask=app.masks[0].as_ref().unwrap();

@@ -2,6 +2,7 @@
 use filmcraft_color::Range;
 use filmcraft_frame::{PixelData, VideoFrame};
 use rayon::prelude::*;
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 #[derive(Clone)]
 pub(super) struct Planes {
@@ -120,6 +121,17 @@ impl Planes {
             && self.chroma == other.chroma
             && self.shifts == other.shifts
             && self.phase == other.phase
+    }
+
+    pub fn fingerprint(&self) -> u64 {
+        let mut hash = DefaultHasher::new();
+        self.shifts.hash(&mut hash);
+        self.phase.hash(&mut hash);
+        super::search::fingerprint(&self.luma, &mut hash);
+        for plane in &self.chroma {
+            super::search::fingerprint(plane, &mut hash);
+        }
+        hash.finish()
     }
 }
 

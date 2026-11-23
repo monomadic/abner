@@ -7,7 +7,30 @@ const MAX_FRAMES: usize = 64;
 const THUMB_W: usize = 64;
 const THUMB_H: usize = 36;
 
-type Thumbnail = [u16; THUMB_W * THUMB_H];
+pub(super) type Thumbnail = [u16; THUMB_W * THUMB_H];
+
+// Mean luma difference of three 8-bit code values, summed over the thumbnail.
+const QUIET_DISTANCE: u32 = 3 * 256 * (THUMB_W * THUMB_H) as u32;
+
+fn distance(a: &Thumbnail, b: &Thumbnail) -> u32 {
+    a.iter().zip(b).map(|(&a, &b)| u32::from(a.abs_diff(b))).sum()
+}
+
+fn median_is_quiet(mut distances: Vec<u32>) -> bool {
+    if distances.is_empty() {
+        return true;
+    }
+    let mid = distances.len() / 2;
+    *distances.select_nth_unstable(mid).1 < QUIET_DISTANCE
+}
+
+pub(super) fn barely_changes(thumbnails: &[Thumbnail]) -> bool {
+    median_is_quiet(
+        thumbnails.iter().enumerate().flat_map(|(i, a)| {
+            thumbnails[i + 1..].iter().map(move |b| distance(a, b))
+        }).collect(),
+    )
+}
 
 struct Sample {
     index: usize,
@@ -73,16 +96,20 @@ impl Reservoir {
         self.samples.sort_unstable_by_key(|sample| sample.index);
     }
 
+    /// Call before finish(), while the cached distances use the current slots.
+    pub fn barely_changes(&self) -> bool {
+        median_is_quiet(
+            (0..self.len()).flat_map(|a| self.distances[a][a + 1..self.len()].iter().copied())
+                .collect(),
+        )
+    }
+
     pub fn consider(&mut self, index: usize, picture: Arc<VideoFrame>) {
         let thumb = thumbnail(&picture, self.region);
         let len = self.samples.len();
         let mut distances = [0; MAX_FRAMES];
         for (distance, sample) in distances.iter_mut().zip(&self.samples) {
-            *distance = thumb
-                .iter()
-                .zip(&sample.thumb)
-                .map(|(&a, &b)| u32::from(a.abs_diff(b)))
-                .sum();
+            *distance = self::distance(&thumb, &sample.thumb);
         }
         let replace = self.closest.and_then(|(pair_distance, a, b)| {
             let nearest = *distances[..len].iter().min()?;
@@ -145,7 +172,7 @@ impl Reservoir {
     }
 }
 
-fn thumbnail(picture: &VideoFrame, [x, y, w, h]: Region) -> Thumbnail {
+pub(super) fn thumbnail(picture: &VideoFrame, [x, y, w, h]: Region) -> Thumbnail {
     let width = picture.width as usize;
     let index = |i: usize| {
         let px = x + (2 * (i % THUMB_W) + 1) * w / (2 * THUMB_W);

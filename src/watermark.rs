@@ -11,7 +11,7 @@ use crate::probe::VideoInfo;
 pub(crate) use evidence::{DEFAULT_SENSITIVITY, Evidence, MAX_SENSITIVITY};
 use filmcraft_frame::{PixelData, VideoFrame};
 use rayon::prelude::*;
-use reservoir::Reservoir;
+use reservoir::{Reservoir, Thumbnail, thumbnail};
 use search::{DETECTOR_BUDGET, DETECTOR_RADIUS, Region, Search};
 use std::{
     borrow::Borrow,
@@ -21,8 +21,10 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc::{self, Receiver},
     },
-    time::{Duration, Instant},
+    time::Instant,
 };
+#[cfg(test)]
+use std::time::Duration;
 
 #[derive(Clone)]
 struct Frame {
@@ -262,18 +264,56 @@ pub(crate) struct Proposal {
     pub pixels: Vec<u8>,
     pub samples: usize,
     pub evidence: Option<Evidence>,
+    pub barely_changes: bool,
 }
+
+const STALL_SECONDS: usize = 180;
+
+struct Progress {
+    count: AtomicUsize,
+    started: Instant,
+    last_activity: AtomicUsize,
+}
+
+impl Progress {
+    fn new() -> Self {
+        Self {
+            count: AtomicUsize::new(0),
+            started: Instant::now(),
+            last_activity: AtomicUsize::new(0),
+        }
+    }
+
+    fn checkpoint(&self, cancel: &AtomicBool) -> Result<(), String> {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("Watermark detection stopped".into());
+        }
+        let now = self.started.elapsed().as_secs() as usize;
+        let last = self.last_activity.load(Ordering::Relaxed);
+        if now.saturating_sub(last) > STALL_SECONDS {
+            return Err("Watermark detection stalled".into());
+        }
+        if now > last {
+            self.last_activity.fetch_max(now, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    fn expired(&self) -> bool {
+        (self.started.elapsed().as_secs() as usize)
+            .saturating_sub(self.last_activity.load(Ordering::Relaxed)) > STALL_SECONDS
+    }
+}
+
 pub(crate) struct Task {
     pub source: usize,
     pub mask_id: u64,
     pub revision: u64,
     pub region: Option<Region>,
     pub receiver: Receiver<Result<Proposal, String>>,
-    pub progress: Arc<AtomicUsize>,
+    progress: Arc<Progress>,
     cancel: Arc<AtomicBool>,
-    started: Instant,
     total: usize,
-    timeout: Duration,
 }
 impl Drop for Task {
     fn drop(&mut self) {
@@ -300,10 +340,9 @@ impl Task {
                 revision,
                 region: None,
                 receiver,
-                progress: Arc::new(AtomicUsize::new(0)),
+                progress: Arc::new(Progress::new()),
                 cancel: cancel.clone(),
-                started: Instant::now(),
-                total:64, timeout:Duration::from_secs(180),
+                total: 64,
             },
             sender,
             cancel,
@@ -312,10 +351,10 @@ impl Task {
 
     /// Frames read so far, of how many.
     pub fn progress_counts(&self) -> (usize, usize) {
-        (self.progress.load(Ordering::Relaxed).min(self.total), self.total)
+        (self.progress.count.load(Ordering::Relaxed).min(self.total), self.total)
     }
     pub fn status(&self) -> String {
-        let n = self.progress.load(Ordering::Relaxed);
+        let n = self.progress.count.load(Ordering::Relaxed);
         if n <= self.total {
             format!("Autodetect · reading frames {n}/{}…", self.total)
         } else if n == self.total + 1 {
@@ -325,7 +364,7 @@ impl Task {
         }
     }
     pub fn expired(&self) -> bool {
-        self.started.elapsed() > self.timeout
+        self.progress.expired()
     }
     // Keep the explicit geometry/pipeline inputs at this boundary.
     #[allow(clippy::too_many_arguments)]
@@ -343,10 +382,9 @@ impl Task {
         let region = detection_region(region, info.width as usize, info.height as usize)?;
         let plan = range.sample_plan(info.duration, info.fps, samples)?;
         let total = plan.count;
-        let timeout=Duration::from_secs((total as u64*3).max(180));
         let cancel = Arc::new(AtomicBool::new(false));
         let flag = cancel.clone();
-        let progress = Arc::new(AtomicUsize::new(0));
+        let progress = Arc::new(Progress::new());
         let count = progress.clone();
         let (sender, receiver) = mpsc::channel();
         std::thread::Builder::new()
@@ -379,8 +417,7 @@ impl Task {
             receiver,
             progress,
             cancel,
-            started: Instant::now(),
-            total,timeout,
+            total,
         })
     }
 }
@@ -443,22 +480,17 @@ fn analyze(
     plan: SamplePlan,
     sparse_range: Option<Range>,
     cancel: &AtomicBool,
-    progress: &AtomicUsize,
+    progress: &Progress,
     region: Option<Region>,
     drawn: bool,
     review: bool,
 ) -> Result<Proposal, String> {
     let region = detection_region(region, w as usize, h as usize)?;
     let total = plan.count;
-    let timeout = Duration::from_secs((total as u64 * 3).max(180));
+    #[cfg(test)]
     let started = Instant::now();
-    let check = || {
-        if cancel.load(Ordering::Relaxed) || started.elapsed() > timeout {
-            Err("Watermark detection stopped".into())
-        } else {
-            Ok(())
-        }
-    };
+    let check = || progress.checkpoint(cancel);
+    let progress = &progress.count;
     check()?;
     let snapped = sparse_range.and_then(|range| {
         let table = crate::fc::SyncTable::for_frame_requests(&path)?;
@@ -476,6 +508,7 @@ fn analyze(
         read_elapsed: started.elapsed(),
     };
     let size = [w as usize, h as usize];
+    let mut barely_changes = false;
     let mut retained = if sparse_range.is_none() {
         let mut retained = Reservoir::new(region, Search::context(size, region), DETECTOR_BUDGET / 2);
         sampling.scan(total, |i, picture| {
@@ -483,10 +516,11 @@ fn analyze(
             progress.store(i + 1, Ordering::Relaxed);
             Ok(())
         })?;
-        retained.finish();
+        barely_changes = retained.barely_changes();
         if retained.len() < 6 {
-            return Err("Too few distinct decoded frames to detect a watermark".into());
+            return insufficient_samples(size, retained.len(), barely_changes);
         }
+        retained.finish();
         progress.store(total + 1, Ordering::Relaxed);
         Some(retained)
     } else {
@@ -520,7 +554,9 @@ fn analyze(
     } else if let Some(retained) = &retained {
         sampling.read_retained(base, retained.origin(), retained.pictures(scout_count))?;
     } else {
-        sampling.read(base, scout_count, Some(progress))?;
+        let mut thumbnails = Vec::new();
+        sampling.read(base, scout_count, Some((progress, region, &mut thumbnails)))?;
+        barely_changes = reservoir::barely_changes(&thumbnails);
     }
     let mut fine_flicker = search.fine_flicker.take().unwrap_or_default();
     let local_region = search.local_region();
@@ -529,7 +565,7 @@ fn analyze(
     }
     let mut samples = search.frames.len();
     if samples < 6 {
-        return Err("Too few distinct decoded frames to detect a watermark".into());
+        return insufficient_samples(size, samples, barely_changes);
     }
     progress.store(total + 1, Ordering::Relaxed);
     let mut evidence = review.then(Evidence::default);
@@ -595,7 +631,17 @@ fn analyze(
         sampling.read_elapsed.as_secs_f64(),
         started.elapsed().saturating_sub(sampling.read_elapsed).as_secs_f64(),
     );
-    Ok(Proposal { pixels, samples, evidence })
+    Ok(Proposal { pixels, samples, evidence, barely_changes })
+}
+
+fn insufficient_samples(
+    [w, h]: [usize; 2], samples: usize, barely_changes: bool,
+) -> Result<Proposal, String> {
+    if barely_changes {
+        Ok(Proposal { pixels: vec![0; w * h], samples, evidence: None, barely_changes })
+    } else {
+        Err("Too few distinct decoded frames to detect a watermark".into())
+    }
 }
 
 fn detect_search(search: &Search, check: Check<'_>) -> Result<static_overlay::Maps, String> {
@@ -631,12 +677,15 @@ impl Sampling<'_> {
         &mut self,
         searches: &mut [Search],
         count: usize,
-        progress: Option<&AtomicUsize>,
+        mut report: Option<(&AtomicUsize, Region, &mut Vec<Thumbnail>)>,
     ) -> Result<(), String> {
         let mut rgba = Vec::new();
         self.scan(count, |i, picture| {
             Self::prepare(&picture, &mut rgba, searches, [0, 0])?;
-            if let Some(progress) = progress {
+            if let Some((progress, region, thumbnails)) = &mut report {
+                if i % count.div_ceil(64) == 0 {
+                    thumbnails.push(thumbnail(&picture, *region));
+                }
                 progress.store(i + 1, Ordering::Relaxed);
             }
             Ok(())
@@ -677,10 +726,22 @@ impl Sampling<'_> {
             }
             return Ok(());
         }
-        let (w, h) = (picture.width, picture.height);
-        crate::fc::fit_rgba_into(picture, crate::fc::Fit::Exact { w, h }, rgba);
+        let cropped;
+        let (rgb_picture, rgb_origin) = if origin == [0, 0] {
+            let crop = Search::conversion_crop(searches, picture);
+            if crop.w * crop.h <= picture.width as usize * picture.height as usize / 2 {
+                cropped = picture.cropped(crop);
+                (&cropped, [crop.x, crop.y])
+            } else {
+                (picture, origin)
+            }
+        } else {
+            (picture, origin)
+        };
+        let (w, h) = (rgb_picture.width, rgb_picture.height);
+        crate::fc::fit_rgba_into(rgb_picture, crate::fc::Fit::Exact { w, h }, rgba);
         for search in searches {
-            search.add(rgba, w as usize, origin)?;
+            search.add(rgba, w as usize, rgb_origin)?;
             if search.fine_flicker.is_some() && has_deep_planes(picture) {
                 search.add_native(picture, origin)?;
             }
@@ -752,6 +813,19 @@ impl Sampling<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn watchdog_expires_on_inactivity_despite_a_large_frame_count() {
+        let progress = Progress {
+            started: Instant::now() - Duration::from_secs((STALL_SECONDS * 2) as u64),
+            ..Progress::new()
+        };
+        progress.count.store(10_000, Ordering::Relaxed);
+        assert!(progress.expired());
+        progress.last_activity.store(STALL_SECONDS * 2, Ordering::Relaxed);
+        assert!(!progress.expired());
+        progress.checkpoint(&AtomicBool::new(false)).unwrap();
+    }
 
     #[test]
     fn deep_flicker_below_the_byte_floor_recovers_a_faint_stroke() {
@@ -886,7 +960,13 @@ mod tests {
         let before = filmcraft_codecs::gop::gop_stats();
         let review = std::env::var_os("ABNER_DETECT_REVIEW").is_some();
         let task = Task::spawn(info, 0, 0, 0, region, range, region.is_some(), count, review).unwrap();
-        let proposal = task.receiver.recv_timeout(task.timeout).unwrap().unwrap();
+        let proposal = loop {
+            match task.receiver.recv_timeout(Duration::from_secs(1)) {
+                Ok(result) => break result.unwrap(),
+                Err(mpsc::RecvTimeoutError::Timeout) if !task.expired() => (),
+                Err(error) => panic!("Autodetect did not return a proposal: {error}"),
+            }
+        };
         let decode = filmcraft_codecs::gop::gop_stats() - before;
         eprintln!(
             "Autodetect total: {:.6}s, {} samples fed to decoders, {} decoder starts",
@@ -921,6 +1001,7 @@ mod tests {
             proposal.samples,
             proposal.pixels.iter().filter(|&&p| p > 0).count(),
         );
+        eprintln!("Low thumbnail diversity: {}", proposal.barely_changes);
     }
 
     #[test]
@@ -932,7 +1013,7 @@ mod tests {
             SamplePlan { first: 0, last: 15, count: 16, fps: 24. },
             None,
             &AtomicBool::new(true),
-            &AtomicUsize::new(0),
+            &Progress::new(),
             None,
             false,
             false,

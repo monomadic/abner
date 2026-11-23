@@ -121,6 +121,14 @@ reference masks cover that.
 
 ### P5. Smaller costs
 
+Implemented. RGB conversion crops to the chroma-aligned union of the active
+context windows when that covers at most half the decoded frame. Frame
+deduplication indexes RGB and native samples by fingerprint, with exact
+comparison inside each matching bucket. The stroke fallback uses a running
+min/max over each line. The worker and review UI now time out after about
+three minutes without a decode or analysis checkpoint. Long ranges can keep
+running while they make progress.
+
 - `watermark.rs:262-268`: the whole frame is converted to RGBA and the search area copied
   out per pixel. Convert only the context rows, or copy rows with `chunks_exact(4)`; for a
   small drawn box on 4K the conversion is nearly all waste.
@@ -189,6 +197,15 @@ around it are left outside, and a processor that inpaints the mask leaves an out
 
 ### Q3. Choose frames that differ
 
+Every frame selects for diversity in its bounded reservoir. Both Every frame
+and fixed sample counts check the median pairwise luma distance over up to 64
+thumbnails. Under three 8-bit code values of mean difference, an empty result
+reports that the picture barely changes. The review offers Whole clip when
+the range is shorter. The motion hint also appears beside successful proposals
+when there is room. Fixed counts retain P2's evenly spaced targets and sync
+snapping, so the check adds no decoder requests. A wider sync-sample pool for
+fixed counts would trade additional decoding for diversity and is deferred.
+
 The detector can say nothing where the surroundings barely change
 (`local_reference < 0.06` is skipped). Evenly spaced times over a locked-off shot, or the
 ±30 s "Near playhead" range inside one scene, give little evidence however many frames
@@ -201,6 +218,8 @@ are read.
   say so in the result ("the picture barely changes in this range") and offer Whole clip.
 
 ### Q4. Pool evidence instead of voting
+
+Implemented by [the one-pass Every frame path](#one-pass-every-frame).
 
 In every-frame mode each batch yields its own binary mask and a pixel survives with 60 %
 of the votes (`watermark.rs:178`). A pixel that is marginal in every batch fails in all of
@@ -505,3 +524,21 @@ matched their pre-change PNGs byte-for-byte.
 Use the earlier fixture commands to repeat the matrix. The two box rows use
 `ABNER_DETECT_BOX=56,56,400,200` and the other rows leave it unset. Set
 `ABNER_DETECT_RANGE=10,20` to run only that portion of a clip, in seconds.
+
+## Cropped conversions and low-motion feedback
+
+P5 matched all 14 saved Q6 proposal PNGs byte-for-byte, including the
+translucent blend fixture, both sample modes for the 10-bit fine-flicker
+fixture, and the 512-sample thin strokes. A frozen 24 fps clip returned no
+pixels and reported low motion with both 64 samples and Every frame. The
+review test also checks the Whole clip retry on a shortened range.
+
+Three alternating release runs per build on the M4 Pro used the original 4K
+clips and `ABNER_DETECT_COUNT=64 ABNER_DETECT_BOX=57,55,399,201`. The odd box
+origin exercises chroma alignment. The masks matched byte-for-byte in
+each comparison. Reading includes decode and conversion.
+
+| Fixture | Median read s before → after | Median analyse s before → after | Decoder input before → after |
+| --- | ---: | ---: | ---: |
+| 4K H.264 | 1.362 → 1.351 | 0.047 → 0.038 | 192 → 192 |
+| 4K ProRes | 0.909 → 0.296 | 0.055 → 0.041 | 64 → 64 |

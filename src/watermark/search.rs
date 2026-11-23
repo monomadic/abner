@@ -1,7 +1,8 @@
 //! Bounded sampling windows for full-resolution and coarse-to-fine searches.
 use super::{Check, Frame, Samples, planes::Planes};
-use filmcraft_frame::VideoFrame;
+use filmcraft_frame::{PixelData, VideoFrame};
 use rayon::prelude::*;
+use std::{collections::{HashMap, hash_map::Entry}, hash::{DefaultHasher, Hash, Hasher}};
 
 pub(super) const DETECTOR_BUDGET: usize = 1536 * 1024 * 1024;
 pub(super) const DETECTOR_RADIUS: usize = 32;
@@ -17,6 +18,8 @@ pub(super) struct Search {
     pub scale: usize,
     pub native: bool,
     pub fine_flicker: Option<Vec<Frame>>,
+    rgb_seen: HashMap<u64, Vec<usize>>,
+    native_seen: HashMap<u64, Vec<usize>>,
 }
 
 impl Search {
@@ -39,6 +42,8 @@ impl Search {
             scale: 1,
             native,
             fine_flicker: None,
+            rgb_seen: HashMap::new(),
+            native_seen: HashMap::new(),
         };
         while search.bytes(samples) > budget {
             search.scale *= 2;
@@ -56,6 +61,25 @@ impl Search {
             (x + rw + HALO).min(w) - left,
             (y + rh + HALO).min(h) - top,
         ]
+    }
+
+    pub fn conversion_crop(searches: &[Self], picture: &VideoFrame) -> filmcraft_frame::Region {
+        let [x, y, w, h] = searches[0].context;
+        let (mut left, mut top, mut right, mut bottom) = (x, y, x + w, y + h);
+        for search in &searches[1..] {
+            let [x, y, w, h] = search.context;
+            left = left.min(x);
+            top = top.min(y);
+            right = right.max(x + w);
+            bottom = bottom.max(y + h);
+        }
+        let (sx, sy) = match &picture.data {
+            PixelData::Yuv8 { chroma, .. } | PixelData::Yuv16 { chroma, .. } => chroma.shifts(),
+            _ => (0, 0),
+        };
+        left = (left >> sx) << sx;
+        top = (top >> sy) << sy;
+        filmcraft_frame::Region { x: left, y: top, w: right - left, h: bottom - top }
     }
 
     fn sample_bytes(&self) -> usize {
@@ -119,10 +143,10 @@ impl Search {
         };
         let [width, height] = self.sample_size();
         let frames = self.fine_flicker.as_mut().unwrap_or(&mut self.frames);
-        if !frames
-            .iter()
-            .any(|frame| frame.native().is_some_and(|p| p.same_samples(&native)))
-        {
+        let hash = native.fingerprint();
+        if record(&mut self.native_seen, hash, frames.len(), |i| {
+            frames[i].native().is_some_and(|p| p.same_samples(&native))
+        }) {
             frames.push(Frame {
                 width,
                 height,
@@ -172,7 +196,11 @@ impl Search {
                 });
         }
         // Codec frames can leave PTS unset. Identical image observations shouldn't vote twice.
-        if !self.frames.iter().any(|frame| frame.rgb() == Some(&rgb)) {
+        let mut hash = DefaultHasher::new();
+        fingerprint(&rgb, &mut hash);
+        if record(&mut self.rgb_seen, hash.finish(), self.frames.len(), |i| {
+            self.frames[i].rgb() == Some(&rgb)
+        }) {
             self.frames.push(Frame::new(w, h, rgb)?);
         }
         Ok(())
@@ -255,9 +283,47 @@ impl Search {
     }
 }
 
+// Sample across the window so indexing new observations stays cheap on large images.
+// The bucket still checks exact equality, including unsampled pixels.
+pub(super) fn fingerprint<T: Hash>(pixels: &[T], hash: &mut impl Hasher) {
+    pixels.len().hash(hash);
+    for band in pixels.chunks(pixels.len().div_ceil(64).max(1)) {
+        band[..band.len().min(4)].hash(hash);
+    }
+}
+
+fn record(
+    seen: &mut HashMap<u64, Vec<usize>>, hash: u64, next: usize, equal: impl Fn(usize) -> bool,
+) -> bool {
+    match seen.entry(hash) {
+        Entry::Vacant(slot) => {
+            slot.insert(vec![next]);
+        }
+        Entry::Occupied(mut slot) => {
+            if slot.get().iter().copied().any(equal) {
+                return false;
+            }
+            slot.get_mut().push(next);
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fingerprint_collisions_keep_distinct_frames_and_drop_exact_repeats() {
+        let mut search = Search::new([32, 16], [0, 0, 32, 16], 8, DETECTOR_BUDGET);
+        let mut rgba = vec![0; 32 * 16 * 4];
+        search.add(&rgba, 32, [0, 0]).unwrap();
+        rgba[8] = 1; // RGB index 6, outside the sampled positions in the first band.
+        search.add(&rgba, 32, [0, 0]).unwrap();
+        search.add(&rgba, 32, [0, 0]).unwrap();
+        assert_eq!(search.frames.len(), 2);
+        assert_eq!(search.rgb_seen.len(), 1);
+    }
 
     #[test]
     fn large_searches_fit_the_budget_and_refine_at_native_resolution() {

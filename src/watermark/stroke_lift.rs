@@ -11,33 +11,50 @@
 //! shape, which is why it is only used inside an explicit search area.
 use super::{Check, Frame, temporal_rows, variation_floor};
 use rayon::prelude::*;
+use std::collections::VecDeque;
 
-fn pass(src: &[f32], w: usize, h: usize, r: usize, horizontal: bool, min: bool) -> Vec<f32> {
+fn pass(
+    src: &[f32], w: usize, h: usize, r: usize, horizontal: bool, min: bool, check: Check,
+) -> Result<Vec<f32>, String> {
     let mut out = vec![0.; w * h];
-    for y in 0..h {
-        for x in 0..w {
-            let (lo, hi) = if horizontal {
-                (x.saturating_sub(r), (x + r).min(w - 1))
-            } else {
-                (y.saturating_sub(r), (y + r).min(h - 1))
-            };
-            let values = (lo..=hi).map(|k| if horizontal { src[y * w + k] } else { src[k * w + x] });
-            out[y * w + x] = if min {
-                values.fold(f32::INFINITY, f32::min)
-            } else {
-                values.fold(f32::NEG_INFINITY, f32::max)
-            };
+    let (lines, len, line_step, sample_step) = if horizontal {
+        (h, w, w, 1)
+    } else {
+        (w, h, 1, w)
+    };
+    let mut queue = VecDeque::<(usize, f32)>::new();
+    for line in 0..lines {
+        check()?;
+        queue.clear();
+        let base = line * line_step;
+        let mut next = 0;
+        for i in 0..len {
+            let left = i.saturating_sub(r);
+            if queue.front().is_some_and(|&(index, _)| index < left) {
+                queue.pop_front();
+            }
+            // Keep only values that can still become the extremum before they expire.
+            while next < len && next <= i + r {
+                let value = src[base + next * sample_step];
+                while queue.back().is_some_and(|&(_, tail)| {
+                    if min { value < tail } else { value > tail }
+                }) {
+                    queue.pop_back();
+                }
+                queue.push_back((next, value));
+                next += 1;
+            }
+            out[base + i * sample_step] = queue[0].1;
         }
     }
-    out
+    Ok(out)
 }
 
 /// Greyscale opening with a (2r+1) square: removes light detail narrower than the square.
 fn open(src: &[f32], w: usize, h: usize, r: usize, check: Check) -> Result<Vec<f32>, String> {
     let mut image = src.to_vec();
     for (horizontal, min) in [(true, true), (false, true), (true, false), (false, false)] {
-        check()?;
-        image = pass(&image, w, h, r, horizontal, min);
+        image = pass(&image, w, h, r, horizontal, min, check)?;
     }
     Ok(image)
 }
@@ -293,6 +310,33 @@ fn detect_checked(frames: &[Frame], region: [usize; 4], check: Check<'_>) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn running_extrema_match_clipped_windows_in_both_directions() {
+        let (w, h) = (7, 4);
+        let src: Vec<_> = (0..w * h).map(|i| ((i * 11) % 21) as f32).collect();
+        for r in [0, 1, 2, 8] {
+            for horizontal in [true, false] {
+                for min in [true, false] {
+                    let actual = pass(&src, w, h, r, horizontal, min, &|| Ok(())).unwrap();
+                    for (i, &value) in actual.iter().enumerate() {
+                        let (x, y) = (i % w, i / w);
+                        let (position, len, step, base) = if horizontal {
+                            (x, w, 1, y * w)
+                        } else {
+                            (y, h, w, x)
+                        };
+                        let mut expected = src[i];
+                        for j in position.saturating_sub(r)..(position + r + 1).min(len) {
+                            let sample = src[base + j * step];
+                            expected = if min { expected.min(sample) } else { expected.max(sample) };
+                        }
+                        assert_eq!(value, expected);
+                    }
+                }
+            }
+        }
+    }
 
     /// Eight identical frames: nothing ever changes, so only appearance can help.
     fn still(overlay: Option<f32>) -> Vec<Frame> {
