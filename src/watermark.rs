@@ -2,13 +2,14 @@
 //! Owns a background decoder; never seeks the visible player or writes media.
 mod blend;
 mod evidence;
+mod planes;
 mod reservoir;
 mod search;
 mod static_overlay;
 mod stroke_lift;
 use crate::probe::VideoInfo;
 pub(crate) use evidence::{DEFAULT_SENSITIVITY, Evidence, MAX_SENSITIVITY};
-use filmcraft_frame::VideoFrame;
+use filmcraft_frame::{PixelData, VideoFrame};
 use rayon::prelude::*;
 use reservoir::Reservoir;
 use search::{DETECTOR_BUDGET, DETECTOR_RADIUS, Region, Search};
@@ -27,7 +28,13 @@ use std::{
 struct Frame {
     width: usize,
     height: usize,
-    rgb: Vec<u8>,
+    samples: Samples,
+}
+
+#[derive(Clone)]
+enum Samples {
+    Rgb(Vec<u8>),
+    Native(planes::Planes),
 }
 impl Frame {
     fn new(width: usize, height: usize, rgb: Vec<u8>) -> Result<Self, String> {
@@ -37,12 +44,67 @@ impl Frame {
         {
             return Err("Invalid sampled frame dimensions".into());
         }
-        Ok(Self { width, height, rgb })
+        Ok(Self { width, height, samples: Samples::Rgb(rgb) })
     }
-    fn pixel(&self, x: usize, y: usize) -> [f32; 3] {
+    fn rgb(&self) -> Option<&[u8]> {
+        match &self.samples {
+            Samples::Rgb(rgb) => Some(rgb),
+            Samples::Native(_) => None,
+        }
+    }
+
+    fn native(&self) -> Option<&planes::Planes> {
+        match &self.samples {
+            Samples::Native(planes) => Some(planes),
+            Samples::Rgb(_) => None,
+        }
+    }
+
+    fn luma_code(&self, x: usize, y: usize) -> u16 {
+        self.native().map_or_else(
+            || (self.luma(x, y) * 65535.).round() as u16,
+            |planes| planes.luma[y * self.width + x],
+        )
+    }
+
+    fn luma(&self, x: usize, y: usize) -> f32 {
+        if let Some(planes) = self.native() {
+            return planes::normalize(planes.luma[y * self.width + x]);
+        }
+        let [r, g, b] = self.rgb_pixel(x, y);
+        0.2126 * r + 0.7152 * g + 0.0722 * b
+    }
+
+    fn rgb_pixel(&self, x: usize, y: usize) -> [f32; 3] {
         let p = (y * self.width + x) * 3;
-        std::array::from_fn(|c| self.rgb[p + c] as f32 / 255.)
+        let rgb = self.rgb().expect("RGB observation");
+        std::array::from_fn(|c| rgb[p + c] as f32 / 255.)
     }
+
+    fn edge_pixel(&self, x: usize, y: usize, native: bool) -> [f32; 3] {
+        if let Some(planes) = self.native() {
+            return planes.pixel(x, y, self.width);
+        }
+        let rgb = self.rgb_pixel(x, y);
+        if !native {
+            return rgb;
+        }
+        let y = self.luma(x, y);
+        [y, 0.5 + (rgb[2] - y) / 1.8556, 0.5 + (rgb[0] - y) / 1.5748]
+    }
+}
+
+fn native_luma(frames: &[Frame]) -> bool {
+    frames.iter().any(|frame| frame.native().is_some())
+}
+
+fn has_deep_planes(picture: &VideoFrame) -> bool {
+    matches!(&picture.data, PixelData::Yuv16 { bits, .. } if (9..=16).contains(bits))
+}
+
+fn variation_floor(frames: &[Frame], byte_floor: f32) -> f32 {
+    frames.iter().map(|frame| frame.native().map_or(1., |p| p.noise_scale))
+        .fold(0., f32::max) * byte_floor
 }
 
 type Check<'a> = &'a (dyn Fn() -> Result<(), String> + Sync);
@@ -58,6 +120,23 @@ fn temporal_rows<T: Send>(
 ) -> Result<(), String> {
     let n = frames.len();
     let (lo, mid, hi) = (n / 8, n / 2, n * 7 / 8);
+    if native_luma(frames) {
+        return rows.enumerate().try_for_each_init(|| vec![0u16; n], |values, (row, mut output)| {
+            check()?;
+            for col in 0..w {
+                for (value, frame) in values.iter_mut().zip(frames) {
+                    *value = frame.luma_code(x + col, y + row);
+                }
+                // Partition the ranks independently within the two halves.
+                let (lower, median, upper) = values.select_nth_unstable(mid);
+                let a = *lower.select_nth_unstable(lo).1;
+                let b = *upper.select_nth_unstable(hi - mid - 1).1;
+                write(&mut output, col, [planes::normalize(*median); 3], planes::normalize(b - a));
+            }
+            Ok(())
+        });
+    }
+
     rows
         .enumerate()
         .try_for_each_init(
@@ -67,7 +146,7 @@ fn temporal_rows<T: Send>(
                 rows.clear();
                 rows.extend(frames.iter().map(|frame| {
                     let start = ((y + row) * frame.width + x) * 3;
-                    &frame.rgb[start..start + w * 3]
+                    &frame.rgb().expect("RGB observations")[start..start + w * 3]
                 }));
                 for col in 0..w {
                     let mut median = [0.; 3];
@@ -391,6 +470,7 @@ fn analyze(
         size: [w, h],
         plan,
         snapped,
+        primed: None,
         check: &check,
         #[cfg(test)]
         read_elapsed: started.elapsed(),
@@ -414,10 +494,23 @@ fn analyze(
     };
     let count = retained.as_ref().map_or(total, Reservoir::len);
     let budget = DETECTOR_BUDGET - retained.as_ref().map_or(0, Reservoir::bytes);
-    let mut search = Search::new(size, region, count, budget);
+    // Price the captured planes from the decoded format. A sparse scan reuses
+    // its first reader and picture after planning.
+    let native = if let Some(retained) = &retained {
+        retained.pictures(count).next().is_some_and(has_deep_planes)
+    } else {
+        sampling.prime()?
+    };
+    // A drawn box in a moving scene keeps the RGB stroke detector's existing
+    // behavior. Save the native planes as a second source of evidence in quiet boxes.
+    let drawn_box = drawn && region[2] * region[3] <= size[0] * size[1] / 4;
+    let mut search = Search::with_native(size, region, count, budget, native && !drawn_box);
     let scout_count = search.scout_count(count, budget);
     if scout_count < count {
-        search = Search::new(size, region, scout_count, budget);
+        search = Search::with_native(size, region, scout_count, budget, native && !drawn_box);
+    }
+    if native && drawn_box {
+        search.reserve_fine_flicker(scout_count, budget);
     }
     let can_consume = search.scale == 1 && scout_count == count;
     let base = std::slice::from_mut(&mut search);
@@ -428,6 +521,11 @@ fn analyze(
         sampling.read_retained(base, retained.origin(), retained.pictures(scout_count))?;
     } else {
         sampling.read(base, scout_count, Some(progress))?;
+    }
+    let mut fine_flicker = search.fine_flicker.take().unwrap_or_default();
+    let local_region = search.local_region();
+    if search.frames.len() < 6 && stroke_lift::quiet(&fine_flicker, local_region) {
+        search.frames = std::mem::take(&mut fine_flicker);
     }
     let mut samples = search.frames.len();
     if samples < 6 {
@@ -441,8 +539,14 @@ fn analyze(
         let blend_veto = std::mem::take(&mut maps.blend_veto);
         let mut selected = native_selection(maps, region, &mut evidence, &check)?;
         // A tightly drawn box permits evidence over stationary scenery.
-        if drawn && !selected.contains(&255) && region[2] * region[3] <= pixels.len() / 4 {
-            let scores = stroke_lift::scores_checked(&search.frames, search.local_region(), &blend_veto, &check)?;
+        if drawn_box && !selected.contains(&255) {
+            let mut scores = stroke_lift::scores_checked(&search.frames, local_region, &blend_veto, &check)?;
+            if !scores.iter().any(|&score| evidence::selected_by_default(score))
+                && stroke_lift::quiet(&fine_flicker, local_region)
+            {
+                scores = stroke_lift::scores_checked(&fine_flicker, local_region, &blend_veto, &check)?;
+                samples = samples.max(fine_flicker.len());
+            }
             selected = scores.iter().map(|&score| u8::from(evidence::selected_by_default(score)) * 255).collect();
             if let Some(evidence) = &mut evidence && selected.contains(&255) {
                 evidence.set_strokes(region, scores);
@@ -516,6 +620,7 @@ struct Sampling<'a> {
     size: [u32; 2],
     plan: SamplePlan,
     snapped: Option<Vec<Option<f64>>>,
+    primed: Option<(filmcraft_media::SharedSource, Arc<VideoFrame>)>,
     check: Check<'a>,
     #[cfg(test)]
     read_elapsed: Duration,
@@ -564,12 +669,53 @@ impl Sampling<'_> {
         searches: &mut [Search],
         origin: [usize; 2],
     ) -> Result<(), String> {
+        if searches.first().is_some_and(|search| search.native)
+            && has_deep_planes(picture)
+        {
+            for search in searches {
+                search.add_native(picture, origin)?;
+            }
+            return Ok(());
+        }
         let (w, h) = (picture.width, picture.height);
         crate::fc::fit_rgba_into(picture, crate::fc::Fit::Exact { w, h }, rgba);
         for search in searches {
             search.add(rgba, w as usize, origin)?;
+            if search.fine_flicker.is_some() && has_deep_planes(picture) {
+                search.add_native(picture, origin)?;
+            }
         }
         Ok(())
+    }
+
+    fn prime(&mut self) -> Result<bool, String> {
+        #[cfg(test)]
+        let started = Instant::now();
+        (self.check)()?;
+        let source = crate::fc::open(self.path)?;
+        let frame_s = crate::fc::timing(&source).map_or(0., |v| v.0);
+        let picture = self.read_picture(&source, 0, frame_s)?;
+        let native = has_deep_planes(&picture);
+        self.primed = Some((source, picture));
+        #[cfg(test)]
+        {
+            self.read_elapsed += started.elapsed();
+        }
+        Ok(native)
+    }
+
+    fn read_picture(
+        &self, source: &filmcraft_media::SharedSource, i: usize, frame_s: f64,
+    ) -> Result<Arc<VideoFrame>, String> {
+        let time = self.snapped.as_ref().and_then(|times| times[i])
+            .unwrap_or_else(|| self.plan.at(i) + frame_s * 0.25);
+        let picture = source.video_frame(filmcraft_media::FrameRequest::full(
+            filmcraft_time::Tick::from_seconds_f64(time),
+        )).map_err(|e| format!("Could not read a nearby frame: {e}"))?;
+        if [picture.width, picture.height] != self.size {
+            return Err("Sampled frame geometry does not match the mask".into());
+        }
+        Ok(picture)
     }
 
     fn scan(
@@ -580,24 +726,18 @@ impl Sampling<'_> {
         #[cfg(test)]
         let started = Instant::now();
         (self.check)()?;
-        let source = crate::fc::open(self.path)?;
+        let (source, mut first) = match self.primed.take() {
+            Some((source, picture)) => (source, Some(picture)),
+            None => (crate::fc::open(self.path)?, None),
+        };
         let frame_s = crate::fc::timing(&source).map_or(0., |v| v.0);
         for sample in 0..count {
             (self.check)()?;
             let i = sample * (self.plan.count - 1) / (count - 1);
-            let t = self.plan.at(i);
-            let request_time = self.snapped
-                .as_ref()
-                .and_then(|times| times[i])
-                .unwrap_or(t + frame_s * 0.25);
-            let picture = source
-                .video_frame(filmcraft_media::FrameRequest::full(
-                    filmcraft_time::Tick::from_seconds_f64(request_time),
-                ))
-                .map_err(|e| format!("Could not read a nearby frame: {e}"))?;
-            if [picture.width, picture.height] != self.size {
-                return Err("Sampled frame geometry does not match the mask".into());
-            }
+            let picture = match first.take() {
+                Some(picture) => picture,
+                None => self.read_picture(&source, i, frame_s)?,
+            };
             visit(sample, picture)?;
         }
         drop(source);
@@ -612,6 +752,53 @@ impl Sampling<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deep_flicker_below_the_byte_floor_recovers_a_faint_stroke() {
+        let [w, h] = [192, 128];
+        let region = [32, 32, 80, 60];
+        let stroke = |x, y| (55..63).contains(&x) && (45..75).contains(&y);
+        let mut searches = [
+            Search::with_native([w, h], region, 6, DETECTOR_BUDGET, true),
+            Search::new([w, h], region, 6, DETECTOR_BUDGET),
+        ];
+        let chroma = Arc::new(vec![512; w * h / 4]);
+        let mut rgba = Vec::new();
+        for t in 0..6 {
+            let luma = (0..w * h).map(|i| {
+                let (y, x) = (i / w, i % w);
+                let texture = (y * 131 + x * 17) % 5;
+                let flicker = (t * (1 + (y * 17 + x * 3) % 7) + y + x) % 6;
+                (500 + texture + if stroke(x, y) { 84 } else { flicker }) as u16
+            }).collect();
+            let picture = VideoFrame {
+                width: w as u32,
+                height: h as u32,
+                data: PixelData::Yuv16 {
+                    planes: [Arc::new(luma), chroma.clone(), chroma.clone()],
+                    chroma: filmcraft_frame::Chroma::C420,
+                    bits: 10,
+                    alpha: None,
+                },
+                color: filmcraft_color::ColorInfo::REC709,
+                par: (1, 1),
+                pts: filmcraft_time::Tick::ZERO,
+            };
+            for search in &mut searches {
+                Sampling::prepare(&picture, &mut rgba, std::slice::from_mut(search), [0, 0]).unwrap();
+            }
+        }
+        let selected = |search: &Search| {
+            stroke_lift::scores_checked(&search.frames, search.local_region(), &[], &|| Ok(())).unwrap()
+                .into_iter().map(evidence::selected_by_default).collect::<Vec<_>>()
+        };
+        let native = selected(&searches[0]);
+        assert!(!selected(&searches[1]).contains(&true));
+        let hits = native.iter().enumerate().filter(|(i, keep)| {
+            **keep && stroke(region[0] + i % region[2], region[1] + i / region[2])
+        }).count();
+        assert_eq!(hits, 8 * 30);
+    }
 
     #[test]
     fn sparse_samples_use_each_nearest_keyframe_once_and_keep_other_targets() {

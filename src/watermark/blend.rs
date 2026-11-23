@@ -1,5 +1,5 @@
 //! A translucent screen-space overlay transmits nearby background variation.
-use super::{Check, Frame};
+use super::{Check, Frame, native_luma};
 
 const SAMPLE_POINTS: usize = 256;
 const OPAQUE: f32 = 0.90;
@@ -70,14 +70,15 @@ pub(super) fn contradicts(
         seen[i] += 1;
     }
     let [near, far] = points_by_side;
+    let native = native_luma(frames);
     let mut near_signal = Vec::with_capacity(frames.len());
     let mut far_signal = Vec::with_capacity(frames.len());
     for (i, frame) in frames.iter().enumerate() {
         if i % 32 == 0 {
             check()?;
         }
-        near_signal.push(mean(frame, near.iter()));
-        far_signal.push(mean(frame, far.iter()));
+        near_signal.push(mean(frame, near.iter(), native));
+        far_signal.push(mean(frame, far.iter(), native));
     }
 
     // The band is only a proxy for the hidden background. Independent motion
@@ -100,7 +101,7 @@ pub(super) fn contradicts(
         if i % 32 == 0 {
             check()?;
         }
-        foreground.push(mean(frame, points.iter()));
+        foreground.push(mean(frame, points.iter(), native));
     }
 
     let fit = regression(&background, &foreground);
@@ -111,11 +112,16 @@ pub(super) fn contradicts(
         && (fit.r2 < MIN_BLEND_R2 || (fit.slope - expected).abs() > tolerance))
 }
 
-fn mean<'a>(frame: &Frame, points: impl Iterator<Item = &'a Point>) -> Rgb {
+fn mean<'a>(frame: &Frame, points: impl Iterator<Item = &'a Point>, native: bool) -> Rgb {
     let mut sum = [0.; 3];
     let mut count = 0;
     for &[x, y] in points {
-        for (sum, value) in sum.iter_mut().zip(frame.pixel(x, y)) {
+        let values = if native {
+            [frame.luma(x, y); 3]
+        } else {
+            frame.rgb_pixel(x, y)
+        };
+        for (sum, value) in sum.iter_mut().zip(values) {
             *sum += f64::from(value);
         }
         count += 1;

@@ -7,7 +7,7 @@ const MAX_FRAMES: usize = 64;
 const THUMB_W: usize = 64;
 const THUMB_H: usize = 36;
 
-type Thumbnail = [u8; THUMB_W * THUMB_H];
+type Thumbnail = [u16; THUMB_W * THUMB_H];
 
 struct Sample {
     index: usize,
@@ -153,20 +153,24 @@ fn thumbnail(picture: &VideoFrame, [x, y, w, h]: Region) -> Thumbnail {
         py * width + px
     };
     match &picture.data {
-        PixelData::Yuv8 { planes, .. } => std::array::from_fn(|i| planes[0][index(i)]),
+        PixelData::Yuv8 { planes, .. } => {
+            std::array::from_fn(|i| u16::from(planes[0][index(i)]) << 8)
+        }
         PixelData::Yuv16 { planes, bits, .. } => {
-            let shift = bits.saturating_sub(8);
-            std::array::from_fn(|i| (planes[0][index(i)] >> shift).min(255) as u8)
+            let shift = 16u32.saturating_sub(*bits);
+            std::array::from_fn(|i| planes[0][index(i)].checked_shl(shift).unwrap_or(0))
         }
         PixelData::Rgba8(rgba) => std::array::from_fn(|i| {
             let p = index(i) * 4;
-            ((77 * u32::from(rgba[p]) + 150 * u32::from(rgba[p + 1]) + 29 * u32::from(rgba[p + 2]))
-                >> 8) as u8
+            let luma = 77 * u32::from(rgba[p])
+                + 150 * u32::from(rgba[p + 1])
+                + 29 * u32::from(rgba[p + 2]);
+            (luma >> 8) as u16 * 256
         }),
         PixelData::RgbaF32(rgba) => std::array::from_fn(|i| {
             let p = index(i) * 4;
             let luma = 0.299 * rgba[p] + 0.587 * rgba[p + 1] + 0.114 * rgba[p + 2];
-            (luma.clamp(0., 1.) * 255.).round() as u8
+            ((luma.clamp(0., 1.) * 255.).round() as u16) << 8
         }),
     }
 }
@@ -229,7 +233,7 @@ mod tests {
         let mut values: Vec<_> = reservoir
             .samples
             .iter()
-            .map(|sample| sample.thumb[0])
+            .map(|sample| sample.thumb[0] >> 8)
             .collect();
         values.sort_unstable();
         assert_eq!(values, [20, 80, 130]);
@@ -264,7 +268,7 @@ mod tests {
             crate::fc::fit_rgba_into(picture, crate::fc::Fit::Exact { w, h }, rgba);
             let mut search = Search::new(size, region, 8, DETECTOR_BUDGET);
             search.add(rgba, w as usize, origin).unwrap();
-            search.frames.pop().unwrap().rgb
+            search.frames.pop().unwrap().rgb().unwrap().to_vec()
         };
         let full = convert(&picture, &mut rgba, [0, 0]);
         let origin = reservoir.origin();

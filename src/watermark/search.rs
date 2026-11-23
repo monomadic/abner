@@ -1,5 +1,6 @@
 //! Bounded sampling windows for full-resolution and coarse-to-fine searches.
-use super::{Check, Frame};
+use super::{Check, Frame, Samples, planes::Planes};
+use filmcraft_frame::VideoFrame;
 use rayon::prelude::*;
 
 pub(super) const DETECTOR_BUDGET: usize = 1536 * 1024 * 1024;
@@ -14,15 +15,30 @@ pub(super) struct Search {
     pub frames: Vec<Frame>,
     context: Region,
     pub scale: usize,
+    pub native: bool,
+    pub fine_flicker: Option<Vec<Frame>>,
 }
 
 impl Search {
+    #[cfg(test)]
     pub fn new(size: [usize; 2], region: Region, samples: usize, budget: usize) -> Self {
+        Self::with_native(size, region, samples, budget, false)
+    }
+
+    pub fn with_native(
+        size: [usize; 2],
+        region: Region,
+        samples: usize,
+        budget: usize,
+        native: bool,
+    ) -> Self {
         let mut search = Self {
             region,
             frames: Vec::new(),
             context: Self::context(size, region),
             scale: 1,
+            native,
+            fine_flicker: None,
         };
         while search.bytes(samples) > budget {
             search.scale *= 2;
@@ -42,9 +58,15 @@ impl Search {
         ]
     }
 
+    fn sample_bytes(&self) -> usize {
+        // Reserve for 4:4:4 even though subsampled inputs use less.
+        if self.native { 6 } else { 3 }
+    }
+
     fn bytes(&self, samples: usize) -> usize {
         let [w, h] = self.sample_size();
-        w.saturating_mul(h).saturating_mul(samples * 3 + 112)
+        w.saturating_mul(h)
+            .saturating_mul(samples * self.sample_bytes() + 112)
     }
 
     fn sample_size(&self) -> [usize; 2] {
@@ -62,7 +84,7 @@ impl Search {
         }
         let [_, _, w, h] = self.context;
         let half_area = w.div_ceil(2).saturating_mul(h.div_ceil(2));
-        let affordable = (budget / half_area).saturating_sub(112) / 3;
+        let affordable = (budget / half_area).saturating_sub(112) / self.sample_bytes();
         affordable.max(16).min(samples)
     }
 
@@ -78,6 +100,36 @@ impl Search {
             (rel_x + w).div_ceil(self.scale) - left,
             (rel_y + h).div_ceil(self.scale) - top,
         ]
+    }
+
+    pub fn reserve_fine_flicker(&mut self, samples: usize, budget: usize) {
+        let [w, h] = self.sample_size();
+        let extra = w.saturating_mul(h).saturating_mul(samples * 6);
+        if self.scale == 1 && self.bytes(samples).saturating_add(extra) <= budget {
+            self.fine_flicker = Some(Vec::new());
+        }
+    }
+
+    pub fn add_native(&mut self, picture: &VideoFrame, origin: [usize; 2]) -> Result<(), String> {
+        let [x, y, w, h] = self.context;
+        let Some(native) =
+            Planes::capture(picture, [x - origin[0], y - origin[1], w, h], self.scale)?
+        else {
+            return Err("Expected deep planar samples for detection".into());
+        };
+        let [width, height] = self.sample_size();
+        let frames = self.fine_flicker.as_mut().unwrap_or(&mut self.frames);
+        if !frames
+            .iter()
+            .any(|frame| frame.native().is_some_and(|p| p.same_samples(&native)))
+        {
+            frames.push(Frame {
+                width,
+                height,
+                samples: Samples::Native(native),
+            });
+        }
+        Ok(())
     }
 
     pub fn add(&mut self, rgba: &[u8], stride: usize, origin: [usize; 2]) -> Result<(), String> {
@@ -120,7 +172,7 @@ impl Search {
                 });
         }
         // Codec frames can leave PTS unset. Identical image observations shouldn't vote twice.
-        if !self.frames.iter().any(|frame| frame.rgb == rgb) {
+        if !self.frames.iter().any(|frame| frame.rgb() == Some(&rgb)) {
             self.frames.push(Frame::new(w, h, rgb)?);
         }
         Ok(())
@@ -139,7 +191,7 @@ impl Search {
     ) -> Result<Vec<Vec<Self>>, String> {
         let [x, y, w, h] = self.region;
         // Reserve the padding on both sides and room for one coarse pixel straddling a tile edge.
-        let side = (budget / (samples * 3 + 112)).isqrt();
+        let side = (budget / (samples * self.sample_bytes() + 112)).isqrt();
         let tile = side
             .saturating_sub(2 * (HALO + REFINE_PAD) + self.scale)
             .min(1024);
@@ -154,7 +206,11 @@ impl Search {
         for (row, flags) in selected.chunks_exact(lw).enumerate() {
             check()?;
             let top = self.context[1] + (ly + row) * self.scale;
-            for (col, _) in flags.iter().enumerate().filter(|(_, selected)| **selected != 0) {
+            for (col, _) in flags
+                .iter()
+                .enumerate()
+                .filter(|(_, selected)| **selected != 0)
+            {
                 let left = self.context[0] + (lx + col) * self.scale;
                 let tile_x = (left.max(x) - x) / tile;
                 let tile_y = (top.max(y) - y) / tile;
@@ -176,11 +232,12 @@ impl Search {
             let top = top.saturating_sub(REFINE_PAD).max(y);
             let right = (right + REFINE_PAD).min(x + w);
             let bottom = (bottom + REFINE_PAD).min(y + h);
-            let search = Self::new(
+            let search = Self::with_native(
                 size,
                 [left, top, right - left, bottom - top],
                 samples,
                 budget,
+                self.native,
             );
             debug_assert_eq!(search.scale, 1);
             let cost = search.bytes(samples);

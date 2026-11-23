@@ -9,7 +9,7 @@
 //! must be strong, and lift counts only where there is no flicker to measure.
 //! It still cannot tell an opaque overlay from scenery of the same
 //! shape, which is why it is only used inside an explicit search area.
-use super::{Check, Frame, temporal_rows};
+use super::{Check, Frame, temporal_rows, variation_floor};
 use rayon::prelude::*;
 
 fn pass(src: &[f32], w: usize, h: usize, r: usize, horizontal: bool, min: bool) -> Vec<f32> {
@@ -82,6 +82,7 @@ fn attenuation(
     w: usize,
     h: usize,
     reach: usize,
+    flicker_floor: f32,
     check: Check,
 ) -> Result<(Vec<f32>, Vec<bool>), String> {
     const G: usize = 4;
@@ -111,14 +112,38 @@ fn attenuation(
             let at = |a: usize, b: usize| grid[b * gw + a];
             let typical = (at(gx, gy) * (1. - tx) + at(gx + 1, gy) * tx) * (1. - ty)
                 + (at(gx, gy + 1) * (1. - tx) + at(gx + 1, gy + 1) * tx) * ty;
-            // Below about two 8-bit levels the ratio is quantisation, not evidence.
-            if typical >= 0.008 {
+            // Require roughly two source code levels before using the ratio.
+            if typical >= flicker_floor {
                 known[y * w + x] = true;
                 out[y * w + x] = (1. - spread[y * w + x] / typical).clamp(-1., 1.);
             }
         }
     }
     Ok((box_mean(&box_mean(&out, w, h, 2), w, h, 2), known))
+}
+
+/// Test a spatial grid in the requested box for variation below the display
+/// path's flicker floor. The fine-grain cue is intended for quiet footage.
+pub(super) fn quiet(frames: &[Frame], [x, y, w, h]: [usize; 4]) -> bool {
+    if frames.len() < 6 {
+        return false;
+    }
+    let mut values = vec![0; frames.len()];
+    let [cols, rows] = [w.min(16), h.min(16)];
+    let mut quiet = 0;
+    for row in 0..rows {
+        for col in 0..cols {
+            let px = x + (2 * col + 1) * w / (2 * cols);
+            let py = y + (2 * row + 1) * h / (2 * rows);
+            for (value, frame) in values.iter_mut().zip(frames) {
+                *value = frame.luma_code(px, py);
+            }
+            values.sort_unstable();
+            let spread = values[values.len() * 7 / 8] - values[values.len() / 8];
+            quiet += usize::from(super::planes::normalize(spread) < 0.008);
+        }
+    }
+    quiet * 10 >= cols * rows * 9
 }
 
 /// Mask over `region` (row-major, region-sized). Empty when nothing stroke-like stands out.
@@ -156,7 +181,7 @@ pub(super) fn scores_checked(
         },
         check,
     )?;
-    let (attenuation, flickers) = attenuation(&spread, cw, ch, coarse, check)?;
+    let (attenuation, flickers) = attenuation(&spread, cw, ch, coarse, variation_floor(frames, 0.008), check)?;
     let vetoed = |p| blend_veto.get(p) == Some(&true);
     let mut best = (0., vec![0; w * h]);
     // A light overlay lifts the darkest channel; a dark one lowers the lightest.

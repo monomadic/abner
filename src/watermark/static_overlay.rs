@@ -1,5 +1,5 @@
 //! Screen-space overlay proposals. No registration or scene trajectories are used.
-use super::{Check, Frame, blend, temporal_rows};
+use super::{Check, Frame, blend, native_luma, temporal_rows, variation_floor};
 use super::evidence::{CONFIDENCE, OPACITY, select_islands, threshold_factor};
 use rayon::prelude::*;
 
@@ -65,8 +65,9 @@ pub(super) fn detect_checked(
     )?;
     // Letterbox / pillarbox bars: constant rows or columns contiguous with the frame edge.
     let mut bar = vec![false; cw * ch];
-    let quiet_row = |y: usize| (0..cw).filter(|&x| ranges[y * cw + x] < 0.012).count() * 50 >= cw * 49;
-    let quiet_col = |x: usize| (0..ch).filter(|&y| ranges[y * cw + x] < 0.012).count() * 50 >= ch * 49;
+    let quiet_floor = variation_floor(frames, 0.012);
+    let quiet_row = |y: usize| (0..cw).filter(|&x| ranges[y * cw + x] < quiet_floor).count() * 50 >= cw * 49;
+    let quiet_col = |x: usize| (0..ch).filter(|&y| ranges[y * cw + x] < quiet_floor).count() * 50 >= ch * 49;
     if y0 == 0 { for y in 0..ch { if !quiet_row(y) { break; } for x in 0..cw { bar[y * cw + x] = true; } } }
     if y1 == fh { for y in (0..ch).rev() { if !quiet_row(y) { break; } for x in 0..cw { bar[y * cw + x] = true; } } }
     if x0 == 0 { for x in 0..cw { if !quiet_col(x) { break; } for y in 0..ch { bar[y * cw + x] = true; } } }
@@ -128,6 +129,7 @@ pub(super) fn detect_checked(
         blend_veto: Vec::new(),
         min_component,
     };
+    let native = native_luma(frames);
     let mut wider_opacity = vec![0.; w * h];
     let mut wider_variation = vec![0.; w * h];
     (
@@ -178,8 +180,8 @@ pub(super) fn detect_checked(
                         if opacity[x] >= 0.55 {
                             magnitudes.clear();
                             magnitudes.extend(frames.iter().map(|f| {
-                                let a = f.pixel(ax, ay);
-                                let b = f.pixel(bx, by);
+                                let a = f.edge_pixel(ax, ay, native);
+                                let b = f.edge_pixel(bx, by, native);
                                 (0..3).map(|c| (b[c] - a[c]).powi(2)).sum::<f32>().sqrt()
                             }));
                             let quartile = magnitudes.len() / 4;
@@ -188,7 +190,22 @@ pub(super) fn detect_checked(
                         }
                         let a = medians[(ay - y0) * cw + ax - x0];
                         let b = medians[(by - y0) * cw + bx - x0];
-                        let direction: [f32; 3] = std::array::from_fn(|c| b[c] - a[c]);
+                        let mut direction: [f32; 3] = std::array::from_fn(|c| b[c] - a[c]);
+                        if native {
+                            // Luma supplied the median and spread. Chroma only
+                            // contributes to the persistent edge direction.
+                            let mut chroma = [0.; 2];
+                            for frame in frames {
+                                let a = frame.edge_pixel(ax, ay, true);
+                                let b = frame.edge_pixel(bx, by, true);
+                                for c in 0..2 {
+                                    chroma[c] += b[c + 1] - a[c + 1];
+                                }
+                            }
+                            for c in 0..2 {
+                                direction[c + 1] = chroma[c] / frames.len() as f32;
+                            }
+                        }
                         let norm = direction.iter().map(|v| v * v).sum::<f32>().sqrt();
                         if norm < 0.04 {
                             continue;
@@ -196,8 +213,8 @@ pub(super) fn detect_checked(
                         let consistent = frames
                             .iter()
                             .filter(|f| {
-                                let a = f.pixel(ax, ay);
-                                let b = f.pixel(bx, by);
+                                let a = f.edge_pixel(ax, ay, native);
+                                let b = f.edge_pixel(bx, by, native);
                                 let dot = (0..3).map(|c| (b[c] - a[c]) * direction[c]).sum::<f32>() / norm;
                                 dot > 0.025
                             })

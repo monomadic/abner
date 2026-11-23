@@ -275,14 +275,55 @@ scenery has slope near 0 and no correlation.
 
 ### Q6. Native planes for deep sources
 
-Samples go through `fc::fit_rgba_into`, the 8-bit display conversion. The flicker floor in
-`stroke_lift` is 0.008 (two 8-bit levels) and the letterbox test 0.012; on clean 10-bit
-footage grain sits below both and the attenuation cue has nothing to measure.
+Autodetect already obtains native decoded frames for sparse and Every frame
+runs. Deep Y′CbCr whole-frame searches now copy luma and subsampled chroma
+directly into the search windows, preserving source precision in normalized
+16-bit samples. Temporal quantiles and blend fitting use luma. Persistent edges
+also use chroma, with the original phase preserved for odd crop origins. Bar
+and fine-flicker floors scale by source code range. A color-only mark with no
+luma attenuation can still escape whole-frame detection.
 
-- Read through the native path (`take_next_native`) and work on luma at the source depth,
-  plus chroma only for the edge-direction test.
-- Luma alone also cuts the temporal pass to one channel in three (a P4 win), at the cost
-  of the coloured-logo case the RGB edge test exists for; keep chroma for edges.
+Drawn boxes keep the established RGB proposal when it finds a mark. Direct
+boxes with room in the detector budget also retain native samples for a
+fine-flicker fallback. That fallback runs when the RGB proposal is empty and
+at least 90% of the sampled positions in the box have temporal spread below
+the 8-bit flicker floor. Both paths share the decoded frames.
+
+The lossless 10-bit HEVC fixture below has five codes of background flicker
+and a faint stroke at `x=55…62, y=45…74`. The previous proposal was empty.
+The native fallback recovered all 240 stroke pixels and selected another 122
+around the stroke. The 64-sample and Every frame masks matched byte-for-byte.
+
+Nine 8-bit H.264 checks and both 10-bit ProRes drawn-box checks matched their
+pre-Q6 masks byte-for-byte. The 4K ProRes whole-frame run selected 60,725 pixels
+versus 203,177 before Q6. Both whole-frame proposals missed the test mark on
+that fixture. Its drawn-box proposal kept its previous 4,940 mark pixels.
+
+```sh
+python3 - <<'PY' | ffmpeg -f rawvideo -pixel_format yuv420p10le -video_size 192x128 -framerate 8 -i - \
+  -c:v libx265 -x265-params lossless=1:log-level=error:pools=2 -pix_fmt yuv420p10le -tag:v hvc1 q6-grain.mp4
+from array import array
+import sys
+
+width, height = 192, 128
+for t in range(64):
+    luma = array('H')
+    for y in range(height):
+        for x in range(width):
+            stroke = 55 <= x < 63 and 45 <= y < 75
+            texture = (y * 131 + x * 17) % 5
+            flicker = (t * (1 + (y * 17 + x * 3) % 7) + y + x) % 6
+            luma.append(500 + texture + (84 if stroke else flicker))
+    chroma = array('H', [512] * (width * height // 2))
+    for plane in (luma, chroma):
+        if sys.byteorder != 'little':
+            plane.byteswap()
+        plane.tofile(sys.stdout.buffer)
+PY
+```
+
+Run the release diagnostic with `ABNER_DETECT_BOX=32,32,80,60` and
+`ABNER_DETECT_COUNT=64` or `all`.
 
 ### Q7. Out of reach of the current model (noted, not planned)
 
