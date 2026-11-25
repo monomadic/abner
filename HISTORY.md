@@ -1,5 +1,11 @@
 # abner — history
 
+## 2026-11-25 — Apply Downsize input during processor export
+
+Export uses the preview's Downsize input settings and spline resampling. It
+strips the host's setting before creating a processor, and when Downsize is
+enabled it shrinks the input and selects the matching upscale model.
+
 ## 2026-11-23 — Check translucent autodetect proposals against their surroundings
 
 Native-resolution autodetect now fits a component's RGB variation to the

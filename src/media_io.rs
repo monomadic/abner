@@ -2940,6 +2940,9 @@ pub(crate) fn pipeline_export_with_inputs(
     emit: impl FnMut(crate::export_page::Rendered) -> Result<(), String> + Send,
 ) -> Result<()> {
     use abner_processor_api::{VideoFrame, InputRequirement, Role};
+    use crate::processor_gui::{self, Downsized};
+
+    const PROCESSOR_BATCH_BYTES: usize = 512 * 1024 * 1024;
     inputs.validate_geometry(info.width,info.height).map_err(anyhow::Error::msg)?;
     ensure!(crop.is_none() || inputs.crops.is_empty(), "Use either the timeline crop or an export crop");
     validate_ranges(keeps)?;
@@ -3048,7 +3051,7 @@ pub(crate) fn pipeline_export_with_inputs(
                 pool.settle(true);
                 let (mut sessions, dims, mut source) = registry.with(|registry| -> Result<_> {
                 let mut dims = [cw as usize, ch as usize];
-                let mut stage_rate = crate::processor_gui::rational(info.fps);
+                let mut stage_rate = processor_gui::rational(info.fps);
                 let mut sessions = Vec::new();
                 for (stage,(id, settings)) in chain.iter().enumerate() {
                     ensure!(stage==0 || inputs.bindings.get(id).is_none_or(|b|b.is_empty()), "Spatial inputs currently require the first enabled processor");
@@ -3057,10 +3060,14 @@ pub(crate) fn pipeline_export_with_inputs(
                         "{}: generator/post-processor execution is not supported by export", f.descriptor().name);
                     ensure!(!matches!(f.capabilities().input, InputRequirement::WholeClip),
                         "{}: whole-clip execution is not supported by export", f.descriptor().name);
-                    let key = format!("{id}|{settings}|{}x{}", dims[0], dims[1]);
-                    let mut made = pool.take(key, || f.create(dims[0], dims[1], settings)).map_err(anyhow::Error::msg)?;
+                    let (settings, downsize) = processor_gui::stage_settings(f, settings).map_err(anyhow::Error::msg)?;
+                    ensure!(downsize == 1 || inputs.bindings.get(id).is_none_or(|b| b.is_empty()),
+                        "Downsize input cannot be combined with spatial inputs");
+                    let [width, height] = Downsized::dimensions(dims, downsize);
+                    let key = format!("{id}|{settings}|{width}x{height}");
+                    let mut made = pool.take(key, || f.create(width, height, &settings)).map_err(anyhow::Error::msg)?;
                     made.configure_input_rate(stage_rate).map_err(anyhow::Error::msg)?;
-                    stage_rate = f.output_rate(settings, stage_rate).map_err(anyhow::Error::msg)?;
+                    stage_rate = f.output_rate(&settings, stage_rate).map_err(anyhow::Error::msg)?;
                     let mut session = abner_processor_api::bind(f, made, inputs.bindings.get(id).cloned().unwrap_or_default())
                         .map_err(anyhow::Error::msg)?;
                     if let Some(report) = stage_report {
@@ -3077,6 +3084,8 @@ pub(crate) fn pipeline_export_with_inputs(
                         session = Box::new(abner_processing::progress::CallBoundary::new(session,
                             std::sync::Arc::new(move || report(&name, StageUpdate::Frame(stage, count, None)))));
                     }
+                    let session = Downsized::wrap(session, downsize, PROCESSOR_BATCH_BYTES)
+                        .map_err(anyhow::Error::msg)?;
                     active.lock().unwrap().push(session.cancellation());
                     dims = session.output_dimensions();
                     ensure!(
@@ -3169,7 +3178,7 @@ pub(crate) fn pipeline_export_with_inputs(
                             0,
                             vec![f],
                             cancel,
-                            512 * 1024 * 1024,
+                            PROCESSOR_BATCH_BYTES,
                         )
                         .map_err(anyhow::Error::msg)?,
                     )?;
@@ -3181,7 +3190,7 @@ pub(crate) fn pipeline_export_with_inputs(
                             &mut sessions,
                             i,
                             cancel,
-                            512 * 1024 * 1024,
+                            PROCESSOR_BATCH_BYTES,
                         )
                         .map_err(anyhow::Error::msg)?,
                     )?;

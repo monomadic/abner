@@ -67,6 +67,28 @@ fn split_downsize(settings: &Value) -> (Value, usize) {
         .map_or(1, |f| f.max(1) as usize);
     (plain, factor)
 }
+/// Resolve host-owned downsize settings before calling the processor.
+pub(crate) fn stage_settings(
+    factory: &dyn abner_processor_api::Factory,
+    raw: &Value,
+) -> Result<(Value, usize), String> {
+    let (mut settings, factor) = split_downsize(raw);
+    if factor > 1 {
+        let option = factory
+            .scales()
+            .into_iter()
+            .find(|s| s.factor == factor)
+            .ok_or_else(|| format!(
+                "{}: no {factor}x model to bring a 1/{factor} input back to size",
+                factory.descriptor().name
+            ))?;
+        if let (Some(map), Some(overlay)) = (settings.as_object_mut(), option.settings.as_object()) {
+            map.extend(overlay.clone());
+        }
+    }
+    Ok((settings, factor))
+}
+
 /// The Downsize input row for a processor declaring `scales`: Off plus one
 /// choice per 2x / 4x model it offers. None when it offers neither.
 fn downsize_field(scales: &[ScaleOption]) -> Option<Field> {
@@ -410,7 +432,8 @@ fn chain_rate(registry: &Registry, chain: &[(String, Value)], fps: f64) -> Resul
     let mut rate = rational(fps);
     for (id, settings) in chain {
         let factory = registry.get(id)?;
-        rate = factory.output_rate(&split_downsize(settings).0, rate)?;
+        let (settings, _) = stage_settings(factory, settings)?;
+        rate = factory.output_rate(&settings, rate)?;
         if rate.contains(&0) || rate_fps(rate) > 1000.0 {
             return Err(format!("{}: unsupported output frame rate", factory.descriptor().name));
         }
@@ -912,24 +935,11 @@ fn render_inner(
     for (index, (id, raw)) in r.chain.iter().enumerate() {
         let factory = registry.get(id)?;
         if index>0 && r.inputs.bindings.get(id).is_some_and(|b|!b.is_empty()) {return Err("Spatial inputs currently require the first enabled processor; move this processor first".into());}
-        let (mut settings, downsize) = split_downsize(raw);
-        let mut stage_dims = dims;
-        if downsize > 1 {
-            if r.inputs.bindings.get(id).is_some_and(|b| !b.is_empty()) {
-                return Err("Downsize input cannot be combined with spatial inputs".into());
-            }
-            let option = factory
-                .scales()
-                .into_iter()
-                .find(|s| s.factor == downsize)
-                .ok_or_else(|| format!("{}: no {downsize}x model to bring a 1/{downsize} input back to size", factory.descriptor().name))?;
-            if let (Some(map), Some(over)) = (settings.as_object_mut(), option.settings.as_object()) {
-                for (k, v) in over {
-                    map.insert(k.clone(), v.clone());
-                }
-            }
-            stage_dims = [(dims[0] / downsize).max(1), (dims[1] / downsize).max(1)];
+        let (settings, downsize) = stage_settings(factory, raw)?;
+        if downsize > 1 && r.inputs.bindings.get(id).is_some_and(|b| !b.is_empty()) {
+            return Err("Downsize input cannot be combined with spatial inputs".into());
         }
+        let stage_dims = Downsized::dimensions(dims, downsize);
         let settings = &settings;
         let caps = factory.capabilities();
         if !matches!(caps.role, Role::Processor)
@@ -989,11 +999,7 @@ fn render_inner(
             callbacks,
             call_boundary: Arc::new(move || stage.frame(None)),
         });
-        let session: Box<dyn Session> = if downsize > 1 {
-            Box::new(Downsized { inner: Box::new(abner_processing::negotiation::Rgb16Boundary::new(session, r.budget)?), factor: downsize })
-        } else {
-            session
-        };
+        let session = Downsized::wrap(session, downsize, r.budget)?;
         dims = session.output_dimensions();
         if dims.contains(&0)
             || dims.iter().any(|d| *d > 8192)
@@ -1227,10 +1233,29 @@ fn render_inner(
 /// the frame goes in at 1/factor and the stage's own factor-x model brings
 /// it back to size. Spatial inputs are refused upstream, so `process` is
 /// the only way in.
-struct Downsized {
+pub(crate) struct Downsized {
     inner: Box<dyn Session>,
     factor: usize,
 }
+
+impl Downsized {
+    pub(crate) fn dimensions(dims: [usize; 2], factor: usize) -> [usize; 2] {
+        dims.map(|dim| (dim / factor).max(1))
+    }
+
+    pub(crate) fn wrap(
+        session: Box<dyn Session>,
+        factor: usize,
+        budget: usize,
+    ) -> Result<Box<dyn Session>, String> {
+        if factor == 1 {
+            return Ok(session);
+        }
+        let inner = abner_processing::negotiation::Rgb16Boundary::new(session, budget)?;
+        Ok(Box::new(Self { inner: Box::new(inner), factor }))
+    }
+}
+
 impl Session for Downsized {
     fn configure_input_rate(&mut self, rate: abner_processor_api::Rate) -> Result<(), String> { self.inner.configure_input_rate(rate) }
     fn set_preview_target(&mut self, pts: i64, time_base: [u32; 2]) {
@@ -1243,7 +1268,7 @@ impl Session for Downsized {
         self.inner.set_frame_progress_reporter(reporter);
     }
     fn process(&mut self, input: Frame) -> Result<Vec<Frame>, String> {
-        let (w, h) = ((input.width / self.factor).max(1), (input.height / self.factor).max(1));
+        let [w, h] = Self::dimensions([input.width, input.height], self.factor);
         let pixels = crate::resample::spline_resize_rgb16(&input.pixels, input.width, input.height, w, h);
         self.inner.process(Frame { width: w, height: h, pixels, ..input })
     }
@@ -5583,6 +5608,9 @@ mod tests {
             vec![ScaleOption { factor: 2, settings: json!({"scale": 2}) }]
         }
         fn create(&self, w: usize, h: usize, s: &Value) -> Result<Box<dyn abner_processor_api::Session>, String> {
+            if s.as_object().is_some_and(|map| map.keys().any(|key| key != "scale")) {
+                return Err("unexpected scaling processor setting".into());
+            }
             let factor = s["scale"].as_u64().unwrap_or(1) as usize;
             Ok(Box::new(Scaling { input: [w, h], factor, cancel: Cancellation::default() }))
         }
@@ -5626,6 +5654,30 @@ mod tests {
         r.register(Box::new(ScalingFactory)).unwrap();
         r
     }
+    #[test]
+    fn export_honors_downsize_settings_for_strict_processors() {
+        let fixture = crate::native_decode_tests::Fixture::new();
+        let info = crate::probe::probe(&fixture.path).unwrap();
+        let registry = registry();
+        let period = 1001. / 24000.;
+        for (name, settings, scale) in [
+            ("off", json!({DOWNSIZE_KEY: 1, "scale": 2}), 2),
+            ("half", json!({DOWNSIZE_KEY: 2, "scale": 1}), 1),
+        ] {
+            let dest = fixture.dir.join(format!("downsize-{name}.mov"));
+            let chain = vec![("example.scaling".into(), settings)];
+            let mut frames = 0;
+            crate::media_io::pipeline_export(
+                &info, &dest, &[(0., 12. * period)], &registry, &chain, true,
+                None, &Cancellation::default(), &Mutex::default(),
+                |_| { frames += 1; Ok(()) },
+            ).unwrap();
+            let exported = crate::probe::probe(&dest).unwrap();
+            assert_eq!(frames, 12, "{name}");
+            assert_eq!([exported.width, exported.height], [info.width * scale, info.height * scale], "{name}");
+        }
+    }
+
     #[test]
     fn downsize_row_appears_only_for_declared_scales_and_stays_out_of_plugin_settings() {
         let mut panel = populated(registry());
