@@ -97,7 +97,7 @@ pub enum Cmd {
     /// runner loads it through the drop path, so it is recorded again.
     OpenRecent(usize),
     OpenFiles,
-    AddRendered(std::path::PathBuf),
+    OpenCopiedSource(std::path::PathBuf),
     OpenDirectory(std::path::PathBuf),
     /// File > Reveal in Finder: select this clip in a Finder window.
     Reveal(std::path::PathBuf),
@@ -188,13 +188,6 @@ pub struct Video {
     pub last_frame: Option<std::sync::Arc<Vec<u8>>>,
 }
 
-struct SourceCopyCheck {
-    path: std::path::PathBuf,
-    keeps: Vec<(f64, f64)>,
-    result: Option<std::sync::mpsc::Receiver<bool>>,
-    ready: bool,
-}
-
 type FramePngResult = Result<(Vec<u8>, u32, u32), String>;
 
 pub struct App {
@@ -209,8 +202,7 @@ pub struct App {
     detection_area_visible:bool,
     processors: crate::processor_gui::Panel,
     export_page: crate::export_page::Page,
-    source_copy_check: Option<SourceCopyCheck>,
-    source_render: Option<std::sync::mpsc::Receiver<Result<std::path::PathBuf, String>>>,
+    source_copy: Option<std::sync::mpsc::Receiver<Result<std::path::PathBuf, String>>>,
     pub videos: Vec<Video>,
     active: usize,
     source_scroll: f32,
@@ -767,8 +759,7 @@ impl App {
             detection_area:None, detection_area_visible:false,
             processors: crate::processor_gui::Panel::default(),
             export_page: crate::export_page::Page::default(),
-            source_render: None,
-            source_copy_check: None,
+            source_copy: None,
             masks: (0..videos.len()).map(|_| None).collect(),
             mask_mode: false,
             brush_diameter: cfg.mask.brush_size,
@@ -1495,7 +1486,7 @@ impl App {
     /// A finished stroke becomes one undo step, if it painted anything.
     fn control_dead(&self,action:&Action)->bool {
         match action {
-            Action::RenderSource => self.source_render.is_some(),
+            Action::CopySource => self.source_copy.is_some(),
             Action::UndoMask => !self.can_undo_mask(),
             Action::RedoMask => !self.can_redo_mask(),
             Action::DetectAccept => !matches!(&self.detection_result, Some(Detection::Proposal(review)) if review.added > 0),
@@ -2044,80 +2035,30 @@ impl App {
         self.export_page.set_copy_unavailable(reason);
     }
 
-    fn source_keeps(&self) -> Vec<(f64, f64)> {
-        self.cut.as_ref().filter(|_| self.active == self.cut_video)
-            .map(|c| c.keeps()).unwrap_or_else(|| vec![(0., self.videos[self.active].info.duration)])
-    }
-
-    fn poll_source_copy_check(&mut self) {
-        if !self.ready() { self.source_copy_check = None; return; }
-        let path = &self.videos[self.active].info.path;
-        let keeps = self.source_keeps();
-        if self.source_copy_check.as_ref().is_none_or(|c| c.path != *path || c.keeps != keeps) {
-            let (tx, rx) = std::sync::mpsc::channel();
-            self.source_copy_check = Some(SourceCopyCheck { path: path.clone(), keeps: keeps.clone(), result: Some(rx), ready: false });
-            let path = path.clone();
-            std::thread::spawn(move || { let _ = tx.send(crate::media_io::can_copy(&path, &keeps).is_ok()); });
-        }
-        let check = self.source_copy_check.as_mut().unwrap();
-        if let Some(rx) = &check.result {
-            match rx.try_recv() {
-                Ok(ready) => { check.ready = ready; check.result = None; }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => { check.result = None; }
-                Err(std::sync::mpsc::TryRecvError::Empty) => {}
-            }
-        }
-    }
-
-    /// This action always copies packets, independently of the Export preset.
-    fn can_render_source(&self) -> bool {
-        self.ready() && self.source_copy_check.as_ref().is_some_and(|c|
-            c.ready && c.path == self.videos[self.active].info.path && c.keeps == self.source_keeps())
-            && self.crop.is_none() && !self.processors.modifies_video()
-            && self.crop_schedule().is_empty()
-            && self.videos[self.active].info.path.extension().is_some_and(|ext|
-                ["mp4", "m4v", "mov", "mkv", "webm"].iter().any(|e| ext.eq_ignore_ascii_case(e)))
-            && self.cut.as_ref().filter(|_| self.active == self.cut_video)
-                .is_none_or(|c| c.copy_ready() && c.segments().iter().any(|s| !s.cut))
-    }
-
-    fn render_source(&mut self) {
-        if !self.can_render_source() || self.source_render.is_some() { return; }
-        let info = self.videos[self.active].info.clone();
-        let cut = self.cut.as_ref().filter(|_| self.active == self.cut_video);
-        let keeps = self.source_keeps();
-        let chapters = cut.map(|c| c.chapters.clone());
+    fn copy_source(&mut self) {
+        if self.source_copy.is_some() { return; }
+        let Some(video) = self.videos.get(self.active) else { return; };
+        let path = video.info.path.clone();
         let (tx, rx) = std::sync::mpsc::channel();
-        self.source_render = Some(rx);
-        self.notify("Rendering stream copy…".into());
+        self.source_copy = Some(rx);
+        self.notify("Copying source…".into());
         std::thread::spawn(move || {
-            let result = (|| {
-                let chapters = match chapters {
-                    Some(chapters) => chapters,
-                    None => crate::media_metadata::timeline(&info.path)?
-                        .map(|t| t.chapters).unwrap_or_default(),
-                };
-                crate::media_io::render_copy(&info.path, &keeps,
-                    &crate::cut::output_chapters(&chapters, &keeps)).map_err(|e| e.to_string())
-            })();
+            let result = crate::media_io::copy_source_file(&path).map_err(|error| format!("{error:#}"));
             let _ = tx.send(result);
         });
     }
 
-    fn poll_source_render(&mut self) {
-        let Some(rx) = &self.source_render else { return; };
+    fn poll_source_copy(&mut self) {
+        let Some(rx) = &self.source_copy else { return; };
         let result = match rx.try_recv() {
             Ok(result) => result,
             Err(std::sync::mpsc::TryRecvError::Empty) => return,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("worker stopped".into()),
         };
-        self.source_render = None;
+        self.source_copy = None;
         match result {
-            Ok(path) => {
-                self.notify(format!("Rendered {}", path.display()));
-                self.cmds.push(Cmd::AddRendered(path));
-            }
-            Err(error) => self.notify(format!("Render failed: {error}")),
+            Ok(path) => self.cmds.push(Cmd::OpenCopiedSource(path)),
+            Err(error) => self.notify(format!("Could not copy source: {error}")),
         }
     }
 
@@ -3245,8 +3186,7 @@ impl App {
             }
             self.frame_detail_boot = false;
         }
-        self.poll_source_copy_check();
-        self.poll_source_render();
+        self.poll_source_copy();
         self.poll_watermark();
         self.keep_chapter_visible();
         self.tick_cut_thumbs(dt);
@@ -3295,7 +3235,7 @@ impl App {
             }
             // Thumbnail workers still out: look again soon even without a
             // moving floor to pace the loop.
-            if self.recent.pending() || self.export_page.has_jobs() || self.source_render.is_some() {
+            if self.recent.pending() || self.export_page.has_jobs() || self.source_copy.is_some() {
                 let soon = Instant::now() + std::time::Duration::from_millis(100);
                 desc.redraw_at = Some(desc.redraw_at.map_or(soon, |t| t.min(soon)));
             }
@@ -3739,7 +3679,7 @@ impl App {
             draw_status_chip(&mut items, self.status_chip(), lamp, text, WORKSPACE_TEXT);
             }
         }
-        let animating = self.source_copy_check.as_ref().is_some_and(|c| c.result.is_some()) || self.source_render.is_some() || self.export_page.has_jobs() || self.export_page.playing() || self.processors.animating()
+        let animating = self.source_copy.is_some() || self.export_page.has_jobs() || self.export_page.playing() || self.processors.animating()
             || self.playing
             || !self.started
             || self.cut_thumb.play.is_some()
@@ -3778,7 +3718,7 @@ impl App {
         let lift = if self.show_ui && self.cut_mode {
             self.frame_detail_extra() + if self.cut_encode_rail() { 26.0 } else { 0.0 }
         } else { 0.0 };
-        Workspace::new(self.vp, self.show_ui, self.cut_mode, lift, self.rail_slide, self.side_slide, self.detail_slide, self.source_width, self.can_render_source() && !self.mask_mode)
+        Workspace::new(self.vp, self.show_ui, self.cut_mode, lift, self.rail_slide, self.side_slide, self.detail_slide, self.source_width)
     }
 
     fn cut_frame_cells(&self) -> bool {
@@ -4411,10 +4351,9 @@ impl App {
                 Action::ToggleDetail,
             ));
         }
-        if l.panel > 0.0 && !self.mask_mode && self.can_render_source() {
-            let y = if self.cut_mode { l.transport.y - 34. } else { self.vp.1 - STATUS_H - 68. };
-            out.push(Control::new(RectPx { x: l.list.x + 12., y,
-                w: l.panel - 24., h: 28. }, "Render", false, Action::RenderSource));
+        let copy = bar.trailing(160.);
+        if self.ready() && !self.mask_mode {
+            out.push(Control::new(copy, "Copy As New Source", false, Action::CopySource));
         }
         if self.cut_mode {
             out.push(Control::new(bar.control(bar.content().x,92.),"Crop clip",false,Action::LaunchEditor(true)));
@@ -4457,6 +4396,7 @@ impl App {
         let content_end=if self.editor.is_some() {reset.x-ButtonBar::GROUP_GAP}else{bar.content().x+bar.content().w};
         let mut x = bar.content().x;
         if !self.mask_mode {
+            let view_end = copy.x - ButtonBar::GROUP_GAP;
             for (label,tool) in [("Crop",2),("Mask",1)] {
                 out.push(Control::new(bar.control(x,58.),label,false,Action::LaunchEditor(tool==2)));x+=58.+ButtonBar::GAP;
             }
@@ -4468,7 +4408,7 @@ impl App {
                 (Mode::Checker, "Checker", 74.0),
                 (Mode::Blend, "Blend", 64.0),
             ] {
-                if x+w>bar.content().x+bar.content().w {break}
+                if x + w > view_end { break; }
                 out.push(Control::new(
                     bar.control(x,w),
                     label,
@@ -4478,7 +4418,7 @@ impl App {
                 x += w + ButtonBar::GAP;
             }
             if matches!(self.mode, Mode::Delta | Mode::Checker | Mode::Blend)
-                && x + 144.0 < self.vp.0
+                && x + 56.0 + ButtonBar::GAP <= view_end
             {
                 for (label, up) in [("−", false), ("+", true)] {
                     out.push(Control::new(
@@ -4648,7 +4588,7 @@ impl App {
             | Action::LeaveDiscard | Action::LeaveKeep | Action::LeaveApply
             | Action::DetectRun | Action::DetectDiscard | Action::DetectAccept | Action::DetectOffset(_) | Action::DetectWhere(_) | Action::DetectRange(_) | Action::DetectRetry(_)
             | Action::Erase(_) | Action::MaskView(_) | Action::BrushPreset(_) | Action::InvertMask | Action::ClearMask => unreachable!(),
-            Action::RenderSource => self.render_source(),
+            Action::CopySource => self.copy_source(),
             Action::Duplicate => self.duplicate_sources(),
             Action::OpenFiles => self.cmds.push(Cmd::OpenFiles),
             Action::ToggleSources => self.show_sources = !self.show_sources,
@@ -4873,7 +4813,7 @@ impl App {
                 control.draw(items, hovered, disabled);
                 continue;
             }
-            if matches!(control.action, Action::Duplicate | Action::OpenFiles | Action::RenderSource) {
+            if matches!(control.action, Action::Duplicate | Action::OpenFiles) {
                 items.push(Item::Rect(RectItem { radius: 8.0, border_w: 1.0,
                     border_color: hex_color(SOURCE_BORDER), ..RectItem::new(control.r, hex_color(SOURCE_SURFACE)) }));
             }
@@ -5031,7 +4971,7 @@ impl App {
         // for even that it reaches past what is under it (cut mode's
         // transport, Input's status line): clip to the rail's real end
         // and drop the footer line when there is no room for it.
-        let end = if self.cut_mode { l.transport.y - if self.can_render_source() { 40. } else { 0. } }
+        let end = if self.cut_mode { l.transport.y }
             else { self.vp.1 - STATUS_H };
         let visible = RectPx { x: 0.0, y: l.list.y, w: l.rail, h: l.list.h.min(end - l.list.y).max(0.0) };
         items.push(Item::Clip(Some(visible)));
@@ -7051,7 +6991,7 @@ impl App {
         // ---- Figma timeline header ----
         let controls = self.controls();
         self.build_cut_header(items);
-        for control in controls.iter().filter(|c|matches!(c.action,Action::LaunchEditor(_) | Action::RenderSource)) {
+        for control in controls.iter().filter(|c|matches!(c.action,Action::LaunchEditor(_) | Action::CopySource)) {
             ButtonBar::button(items, control.r, &control.label, control.selected,
                 self.cursor_inside && contains(control.r,self.cursor.0,self.cursor.1), self.control_dead(&control.action));
         }
@@ -8210,7 +8150,7 @@ impl Workspace {
     /// height (frame detail, the encode rail); everything above moves with it.
     // Keep the explicit geometry/pipeline inputs at this boundary.
     #[allow(clippy::too_many_arguments)]
-    fn new(vp: (f32, f32), visible: bool, cut: bool, lift: f32, slide: f32, side_slide: f32, detail_slide: f32, source_width: Option<f32>, render_source: bool) -> Self {
+    fn new(vp: (f32, f32), visible: bool, cut: bool, lift: f32, slide: f32, side_slide: f32, detail_slide: f32, source_width: Option<f32>) -> Self {
         let (w, h) = vp;
         let none = RectPx { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
         // `rail` is what the layout gives the panel this frame; `panel` is
@@ -8237,9 +8177,7 @@ impl Workspace {
         if visible && cut {
             // Timeline Edit (12:2): the source rail, the canvas and the
             // inspector share the top; the transport and the lanes run the
-            // full width underneath (compact lanes on short windows). The
-            // rail keeps its focused inspector and reserves a row for Render
-            // above the transport when the focused source can be copied.
+            // full width underneath (compact lanes on short windows).
             let lanes = if h >= CUT_FULL_MIN_H { CUT_TIMELINE_H } else { CUT_TIMELINE_COMPACT_H } + lift;
             // The inspector keeps its width and slides past the right edge;
             // `side_in` is the part still inside, which the canvas reclaims.
@@ -8251,7 +8189,7 @@ impl Workspace {
             let attached = surface.timeline.unwrap();
             let transport_y = attached.transport.y;
             let top = (transport_y - CUT_HEADER_H).max(1.0);
-            let (grip, inspector) = Self::detail(ox, panel, h, list_y, transport_y - if render_source { 40. } else { 0. }, detail_slide);
+            let (grip, inspector) = Self::detail(ox, panel, h, list_y, transport_y, detail_slide);
             return Self {
                 rail, panel, mini, inspector, grip,
                 list: list_of(transport_y, grip.y),
@@ -8269,7 +8207,7 @@ impl Workspace {
         // footer line above the inspector and the Duplicate / Add files
         // buttons under it — are not in the design and take their own
         // strips, so nothing overlaps the inspector's path line.
-        let (grip, inspector) = Self::detail(ox, panel, h, list_y, h - STATUS_H - RAIL_ACTIONS_H - if render_source { 34. } else { 0. }, detail_slide);
+        let (grip, inspector) = Self::detail(ox, panel, h, list_y, h - STATUS_H - RAIL_ACTIONS_H, detail_slide);
         Self {
             rail, panel, mini, canvas, surface, inspector, grip, timeline: none, side: none,
             list: list_of(h - STATUS_H, grip.y),
@@ -8352,7 +8290,7 @@ impl DetectionReview {
     }
 }
 #[derive(Clone, Copy)]
-enum Action { LaunchEditor(bool), ResetEdit, ApplyEdit, CancelEdit, DetectRun, DetectDiscard, DetectAccept, DetectOffset(i8), DetectWhere(bool), DetectRange(u8), DetectRetry(u8), LeaveDiscard, LeaveKeep, LeaveApply, Erase(bool), MaskView(u8), BrushPreset(u16), InvertMask, ClearMask, Duplicate, RenderSource, OpenFiles, ToggleSources, ToggleInspector, ToggleDetail, Tool(usize), View(Mode), Autodetect, DetectionArea, UndoMask, RedoMask, Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
+enum Action { LaunchEditor(bool), ResetEdit, ApplyEdit, CancelEdit, DetectRun, DetectDiscard, DetectAccept, DetectOffset(i8), DetectWhere(bool), DetectRange(u8), DetectRetry(u8), LeaveDiscard, LeaveKeep, LeaveApply, Erase(bool), MaskView(u8), BrushPreset(u16), InvertMask, ClearMask, Duplicate, CopySource, OpenFiles, ToggleSources, ToggleInspector, ToggleDetail, Tool(usize), View(Mode), Autodetect, DetectionArea, UndoMask, RedoMask, Brush(bool), Save, Export, Param(bool), Cut(CutAction) }
 #[derive(Clone, Copy, PartialEq)]
 enum CutAction { TogglePosters, FrameChanges(bool), TimeDisplay(bool),
     // Set in / out: no key or button reaches these while the feature is disabled.
@@ -10087,7 +10025,7 @@ mod tests {
         // keycap per clip, the cards and their controls gone.
         assert!(l.mini);
         assert_eq!((l.rail, l.canvas.x, l.canvas.w, l.panel, l.inspector.h), (RAIL_MINI_W, RAIL_MINI_W, 1280.0 - RAIL_MINI_W, 0.0, 0.0));
-        assert!(app.controls().iter().all(|c| !matches!(c.action, Action::Duplicate | Action::OpenFiles | Action::RenderSource)));
+        assert!(app.controls().iter().all(|c| !matches!(c.action, Action::Duplicate | Action::OpenFiles)));
         assert!(app.controls().iter().any(|c| matches!(c.action, Action::ToggleSources) && !c.selected));
         let t = app.header_tabs();
         assert_eq!((t.x, t.y, t.w, t.h), (tabs.x, tabs.y, tabs.w, tabs.h));
@@ -10248,8 +10186,8 @@ mod tests {
     #[test]
     fn canvas_bar_metrics_match_across_all_pages() {
         for vp in [(720.,480.),(1280.,800.),(1920.,1080.)] {
-            let sources=Workspace::new(vp,true,false,0.,1.,1.,1.,None,false);
-            let timeline=Workspace::new(vp,true,true,0.,1.,1.,1.,None,false);
+            let sources=Workspace::new(vp,true,false,0.,1.,1.,1.,None);
+            let timeline=Workspace::new(vp,true,true,0.,1.,1.,1.,None);
             let export=crate::export_page::Layout::new(vp);
             let process=crate::processor_gui::Panel::default().viewer(vp);
             assert_eq!(sources.canvas.y,HEADER_H+ButtonBar::HEIGHT);
@@ -10393,115 +10331,81 @@ mod tests {
         assert!(app.masks[app.active..].iter().all(Option::is_none));
     }
 
-    /// Frame > Copy Frame as PNG: the frame on screen is read back from
-    /// the player's cache (nothing is kept app-side outside mask mode), the
-    /// worker hands back a decodable RGB PNG at the clip's native size, and
-    /// the menu is dead without a clip.
     #[test]
-    fn source_render_visibility_and_compact_layout() {
+    fn source_copy_is_in_the_canvas_toolbar() {
         let Some(clip) = test_clip() else { return };
         let mut app = mk_app(&clip, 1);
-        assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.can_render_source()));
-        for width in [110., 180., 210., 280.] {
-            app.source_width = Some(width);
-            let controls = app.controls();
-            let render = controls.iter().find(|c| matches!(c.action, Action::RenderSource)).unwrap();
-            let add = controls.iter().find(|c| matches!(c.action, Action::OpenFiles)).unwrap();
-            assert_eq!(render.label, "Render");
-            assert!(render.r.y + render.r.h <= add.r.y);
-            assert!(render.r.w >= 86.);
-            let ws = app.workspace();
-            assert!(ws.inspector.y + ws.inspector.h <= render.r.y);
+        for cut_mode in [false, true] {
+            app.set_cut_mode(cut_mode);
+            for (vp, rail_slide) in [((720., 480.), 1.), ((1280., 800.), 1.), ((1280., 800.), 0.)] {
+                app.vp = vp;
+                app.rail_slide = rail_slide;
+                let controls = app.controls();
+                let copy = controls.iter().find(|c| matches!(c.action, Action::CopySource)).unwrap();
+                let bar = app.workspace().surface.button_bar.unwrap();
+                let content = bar.content();
+                assert_eq!(copy.label, "Copy As New Source");
+                assert!(copy.r.x >= content.x && copy.r.x + copy.r.w <= content.x + content.w);
+                assert_eq!(copy.r.y, content.y);
+                assert!(controls.iter().filter(|c| c.r.y == copy.r.y).all(|c|
+                    matches!(c.action, Action::CopySource) || c.r.x + c.r.w <= copy.r.x));
+                let mut items = Vec::new();
+                if cut_mode { app.build_cut_hud(&mut items, vp); }
+                else { app.build_hud(&mut items, vp); }
+                assert!(items.iter().any(|i| matches!(i, Item::Label(t) if t.string == copy.label)));
+            }
         }
-        app.videos[0].input_crop = Some(Crop { x: 0., y: 0., w: 64., h: 64. });
-        assert!(!app.can_render_source());
-        assert!(!app.controls().iter().any(|c| matches!(c.action, Action::RenderSource)));
-        app.videos[0].input_crop = None;
+    }
+
+    #[test]
+    fn source_copy_uses_the_focused_file_and_retains_both_sources() {
+        let Some(clip) = test_clip() else { return };
+        let first = crate::media_io::copy_source_file(&clip).unwrap();
+        let mut app = mk_app(&clip, 1);
+        app.add_videos(vec![mk_video(&first)], false);
         app.set_cut_mode(true);
-        assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.cut.as_ref().is_some_and(|c| !c.scanning())));
         let cut = app.cut.as_mut().unwrap();
         cut.snap = Snap::Frame;
-        cut.split(0.5);
-        assert!(!app.can_render_source());
-    }
-
-    #[test]
-    fn source_render_is_drawn_and_clickable_on_single_file_timeline() {
-        let Some(clip) = test_clip() else { return };
-        let mut app = mk_app(&clip, 1);
-        app.set_cut_default(true); // Same startup path as the executable.
-        assert!(app.cut_mode);
-        assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.can_render_source()));
-        let render = app.controls().into_iter().find(|c| matches!(c.action, Action::RenderSource))
-            .expect("Timeline must expose Render in its Sources pane");
-        let ws = app.workspace();
-        assert!(render.r.y + render.r.h <= ws.transport.y);
-        assert!(ws.inspector.y + ws.inspector.h <= render.r.y);
-        let mut items = Vec::new();
-        app.build_cut_hud(&mut items, app.vp);
-        assert!(items.iter().any(|item| matches!(item, Item::Label(t)
-            if t.string == "Render" && t.rect.y < ws.transport.y)), "button must be painted, not just hit-testable");
-        app.mouse_down(render.r.x + render.r.w / 2., render.r.y + render.r.h / 2.);
-        assert!(app.source_render.is_some(), "click must launch the source copy");
-        assert!(tick_until(&mut app, Duration::from_secs(15), |a| a.source_render.is_none()));
-        for cmd in app.take_cmds() {
-            if let Cmd::AddRendered(path) = cmd { std::fs::remove_file(path).unwrap(); }
-        }
-    }
-
-    #[test]
-    fn source_render_copies_trim_and_retains_original() {
-        let Some(clip) = test_clip() else { return };
-        let mut app = mk_app(&clip, 1);
-        app.set_cut_mode(true);
-        assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.cut.as_ref().is_some_and(|c| !c.scanning())));
-        let cut = app.cut.as_mut().unwrap();
-        cut.set_in(0.); cut.set_out(1.); assert!(cut.cut_selection());
-        app.set_cut_mode(false);
-        assert!(tick_until(&mut app, Duration::from_secs(10), |a| a.can_render_source()));
-        app.render_source();
-        assert!(app.control_dead(&Action::RenderSource));
-        app.render_source(); // A second click cannot start another job.
-        assert!(tick_until(&mut app, Duration::from_secs(15), |a| a.source_render.is_none()));
-        let paths: Vec<_> = app.take_cmds().into_iter().filter_map(|c| match c {
-            Cmd::AddRendered(p) => Some(p), _ => None,
-        }).collect();
-        assert_eq!(paths.len(), 1, "{:?}", app.fresh_notice());
-        let dest = &paths[0];
-        assert_eq!(dest.parent(), clip.parent());
-        let info = probe::probe(dest).unwrap();
-        assert!((info.duration - 3.).abs() < 0.1, "{}", info.duration);
-        let original = crate::media_io::Input::open(&clip).unwrap();
-        let rendered = crate::media_io::Input::open(dest).unwrap();
-        let ov = original.video().unwrap(); let rv = rendered.video().unwrap();
-        let start = original.tracks[ov].samples.iter().position(|s| (s.pts - 1.).abs() < 0.0001).unwrap();
-        for i in 0..rendered.tracks[rv].samples.len() {
-            assert_eq!(original.data(ov, start+i).unwrap(), rendered.data(rv, i).unwrap());
-        }
-        // The runner sends the result through this same additive load path.
-        app.add_videos(vec![mk_video(dest)], false);
-        assert_eq!(app.videos.len(), 2);
-        assert_eq!(app.videos[0].info.path, clip);
-        assert_eq!(app.videos[app.active].info.path, *dest);
-        let second = crate::media_io::render_copy(&clip, &[(1., 4.)], &[]).unwrap();
+        cut.set_in(0.);
+        cut.set_out(1.);
+        assert!(cut.cut_selection());
+        let button = app.controls().into_iter().find(|c| matches!(c.action, Action::CopySource)).unwrap();
+        app.mouse_down(button.r.x + button.r.w / 2., button.r.y + button.r.h / 2.);
+        assert!(app.control_dead(&Action::CopySource));
+        app.copy_source(); // A second click cannot start another job.
+        assert!(tick_until(&mut app, Duration::from_secs(15), |a| a.source_copy.is_none()));
+        let cmds = app.take_cmds();
+        let [Cmd::OpenCopiedSource(dest)] = cmds.as_slice() else { panic!("expected one copy"); };
+        assert_eq!(dest.parent(), first.parent());
+        assert!(dest.file_stem().unwrap().to_string_lossy().starts_with(&format!("{}.copy", first.file_stem().unwrap().to_string_lossy())));
+        let bytes = std::fs::read(&first).unwrap();
+        assert_eq!(std::fs::read(dest).unwrap(), bytes);
+        let second = crate::media_io::copy_source_file(&first).unwrap();
         assert_ne!(*dest, second);
-        assert!(dest.exists());
+        assert_eq!(std::fs::read(dest).unwrap(), bytes);
+        // Use the runner's loader and additive source path.
+        app.add_videos(vec![crate::load_video(dest, app.cache_bytes()).unwrap()], false);
+        assert_eq!(app.videos.len(), 3);
+        assert_eq!(app.videos[0].info.path, clip);
+        assert_eq!(app.videos[1].info.path, first);
+        assert_eq!(app.videos[app.active].info.path, *dest);
         drop(app);
-        std::fs::remove_file(dest).unwrap();
-        std::fs::remove_file(second).unwrap();
+        for path in [&first, dest, &second] {
+            std::fs::remove_file(path).unwrap();
+        }
     }
 
     #[test]
-    fn source_render_failure_does_not_add_a_source() {
+    fn source_copy_failure_does_not_add_a_source() {
         let Some(clip) = test_clip() else { return };
         let mut app = mk_app(&clip, 1);
         let (tx, rx) = std::sync::mpsc::channel();
-        app.source_render = Some(rx);
+        app.source_copy = Some(rx);
         tx.send(Err("disk full".into())).unwrap();
-        app.poll_source_render();
-        assert!(app.source_render.is_none());
+        app.poll_source_copy();
+        assert!(app.source_copy.is_none());
         assert!(app.fresh_notice().unwrap().contains("disk full"));
-        assert!(!app.take_cmds().iter().any(|c| matches!(c, Cmd::AddRendered(_))));
+        assert!(!app.take_cmds().iter().any(|c| matches!(c, Cmd::OpenCopiedSource(_))));
         assert_eq!(app.videos.len(), 1);
     }
 

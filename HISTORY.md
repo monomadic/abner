@@ -1,5 +1,12 @@
 # abner — history
 
+## 2026-11-26 — Copy As New Source
+
+The canvas toolbar in Sources and Timeline copies the focused file byte for
+byte beside the original. The copy keeps its extension and gets a numbered
+suffix when the name is already taken. Abner adds and selects the copy while
+retaining the original in Sources.
+
 ## 2026-11-25 — Apply Downsize input during processor export
 
 Export uses the preview's Downsize input settings and spline resampling. It

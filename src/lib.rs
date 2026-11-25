@@ -645,11 +645,13 @@ impl Runner {
                         log::warn!("could not open {}: {err}", path.display());
                     }
                 }
-                Cmd::AddRendered(path) => {
+                Cmd::OpenCopiedSource(path) => {
                     let count = self.app.videos.len();
                     self.files_dropped(vec![path.clone()], false);
                     if self.app.videos.len() == count {
-                        self.app.notify(format!("Rendered {}, but could not open its preview", path.display()));
+                        self.app.notify(format!("Copied {}, but could not open it as a source", path.display()));
+                    } else {
+                        self.app.notify(format!("Copied {}", path.display()));
                     }
                     self.animating = true;
                     if let Some(w) = &self.window { w.request_redraw(); }

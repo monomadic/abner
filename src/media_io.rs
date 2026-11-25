@@ -1361,18 +1361,6 @@ fn cfg(entry: SampleEntry, language: &str) -> mp4::TrackConfig {
     c
 }
 
-/// Read-only eligibility check, run on a worker before offering source Render.
-pub(crate) fn can_copy(path: &Path, keeps: &[(f64, f64)]) -> Result<()> {
-    validate_ranges(keeps)?;
-    let input = Input::open(path)?;
-    let vi = input.video()?;
-    validate_copy_ranges(&input.tracks[vi], keeps)?;
-    for t in input.tracks.iter().filter(|t| matches!(t.kind, Kind::Video | Kind::Audio)) {
-        ensure!(t.entry.is_some(), "This track has no lossless native MP4 mapping");
-    }
-    Ok(())
-}
-
 fn validate_copy_ranges(video: &Track, keeps: &[(f64, f64)]) -> Result<()> {
     for &(a, b) in keeps {
         ensure!(
@@ -1932,32 +1920,34 @@ fn trim_regions(input: &Input, keeps: &[(f64, f64)]) -> Result<Vec<crate::smart:
     Ok(regions)
 }
 
-/// Publish a packet copy beside its source without replacing any existing file.
-pub(crate) fn render_copy(path: &Path, keeps: &[(f64, f64)], chapters: &[ExportChapter]) -> Result<PathBuf> {
-    let ext = path.extension().context("source has no container extension")?;
-    let staging = loop {
-        let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let mut suffix = std::ffi::OsString::from(format!("{}.{}.rendering.", std::process::id(), n));
-        suffix.push(ext);
-        let candidate = path.with_extension(suffix);
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
-            Ok(_) => break Pending(candidate),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e.into()),
-        }
-    };
-    export(path, &staging.0, keeps, true, chapters, None)?;
+/// Copy the source file verbatim beside the original, keeping its extension.
+pub(crate) fn copy_source_file(path: &Path) -> Result<PathBuf> {
+    let stem = path.file_stem().context("source has no filename")?;
+    ensure!(path.metadata()?.is_file(), "source is not a regular file");
+    let mut input = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     for n in 1u64.. {
-        let mut name = path.file_stem().unwrap_or_default().to_os_string();
-        name.push(if n == 1 { ".render".to_owned() } else { format!(".render-{n}") });
-        name.push(".");
-        name.push(ext);
-        let dest = path.with_file_name(name);
-        match std::fs::hard_link(&staging.0, &dest) {
-            Ok(()) => return Ok(dest),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e.into()),
+        let mut name = stem.to_os_string();
+        name.push(if n == 1 { ".copy".to_owned() } else { format!(".copy-{n}") });
+        if let Some(ext) = path.extension() {
+            name.push(".");
+            name.push(ext);
         }
+        let dest = path.with_file_name(name);
+        let result = std::fs::OpenOptions::new().write(true).create_new(true).open(&dest);
+        let mut output = match result {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error).with_context(|| format!("creating {}", dest.display())),
+        };
+        let copied = std::io::copy(&mut input, &mut output).and_then(|_| output.sync_all());
+        drop(output);
+        if let Err(error) = copied {
+            if let Err(cleanup) = std::fs::remove_file(&dest) {
+                log::warn!("Could not remove incomplete source copy {}: {cleanup}", dest.display());
+            }
+            return Err(error).with_context(|| format!("writing {}", dest.display()));
+        }
+        return Ok(dest);
     }
     unreachable!()
 }
