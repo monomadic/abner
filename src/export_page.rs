@@ -233,51 +233,79 @@ pub(crate) struct Layout {
 impl Layout {
     pub fn new(vp: (f32, f32)) -> Self {
         let side = crate::app::rail_full_width(vp.0);
-        let footer_y = vp.1 - crate::app::CUT_STATUS_H;
-        let sidebar = RectPx { x: 0., y: crate::app::HEADER_H,
-            w: side, h: footer_y - crate::app::HEADER_H };
-        let attachment_h = (vp.1 * 0.325).clamp(176., 260.);
-        // Figma 621:8921: no bar; the picture meets the header and the
-        // attachment runs transport, review track, then the job card.
-        let canvas = Canvas::layout(RectPx{x:side,y:sidebar.y,w:vp.0-side,h:footer_y-sidebar.y},false,
-            Some(TimelineAttachment{x:side,width:vp.0-side,transport_height:attachment_h,lanes_height:0.}));
-        let transport=canvas.timeline.unwrap().transport;
-        let video=canvas.r;
-        let seek = RectPx { x: transport.x + 38., y: transport.y + 66.,
-            w: (transport.w - 76.).max(80.), h: 4. };
+        let footer = RectPx {
+            x: 0., y: vp.1 - crate::app::CUT_STATUS_H,
+            w: vp.0, h: crate::app::CUT_STATUS_H,
+        };
+        let sidebar = RectPx {
+            x: 20., y: crate::app::HEADER_H,
+            w: side - 20., h: footer.y - crate::app::HEADER_H,
+        };
+        let bounds = RectPx {
+            x: side + 20., y: sidebar.y,
+            w: vp.0 - side - 30., h: sidebar.h,
+        };
+        let attachment_h = (vp.1 * 0.325).clamp(176., 263.);
+        let canvas = Canvas::layout(bounds, true, Some(TimelineAttachment {
+            x: bounds.x, width: bounds.w, transport_height: attachment_h, lanes_height: 0.,
+        })).bar_below();
+        let transport = canvas.timeline.unwrap().transport;
+        let seek = RectPx {
+            x: transport.x + 22., y: transport.y + 66.,
+            w: transport.w - 44., h: 4.,
+        };
+        Self { sidebar, video: canvas.r, canvas, transport, seek, footer }
+    }
 
+    fn job_card(&self) -> RectPx {
+        RectPx {
+            x: self.transport.x, y: self.transport.y + 95.,
+            w: self.transport.w, h: self.transport.h - 105.,
+        }
+    }
+
+    fn job_progress(&self) -> RectPx {
+        let card = self.job_card();
+        let (bottom, height) = if card.h < 110. { (32., 6.) } else { (55., 16.) };
+        RectPx { x: card.x + 22., y: card.y + card.h - bottom, w: card.w - 44., h: height }
+    }
+
+    fn footer_export(&self) -> RectPx {
+        RectPx { x: 104., y: self.footer.y + 6., w: 132., h: 26. }
+    }
+}
+
+struct SettingsLayout {
+    panel: RectPx,
+    x: f32,
+    width: f32,
+    codec: f32,
+    container: f32,
+    filename: RectPx,
+    directory: RectPx,
+    export: RectPx,
+}
+
+impl SettingsLayout {
+    fn new(l: Layout) -> Self {
+        // Leave room for the queue heading and a job even at minimum window height.
+        let scale = ((l.sidebar.h - 244.) / 282.).clamp(0.58, 1.);
+        let top = l.sidebar.y + 98. + 17. * ((scale - 0.6) / 0.4).clamp(0., 1.);
+        let field_height = (32. * scale).max(24.);
+        let y = |offset: f32| top + offset * scale;
+        let x = l.sidebar.x + 11.;
+        let width = l.sidebar.w - 22.;
+        let export = RectPx { x: x + (width - 174.) / 2., y: y(282.), w: 174., h: 32. };
+        let panel = RectPx { y: top, h: export.y + 47. - top, ..l.sidebar };
         Self {
-            sidebar,
-            video,
-            canvas,
-            transport,
-            seek,
-            footer: RectPx {
-                x: 0.,
-                y: vp.1 - 38.,
-                w: vp.0,
-                h: crate::app::CUT_STATUS_H,
-            },
+            panel, x, width, codec: y(38.), container: y(91.),
+            directory: RectPx { x, y: y(148.), w: width, h: field_height },
+            filename: RectPx { x, y: y(211.), w: width, h: field_height },
+            export,
         }
     }
 }
-/// Export owns its content slots, while Canvas and ButtonBar retain shared shell geometry.
-struct SettingsLayout { width:f32, codec:f32, container:f32, filename:RectPx, directory:RectPx, export:RectPx }
-impl SettingsLayout {
-    fn new(l:Layout)->Self {
-        let width=l.sidebar.w-32.;
-        let scale=((l.sidebar.h-50.)/668.).clamp(0.72,1.);
-        let y=|offset:f32| l.sidebar.y+offset*scale;
-        Self {width,codec:y(130.),container:y(182.),
-            filename:RectPx{x:16.,y:y(266.),w:width,h:32.},
-            directory:RectPx{x:16.,y:y(336.),w:width,h:32.},
-            export:RectPx{x:16.,y:y(406.),w:width,h:31.}}
-    }
-}
-impl Layout {
-    /// Under the transport row and the review track, 16px from the attachment's edges.
-    fn job_card(&self)->RectPx { RectPx{x:self.transport.x+16.,y:self.transport.y+84.,w:self.transport.w-32.,h:(self.transport.h-100.).max(76.)} }
-}
+
 fn surface(items:&mut Vec<Item>,r:RectPx,color:u32,radius:f32) { surface_alpha(items,r,hex_color(color),radius); }
 fn surface_alpha(items:&mut Vec<Item>,r:RectPx,color:[f32;4],radius:f32) {
     items.push(Item::Shape(figleaf::Shape::rect(figleaf::Rect::new(r.x,r.y,r.w.max(0.),r.h.max(0.))).radius(radius).fill(color)));
@@ -353,8 +381,9 @@ impl Page {
     pub fn has_jobs(&self) -> bool { self.busy() || self.history.iter().any(Self::busy) }
     fn queue_rect(&self, vp: (f32,f32)) -> RectPx {
         let l = Layout::new(vp);
-        let y = self.settings(l).export.y + 45.;
-        RectPx { x: 0., y, w: l.sidebar.w-1., h: (l.footer.y-y).max(0.) }
+        let panel = self.settings(l).panel;
+        let y = panel.y + panel.h + 10.;
+        RectPx { y, h: (l.footer.y - y - 6.).max(0.), ..l.sidebar }
     }
     pub fn scroll(&mut self, dy: f32, cursor: (f32,f32), vp:(f32,f32)) -> bool {
         if !hit(self.queue_rect(vp),cursor.0,cursor.1) { return false; }
@@ -859,7 +888,7 @@ impl Page {
         let l = Layout::new(vp);
         let settings = self.settings(l);
         let third = (settings.width - 4.) / 3.;
-        let r = |col: f32, y| RectPx { x: 16. + col*(third+2.), y, w: third, h: 21. };
+        let r = |col: f32, y| RectPx { x: settings.x + col*(third+2.), y, w: third, h: 21. };
         let mut actions = vec![
             (r(0.,settings.codec), "Copy", self.lossless, Action::Lossless),
             (r(1.,settings.codec), "HEVC", !self.prores && !self.lossless, Action::Preset(false)),
@@ -868,26 +897,28 @@ impl Page {
             (r(1.,settings.container), "MP4", self.container == Container::Mp4, Action::Container(Container::Mp4)),
             (r(2.,settings.container), "MKV", self.container == Container::Mkv, Action::Container(Container::Mkv)),
             (settings.filename, "", self.filename_edit.is_some(), Action::EditFilename),
-            (RectPx{x: settings.directory.x+settings.directory.w-38.,w:38.,..settings.directory}, "Change directory", false, Action::ChooseDirectory),
-            (RectPx{w:settings.directory.w-38.,..settings.directory}, "", false, Action::RevealDirectory),
+            (RectPx { w: 38., ..settings.directory }, "Change directory", false, Action::ChooseDirectory),
+            (RectPx { x: settings.directory.x + 38., w: settings.directory.w - 38., ..settings.directory }, "", false, Action::RevealDirectory),
             (settings.export, "Export", false, Action::Export),
         ];
-        let cy = l.seek.y - 50.;
-        // The time/follow row collapses gracefully while retaining all five transport controls.
-        let center = if l.transport.w < 700. { l.transport.x+110. } else { l.transport.x+l.transport.w/2. };
+        let bar = l.canvas.button_bar.unwrap();
+        actions.push((bar.trailing(148.), "Export", false, Action::Export));
+        actions.push((l.footer_export(), "Run Export", false, Action::Export));
+        let cy = l.seek.y - 48.;
+        let center = l.transport.x + (l.transport.w / 2.).min(l.transport.w - 270.);
         for (offset, width, label, action) in [(-93.,34.,"Previous keyframe",Action::Keyframe(false)),
             (-55.,34.,"Previous frame",Action::Step(false)),(-17.,34.,"Play / pause",Action::Play),
             (21.,34.,"Next frame",Action::Step(true)),(59.,34.,"Next keyframe",Action::Keyframe(true))] {
             actions.push((RectPx{x:center+offset,y:cy,w:width,h:34.},label,false,action));
         }
-        actions.push((RectPx{x:l.transport.x+l.transport.w-192.,y:cy,w:154.,h:34.},"Follow latest frame",self.following,Action::Follow));
+        actions.push((RectPx{x:l.transport.x+l.transport.w-176.,y:cy,w:154.,h:34.},"Follow latest frame",self.following,Action::Follow));
         let card = l.job_card();
         if self.busy() { actions.push((RectPx{x:card.x+card.w-146.,y:card.y+if card.h<110.{4.}else{20.},w:130.,h:if card.h<110.{30.}else{38.}},"Cancel",false,Action::Cancel)); }
         else if self.path.is_some() { actions.push((RectPx{x:card.x+card.w-146.,y:card.y+if card.h<110.{4.}else{20.},w:130.,h:if card.h<110.{30.}else{38.}},"Reveal output",false,Action::Reveal)); }
         let queue = self.queue_rect(vp);
         for (row, index) in (0..self.history.len() + usize::from(self.record.is_some())).rev().skip(self.queue_scroll).enumerate() {
-            let rect = RectPx { x: 8., y: queue.y + 24. + row as f32 * 38., w: l.sidebar.w - 16., h: 34. };
-            if rect.y + rect.h > l.footer.y { break; }
+            let rect = RectPx { x: queue.x + 8., y: queue.y + 28. + row as f32 * 38., w: queue.w - 16., h: 34. };
+            if rect.y + rect.h > queue.y + queue.h { break; }
             actions.push((rect, "", index == self.history.len(), Action::OpenExport(index)));
         }
         actions
@@ -995,6 +1026,50 @@ impl Page {
     pub(crate) fn base_rect(&self,vp:(f32,f32),show_ui:bool,info:&VideoInfo)->RectPx {
         Self::canvas(vp,show_ui).fit_inset(self.display_dims(info),if !show_ui {0.}else if vp.0<900. {16.}else{24.})
     }
+    fn draw_source_summary(items: &mut Vec<Item>, sidebar: RectPx, source: usize, info: &VideoInfo) {
+        let card = RectPx { y: sidebar.y + 2., h: 62., ..sidebar };
+        let frame = figleaf::Shape::rect(figleaf::Rect::new(card.x, card.y, card.w, card.h)).radius(7.);
+        items.push(Item::Shape(frame.clone().fill(hex_color(0x1f1f1f))
+            .stroke(2., hex_color(0x464545), figleaf::StrokeAlign::Inside)
+            .shadow(figleaf::Shadow::inner([0., 0., 0., 0.6], [0., 3.], 9.))));
+
+        let thumb = RectPx { x: card.x + 14., y: card.y + 11., w: 72., h: 40.5 };
+        let dims = (info.width, info.height);
+        let aspect = dims.0.max(1) as f32 / dims.1.max(1) as f32;
+        let target = thumb.w / thumb.h;
+        let u = (target / aspect).min(1.);
+        let v = (aspect / target).min(1.);
+        items.push(Item::Video { a: source, b: source, r: thumb,
+            uv: [(1. - u) / 2., (1. - v) / 2., (1. + u) / 2., (1. + v) / 2.],
+            mode: VideoMode::Tex, p0: 5., p1: 0. });
+        items.push(Item::Shape(figleaf::Shape::rect(figleaf::Rect::new(thumb.x, thumb.y, thumb.w, thumb.h))
+            .radius(5.).stroke(1., hex_color(0x969696), figleaf::StrokeAlign::Inside)));
+
+        let text = RectPx { x: thumb.x + thumb.w + 12., y: thumb.y, w: card.w - 110., h: 17. };
+        let ink = hex_color(0xf4f3ed);
+        export_label(items, text, &info.path.file_name().unwrap_or_default().to_string_lossy(),
+            11., ink, true, Align::Left);
+        let resolution = if dims.1 == 2160 { "4K".into() } else { format!("{}p", dims.1) };
+        let fps = format!("{:.2}", info.fps);
+        let fps = fps.trim_end_matches('0').trim_end_matches('.');
+        if text.w >= 145. {
+            let mut x = text.x;
+            for (label, w) in [(resolution, 34.), (format!("{fps}FPS"), 58.), (info.codec.to_uppercase(), 48.)] {
+                let badge = RectPx { x, y: thumb.y + 20., w, h: 18. };
+                items.push(Item::Shape(figleaf::Shape::rect(figleaf::Rect::new(badge.x, badge.y, badge.w, badge.h))
+                    .radius(3.5).fill(hex_color(0x000000))
+                    .stroke(0.75, hex_color(0x777777), figleaf::StrokeAlign::Inside)));
+                export_label(items, badge, &label, 9., ink, false, Align::Center);
+                x += w + 4.;
+            }
+        } else {
+            let metadata = RectPx { y: thumb.y + 17., h: 13., ..text };
+            export_label(items, metadata, &format!("{resolution} · {fps}fps"), 8.5, ink, true, Align::Left);
+            export_label(items, RectPx { y: metadata.y + 13., ..metadata },
+                &info.codec.to_uppercase(), 8.5, ink, true, Align::Left);
+        }
+    }
+
     // Keep the explicit geometry/pipeline inputs at this boundary.
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
@@ -1049,7 +1124,7 @@ impl Page {
         surface(items,l.sidebar,0x050505,0.);
         surface(items,l.transport,0x000000,0.);
         let corners=[CANVAS_RADIUS,CANVAS_RADIUS,0.,0.];
-        l.canvas.ground_radii(items,corners);
+        surface(items, l.video, 0x242322, CANVAS_RADIUS);
         let current = self.current();
         let idx = if current.is_some() && !self.original { slot } else { source };
         let picture = crate::canvas::zoomed(self.base_rect(vp,show_ui,info),view.0,view.1);
@@ -1060,20 +1135,22 @@ impl Page {
         } else { items.push(Item::Video{a:idx,b:idx,r:picture,uv:[0.,0.,1.,1.],mode:VideoMode::Tex,p0:0.,p1:0.}); }
         l.canvas.recess_radii(items,corners);
         items.push(Item::Clip(None));
-        export_label(items,RectPx{x:16.,y:l.sidebar.y+8.,w:settings.width,h:22.},"Export Settings",13.,hex_color(0xc8c8c8),true,Align::Left);
-        let thumb=RectPx{x:16.,y:l.sidebar.y+38.,w:72.,h:40.5};
-        items.push(Item::Video{a:source,b:source,r:crate::canvas::fit_rect((info.width,info.height),thumb),uv:[0.,0.,1.,1.],mode:VideoMode::Tex,p0:0.,p1:0.});
-        export_label(items,RectPx{x:98.,y:thumb.y,w:settings.width-82.,h:18.},&info.path.file_name().unwrap_or_default().to_string_lossy(),11.,ink,true,Align::Left);
-        export_label(items,RectPx{x:98.,y:thumb.y+22.,w:settings.width-82.,h:14.},&format!("{} · {}p · {:.0}fps",info.codec,info.height,info.fps),8.,hex_color(0x8b8b8b),true,Align::Left);
-        for y in [settings.codec-34.,settings.filename.y-42.,settings.export.y-20.].into_iter().filter(|_|l.sidebar.h>=550.) {
-            surface(items,RectPx{x:16.,y,w:settings.width,h:1.},0x303030,0.);
-        }
-        for (title,y) in [("Codec",settings.codec-15.),("Container",settings.container-15.),("Filename",settings.filename.y-18.),("Directory",settings.directory.y-18.)] {
-            export_label(items,RectPx{x:16.,y,w:settings.width,h:12.},title,8.,hex_color(0xc8c8c8),true,Align::Left);
+        l.canvas.button_bar.unwrap().draw_radii(items, [0., 0., CANVAS_RADIUS, CANVAS_RADIUS]);
+        Self::draw_source_summary(items, l.sidebar, source, info);
+        let panel = settings.panel;
+        export_label(items, RectPx { y: panel.y - 32., h: 22., ..panel },
+            "Export Settings", 16., dim, true, Align::Left);
+        items.push(Item::Shape(figleaf::Shape::rect(figleaf::Rect::new(panel.x, panel.y, panel.w, panel.h))
+            .radius(14.).stroke(1., hex_color(0x2e2e2e), figleaf::StrokeAlign::Inside)));
+        surface(items, RectPx { x: settings.x, y: settings.export.y - 11., w: settings.width, h: 1. }, 0x303030, 0.);
+        for (title, y) in [("Codec", settings.codec), ("Container", settings.container),
+            ("Directory", settings.directory.y), ("Filename", settings.filename.y)] {
+            export_label(items, RectPx { x: settings.x, y: y - 14., w: settings.width, h: 12. },
+                title, 10., dim, true, Align::Left);
         }
         // Figma 547:5962 / 547:5966: light recessed fields with dark type.
         // The edge is the frame's white @ 62% over the fill, baked opaque.
-        let field_ink = hex_color(0x222422);
+        let field_ink = hex_color(0x324738);
         let field = |items:&mut Vec<Item>,r:RectPx| {
             items.push(Item::Shape(figleaf::Shape::rect(figleaf::Rect::new(r.x,r.y,r.w,r.h)).radius(7.)
                 .fill(hex_color(0x9fa89f)).stroke(1.,hex_color(0xdbdedb),figleaf::StrokeAlign::Inside)
@@ -1081,16 +1158,17 @@ impl Page {
         };
         field(items,settings.filename);
         field(items,settings.directory);
-        export_label(items,RectPx{x:settings.directory.x+12.,w:settings.directory.w-54.,..settings.directory},
+        export_label(items,RectPx{x:settings.directory.x+50.,w:settings.directory.w-60.,..settings.directory},
             &self.directory().map(|p|p.display().to_string()).unwrap_or_default(),11.,field_ink,true,Align::Left);
-        let queue=self.queue_rect(vp);
-        if self.record.is_some() || !self.history.is_empty() {
-            surface(items,queue,0x0f0f0f,0.);
-            export_label(items,RectPx{x:16.,y:queue.y,w:settings.width,h:24.},&format!("Exports · {}",self.history.len()+usize::from(self.record.is_some())),11.,ink,true,Align::Left);
-        }
+        let queue = self.queue_rect(vp);
+        let jobs = self.history.len() + usize::from(self.record.is_some());
+        surface(items, queue, 0x101010, 8.);
+        let queue_title = if jobs == 0 { "Export Queue".into() } else { format!("Export Queue · {jobs}") };
+        export_label(items, RectPx { x: queue.x + 10., w: queue.w - 20., h: 26., ..queue },
+            &queue_title, 11., dim, true, Align::Left);
         let card=l.job_card();
         items.push(Item::Shape(figleaf::Shape::rect(figleaf::Rect::new(card.x,card.y,card.w,card.h)).radius(8.)
-            .fill(hex_color(0x0f0e0e)).stroke(1.,hex_color(0x2b2a2a),figleaf::StrokeAlign::Inside)));
+            .fill(hex_color(0x171717)).stroke(3.,hex_color(0x323232),figleaf::StrokeAlign::Inside)));
         let done=if self.busy() {self.total_fraction()} else {(self.rendered_time/self.duration.max(0.001)).clamp(0.,1.)};
         let queued=self.job.as_ref().is_some_and(|j|j.launch.is_some());
         let title=if queued { "Queued".into() } else if self.busy() {
@@ -1108,9 +1186,17 @@ impl Page {
         if card.h>=110. {
             export_label(items,RectPx{x:card.x+20.,y:card.y+42.,w:text_w,h:20.},&subtitle,13.,dim,false,Align::Left);
         }
-        let progress=RectPx{x:card.x+20.,y:card.y+card.h-if card.h<110.{32.}else{42.},w:card.w-40.,h:6.};
-        surface(items,progress,0x202020,0.);
-        surface(items,RectPx{w:progress.w*if self.path.is_some(){1.}else{done as f32},..progress},0x0059ff,0.);
+        let progress = l.job_progress();
+        let progress_radius = progress.h / 2.;
+        if self.record.is_some() || self.path.is_some() {
+            surface(items, progress, 0x343434, progress_radius);
+        }
+        let fill_width = progress.w * if self.path.is_some() { 1. } else { done as f32 };
+        if fill_width > 0. {
+            items.push(Item::Clip(Some(RectPx { w: fill_width, ..progress })));
+            surface(items, progress, 0xff8800, progress_radius);
+            items.push(Item::Clip(None));
+        }
         // Frame steps contribute to `done` above; keep their local detail in
         // the footer instead of drawing a bar that restarts for every frame.
         let stats_y=card.y+card.h-24.;
@@ -1118,18 +1204,20 @@ impl Page {
         for (i,text,align) in [(0,format!("{} of {} processed",duration_label(self.rendered_time),duration_label(self.duration)),Align::Left),
             (1,format!("{:.1} fps",self.count as f64/elapsed.max(0.001)),Align::Center),
             (2,format!("{} elapsed",remaining(elapsed)),Align::Right)] {
+            if self.record.is_none() { break; }
             export_label(items,RectPx{x:card.x+20.+i as f32*third,y:stats_y,w:third,h:20.},&text,if card.w<600.{9.}else{12.},dim,false,align);
         }
-        let time=current.map_or(0.,Self::frame_time);
-        if l.transport.w>=700. {
-            export_label(items,RectPx{x:l.seek.x,y:l.seek.y-50.,w:185.,h:34.},&timecode(time,current.map_or(info.fps,|f|1./f.frame_duration)),16.,ink,true,Align::Left);
-        }
-        surface(items,l.seek,0x000000,0.);
-        surface(items,RectPx{w:l.seek.w*(time/self.duration.max(0.001)).clamp(0.,1.) as f32,..l.seek},0x0059ff,0.);
+        let time = current.map_or(shown_pts, Self::frame_time);
+        let (time_width, time_size) = if l.transport.w < 560. { (90., 12.) } else { (132., 16.) };
+        let time_rect = RectPx { x: l.seek.x, y: l.seek.y - 48., w: time_width, h: 34. };
+        let fps = current.map_or(info.fps, |frame| 1. / frame.frame_duration);
+        export_label(items, time_rect, &timecode(time, fps), time_size, ink, true, Align::Left);
+        surface(items, l.seek, 0x303132, 0.);
+        surface(items,RectPx{w:l.seek.w * (time / if self.record.is_some() { self.duration.max(0.001) } else { info.duration.max(0.001) }).clamp(0., 1.) as f32,..l.seek},0x0059ff,0.);
         surface(items,l.footer,0x050505,0.);
         export_label(items,RectPx{x:16.,y:l.footer.y,w:70.,h:l.footer.h},"EXPORT",10.,hex_color(0x8b8b8b),false,Align::Left);
         let status=if self.busy() {render_line(done,self.count,self.frames.back().map(|f|f.frame_duration),self.duration,elapsed,self.job.as_ref().and_then(|j|j.stage.lock().ok().and_then(|s|s.clone())).as_ref(),self.frame_report().as_ref())}else{self.status.clone()};
-        export_label(items,RectPx{x:98.,y:l.footer.y,w:vp.0-114.,h:l.footer.h},&status,10.,hex_color(0x8b8b8b),false,Align::Left);
+        export_label(items,RectPx{x:252.,y:l.footer.y,w:vp.0-268.,h:l.footer.h},&status,10.,hex_color(0x8b8b8b),false,Align::Left);
         for (r,t,selected,a) in self.actions(vp) {
             let hovered=hit(r,cursor.0,cursor.1);
             let disabled=match a {
@@ -1140,10 +1228,19 @@ impl Page {
             };
             match a {
                 Action::ChooseDirectory=>{
-                    items.push(Item::Shape(figleaf::Shape::rect(figleaf::Rect::new(r.x,r.y,r.w,r.h)).radii([0.,7.,7.,0.]).fill(hex_color(if hovered{0x484948}else{0x343534}))));
+                    items.push(Item::Shape(figleaf::Shape::rect(figleaf::Rect::new(r.x,r.y,r.w,r.h)).radii([7.,0.,0.,7.]).fill(hex_color(if hovered{0x484948}else{0x343534}))));
                     items.push(Item::FrameIcon{x:r.x+(r.w-20.)/2.,y:r.y+(r.h-20.)/2.,index:6});
                 }
                 Action::RevealDirectory=>{},
+                Action::Export if r.y >= l.footer.y => {
+                    crate::app::draw_cut_footer_button(items, r, t, "⌘E", false, hovered, false);
+                }
+                Action::Export if r.x < l.video.x => {
+                    items.push(Item::Shape(figleaf::Shape::rect(figleaf::Rect::new(r.x, r.y, r.w, r.h))
+                        .radius(7.).fill(hex_color(if hovered { 0x242424 } else { 0x050505 }))
+                        .stroke(1., hex_color(0x656565), figleaf::StrokeAlign::Inside)));
+                    export_label(items, r, t, 11., if hovered { ink } else { hex_color(0x919191) }, true, Align::Center);
+                }
                 Action::Export|Action::Cancel|Action::Reveal=>{
                     ButtonBar::primary(items,r,t,hovered,false);
                 }
@@ -1489,20 +1586,24 @@ mod tests {
     }
     #[test]
     fn export_controls_share_hit_bounds_at_supported_window_sizes() {
-        let p = Page::default();
+        let mut p = Page::default();
+        p.record = Some(PathBuf::from("export.mp4"));
         for vp in [(720.,480.),(900.,600.),(1280.,800.),(1440.,900.)] {
             let l=Layout::new(vp);
             assert_eq!(l.video.y,crate::app::HEADER_H);
-            assert!(l.canvas.button_bar.is_none());
-            assert_eq!(p.actions(vp).iter().filter(|(..,a)|*a==Action::Export).count(),1);
+            let bar = l.canvas.button_bar.unwrap();
+            assert_eq!(bar.r.y, l.video.y + l.video.h);
+            assert_eq!(bar.r.y + bar.r.h, l.transport.y);
+            assert_eq!(p.actions(vp).iter().filter(|(..,a)|*a==Action::Export).count(),3);
             let actions=p.actions(vp);
+            assert!(actions.iter().any(|(.., action)| *action == Action::OpenExport(0)));
             let play=actions.iter().find(|(..,a)|*a==Action::Play).unwrap().0;
             let card=l.job_card();
             assert!(play.y+play.h <= l.seek.y && l.seek.y+l.seek.h+12. <= card.y, "transport, track, then card");
             assert!(card.y+card.h <= l.footer.y, "card inside the attachment at {vp:?}");
             for (i,(r,_,_,a)) in actions.iter().enumerate() {
                 assert!(r.x>=0. && r.x+r.w<=vp.0+0.1,"{a:?} at {vp:?}");
-                assert!(r.y>=crate::app::HEADER_H && r.y+r.h<=l.footer.y,"{a:?} at {vp:?}");
+                assert!(r.y>=crate::app::HEADER_H && r.y+r.h<=vp.1,"{a:?} at {vp:?}");
                 assert!(!hit(l.video,r.x,r.y));
                 assert_eq!(p.click(vp,r.x+r.w/2.,r.y+r.h/2.),Some(*a));
                 for (other,_,_,_) in &actions[i+1..] {
@@ -1525,10 +1626,9 @@ mod tests {
             assert!(play.y+play.h <= l.job_card().y, "card sits under the transport");
             let reveal=actions.iter().find(|(..,a)|*a==Action::Reveal).unwrap();
             assert!(hit(l.job_card(),reveal.0.x,reveal.0.y));
-            let card=l.job_card();
-            assert!(reveal.0.y+reveal.0.h <= card.y+card.h-if card.h<110.{32.}else{42.});
+            assert!(reveal.0.y + reveal.0.h <= l.job_progress().y);
             assert_eq!(p.click(vp,reveal.0.x+1.,reveal.0.y+1.),Some(Action::Reveal));
-            assert_eq!(actions.iter().filter(|(..,a)|*a==Action::Export).count(),1);
+            assert_eq!(actions.iter().filter(|(..,a)|*a==Action::Export).count(),3);
         }
         assert_eq!(p.apply(Action::Reveal),p.destination);
     }
@@ -1568,8 +1668,8 @@ mod tests {
         let actions = p.actions((720., 480.));
         let field = actions.iter().find(|(.., a)| *a == Action::EditFilename).unwrap().0;
         let chooser = actions.iter().find(|(.., a)| *a == Action::ChooseDirectory).unwrap().0;
-        assert!(chooser.y >= field.y + field.h);
-        assert_eq!(chooser.x + chooser.w, field.x + field.w);
+        assert!(chooser.y + chooser.h <= field.y);
+        assert_eq!(chooser.x, field.x);
     }
     #[test]
     fn native_pipeline_writes_selected_codecs_containers_audio_and_processed_pixels() {

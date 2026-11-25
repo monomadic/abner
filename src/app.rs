@@ -10253,9 +10253,10 @@ mod tests {
             let export=crate::export_page::Layout::new(vp);
             let process=crate::processor_gui::Panel::default().viewer(vp);
             assert_eq!(sources.canvas.y,HEADER_H+ButtonBar::HEIGHT);
-            // Export has no bar: its picture meets the header.
             assert_eq!(export.video.y,HEADER_H);
-            assert!(export.canvas.button_bar.is_none());
+            let export_bar = export.canvas.button_bar.unwrap().r;
+            assert_eq!((export_bar.y, export_bar.h), (export.video.y + export.video.h, ButtonBar::HEIGHT));
+            assert_eq!(export_bar.y + export_bar.h, export.transport.y);
             // Process and Timeline keep the same bar under the picture, which meets the header.
             assert_eq!(process.y,HEADER_H);
             assert_eq!(timeline.canvas.y,HEADER_H);
