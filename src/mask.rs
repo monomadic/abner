@@ -393,6 +393,29 @@ pub fn save_rgba(path: &Path, width: u32, height: u32, pixels: &[u8]) -> anyhow:
     write_png(path, width, height, pixels, png::ColorType::Rgba)
 }
 
+/// Read a PNG as a mask for a `width`×`height` picture. Any colour type is
+/// taken by its brightness (alpha ignored) and thresholded at half, so a
+/// mask exported here comes back pixel for pixel. A PNG of another size is
+/// refused: masks are native resolution and nothing here resamples them.
+pub fn load(path: &Path, width: u32, height: u32) -> anyhow::Result<Vec<u8>> {
+    let mut decoder = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path)?));
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut reader = decoder.read_info()?;
+    let size = reader.output_buffer_size().ok_or_else(|| anyhow::anyhow!("the PNG is too large"))?;
+    let mut decoded = vec![0; size];
+    let info = reader.next_frame(&mut decoded)?;
+    anyhow::ensure!(
+        (info.width, info.height) == (width, height),
+        "the PNG is {}×{}, the picture is {width}×{height}", info.width, info.height
+    );
+    let channels = info.color_type.samples();
+    let luma = |p: &[u8]| -> u32 {
+        if channels >= 3 { (p[0] as u32 * 54 + p[1] as u32 * 183 + p[2] as u32 * 19) >> 8 } else { p[0] as u32 }
+    };
+    Ok(decoded[..info.buffer_size()].chunks_exact(channels)
+        .map(|p| if luma(p) >= 128 { 255 } else { 0 }).collect())
+}
+
 fn write_png(
     path: &Path,
     width: u32,
@@ -580,6 +603,14 @@ mod tests {
         assert_eq!(&decoded[..info.buffer_size()], mask.pixels.as_slice());
         assert_eq!(decoded[5 * 17 + 8], 255);
         assert_eq!(decoded[0], 0);
+        // Import reads the same pixels back, and refuses another size.
+        assert_eq!(load(&path, 17, 11).unwrap(), *mask.pixels);
+        assert!(load(&path, 16, 11).is_err());
+        let rgba: Vec<u8> = mask.pixels.iter().flat_map(|&p| [p, p, p, 7]).collect();
+        let colour = path.with_extension("rgba.png");
+        save_rgba(&colour, 17, 11, &rgba).unwrap();
+        assert_eq!(load(&colour, 17, 11).unwrap(), *mask.pixels);
+        std::fs::remove_file(&colour).unwrap();
         // A failed replacement must not destroy the successful export.
         assert!(save(&path, 17, 11, &[0]).is_err());
         assert!(std::fs::metadata(&path).unwrap().len() > 0);
