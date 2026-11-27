@@ -919,6 +919,19 @@ impl ExportOutput {
             }
         }
     }
+    fn publish(self, dest: &Path, seated: Option<Pending>) -> Result<()> {
+        let source = seated.as_ref().map_or(&self.0, |file| &file.0);
+        if let Err(e) = std::fs::hard_link(source, dest) {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                anyhow::bail!("Could not publish {}: {e}. Export retained at {}", dest.display(), self.0.display());
+            }
+            publish_by_rename(source, dest).map_err(|e| anyhow::anyhow!(
+                "Could not publish {}: {e}. Export retained at {}", dest.display(), self.0.display()
+            ))?;
+        }
+        self.published();
+        Ok(())
+    }
     fn published(self) {
         // A rename may already have consumed the working path.
         if let Err(e) = std::fs::remove_file(&self.0)
@@ -927,6 +940,17 @@ impl ExportOutput {
         }
     }
 }
+// SMB and exFAT can reject hard links. Claim the destination before a
+// same-directory rename so another export cannot take the same name.
+fn publish_by_rename(source: &Path, dest: &Path) -> std::io::Result<()> {
+    drop(std::fs::OpenOptions::new().write(true).create_new(true).open(dest)?);
+    if let Err(e) = std::fs::rename(source, dest) {
+        let _ = std::fs::remove_file(dest);
+        return Err(e);
+    }
+    Ok(())
+}
+
 const SCALE: u32 = 1_000_000;
 fn cancelled(cancel: &AtomicBool) -> Result<()> {
     ensure!(!cancel.load(Ordering::Relaxed), "Encoding cancelled");
@@ -3238,18 +3262,14 @@ pub(crate) fn pipeline_export_with_inputs(
     })?;
     wait()?;
     if webp {
-        std::fs::hard_link(&temp.0, dest)?;
-        temp.published();
-        return Ok(());
+        return temp.publish(dest, None);
     }
     if let Some(mkv) = mkv_out {
         let (file, slots) = mkv.finish()?;
         mkv_append(file, &temp.0, chapters, &meta, &slots, false)?;
         let seated = finish_mkv(&temp.0, dest, &meta, None)?;
         wait()?;
-        std::fs::hard_link(seated.as_ref().map_or(&temp.0, |s| &s.0), dest)?;
-        temp.published();
-        return Ok(());
+        return temp.publish(dest, seated);
     }
     let mut mux = mp4_out.context("no MP4 writer")?;
     write_subs_mp4(&mut mux, &subs)?;
@@ -3258,9 +3278,7 @@ pub(crate) fn pipeline_export_with_inputs(
     let tags: &[(String, String)] = if mp4_brand(dest) { &meta.mp4 } else { &[] };
     finish_mp4(&temp.0, chapters, true, tags)?;
     wait()?;
-    std::fs::hard_link(&temp.0, dest)?;
-    temp.published();
-    Ok(())
+    temp.publish(dest, None)
 }
 
 /// A chain output on its way to the writer, timing already checked.
@@ -3481,9 +3499,7 @@ fn reencode_webp(
     ensure!(count > 0, "Pipeline returned no output frames");
     writer.finish()?;
     wait()?;
-    std::fs::hard_link(&temp.0, dest)?;
-    temp.published();
-    Ok(())
+    temp.publish(dest, None)
 }
 
 fn write_webp(
@@ -3969,11 +3985,28 @@ mod tests {
         assert_ne!(next.0, partial);
         let next_path = next.0.clone();
         std::fs::write(&next.0, b"complete video").unwrap();
-        std::fs::hard_link(&next.0, &dest).unwrap();
-        next.published();
+        next.publish(&dest, None).unwrap();
         assert!(!next_path.exists());
         assert!(partial.exists());
         assert_eq!(std::fs::read(dest).unwrap(), b"complete video");
+    }
+
+    #[test]
+    fn rename_publication_preserves_collisions_and_releases_failed_reservations() {
+        let dir = Dir::new("publish-rename");
+        let dest = dir.0.join("video.mkv");
+        let partial = dir.0.join("video.partial.mkv");
+        assert!(publish_by_rename(&partial, &dest).is_err());
+        assert!(!dest.exists());
+        std::fs::write(&partial, b"encode").unwrap();
+        std::fs::write(&dest, b"existing").unwrap();
+        assert_eq!(publish_by_rename(&partial, &dest).unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"existing");
+        std::fs::remove_file(&dest).unwrap();
+        publish_by_rename(&partial, &dest).unwrap();
+        assert_eq!(std::fs::read(dest).unwrap(), b"encode");
+        assert!(!partial.exists());
     }
 
     fn fixture(path: &Path) {

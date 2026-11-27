@@ -1,5 +1,10 @@
 # abner — history
 
+## 2026-11-27 — Finish processed exports on shares without hard links
+
+When a volume rejects hard links, Abner reserves the output filename and moves
+the completed encode into place. A filename collision keeps the partial export.
+
 ## 2026-11-27 — Side by side focuses on the press
 
 A press on a clip's cell in Side by side focuses that clip at mouse down
