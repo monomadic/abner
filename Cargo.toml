@@ -12,6 +12,7 @@ version = 2
 abner-processor-api = { path = "crates/processor-api" }
 abner-processing = { path = "crates/processing" }
 anyhow = "1"
+image-webp = "0.2.4"
 log = "0.4"
 env_logger = "0.11"
 winit = "0.30"

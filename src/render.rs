@@ -191,6 +191,33 @@ fn srgb_to_linear(c: f32) -> f64 {
     if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
 }
 
+/// Premultiply in linear light before the GPU filters video textures.
+fn video_texture_pixels(rgba: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    use std::borrow::Cow;
+    if rgba.chunks_exact(4).all(|pixel| pixel[3] == 255) {
+        return Cow::Borrowed(rgba);
+    }
+    let linear = filmcraft_color::srgb_u8_to_linear_table();
+    let mut pixels = rgba.to_vec();
+    for pixel in pixels.chunks_exact_mut(4) {
+        let alpha = f32::from(pixel[3]) / 255.;
+        if pixel[3] != 255 {
+            for channel in &mut pixel[..3] {
+                *channel = filmcraft_color::linear_to_srgb_u8(linear[*channel as usize] * alpha);
+            }
+        }
+    }
+    Cow::Owned(pixels)
+}
+
+#[cfg(test)]
+#[test]
+fn video_texture_alpha_hides_rgb_before_filtering() {
+    assert!(matches!(video_texture_pixels(&[1, 2, 3, 255]), std::borrow::Cow::Borrowed(_)));
+    assert_eq!(&*video_texture_pixels(&[255, 0, 255, 0, 255, 255, 255, 128]),
+        &[0, 0, 0, 0, 188, 188, 188, 128]);
+}
+
 /// Fullscreen-triangle blit used to fill each video mip from the previous.
 const BLIT_WGSL: &str = r#"
 @group(0) @binding(0) var src: texture_2d<f32>;
@@ -1136,7 +1163,7 @@ impl Gpu {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &up.buf,
+            &video_texture_pixels(&up.buf),
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(up.w * 4),

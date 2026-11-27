@@ -155,3 +155,51 @@ mod tests {
         assert_eq!(&f.pixels[9..12], &[0, 0, 0]);
     }
 }
+
+/// Fit a crop into the original canvas with transparent padding. Interpolate
+/// premultiplied colors so RGB in transparent source pixels stays invisible.
+pub(crate) fn fit_alpha_crop(
+    rgba: &std::sync::Arc<Vec<u8>>,
+    [width, height]: [u32; 2],
+    crop: Crop,
+) -> std::sync::Arc<Vec<u8>> {
+    let (x, y, w, h) = crop.pixels(width, height);
+    if w == 0 || h == 0 || (w, h) == (width, height) {
+        return rgba.clone();
+    }
+    let scale = (width as f64 / w as f64).min(height as f64 / h as f64);
+    let dw = (w as f64 * scale).round() as usize;
+    let dh = (h as f64 * scale).round() as usize;
+    let stride = width as usize * 4;
+    let ox = (width as usize - dw) / 2;
+    let oy = (height as usize - dh) / 2;
+    let mut out = vec![0; rgba.len()];
+    let axis = |i: usize, n: u32| {
+        let pos = ((i as f64 + 0.5) / scale - 0.5).clamp(0., (n - 1) as f64);
+        let low = pos as usize;
+        [(low, 1. - pos.fract()), ((low + 1).min(n as usize - 1), pos.fract())]
+    };
+    for row in 0..dh {
+        for col in 0..dw {
+            let mut sum = [0.; 4];
+            for (sy, wy) in axis(row, h) {
+                for (sx, wx) in axis(col, w) {
+                    let src = (y as usize + sy) * stride + (x as usize + sx) * 4;
+                    let weight = wx * wy * f64::from(rgba[src + 3]);
+                    for c in 0..3 {
+                        sum[c] += weight * f64::from(rgba[src + c]);
+                    }
+                    sum[3] += weight;
+                }
+            }
+            let dst = (oy + row) * stride + (ox + col) * 4;
+            if sum[3] > 0. {
+                for c in 0..3 {
+                    out[dst + c] = (sum[c] / sum[3]).round() as u8;
+                }
+                out[dst + 3] = sum[3].round() as u8;
+            }
+        }
+    }
+    std::sync::Arc::new(out)
+}

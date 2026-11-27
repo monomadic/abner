@@ -52,6 +52,7 @@ dependencies = [
  "filmcraft-platform",
  "filmcraft-prores",
  "filmcraft-time",
+ "image-webp",
  "libc",
  "log",
  "objc2 0.5.2",

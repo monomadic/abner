@@ -11,7 +11,7 @@ use abner_processor_api::{Cancellation, Registry};
 use std::{
     collections::VecDeque,
     path::PathBuf,
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, Condvar, Mutex, mpsc},
     time::Instant,
 };
 
@@ -36,6 +36,7 @@ pub(crate) enum Container {
     Mp4,
     Mov,
     Mkv,
+    Webp,
 }
 
 impl Container {
@@ -44,6 +45,7 @@ impl Container {
             Self::Mp4 => "mp4",
             Self::Mov => "mov",
             Self::Mkv => "mkv",
+            Self::Webp => "webp",
         }
     }
 }
@@ -57,7 +59,9 @@ pub(crate) enum Action {
     EditFilename,
     OpenExport(usize),
     RevealDirectory,
-    Cancel,
+    Pause,
+    Resume,
+    OpenAsSource,
     Follow,
     Play,
     Step(bool),
@@ -119,7 +123,35 @@ fn render_line(done: f64, count: u64, frame_duration: Option<f64>, duration: f64
     }) };
     format!("{:.0}% · {frames}{pace}{eta}{stage}", (done * 100.).floor())
 }
+#[derive(Default)]
+struct PauseGate {
+    paused_at: Mutex<Option<Instant>>,
+    resumed: Condvar,
+}
+
+impl PauseGate {
+    fn pause(&self) {
+        self.paused_at.lock().unwrap().get_or_insert_with(Instant::now);
+    }
+
+    fn resume(&self) -> Option<Instant> {
+        let paused_at = self.paused_at.lock().unwrap().take();
+        self.resumed.notify_all();
+        paused_at
+    }
+
+    fn paused_at(&self) -> Option<Instant> {
+        *self.paused_at.lock().unwrap()
+    }
+
+    fn wait(&self) {
+        let guard = self.paused_at.lock().unwrap();
+        drop(self.resumed.wait_while(guard, |paused_at| paused_at.is_some()).unwrap());
+    }
+}
+
 struct Job {
+    pause: Arc<PauseGate>,
     launch: Option<Box<dyn FnOnce() + Send>>,
     latest: Arc<Mutex<Option<Rendered>>>,
     stage: Arc<Mutex<Option<(String, abner_processor_api::Progress)>>>,
@@ -470,15 +502,17 @@ impl Page {
     /// file must not exist yet — an export never overwrites.
     pub fn set_destination(&mut self, path: PathBuf) -> Result<(), String> {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
-        self.container = match ext.as_str() {
+        let container = match ext.as_str() {
             "mp4" => Container::Mp4,
             "mov" => Container::Mov,
             "mkv" => Container::Mkv,
-            _ => return Err(format!("{}: export to .mp4, .mov or .mkv", path.display())),
+            "webp" => Container::Webp,
+            _ => return Err(format!("{}: export to .mp4, .mov, .mkv or .webp", path.display())),
         };
         if path.exists() {
             return Err(format!("{} already exists; exports never overwrite", path.display()));
         }
+        self.container = container;
         self.destination = Some(path);
         Ok(())
     }
@@ -489,6 +523,14 @@ impl Page {
     pub fn busy(&self) -> bool {
         self.job.is_some()
     }
+    fn paused_at(&self) -> Option<Instant> {
+        self.job.as_ref()?.pause.paused_at()
+    }
+
+    fn active_elapsed(&self) -> f64 {
+        self.paused_at().unwrap_or_else(Instant::now).saturating_duration_since(self.started).as_secs_f64()
+    }
+
     pub fn cancel(&mut self) {
         if self.job.as_ref().is_some_and(|j|j.launch.is_some()) {
             self.job = None;
@@ -501,6 +543,7 @@ impl Page {
             for c in j.active.lock().unwrap().iter() {
                 c.cancel();
             }
+            j.pause.resume();
             self.status = "Cancelling export…".into();
         }
     }
@@ -527,7 +570,7 @@ impl Page {
         registry: Arc<Mutex<Registry>>,
         chain: Vec<(String, serde_json::Value)>,
     ) {
-        if self.lossless && (self.copy_unavailable.is_some() || !chain.is_empty()
+        if self.container != Container::Webp && self.lossless && (self.copy_unavailable.is_some() || !chain.is_empty()
             || self.crop.is_some() || !self.inputs.crops.is_empty()) {
             self.status = "Lossless copy is unavailable: these edits require rendering.".into();
             return;
@@ -539,7 +582,7 @@ impl Page {
         if !self.finish_filename() { return; }
         let ext = self.container.extension();
         let Some(mut dest) = self.destination.clone().or_else(||
-            crate::open::export_destination(&self.destination_name())) else { return; };
+            crate::open::export_destination(&self.destination_name(), info.path.parent())) else { return; };
         dest.set_extension(ext);
         self.destination = Some(dest.clone());
         if dest.exists() {
@@ -553,7 +596,7 @@ impl Page {
         }
         self.archive();
         self.record = Some(dest.clone());
-        self.export_lossless = self.lossless;
+        self.export_lossless = self.lossless && self.container != Container::Webp;
         self.preview_source = Some(info.path.clone());
         self.frames.clear();
         self.held = None;
@@ -571,7 +614,7 @@ impl Page {
         if info.fps > 0. { self.review_fps = info.fps; }
         self.started = Instant::now();
         self.elapsed = 0.;
-        self.status = if self.lossless { "Copying compressed media…" } else { "Preparing pipeline…" }.into();
+        self.status = if self.export_lossless { "Copying compressed media…" } else { "Preparing pipeline…" }.into();
         let cancel = Cancellation::default();
         let latest = Arc::new(Mutex::new(None));
         let (tx, done) = mpsc::sync_channel(1);
@@ -593,16 +636,19 @@ impl Page {
         let stop = cancel.clone();
         let inputs = self.inputs.clone();
         let chapters = self.chapters.clone();
-        let prores = self.prores;
+        let prores = self.prores && self.container != Container::Webp;
         let bitrate_kbps = self.bitrate_mbps * 1000;
-        let lossless = self.lossless;
+        let lossless = self.export_lossless;
         let crop = self.crop;
         let active = Arc::new(Mutex::new(Vec::new()));
         let worker_active = active.clone();
         let copy_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let worker_copy_cancel = copy_cancel.clone();
+        let pause = Arc::new(PauseGate::default());
+        let worker_pause = pause.clone();
         let launch: Box<dyn FnOnce() + Send> = Box::new(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                worker_pause.wait();
                 stop.check().map_err(|e| e.to_string())?;
                 let chapters = match chapters {
                     Some(list) => list,
@@ -613,7 +659,8 @@ impl Page {
                 let chapters = crate::cut::output_chapters(&chapters, &keeps);
                 if lossless {
                     stop.check().map_err(|e| e.to_string())?;
-                    crate::media_io::export_with_cancel(&info.path, &dest, &keeps, true, &chapters, None, &worker_copy_cancel)
+                    crate::media_io::export_with_checkpoint(&info.path, &dest, &keeps, true, &chapters, None,
+                        &worker_copy_cancel, &|| worker_pause.wait())
                         .map_err(|e| e.to_string())?;
                     return Ok(dest);
                 }
@@ -633,6 +680,7 @@ impl Page {
                     Some(&report),
                     // A picture only once the page has taken the last one.
                     Some(&|| shared.lock().unwrap().as_ref().is_none_or(|f: &Rendered| !f.has_picture())),
+                    Some(&|| worker_pause.wait()),
                     |frame| {
                         stop.check()?;
                         let mut slot = shared.lock().unwrap();
@@ -651,6 +699,7 @@ impl Page {
             let _ = tx.send(result);
         });
         self.job = Some(Job {
+            pause,
             launch: Some(launch),
             latest,
             stage,
@@ -666,7 +715,7 @@ impl Page {
             .any(|p|p.job.as_ref().is_some_and(|j|j.launch.is_none()));
         if !running {
             let next = std::iter::once(&*self).chain(self.history.iter()).enumerate()
-                .filter(|(_,p)|p.job.is_some()).min_by_key(|(_,p)|p.started).map(|(i,_)|i);
+                .filter(|(_,p)|p.job.is_some() && p.paused_at().is_none()).min_by_key(|(_,p)|p.started).map(|(i,_)|i);
             if let Some(index) = next {
                 let page = if index == 0 { &mut *self } else { &mut self.history[index-1] };
                 page.started = Instant::now();
@@ -694,7 +743,12 @@ impl Page {
     }
     fn review_seek(&mut self, time: f64) {
         if let Some(player) = &self.review {
-            player.seek(time.clamp(0., (self.duration - 1./self.review_fps).max(0.)), true);
+            let target = if self.path.as_deref().is_some_and(crate::animated_webp::is_webp) {
+                time.clamp(0., self.duration)
+            } else {
+                time.clamp(0., (self.duration - 1./self.review_fps).max(0.))
+            };
+            player.seek(target, true);
             self.review_pending = true;
             self.playback = None;
         }
@@ -740,7 +794,7 @@ impl Page {
             Err(mpsc::TryRecvError::Empty) => None,
         });
         if let Some(result) = result {
-            self.elapsed = self.started.elapsed().as_secs_f64();
+            self.elapsed = self.active_elapsed();
             self.job = None;
             match result {
                 Ok(path) => {
@@ -760,9 +814,11 @@ impl Page {
             if let Some((pts, pixels)) = frame {
                 self.review_pending = false;
                 self.frames.clear(); self.held = None; self.selected = 0; self.following = true;
+                let duration = player.animation_duration_us((pts * 1e6).round() as i64)
+                    .map_or(1. / self.review_fps, |us| us as f64 * 1e-6);
                 self.frames.push_back(Rendered { pixels, dims:[player.w,player.h], source_pts:pts,
-                    output_time:pts+1./self.review_fps, count:(pts*self.review_fps).round() as u64,
-                    frame_duration:1./self.review_fps });
+                    output_time:pts+duration, count:(pts*self.review_fps).round() as u64,
+                    frame_duration:duration });
                 self.dirty = true;
             }
             if time.is_some_and(|t| t >= self.duration) { self.playback = None; }
@@ -836,7 +892,9 @@ impl Page {
     fn step_preview(&mut self, forward: bool) {
         if self.review.is_some() {
             let time = self.current().map_or(0., Self::frame_time);
-            self.review_seek(time + if forward { 0.5 / self.review_fps } else { -1.5 / self.review_fps });
+            let target = self.review.as_ref().and_then(|player| player.animation_frame_time(time, if forward { 1 } else { -1 }))
+                .unwrap_or_else(|| time + if forward { 0.5 / self.review_fps } else { -1.5 / self.review_fps });
+            self.review_seek(target);
             return;
         }
         let Some(frame) = self.current() else { return; };
@@ -871,10 +929,6 @@ impl Page {
             return true;
         }
         match k {
-            Key::Escape if self.busy() => {
-                self.cancel();
-                true
-            }
             Key::Tab => {
                 self.original = !self.original;
                 true
@@ -889,18 +943,26 @@ impl Page {
         let settings = self.settings(l);
         let third = (settings.width - 4.) / 3.;
         let r = |col: f32, y| RectPx { x: settings.x + col*(third+2.), y, w: third, h: 21. };
-        let mut actions = vec![
-            (r(0.,settings.codec), "Copy", self.lossless, Action::Lossless),
-            (r(1.,settings.codec), "HEVC", !self.prores && !self.lossless, Action::Preset(false)),
-            (r(2.,settings.codec), "ProRes", self.prores && !self.lossless, Action::Preset(true)),
-            (r(0.,settings.container), "MOV", self.container == Container::Mov, Action::Container(Container::Mov)),
-            (r(1.,settings.container), "MP4", self.container == Container::Mp4, Action::Container(Container::Mp4)),
-            (r(2.,settings.container), "MKV", self.container == Container::Mkv, Action::Container(Container::Mkv)),
+        let webp = self.container == Container::Webp;
+        let quarter = (settings.width - 6.) / 4.;
+        let mut actions: Vec<_> = [("MOV", Container::Mov), ("MP4", Container::Mp4),
+            ("MKV", Container::Mkv), ("WebP", Container::Webp)].into_iter().enumerate()
+            .map(|(col, (label, container))| (RectPx { x: settings.x + col as f32 * (quarter + 2.),
+                y: settings.container, w: quarter, h: 21. }, label, self.container == container,
+                Action::Container(container))).collect();
+        if !webp {
+            actions.extend([
+                (r(0., settings.codec), "Copy", self.lossless, Action::Lossless),
+                (r(1., settings.codec), "HEVC", !self.prores && !self.lossless, Action::Preset(false)),
+                (r(2., settings.codec), "ProRes", self.prores && !self.lossless, Action::Preset(true)),
+            ]);
+        }
+        actions.extend([
             (settings.filename, "", self.filename_edit.is_some(), Action::EditFilename),
             (RectPx { w: 38., ..settings.directory }, "Change directory", false, Action::ChooseDirectory),
             (RectPx { x: settings.directory.x + 38., w: settings.directory.w - 38., ..settings.directory }, "", false, Action::RevealDirectory),
             (settings.export, "Export", false, Action::Export),
-        ];
+        ]);
         let bar = l.canvas.button_bar.unwrap();
         actions.push((bar.trailing(148.), "Export", false, Action::Export));
         actions.push((l.footer_export(), "Run Export", false, Action::Export));
@@ -913,8 +975,24 @@ impl Page {
         }
         actions.push((RectPx{x:l.transport.x+l.transport.w-176.,y:cy,w:154.,h:34.},"Follow latest frame",self.following,Action::Follow));
         let card = l.job_card();
-        if self.busy() { actions.push((RectPx{x:card.x+card.w-146.,y:card.y+if card.h<110.{4.}else{20.},w:130.,h:if card.h<110.{30.}else{38.}},"Cancel",false,Action::Cancel)); }
-        else if self.path.is_some() { actions.push((RectPx{x:card.x+card.w-146.,y:card.y+if card.h<110.{4.}else{20.},w:130.,h:if card.h<110.{30.}else{38.}},"Reveal output",false,Action::Reveal)); }
+        let job_button = RectPx {
+            x: card.x + card.w - 146.,
+            y: card.y + if card.h < 110. { 4. } else { 20. },
+            w: 130.,
+            h: if card.h < 110. { 30. } else { 38. },
+        };
+        if self.busy() {
+            let (label, action) = if self.paused_at().is_some() {
+                ("Resume", Action::Resume)
+            } else {
+                ("Pause", Action::Pause)
+            };
+            actions.push((job_button, label, false, action));
+        } else if self.path.is_some() {
+            actions.push((RectPx { x: job_button.x - 138., ..job_button },
+                "Open as source", false, Action::OpenAsSource));
+            actions.push((job_button, "Reveal output", false, Action::Reveal));
+        }
         let queue = self.queue_rect(vp);
         for (row, index) in (0..self.history.len() + usize::from(self.record.is_some())).rev().skip(self.queue_scroll).enumerate() {
             let rect = RectPx { x: queue.x + 8., y: queue.y + 28. + row as f32 * 38., w: queue.w - 16., h: 34. };
@@ -997,7 +1075,16 @@ impl Page {
                     self.show_frame(if forward { self.frames.len()-1 } else { 0 });
                 }
             }
-            Action::Cancel => self.cancel(),
+            Action::Pause => {
+                if let Some(job) = &self.job { job.pause.pause(); }
+            }
+            Action::Resume => {
+                if let Some(job) = &self.job
+                    && let Some(paused_at) = job.pause.resume()
+                    && job.launch.is_none() {
+                    self.started += paused_at.elapsed();
+                }
+            }
             Action::Play => self.toggle_playback(),
             Action::Step(forward) => self.step_preview(forward),
             Action::Follow => {
@@ -1012,7 +1099,7 @@ impl Page {
                 self.show_frame(self.frame_at(fraction * self.duration));
             }
             Action::RevealDirectory => return self.directory(),
-            Action::Reveal => return self.path.clone(),
+            Action::Reveal | Action::OpenAsSource => return self.path.clone(),
             _ => {}
         }
         None
@@ -1148,6 +1235,10 @@ impl Page {
             export_label(items, RectPx { x: settings.x, y: y - 14., w: settings.width, h: 12. },
                 title, 10., dim, true, Align::Left);
         }
+        if self.container == Container::Webp {
+            export_label(items, RectPx { x: settings.x, y: settings.codec, w: settings.width, h: 21. },
+                "Lossless · Loop forever", 10., ink, false, Align::Left);
+        }
         // Figma 547:5962 / 547:5966: light recessed fields with dark type.
         // The edge is the frame's white @ 62% over the fill, baked opaque.
         let field_ink = hex_color(0x324738);
@@ -1171,17 +1262,18 @@ impl Page {
             .fill(hex_color(0x171717)).stroke(3.,hex_color(0x323232),figleaf::StrokeAlign::Inside)));
         let done=if self.busy() {self.total_fraction()} else {(self.rendered_time/self.duration.max(0.001)).clamp(0.,1.)};
         let queued=self.job.as_ref().is_some_and(|j|j.launch.is_some());
-        let title=if queued { "Queued".into() } else if self.busy() {
+        let paused = self.paused_at().is_some();
+        let title=if paused { "Paused".into() } else if queued { "Queued".into() } else if self.busy() {
             if self.export_lossless { "Copying packets…".into() } else if self.count==0 && done<=0. { "Preparing export…".into() }
             else { format!("Rendering & encoding   {:.0}%",done*100.) }
         } else if self.path.is_some() { "Export complete".into() } else if self.record.is_some() { self.status.clone() } else { "Ready to export".into() };
-        let elapsed=if self.busy() {self.started.elapsed().as_secs_f64()}else{self.elapsed};
-        let subtitle=if self.busy() && !queued && done>0. && done<1. {
+        let elapsed=if self.busy() {self.active_elapsed()}else{self.elapsed};
+        let subtitle=if paused { "Resume to continue this export".into() } else if self.busy() && !queued && done>0. && done<1. {
             format!("About {} remaining",remaining(elapsed*(1.-done)/done))
         } else if queued { "Waiting for the previous export".into() }
         else if self.busy() { "Waiting for progress…".into() }
         else { self.path.as_ref().map(|p|p.display().to_string()).unwrap_or_else(||"Choose a preset and export the enabled pipeline.".into()) };
-        let text_w=card.w-if self.busy()||self.path.is_some(){184.}else{40.};
+        let text_w=card.w-if self.path.is_some() { 300. } else if self.busy() { 184. } else { 40. };
         export_label(items,RectPx{x:card.x+20.,y:card.y+if card.h<110.{4.}else{14.},w:text_w,h:26.},&title,if card.h<110.{14.}else{18.},ink,false,Align::Left);
         if card.h>=110. {
             export_label(items,RectPx{x:card.x+20.,y:card.y+42.,w:text_w,h:20.},&subtitle,13.,dim,false,Align::Left);
@@ -1216,7 +1308,7 @@ impl Page {
         surface(items,RectPx{w:l.seek.w * (time / if self.record.is_some() { self.duration.max(0.001) } else { info.duration.max(0.001) }).clamp(0., 1.) as f32,..l.seek},0x0059ff,0.);
         surface(items,l.footer,0x050505,0.);
         export_label(items,RectPx{x:16.,y:l.footer.y,w:70.,h:l.footer.h},"EXPORT",10.,hex_color(0x8b8b8b),false,Align::Left);
-        let status=if self.busy() {render_line(done,self.count,self.frames.back().map(|f|f.frame_duration),self.duration,elapsed,self.job.as_ref().and_then(|j|j.stage.lock().ok().and_then(|s|s.clone())).as_ref(),self.frame_report().as_ref())}else{self.status.clone()};
+        let status=if paused { "Export paused".into() } else if self.busy() {render_line(done,self.count,self.frames.back().map(|f|f.frame_duration),self.duration,elapsed,self.job.as_ref().and_then(|j|j.stage.lock().ok().and_then(|s|s.clone())).as_ref(),self.frame_report().as_ref())}else{self.status.clone()};
         export_label(items,RectPx{x:252.,y:l.footer.y,w:vp.0-268.,h:l.footer.h},&status,10.,hex_color(0x8b8b8b),false,Align::Left);
         for (r,t,selected,a) in self.actions(vp) {
             let hovered=hit(r,cursor.0,cursor.1);
@@ -1241,7 +1333,7 @@ impl Page {
                         .stroke(1., hex_color(0x656565), figleaf::StrokeAlign::Inside)));
                     export_label(items, r, t, 11., if hovered { ink } else { hex_color(0x919191) }, true, Align::Center);
                 }
-                Action::Export|Action::Cancel|Action::Reveal=>{
+                Action::Export|Action::Pause|Action::Resume|Action::Reveal|Action::OpenAsSource=>{
                     ButtonBar::primary(items,r,t,hovered,false);
                 }
                 Action::Follow=>{
@@ -1268,12 +1360,35 @@ impl Page {
                     if self.filename_edit.is_some() && let Some(Item::Text(text)) = items.last_mut() { self.filename_cursor.show(text); }
                 }
                 Action::OpenExport(index)=>{
-                    surface(items,r,if selected{0x19334b}else if hovered{0x303438}else{0x171c21},6.);
-                    let page=self.history.get(index).unwrap_or(self);
-                    let name=page.record.as_ref().and_then(|p|p.file_name()).unwrap_or_default().to_string_lossy();
-                    export_label(items,RectPx{x:r.x+8.,y:r.y+2.,w:r.w-16.,h:15.},&name,10.,ink,true,Align::Left);
-                    let state=if page.busy(){if page.job.as_ref().is_some_and(|j|j.launch.is_some()){"Queued".into()}else{format!("Rendering · {:.0}%",page.total_fraction()*100.)}}else if page.path.is_some(){"Completed · click to view".into()}else{page.status.clone()};
-                    export_label(items,RectPx{x:r.x+8.,y:r.y+17.,w:r.w-16.,h:15.},&state,9.,dim,true,Align::Left);
+                    let page = self.history.get(index).unwrap_or(self);
+                    let name = page.record.as_deref().and_then(|p| p.file_name())
+                        .map_or_else(|| "Export".into(), |name| name.to_string_lossy());
+                    let progress = page.total_fraction() as f32;
+                    let (state, accent) = if page.paused_at().is_some() {
+                        ("Paused".into(), 0xffbd69)
+                    } else if page.job.as_ref().is_some_and(|job| job.launch.is_some()) {
+                        ("Queued".into(), 0xa3abb5)
+                    } else if page.busy() {
+                        (format!("Rendering · {:.0}%", progress * 100.), 0x72baff)
+                    } else if page.path.is_some() {
+                        ("Completed".into(), 0x84d5ab)
+                    } else {
+                        (page.status.clone(), 0xe9a098)
+                    };
+                    let fill = if selected { 0x142638 } else if hovered { 0x242930 } else { 0x181b20 };
+                    items.push(Item::Shape(figleaf::Shape::rect(figleaf::Rect::new(r.x, r.y, r.w, r.h))
+                        .radius(7.).fill(hex_color(fill))
+                        .stroke(1., hex_color(if selected { 0x4082ba } else { 0x31363e }), figleaf::StrokeAlign::Inside)));
+                    surface(items, RectPx { x: r.x + 10., y: r.y + 20., w: 5., h: 5. }, accent, 2.5);
+                    items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(r.w - 20.),
+                        ..TextItem::new(r.x + 10., r.y + 10., 11., ink, name.as_ref()) }));
+                    items.push(Item::Text(TextItem { regular: true, valign: VAlign::Middle, max_width: Some(r.w - 30.),
+                        ..TextItem::new(r.x + 20., r.y + 22., 10., hex_color(accent), state) }));
+                    if page.busy() && progress > 0. {
+                        let track = RectPx { x: r.x + 10., y: r.y + r.h - 4., w: r.w - 20., h: 2. };
+                        surface(items, track, 0x343b44, 1.);
+                        surface(items, RectPx { w: track.w * progress, ..track }, accent, 1.);
+                    }
                 }
                 _=>{
                     let border=hex_color(if selected{0xff8d28}else if disabled{0x393939}else{0x666666});
@@ -1420,7 +1535,7 @@ mod tests {
         p.record = Some(PathBuf::from("output.mp4"));
         let cancel = Cancellation::default();
         let (tx, done) = mpsc::channel();
-        p.job = Some(Job { launch: None, latest: Arc::default(), stage: Arc::default(), frame: Arc::default(), done,
+        p.job = Some(Job { pause: Arc::default(), launch: None, latest: Arc::default(), stage: Arc::default(), frame: Arc::default(), done,
             cancel: cancel.clone(), active: Arc::default(), copy_cancel: Arc::default() });
         p.archive(); p.source = Some(PathBuf::from("new.mp4"));
         assert!(cancel.check().is_ok()); assert!(p.has_jobs());
@@ -1441,7 +1556,7 @@ mod tests {
         let mut p = Page::default();
         let (_tx, done) = mpsc::channel();
         let frame: Arc<Mutex<FrameState>> = Arc::default();
-        p.job = Some(Job { launch: None, latest: Arc::default(), stage: Arc::default(), frame: frame.clone(), done,
+        p.job = Some(Job { pause: Arc::default(), launch: None, latest: Arc::default(), stage: Arc::default(), frame: frame.clone(), done,
             cancel: Cancellation::default(), active: Arc::default(), copy_cancel: Arc::default() });
         p.duration = 4.;
         p.review_fps = 1.;
@@ -1465,13 +1580,13 @@ mod tests {
     fn export_queue_runs_one_worker_at_a_time_and_can_cancel_waiting_job() {
         let mut p = Page::default();
         let (tx, done) = mpsc::channel();
-        p.job = Some(Job { launch: None, latest: Arc::default(), stage: Arc::default(), frame: Arc::default(), done,
+        p.job = Some(Job { pause: Arc::default(), launch: None, latest: Arc::default(), stage: Arc::default(), frame: Arc::default(), done,
             cancel: Cancellation::default(), active: Arc::default(), copy_cancel: Arc::default() });
         p.archive();
         let (tx2, done) = mpsc::channel();
         let launched = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = launched.clone();
-        p.job = Some(Job { launch: Some(Box::new(move || { flag.store(true, std::sync::atomic::Ordering::SeqCst); let _ = tx2.send(Ok(PathBuf::from("second.mp4"))); })),
+        p.job = Some(Job { pause: Arc::default(), launch: Some(Box::new(move || { flag.store(true, std::sync::atomic::Ordering::SeqCst); let _ = tx2.send(Ok(PathBuf::from("second.mp4"))); })),
             latest: Arc::default(), stage: Arc::default(), frame: Arc::default(), done, cancel: Cancellation::default(), active: Arc::default(), copy_cancel: Arc::default() });
         p.poll(&mut vec![], 3);
         assert!(!launched.load(std::sync::atomic::Ordering::SeqCst));
@@ -1479,6 +1594,29 @@ mod tests {
         tx.send(Ok(PathBuf::from("first.mp4"))).unwrap();
         p.poll(&mut vec![], 3);
         assert!(!p.has_jobs()); assert!(!launched.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn paused_worker_waits_for_resume() {
+        let pause = Arc::new(PauseGate::default());
+        pause.pause();
+        let (entered, ready) = mpsc::channel();
+        let (completed, done) = mpsc::channel();
+        let worker = {
+            let pause = pause.clone();
+            std::thread::spawn(move || {
+                entered.send(()).unwrap();
+                pause.wait();
+                completed.send(()).unwrap();
+            })
+        };
+        let timeout = std::time::Duration::from_secs(2);
+        ready.recv_timeout(timeout).unwrap();
+        let blocked = done.recv_timeout(std::time::Duration::from_millis(20));
+        pause.resume();
+        assert_eq!(blocked, Err(mpsc::RecvTimeoutError::Timeout));
+        done.recv_timeout(timeout).unwrap();
+        worker.join().unwrap();
     }
 
     #[test]
@@ -1522,7 +1660,7 @@ mod tests {
         };
         let latest = Arc::new(Mutex::new(Some(frame(1))));
         let (_tx, done) = mpsc::channel();
-        p.job = Some(Job {
+        p.job = Some(Job { pause: Arc::default(),
             launch: None,
             latest: latest.clone(),
             stage: Arc::default(),
@@ -1533,9 +1671,16 @@ mod tests {
             copy_cancel: Arc::default(),
         });
         let actions = p.actions((720., 480.));
-        let cancel = actions.iter().find(|(.., a)| *a == Action::Cancel).unwrap();
-        assert!(cancel.0.y < Layout::new((720., 480.)).footer.y);
+        let pause = actions.iter().find(|(.., a)| *a == Action::Pause).unwrap();
+        assert!(pause.0.y < Layout::new((720., 480.)).footer.y);
         assert!(!actions.iter().any(|(.., a)| *a == Action::Reveal));
+        p.apply(Action::Pause);
+        let paused = p.active_elapsed();
+        let resume = p.actions((720., 480.)).into_iter().find(|(.., a)| *a == Action::Resume).unwrap();
+        assert_eq!([pause.0.x, pause.0.y], [resume.0.x, resume.0.y]);
+        assert_eq!(p.active_elapsed(), paused);
+        p.apply(Action::Resume);
+        assert!(p.paused_at().is_none());
         let mut uploads = vec![];
         p.poll(&mut uploads, 3);
         assert_eq!(p.seek.take(), Some(1.));
@@ -1626,11 +1771,17 @@ mod tests {
             assert!(play.y+play.h <= l.job_card().y, "card sits under the transport");
             let reveal=actions.iter().find(|(..,a)|*a==Action::Reveal).unwrap();
             assert!(hit(l.job_card(),reveal.0.x,reveal.0.y));
+            let card=l.job_card();
             assert!(reveal.0.y + reveal.0.h <= l.job_progress().y);
             assert_eq!(p.click(vp,reveal.0.x+1.,reveal.0.y+1.),Some(Action::Reveal));
+            let open = actions.iter().find(|(.., a)| *a == Action::OpenAsSource).unwrap().0;
+            assert!(hit(card, open.x, open.y));
+            assert!(open.x + open.w <= reveal.0.x);
+            assert_eq!(p.click(vp, open.x + 1., open.y + 1.), Some(Action::OpenAsSource));
             assert_eq!(actions.iter().filter(|(..,a)|*a==Action::Export).count(),3);
         }
         assert_eq!(p.apply(Action::Reveal),p.destination);
+        assert_eq!(p.apply(Action::OpenAsSource),p.destination);
     }
     #[test]
     fn preview_navigation_uses_available_boundaries_without_a_decoder() {
@@ -1749,6 +1900,8 @@ mod tests {
                     stages.lock().unwrap().push((name.to_owned(), p.phase, p.total))
                 })
             };
+            // A crop can leave both axes odd. MOV/ProRes must preserve them.
+            let crop = (prores && ext == "mov").then_some((1, 1, 61, 63));
             crate::media_io::pipeline_export_with_inputs(
                 &Default::default(),
                 &info,
@@ -1759,10 +1912,11 @@ mod tests {
                 &[("test.red".into(), serde_json::json!({}))],
                 prores,
                 Some(40_000),
-                None,
+                crop,
                 &Cancellation::default(),
                 &Mutex::default(),
                 Some(&report),
+                None,
                 None,
                 |f| {
                     previews += 1;
@@ -1792,6 +1946,12 @@ mod tests {
             };
             assert_eq!(title.as_deref(), Some("Pipeline title"), "{ext}");
             let output = crate::probe::probe(&dest).unwrap();
+            if let Some((_, _, w, h)) = crop {
+                assert_eq!((output.width, output.height), (w, h));
+                assert!(std::process::Command::new("ffmpeg")
+                    .args(["-v", "error", "-xerror", "-i"]).arg(&dest)
+                    .args(["-map", "0:v:0", "-f", "null", "-"]).status().unwrap().success());
+            }
             assert!(
                 output.codec.to_lowercase().contains(codec),
                 "{}",
@@ -1826,7 +1986,7 @@ mod tests {
             let mut count = 0;
             crate::media_io::pipeline_export_with_inputs(&Default::default(), &info, &dest,
                 &[(0.,0.5)], &[], &registry, &[], false, Some(12_000), None,
-                &Cancellation::default(), &Mutex::default(), None, None, |_| { count += 1; Ok(()) }).unwrap();
+                &Cancellation::default(), &Mutex::default(), None, None, None, |_| { count += 1; Ok(()) }).unwrap();
             assert_eq!(count, 12, "explicit HEVC must encode even with no processing stages");
             assert!(crate::probe::probe(&dest).unwrap().codec.to_lowercase().contains("hevc"));
             let mut page = Page::default(); page.path = Some(dest.clone()); page.open = true;
@@ -1908,12 +2068,17 @@ mod tests {
             assert!(error.to_string().contains(message), "{error}");
             assert!(!dest.exists());
         }
-        for ext in ["mp4", "mov", "mkv"] {
+        let interrupted: &[(&str, bool)] = if prores_only {
+            &[("mov", true), ("mkv", true)]
+        } else {
+            &[("mp4", false), ("mkv", false)]
+        };
+        for &(ext, prores) in interrupted {
             let dest = dir.join(format!("interrupted.{ext}"));
             let cancelled = Cancellation::default();
             let result = crate::media_io::pipeline_export(
                 &info, &dest, &[(0., 0.5)], &registry,
-                &[("test.red".into(), serde_json::json!({}))], ext == "mov", None,
+                &[("test.red".into(), serde_json::json!({}))], prores, None,
                 &cancelled, &Mutex::default(), |_| { cancelled.cancel(); Ok(()) },
             );
             assert!(result.is_err());
@@ -2016,7 +2181,7 @@ mod tests {
                     (v[0], v[1], v[2], v[3])
                 }),
                 &Cancellation::default(), &Mutex::default(), None,
-                std::env::var_os("ABNER_BENCH_NO_PICTURE").map(|_| &(|| false) as &(dyn Fn() -> bool + Sync)),
+                std::env::var_os("ABNER_BENCH_NO_PICTURE").map(|_| &(|| false) as &(dyn Fn() -> bool + Sync)), None,
                 |_| { frames += 1; Ok(()) }).unwrap();
             let s = start.elapsed().as_secs_f64();
             eprintln!("{size} {label}: {frames} frames in {s:.2}s = {:.1} fps", frames as f64 / s);

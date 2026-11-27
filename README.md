@@ -36,13 +36,17 @@ loading one does not turn a bypassed processor on.
 ## Export
 
 Open the **Export** tab to write the enabled processor pipeline, or launch with
-`abner --export INPUT`. Choose a codec and MP4, MOV, or MKV, then Export to pick
+`abner --export INPUT`. Choose MP4, MOV, MKV, or WebP, then Export to pick
 a destination. ProRes is available in MOV and MKV. Selecting ProRes while MP4
 is active switches the container to MOV. The large output viewer follows
 new rendered frames; scrubbing or arrow keys holds a recent frame for inspection,
 TAB compares its original, and Follow render returns to the latest frame. Progress
-shows encoded frames, FPS, elapsed time and estimated remaining time. The footer
-contains Export, Cancel and Reveal output.
+shows encoded frames, FPS, elapsed time and estimated remaining time.
+
+Abner opens animated WebP as a source with its original per-frame timing.
+WebP export writes a lossless, infinitely looping animation without audio.
+WebP-to-WebP trims and direct crops retain transparency. Processor chains
+require opaque input.
 
 This initial exporter supports SDR constant-rate video, current Timeline kept ranges,
 an active crop and streaming processors. Recent-frame review is memory bounded;

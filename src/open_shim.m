@@ -42,7 +42,8 @@ static AbMenuCallback ab_menu_cb = NULL;
 @end
 
 // Menu action tags — mirrored by open.rs's MenuAction.
-enum { AB_MENU_OPEN = 1, AB_MENU_REVEAL = 2, AB_MENU_EXPORT = 3, AB_MENU_CLOSE = 4, AB_MENU_COPY_FRAME = 5 };
+enum { AB_MENU_OPEN = 1, AB_MENU_REVEAL = 2, AB_MENU_EXPORT = 3, AB_MENU_CLOSE = 4, AB_MENU_COPY_FRAME = 5, AB_MENU_COPY_PATHNAME = 6,
+       AB_MENU_MASK_IMPORT = 7, AB_MENU_MASK_EXPORT = 8, AB_MENU_MASK_CLEAR = 9, AB_MENU_MASK_AUTODETECT = 10 };
 
 static NSMenuItem *ab_item(NSMenu *menu, NSString *title, SEL action, NSString *key,
                            NSEventModifierFlags mods, NSInteger tag, id target) {
@@ -60,10 +61,13 @@ static void ab_add_menu(NSMenu *bar, NSMenu *menu, NSInteger at) {
     [bar insertItem:heading atIndex:MIN(at, bar.numberOfItems)];
 }
 
-// File · View · Frame, after winit's application menu. Built once; every
+// File · View · Frame · Mask, after winit's application menu. Built once; every
 // call re-derives the enabled/checked state from the app, never from clicks.
-void ab_sync_menus(int mode, bool has_clips, bool can_export, AbViewCallback view_cb, AbMenuCallback menu_cb) {
-    static NSMenu *file = nil, *view = nil, *frame = nil;
+// `mask`: -1 hides the Mask menu (not painting a mask), otherwise bit 0 ticks
+// Autodetect and bit 1 says the items can act now.
+void ab_sync_menus(int mode, bool has_clips, bool can_export, int mask, AbViewCallback view_cb, AbMenuCallback menu_cb) {
+    static NSMenu *file = nil, *view = nil, *frame = nil, *mask_menu = nil;
+    static NSMenuItem *mask_heading = nil;
     static AbMenuTarget *target = nil;
     ab_view_cb = view_cb;
     ab_menu_cb = menu_cb;
@@ -78,6 +82,7 @@ void ab_sync_menus(int mode, bool has_clips, bool can_export, AbViewCallback vie
         ab_item(file, @"Open…", @selector(menuAction:), @"o", cmd, AB_MENU_OPEN, target);
         [file addItem:[NSMenuItem separatorItem]];
         ab_item(file, @"Reveal in Finder", @selector(menuAction:), @"r", cmd | NSEventModifierFlagShift, AB_MENU_REVEAL, target);
+        ab_item(file, @"Copy Pathname", @selector(menuAction:), @"", 0, AB_MENU_COPY_PATHNAME, target);
         ab_item(file, @"Export", @selector(menuAction:), @"e", cmd, AB_MENU_EXPORT, target);
         [file addItem:[NSMenuItem separatorItem]];
         ab_item(file, @"Close", @selector(menuAction:), @"w", cmd, AB_MENU_CLOSE, target);
@@ -97,6 +102,18 @@ void ab_sync_menus(int mode, bool has_clips, bool can_export, AbViewCallback vie
         ab_add_menu(bar, file, 1);
         ab_add_menu(bar, view, 2);
         ab_add_menu(bar, frame, 3);
+
+        // No key equivalents: the mask editor's own keys are bare letters.
+        mask_menu = [[NSMenu alloc] initWithTitle:@"Mask"];
+        mask_menu.autoenablesItems = NO;
+        ab_item(mask_menu, @"Import…", @selector(menuAction:), @"", 0, AB_MENU_MASK_IMPORT, target);
+        ab_item(mask_menu, @"Export…", @selector(menuAction:), @"", 0, AB_MENU_MASK_EXPORT, target);
+        [mask_menu addItem:[NSMenuItem separatorItem]];
+        ab_item(mask_menu, @"Clear", @selector(menuAction:), @"", 0, AB_MENU_MASK_CLEAR, target);
+        [mask_menu addItem:[NSMenuItem separatorItem]];
+        ab_item(mask_menu, @"Autodetect", @selector(menuAction:), @"", 0, AB_MENU_MASK_AUTODETECT, target);
+        ab_add_menu(bar, mask_menu, 4);
+        mask_heading = mask_menu.supermenu == bar ? [bar itemAtIndex:[bar indexOfItemWithSubmenu:mask_menu]] : nil;
     }
     for (NSMenuItem *item in file.itemArray) {
         switch (item.tag) {
@@ -111,6 +128,23 @@ void ab_sync_menus(int mode, bool has_clips, bool can_export, AbViewCallback vie
         item.state = item.tag == mode ? NSControlStateValueOn : NSControlStateValueOff;
     }
     for (NSMenuItem *item in frame.itemArray) item.enabled = has_clips;
+    // The Mask menu exists only while a mask is being painted.
+    mask_heading.hidden = mask < 0;
+    for (NSMenuItem *item in mask_menu.itemArray) {
+        item.enabled = mask >= 0 && (mask & 2);
+        if (item.tag == AB_MENU_MASK_AUTODETECT) {
+            item.state = (mask >= 0 && (mask & 1)) ? NSControlStateValueOn : NSControlStateValueOff;
+        }
+    }
+}
+
+// Plain text onto the general pasteboard. Main thread.
+void ab_copy_text(const char *text) {
+    NSString *string = [NSString stringWithUTF8String:text];
+    if (string == nil) return;
+    NSPasteboard *pb = [NSPasteboard generalPasteboard];
+    [pb clearContents];
+    [pb setString:string forType:NSPasteboardTypeString];
 }
 
 // Encoded PNG bytes onto the general pasteboard. Main thread.
@@ -292,12 +326,31 @@ char *ab_paste_text(void) {
 void ab_free_text(char *text) { free(text); }
 
 // The export page owns codec/container choices; this panel only chooses a destination.
-char *ab_export_destination(const char *name) {
+char *ab_export_destination(const char *name, const char *directory) {
     NSSavePanel *panel = [NSSavePanel savePanel];
     panel.nameFieldStringValue = [NSString stringWithUTF8String:name];
+    panel.directoryURL = [NSURL fileURLWithFileSystemRepresentation:directory isDirectory:YES relativeToURL:nil];
     panel.canCreateDirectories = YES;
     if ([panel runModal] != NSModalResponseOK) return NULL;
     return strdup(panel.URL.path.UTF8String);
+}
+
+// Mask > Import: one PNG, or NULL when cancelled.
+char *ab_choose_png(const char *directory) {
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.canChooseFiles = YES;
+    panel.canChooseDirectories = NO;
+    panel.allowsMultipleSelection = NO;
+    panel.prompt = @"Import mask";
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    panel.allowedFileTypes = @[@"png"]; // the UTType API would pull in another framework
+#pragma clang diagnostic pop
+    if (directory && directory[0]) {
+        panel.directoryURL = [NSURL fileURLWithFileSystemRepresentation:directory isDirectory:YES relativeToURL:nil];
+    }
+    if ([panel runModal] != NSModalResponseOK) return NULL;
+    return strdup(panel.URL.fileSystemRepresentation);
 }
 
 char *ab_export_directory(const char *directory) {

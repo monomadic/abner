@@ -2790,23 +2790,12 @@ impl Panel {
     }
     /// Preset controls use the same bounds for drawing and pointer input.
     fn preset_buttons(&self, vp: (f32, f32)) -> [RectPx; 5] {
-        if self.picker.is_some() { return self.picker_layout(vp).presets(); }
-        let x = vp.0 - self.right(vp) + 16.;
-        let y = HEADER_H + 100.;
-        let w = self.right(vp) - 32.;
-        let name = (w - 128.).max(40.);
-        let widths = [name, 18., 18., 34., 42.];
-        let mut at = x;
-        std::array::from_fn(|i| {
-            let r = RectPx {
-                x: at,
-                y,
-                w: widths[i],
-                h: 23.,
-            };
-            at += widths[i] + 4.;
-            r
-        })
+        if self.picker.is_some() {
+            let settings = self.picker_layout(vp).settings;
+            return picker::preset_rects(settings.x, settings.y + 23.0, settings.w);
+        }
+        let right = self.right(vp);
+        picker::preset_rects(vp.0 - right + 16.0, HEADER_H + 100.0, right - 32.0)
     }
     fn begin_save_preset(&mut self) {
         if let Some((i, value)) = &self.editing {
@@ -2937,14 +2926,7 @@ impl Panel {
         let switch = Self::settings_switch(vp);
         draw_processor_switch(items, switch, self.enabled[self.selected], self.switch_position(self.selected, Instant::now()));
         text(items, x, top + 88.0, 9.0, "PRESET", dim, w);
-        let name=self.preset_name.as_deref();
-        let preset = name.unwrap_or_else(||d.presets.get(self.preset).map_or("Default", |p| p.name.as_str()));
-        let custom=d.presets.get(self.preset).is_some_and(|p|self.user_presets.contains_key(&p.id));
-        for (index,(r, label)) in self.preset_buttons(vp).into_iter().zip([preset, "‹", "›", "Save", "Delete"]).enumerate() {
-            items.push(Item::Rect(RectItem { radius: 6.0, border_w: 1.0, border_color: hex_color(0x303234), ..RectItem::new(r, hex_color(0x0a0a0a)) }));
-            ui_label(items, r.x + r.w / 2.0, r.y + r.h / 2.0, 10.0, if index==4&&!custom {dim} else {muted}, label, Align::Center, r.w - 4.0);
-            if index == 0 && name.is_some() { set_caret(items, &self.text_cursor); }
-        }
+        self.draw_preset_controls(items, self.preset_buttons(vp));
         items.push(Item::Rect(RectItem::new(RectPx { x, y: top + 136.0, w, h: 1.0 }, hex_color(0x303234))));
         let clip = RectPx { x: x - 16.0, y: top + 158.0, w: self.right(vp), h: (self.info(vp).y - top - 158.0).max(1.0) };
         self.draw_fields(items, vp, clip);
@@ -3485,6 +3467,7 @@ impl Panel {
         self.settings_click(x, y, vp)
     }
     fn settings_click(&mut self, x: f32, y: f32, vp: (f32, f32)) -> bool {
+        if self.picker.is_none() && self.right(vp) == 0.0 { return false; }
         if let Some(button) = self.preset_buttons(vp).iter().position(|r| hit(*r, x, y))
             && !self.descriptors.is_empty()
         {
@@ -6787,7 +6770,14 @@ mod tests {
         click(&mut reloaded,4);assert!(!file.exists());assert_eq!(reloaded.settings["strength"],json!(0.5));
         reloaded.descriptors[0].presets.push(abner_processor_api::Preset{id:"builtin".into(),name:"Built-in".into(),settings:json!({"strength":0.25})});
         click(&mut reloaded,2);click(&mut reloaded,4);assert_eq!(reloaded.descriptors[0].presets.len(),1);assert!(reloaded.status.contains("Built-in presets cannot"));
-        for vp in [(720.,480.),(1280.,800.),(1440.,900.)]{let rects=reloaded.preset_buttons(vp);for pair in rects.windows(2){assert!(pair[0].x+pair[0].w<=pair[1].x);}assert!(rects[4].x+rects[4].w<=vp.0-15.);}
+        for vp in [(720., 480.), (1280., 800.), (1440., 900.)] {
+            let [name, previous, next, save, delete] = reloaded.preset_buttons(vp);
+            assert!(name.w > 0.0);
+            for pair in [previous, name, next, save, delete].windows(2) {
+                assert!(pair[0].x + pair[0].w <= pair[1].x);
+            }
+            assert!(delete.x + delete.w <= vp.0 - 15.0);
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 

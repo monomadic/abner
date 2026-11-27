@@ -1,5 +1,23 @@
 # abner — history
 
+## 2026-11-27 — Side by side focuses on the press
+
+A press on a clip's cell in Side by side focuses that clip at mouse down
+(`side_by_side_cell`, the same cell maths as the zoom anchor); the same press
+still pans a zoomed picture. Before this the canvas never changed focus.
+The focused clip wears the rail's orange ring (`FOCUS_RING_W`, 2px inside
+the visible part of its picture); the ring goes with the shell on Enter.
+
+## 2026-11-26 — Mask menu
+
+While a mask is being painted (the Mask page or the Process page's in-place
+editor, not the crop marquee) the menu bar carries a Mask menu: Import… reads
+a PNG as the mask, Export… writes it wherever the save panel says, Clear
+empties it, and Autodetect is a ticked item that follows the autodetect
+setup. Import and Clear are single undo steps. An imported PNG must be the
+picture's size; any colour type is thresholded on brightness. The items are
+dead while the editor asks about unapplied strokes.
+
 ## 2026-11-26 — Copy As New Source
 
 The canvas toolbar in Sources and Timeline copies the focused file byte for
@@ -12,6 +30,19 @@ retaining the original in Sources.
 Export uses the preview's Downsize input settings and spline resampling. It
 strips the host's setting before creating a processor, and when Downsize is
 enabled it shrinks the input and selects the matching upscale model.
+
+## 2026-11-23 — Animated WebP import and export
+
+Animated WebP opens through the player with composited frames and source delays.
+The Export page and `--export-run` write lossless looping WebP. Direct WebP trims
+and crops preserve alpha, and exports can be reopened as sources.
+
+## 2026-11-23 — Pause exports and open finished renders as sources
+
+The export job card pauses at frame or packet boundaries and resumes the same
+job. Paused time stays out of the encode rate and ETA. Completed exports can
+be added to Sources directly, and the save panel starts beside the source.
+ProRes retains odd crop dimensions, with round-trip coverage for a 61 × 63 MOV.
 
 ## 2026-11-23 — Check translucent autodetect proposals against their surroundings
 

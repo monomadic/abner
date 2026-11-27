@@ -84,6 +84,7 @@ pub struct Player {
 /// frame at or after t" is known to be the TRUE next frame and not the
 /// far side of a gap), where the consumer is, and what it is waiting for.
 struct Cache {
+    seek_tolerance_us: i64,
     frames: BTreeMap<i64, CachedFrame>,
     /// Contiguous decoded spans `[first, last]`, sorted, non-overlapping.
     /// A span grows as the reader decodes on; a seek starts a new one at
@@ -124,7 +125,7 @@ impl Cache {
     /// between the target and it.
     fn covers(&self, key: i64, t: i64) -> bool {
         self.run_of(key)
-            .is_some_and(|i| self.runs[i].0 <= t + SAME_FRAME_US)
+            .is_some_and(|i| self.runs[i].0 <= t + self.seek_tolerance_us)
     }
 
     /// First deliverable key: for a pending target, the first cached
@@ -137,7 +138,7 @@ impl Cache {
                 .filter(|k| self.frames.contains_key(k)),
             Some(t) => self
                 .frames
-                .range(t - SAME_FRAME_US..)
+                .range(t - self.seek_tolerance_us..)
                 .next()
                 .map(|(k, _)| *k)
                 .filter(|k| self.covers(*k, t)),
@@ -164,7 +165,7 @@ impl Cache {
                     .find(|&k| self.run_of(k) == self.run_of(first))
             }
             Some(t) => {
-                let lo = t - SAME_FRAME_US;
+                let lo = t - self.seek_tolerance_us;
                 if t_us < lo {
                     return None;
                 }
@@ -285,6 +286,7 @@ impl Cache {
 }
 
 struct Shared {
+    animation: std::sync::OnceLock<(Arc<[u64]>, u64)>,
     cache: Mutex<Cache>,
     /// Signalled when the position moves, a seek lands in the cache, or
     /// the player closes — anything that changes what the parked reader
@@ -380,7 +382,8 @@ impl Player {
         Self::spawn_mode(path, w, h, cache_bytes, true)
     }
     fn spawn_mode(path: &Path, w: u32, h: u32, cache_bytes: usize, native: bool) -> Option<Self> {
-        let (w, h) = (w.max(2), h.max(2));
+        let min_dim = if crate::animated_webp::is_webp(path) { 1 } else { 2 };
+        let (w, h) = (w.max(min_dim), h.max(min_dim));
         let cfg = ReaderCfg {
             path: path.to_path_buf(),
             w,
@@ -390,7 +393,9 @@ impl Player {
         // Keep the existing cache floor; admission/eviction use actual plane bytes.
         let frame_bytes = (w as usize) * (h as usize) * 4;
         let shared = Arc::new(Shared {
+            animation: std::sync::OnceLock::new(),
             cache: Mutex::new(Cache {
+                seek_tolerance_us: SAME_FRAME_US,
                 frames: BTreeMap::new(),
                 runs: Vec::new(),
                 bytes: 0,
@@ -459,7 +464,8 @@ impl Player {
     /// first keyframe at or AFTER the target (falling back to the one
     /// before when none follows). Exact seeks ignore the bias.
     pub fn seek_biased(&self, target_s: f64, exact: bool, forward: bool) {
-        let t = target_s.max(0.0);
+        let t = self.animation_frame_time(target_s, if !exact && forward { 1 } else { 0 })
+            .unwrap_or_else(|| target_s.max(0.0));
         let key = us(t);
         let mut c = self.shared.cache.lock().unwrap();
         c.position = key;
@@ -468,7 +474,7 @@ impl Player {
         self.shared.set_position(key);
         let cached = exact
             && c.frames
-                .range(key - SAME_FRAME_US..)
+                .range(key - c.seek_tolerance_us..)
                 .next()
                 .map(|(k, _)| *k)
                 .is_some_and(|k| c.covers(k, key));
@@ -490,11 +496,24 @@ impl Player {
         self.shared.space.notify_all();
     }
 
+    pub(crate) fn animation_frame_time(&self, time: f64, step: i32) -> Option<f64> {
+        let (starts, _) = self.shared.animation.get()?;
+        let index = starts.partition_point(|&ms| ms * 1000 <= us(time).max(0) as u64).saturating_sub(1);
+        let index = index.saturating_add_signed(step as isize).min(starts.len() - 1);
+        Some(starts[index] as f64 / 1000.)
+    }
+
+    pub(crate) fn animation_duration_us(&self, time: i64) -> Option<i64> {
+        let (starts, end) = self.shared.animation.get()?;
+        let index = starts.binary_search(&(time as u64 / 1000)).ok()?;
+        Some(((starts.get(index + 1).unwrap_or(end) - starts[index]) * 1000) as i64)
+    }
+
     /// Whether an exact seek can land from a contiguous resident span.
     pub(crate) fn seek_cached(&self, target_s: f64) -> bool {
-        let key = us(target_s.max(0.0));
+        let key = us(self.animation_frame_time(target_s, 0).unwrap_or_else(|| target_s.max(0.0)));
         let c = self.shared.cache.lock().unwrap();
-        c.frames.range(key - SAME_FRAME_US..).next()
+        c.frames.range(key - c.seek_tolerance_us..).next()
             .is_some_and(|(&k, _)| c.covers(k, key))
     }
 
@@ -505,11 +524,12 @@ impl Player {
     /// moving (playback), lets the reader go again. Ignored while an exact seek is landing, and
     /// when the frame is already cached.
     pub fn prefetch(&self, target_s: f64) {
-        let key = us(target_s.max(0.0));
+        let target_s = self.animation_frame_time(target_s, 0).unwrap_or_else(|| target_s.max(0.0));
+        let key = us(target_s);
         let c = self.shared.cache.lock().unwrap();
         let cached = c
             .frames
-            .range(key - SAME_FRAME_US..)
+            .range(key - c.seek_tolerance_us..)
             .next()
             .is_some_and(|(k, _)| c.covers(*k, key));
         if cached || c.pending.is_some() || c.landing || self.shared.cmd.lock().unwrap().is_some() {
@@ -566,7 +586,7 @@ impl Player {
                         .next()
                         .is_some()
                 {
-                    let target = c.position.saturating_add(SAME_FRAME_US + 1);
+                    let target = c.position.saturating_add(c.seek_tolerance_us + 1);
                     c.pending = Some(target);
                     c.pending_verified = None;
                     c.gap_refill = true;
@@ -703,11 +723,33 @@ fn reader(shared: &Arc<Shared>, cfg: &ReaderCfg) -> Result<(), String> {
     let elapsed_ms = |start: Option<std::time::Instant>| {
         start.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0)
     };
-    let src = fc::open(&cfg.path)?;
-    let (frame_s, frames) = fc::timing(&src).ok_or_else(|| "no video stream".to_string())?;
+    let animation = crate::animated_webp::Animation::open(&cfg.path).map_err(|e| e.to_string())?;
+    let starts = animation.as_ref().map(|a| (a.starts_ms.clone(), a.duration_ms));
+    let seek_tolerance_us = if starts.is_some() { 0 } else { SAME_FRAME_US };
+    shared.cache.lock().unwrap().seek_tolerance_us = seek_tolerance_us;
+    let src: filmcraft_media::SharedSource = if let Some(animation) = animation {
+        let _ = shared.animation.set((animation.starts_ms.clone(), animation.duration_ms));
+        Arc::new(animation)
+    } else {
+        fc::open_standard(&cfg.path)?
+    };
+    let (frame_s, nominal_frames) = fc::timing(&src).ok_or_else(|| "no video stream".to_string())?;
     let sync = fc::SyncTable::open(&cfg.path);
-    let to_index = |t: f64| ((t.max(0.0) / frame_s).round() as u64).min(frames.saturating_sub(1));
-    let key_of = |index: u64| us(index as f64 * frame_s);
+    let frames = starts.as_ref().map_or(nominal_frames, |(starts, _)| starts.len() as u64);
+    let to_index = |t: f64| {
+        starts.as_ref().map_or_else(|| (t.max(0.) / frame_s).round() as u64,
+            |(starts, _)| starts.partition_point(|&ms| (ms * 1000) < us(t).max(0) as u64) as u64)
+            .min(frames - 1)
+    };
+    let key_of = |index: u64| starts.as_ref().map_or_else(|| us(index as f64 * frame_s),
+        |(starts, duration)| (starts.get(index as usize).unwrap_or(duration) * 1000) as i64);
+    let decode = |index| {
+        if let Some((starts, _)) = &starts {
+            fc::frame_at(&src, starts[index as usize], 0.001, &shared.cancel)
+        } else {
+            fc::frame_at(&src, index, frame_s, &shared.cancel)
+        }
+    };
     // The keyframe index at or before `index` (the index itself without a sync table).
     let keyframe_before = |index: u64| match &sync {
         Some(s) => to_index(s.before(index as f64 * frame_s)),
@@ -735,11 +777,23 @@ fn reader(shared: &Arc<Shared>, cfg: &ReaderCfg) -> Result<(), String> {
         if shared.closed.load(Ordering::Relaxed) {
             return Ok(());
         }
-        if let Some((target, exact, forward)) = shared.cmd.lock().unwrap().take() {
+        let command = shared.cmd.lock().unwrap().take();
+        if let Some((target, exact, forward)) = command {
             hold = None;
             at_jump = None;
             shared.eof.store(false, Ordering::Release);
-            let t_idx = to_index(target);
+            let mut t_idx = to_index(target);
+            if exact && starts.is_some() {
+                let mut cache = shared.cache.lock().unwrap();
+                // An initial seek may have arrived before the timing table. A gap
+                // refill, by contrast, must advance to the first following frame.
+                if !cache.gap_refill && key_of(t_idx) > us(target) {
+                    t_idx = t_idx.saturating_sub(1);
+                }
+                if cache.pending == Some(us(target)) {
+                    cache.pending = Some(key_of(t_idx));
+                }
+            }
             if exact {
                 active_target = Some(key_of(t_idx));
                 // A rewind window of frames before the target, bounded by the budget (as
@@ -789,7 +843,7 @@ fn reader(shared: &Arc<Shared>, cfg: &ReaderCfg) -> Result<(), String> {
             shared.cancel.store(false, Ordering::Relaxed);
             // The frame itself is not wanted, only the decoder state and FilmCraft's pictures.
             // Cancelled = a seek or a newer prefetch: the loop picks that up.
-            let _ = fc::frame_at(&src, to_index(t), frame_s, &shared.cancel);
+            let _ = decode(to_index(t));
             hold = Some(shared.position.load(Ordering::Relaxed));
             // The frame a parked push gave up on (see `push`) is missing: start a fresh span.
             shared.cache.lock().unwrap().broken = true;
@@ -825,7 +879,7 @@ fn reader(shared: &Arc<Shared>, cfg: &ReaderCfg) -> Result<(), String> {
         // Decoding ahead is about to cross a jump the app will seek over: stop here and warm
         // where playback resumes. A seek that LANDED inside a jump's span decodes on normally.
         // Not while heading for an exact target: that seek asked for these frames.
-        let heading = active_target.is_some_and(|t| key_of(index) <= t + SAME_FRAME_US);
+        let heading = active_target.is_some_and(|t| key_of(index) <= t + seek_tolerance_us);
         let crossing = last_index.filter(|_| !heading).and_then(|l| {
             let (before, here) = (key_of(l), key_of(index));
             shared.jumps.lock().unwrap().iter().copied().find(|&(from, to)| {
@@ -836,7 +890,7 @@ fn reader(shared: &Arc<Shared>, cfg: &ReaderCfg) -> Result<(), String> {
         });
         if let Some((_, to)) = crossing {
             shared.cancel.store(false, Ordering::Relaxed);
-            let _ = fc::frame_at(&src, to_index(to), frame_s, &shared.cancel);
+            let _ = decode(to_index(to));
             at_jump = Some(generation);
             continue;
         }
@@ -876,7 +930,7 @@ fn reader(shared: &Arc<Shared>, cfg: &ReaderCfg) -> Result<(), String> {
         }
         shared.cancel.store(false, Ordering::Relaxed);
         let request_start = profile.then(std::time::Instant::now);
-        let frame = match fc::frame_at(&src, index, frame_s, &shared.cancel) {
+        let frame = match decode(index) {
             Ok(f) => f,
             Err(true) => continue, // cancelled by a command or a drop
             Err(false) => {
@@ -902,7 +956,7 @@ fn reader(shared: &Arc<Shared>, cfg: &ReaderCfg) -> Result<(), String> {
                 }
             );
         }
-        if active_target.is_some_and(|t| key < t - SAME_FRAME_US) {
+        if active_target.is_some_and(|t| key < t - seek_tolerance_us) {
             seen_before_target = true;
         }
         let (buf, reused, pool_lock_ms, prepare_ms, convert_ms) = if cfg.native {
@@ -1005,9 +1059,9 @@ fn land(shared: &Shared, c: &mut Cache, key: i64) -> bool {
 fn verify_target(c: &mut Cache, key: i64, active_target: Option<i64>, seen_before: bool) {
     if active_target.is_some_and(|t| {
         c.pending == Some(t)
-            && key >= t - SAME_FRAME_US
+            && key >= t - c.seek_tolerance_us
             && c.pending_verified.is_none()
-            && (seen_before || key <= t + SAME_FRAME_US || t == 0)
+            && (seen_before || key <= t + c.seek_tolerance_us || t == 0)
     }) {
         c.pending_verified = Some(key);
     }
@@ -1109,6 +1163,7 @@ mod tests {
     #[test]
     fn pending_seek_uses_its_covered_run_even_with_a_later_cached_run() {
         let mut c = Cache {
+            seek_tolerance_us: SAME_FRAME_US,
             frames: BTreeMap::new(),
             runs: vec![(100_000, 120_000), (200_000, 220_000)],
             bytes: 0,

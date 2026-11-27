@@ -136,45 +136,59 @@ impl PickerLayout {
             h: (self.list.h - 24.0).max(1.0),
         }
     }
-    pub(super) fn presets(self) -> [RectPx; 5] {
-        let x = self.settings.x;
-        let y = self.settings.y + 23.0;
-        let w = self.settings.w;
-        [
-            RectPx {
-                x: x + 25.0,
-                y,
-                w: w - 108.0,
-                h: 23.0,
-            },
-            RectPx {
-                x,
-                y,
-                w: 25.0,
-                h: 23.0,
-            },
-            RectPx {
-                x: x + w - 83.0,
-                y,
-                w: 25.0,
-                h: 23.0,
-            },
-            RectPx {
-                x: x + w - 54.0,
-                y,
-                w: 25.0,
-                h: 23.0,
-            },
-            RectPx {
-                x: x + w - 25.0,
-                y,
-                w: 25.0,
-                h: 23.0,
-            },
-        ]
-    }
 }
+
+pub(super) fn preset_rects(x: f32, y: f32, w: f32) -> [RectPx; 5] {
+    [
+        RectPx { x: x + 25.0, y, w: w - 108.0, h: 23.0 },
+        RectPx { x, y, w: 25.0, h: 23.0 },
+        RectPx { x: x + w - 83.0, y, w: 25.0, h: 23.0 },
+        RectPx { x: x + w - 54.0, y, w: 25.0, h: 23.0 },
+        RectPx { x: x + w - 25.0, y, w: 25.0, h: 23.0 },
+    ]
+}
+
 impl Panel {
+    pub(super) fn draw_preset_controls(&self, items: &mut Vec<Item>, rects: [RectPx; 5]) {
+        let preset = self.descriptors[self.selected].presets.get(self.preset);
+        let name = self.preset_name.as_deref().unwrap_or_else(|| {
+            preset.map_or("Default", |p| p.name.as_str())
+        });
+        let custom = preset.is_some_and(|p| self.user_presets.contains_key(&p.id));
+        let [field, buttons @ ..] = rects;
+        items.push(Item::Shape(ui_shape(field, hex_color(0x0a0a0a))));
+        for y in [field.y, field.y + field.h - 1.0] {
+            items.push(Item::Shape(ui_shape(
+                RectPx { y, h: 1.0, ..field },
+                hex_color(0x303234),
+            )));
+        }
+        if self.preset_name.is_some() {
+            items.push(Item::Text(TextItem {
+                regular: true,
+                align: Align::Center,
+                valign: VAlign::Middle,
+                max_width: Some(field.w - 8.0),
+                ..TextItem::new(
+                    field.x + field.w / 2.0,
+                    field.y + field.h / 2.0,
+                    10.0,
+                    hex_color(0xc8c8c8),
+                    name,
+                )
+            }));
+            set_caret(items, &self.text_cursor);
+        } else {
+            interface_center(items, field, name, 10.0, 0xc8c8c8);
+        }
+        for (button, index) in buttons.into_iter().zip(PRESET_ICONS) {
+            items.push(Item::FrameIcon { x: button.x, y: button.y, index });
+        }
+        if !custom {
+            items.push(Item::Shape(ui_shape(buttons[3], [0.0, 0.0, 0.0, 0.42]).radius(4.0)));
+        }
+    }
+
     pub(crate) fn modal_open(&self) -> bool {
         self.open && self.picker.is_some()
     }
@@ -881,57 +895,7 @@ impl Panel {
                 hex_color(0xd6d6d6),
                 l.settings.w,
             );
-            let name = self.preset_name.as_deref().unwrap_or_else(|| {
-                d.presets
-                    .get(self.preset)
-                    .map_or("Default", |p| p.name.as_str())
-            });
-            for (i, b) in l.presets().into_iter().enumerate() {
-                match i {
-                    0 => {
-                        items.push(Item::Shape(ui_shape(b, hex_color(0x0a0a0a))));
-                        for y in [b.y, b.y + b.h - 1.0] {
-                            items.push(Item::Shape(ui_shape(
-                                RectPx { y, h: 1.0, ..b },
-                                hex_color(0x303234),
-                            )));
-                        }
-                        if self.preset_name.is_some() {
-                            items.push(Item::Text(TextItem {
-                                regular: true,
-                                align: Align::Center,
-                                valign: VAlign::Middle,
-                                max_width: Some(b.w - 8.0),
-                                ..TextItem::new(
-                                    b.x + b.w / 2.0,
-                                    b.y + b.h / 2.0,
-                                    10.0,
-                                    hex_color(0xc8c8c8),
-                                    name,
-                                )
-                            }));
-                            set_caret(items, &self.text_cursor);
-                        } else {
-                            interface_center(items, b, name, 10.0, 0xc8c8c8);
-                        }
-                    }
-                    _ => {
-                        items.push(Item::FrameIcon {
-                            x: b.x,
-                            y: b.y,
-                            index: PRESET_ICONS[i - 1],
-                        });
-                        if i == 4
-                            && !d
-                                .presets
-                                .get(self.preset)
-                                .is_some_and(|p| self.user_presets.contains_key(&p.id))
-                        {
-                            items.push(Item::Shape(ui_shape(b, [0.0, 0.0, 0.0, 0.42]).radius(4.0)));
-                        }
-                    }
-                }
-            }
+            self.draw_preset_controls(items, self.preset_buttons(vp));
             items.push(Item::Clip(Some(l.about)));
             picker_text(
                 items,

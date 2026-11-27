@@ -31,6 +31,7 @@ mod probe;
 mod media_metadata;
 mod media_packets;
 mod media_io;
+mod animated_webp;
 mod recent;
 mod render;
 mod schedule;
@@ -82,7 +83,7 @@ processor previews:
   --processor-mask-ask              the same, with a stroke painted and the
                                     unapplied-changes question up (captures)
   --export                          open the minimal Export workspace
-  --export-run OUT                  open it and export to OUT (.mp4/.mov/.mkv,
+  --export-run OUT                  open it and export to OUT (.mp4/.mov/.mkv/.webp,
                                     must not exist) at once, with the
                                     --processor chain and default settings
   --process                         open the Process workspace
@@ -634,6 +635,14 @@ impl Runner {
         for cmd in self.app.take_cmds() {
             match cmd {
                 Cmd::OpenFiles => open::choose_files(),
+                // The panels are AppKit's and modal, so they run here.
+                Cmd::ImportMask(directory) => {
+                    if let Some(path) = open::choose_mask_png(directory.as_deref()) { self.app.import_mask(&path); }
+                }
+                Cmd::ExportMask(suggested) => {
+                    let name = suggested.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "mask.png".into());
+                    if let Some(path) = open::export_destination(&name, suggested.parent()) { self.app.export_mask_to(path); }
+                }
                 Cmd::OpenDirectory(path) => {
                     #[cfg(target_os = "macos")]
                     let opener = "open";
@@ -656,7 +665,19 @@ impl Runner {
                     self.animating = true;
                     if let Some(w) = &self.window { w.request_redraw(); }
                 }
+                Cmd::OpenExportAsSource(path) => {
+                    let count = self.app.videos.len();
+                    self.files_dropped(vec![path.clone()], false);
+                    if self.app.videos.len() == count {
+                        self.app.notify(format!("Rendered {}, but could not open it as a source", path.display()));
+                    } else {
+                        self.app.select_workspace_mode(0);
+                    }
+                    self.animating = true;
+                    if let Some(w) = &self.window { w.request_redraw(); }
+                }
                 Cmd::Reveal(path) => open::reveal(&path),
+                Cmd::CopyPathname(path) => open::copy_pathname(&path),
                 Cmd::Quit => event_loop.exit(),
                 Cmd::ToggleFullscreen => {
                     if let Some(w) = &self.window {
@@ -1205,7 +1226,7 @@ impl ApplicationHandler for Runner {
             self.app.notify(message);
             if let Some(w) = &self.window { w.request_redraw(); }
         }
-        open::sync_menus(self.app.workspace_mode(), self.app.ready(), self.app.can_export());
+        open::sync_menus(self.app.workspace_mode(), self.app.ready(), self.app.can_export(), self.app.mask_menu());
         // The cadence rules live in `schedule` (tested there), not here.
         let Some(w) = &self.window else { return };
         match schedule::next_frame(

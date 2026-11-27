@@ -1392,7 +1392,7 @@ fn copy_ranges(
     input: &Input,
     mux: &mut mp4::Mp4Writer<std::fs::File>,
     keeps: &[(f64, f64)],
-    cancel: &AtomicBool,
+    check: &impl Fn() -> Result<()>,
     subtitles: bool,
 ) -> Result<()> {
     let vi = input.video()?;
@@ -1418,7 +1418,7 @@ fn copy_ranges(
                     if end <= a || s.pts >= b {
                         continue;
                     }
-                    cancelled(cancel)?;
+                    check()?;
                     let data = input.data(ti, i)?;
                     let frames = data.len() / width;
                     let first = (((a - s.pts).max(0.) * rate as f64).round() as usize).min(frames);
@@ -1476,7 +1476,7 @@ fn copy_ranges(
                 continue;
             }
             for (i, s) in selected {
-                cancelled(cancel)?;
+                check()?;
                 let data = input.data(ti, i)?;
                 let offset = if t.kind == Kind::Video {
                     s.pts - s.dts
@@ -1972,6 +1972,24 @@ pub(crate) fn export_with_cancel(
     crop: Option<(u32, u32, u32, u32)>,
     cancel: &AtomicBool,
 ) -> Result<()> {
+    export_with_checkpoint(path, dest, keeps, copy, chapters, crop, cancel, &|| {})
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn export_with_checkpoint(
+    path: &Path,
+    dest: &Path,
+    keeps: &[(f64, f64)],
+    copy: bool,
+    chapters: &[ExportChapter],
+    crop: Option<(u32, u32, u32, u32)>,
+    cancel: &AtomicBool,
+    checkpoint: &impl Fn(),
+) -> Result<()> {
+    let check = || {
+        checkpoint();
+        cancelled(cancel)
+    };
     validate_ranges(keeps)?;
     ensure!(
         path != dest && (!dest.exists() || path.canonicalize()? != dest.canonicalize()?),
@@ -2005,7 +2023,7 @@ pub(crate) fn export_with_cancel(
     let temp = ExportOutput::new(dest)?;
     let mut mux = new_mux(&meta, &temp.0, dest)?;
     if copy {
-        copy_ranges(&input, &mut mux, keeps, cancel, false)?;
+        copy_ranges(&input, &mut mux, keeps, &check, false)?;
     } else {
         encode_ranges(&input, path, &mut mux, keeps, crop, cancel)?;
     }
@@ -2023,6 +2041,7 @@ pub(crate) fn export_with_cancel(
     }
     let tags: &[(String, String)] = if mp4_brand(dest) { &meta.mp4 } else { &[] };
     finish_mp4(&temp.0, chapters, !mkv, tags)?;
+    check()?;
     if mkv
     {
         remux_mkv(&temp.0, dest, chapters, &meta, &subs)?;
@@ -2902,7 +2921,7 @@ pub(crate) fn pipeline_export(
     chain:&[(String,serde_json::Value)],prores:bool,crop:Option<(u32,u32,u32,u32)>,
     cancel:&abner_processor_api::Cancellation,active:&Mutex<Vec<abner_processor_api::Cancellation>>,
     emit:impl FnMut(crate::export_page::Rendered)->Result<(),String>+Send,
-)->Result<()> {pipeline_export_with_inputs(&Default::default(),info,dest,keeps,&[],registry,chain,prores,None,crop,cancel,active,None,None,emit)}
+)->Result<()> {pipeline_export_with_inputs(&Default::default(),info,dest,keeps,&[],registry,chain,prores,None,crop,cancel,active,None,None,None,emit)}
 
 // Keep the explicit geometry/pipeline inputs at this boundary.
 #[allow(clippy::too_many_arguments)]
@@ -2927,6 +2946,8 @@ pub(crate) fn pipeline_export_with_inputs(
     // the output size, a conversion per frame). `None`: every frame does.
     // The export page asks only when it has taken the last one.
     want_picture: Option<&(dyn Fn() -> bool + Sync)>,
+    // The page can hold the writer at frame boundaries and before publication.
+    checkpoint: Option<&(dyn Fn() + Sync)>,
     emit: impl FnMut(crate::export_page::Rendered) -> Result<(), String> + Send,
 ) -> Result<()> {
     use abner_processor_api::{VideoFrame, InputRequirement, Role};
@@ -2942,13 +2963,14 @@ pub(crate) fn pipeline_export_with_inputs(
     );
     let extension = dest.extension().and_then(|ext| ext.to_str()).unwrap_or_default();
     let extension = extension.to_ascii_lowercase();
+    let webp = extension == "webp";
     ensure!(
-        matches!(extension.as_str(), "mp4" | "mov" | "mkv"),
-        "Choose MP4, MOV or MKV for pipeline export"
+        matches!(extension.as_str(), "mp4" | "mov" | "mkv" | "webp"),
+        "Choose MP4, MOV, MKV or WebP for pipeline export"
     );
-    ensure!(!prores || extension != "mp4", "ProRes requires MOV or MKV");
+    ensure!(!prores || matches!(extension.as_str(), "mov" | "mkv"), "ProRes requires MOV or MKV");
     cancel.check().map_err(anyhow::Error::msg)?;
-    if bitrate_kbps.is_none() && chain.is_empty() && crop.is_none() && inputs.crops.is_empty() && !prores {
+    if !webp && bitrate_kbps.is_none() && chain.is_empty() && crop.is_none() && inputs.crops.is_empty() && !prores {
         // Keep the packet path available through the Export workspace. Repair
         // only boundary GOPs, and never pass untouched HDR through the SDR host.
         // Keep interrupted bytes beside the destination until publication succeeds.
@@ -2966,13 +2988,21 @@ pub(crate) fn pipeline_export_with_inputs(
     if registry.with(|registry| crate::processor_gui::retimes(registry, chain, info.fps)).map_err(anyhow::Error::msg)? {
         crate::media_metadata::require_constant_rate(&info.path).map_err(anyhow::Error::msg)?;
     }
-    // Subtitles and tags from the source, when it is a container the
-    // packet reader knows; other sources export without them.
-    let (subs, meta) = match Input::open(&info.path) {
-        Ok(original) => (subtitle_tracks(&original, keeps)?, source_meta(&original, &info.path)),
-        Err(e) => {
-            log::warn!("{}: subtitles and tags not carried: {e}", info.path.display());
-            (Vec::new(), SourceMeta::default())
+    if webp && chain.is_empty()
+        && let Some(animation) = crate::animated_webp::Animation::open(&info.path)?
+    {
+        return reencode_webp(&animation, info, dest, keeps, crop, &inputs.crops, cancel, checkpoint, want_picture, emit);
+    }
+    // WebP has no audio, subtitles or chapters. Video outputs retain available metadata.
+    let (subs, meta) = if webp {
+        (Vec::new(), SourceMeta::default())
+    } else {
+        match Input::open(&info.path) {
+            Ok(original) => (subtitle_tracks(&original, keeps)?, source_meta(&original, &info.path)),
+            Err(e) => {
+                log::warn!("{}: subtitles and tags not carried: {e}", info.path.display());
+                (Vec::new(), SourceMeta::default())
+            }
         }
     };
     let temp = ExportOutput::new(dest)?;
@@ -2990,7 +3020,10 @@ pub(crate) fn pipeline_export_with_inputs(
     let mkv = extension == "mkv";
     let mut mp4_out = None;
     let mut mkv_out = None;
-    if mkv {
+    let mut webp_out = None;
+    if webp {
+        webp_out = Some(file);
+    } else if mkv {
         mkv_out = Some(MkvSink::new(file, &meta, &subs));
     } else {
         mp4_out = Some(mp4::Mp4Writer::new(file, options)?);
@@ -3000,9 +3033,9 @@ pub(crate) fn pipeline_export_with_inputs(
         "Export requires a valid constant frame rate"
     );
     let (cx, cy, cw, ch) = crop.unwrap_or((0, 0, info.width, info.height));
+    let min_dim = if webp { 1 } else { 2 };
     ensure!(
-        cw >= 2
-            && ch >= 2
+        cw >= min_dim && ch >= min_dim
             && cx.checked_add(cw).is_some_and(|x| x <= info.width)
             && cy.checked_add(ch).is_some_and(|y| y <= info.height),
         "Crop lies outside the source"
@@ -3017,16 +3050,22 @@ pub(crate) fn pipeline_export_with_inputs(
     // a chain or timeline crop working at 16 bits or float (audit E5). An
     // untouched 8-bit source stays Main, the more widely decoded profile.
     let ten_bit = !prores && (deep_pixel_format(&info.pix_fmt) || !chain.is_empty() || !inputs.crops.is_empty());
-    let sink_format = PipelineEncoder::input_format(prores, ten_bit);
+    let sink_format = if webp { abner_processor_api::PixelFormat::Rgba8 }
+        else { PipelineEncoder::input_format(prores, ten_bit) };
     let check = || cancel.check().map_err(anyhow::Error::msg);
+    let wait = || {
+        if let Some(checkpoint) = checkpoint { checkpoint(); }
+        check()
+    };
     let (mp4_out, mkv_out) = std::thread::scope(|scope| -> Result<_> {
-        // AAC for every container, encoded beside the video.
-        let audio = AudioFeed::spawn(scope, &info.path, keeps, false, &check)?;
+        let audio = if webp { None } else { Some(AudioFeed::spawn(scope, &info.path, keeps, false, &check)?) };
         let (to_writer, from_chain) = std::sync::mpsc::sync_channel::<Output>(1);
-        let writer = scope.spawn(move || match (mp4_out, mkv_out) {
-            (Some(mux), _) => write_frames(from_chain, mux, audio, prores, bitrate_kbps, cancel, want_picture, emit)
+        let writer = scope.spawn(move || match (mp4_out, mkv_out, webp_out, audio) {
+            (_, _, Some(file), _) => write_webp(from_chain, file, &wait, want_picture, emit)
+                .map(|()| (None, None)),
+            (Some(mux), _, _, Some(audio)) => write_frames(from_chain, mux, audio, prores, bitrate_kbps, &wait, want_picture, emit)
                 .map(|m| (Some(m), None)),
-            (_, Some(mux)) => write_frames(from_chain, mux, audio, prores, bitrate_kbps, cancel, want_picture, emit)
+            (_, Some(mux), _, Some(audio)) => write_frames(from_chain, mux, audio, prores, bitrate_kbps, &wait, want_picture, emit)
                 .map(|m| (None, Some(m))),
             _ => unreachable!(),
         });
@@ -3141,7 +3180,7 @@ pub(crate) fn pipeline_export_with_inputs(
                         previous_end = Some(source_pts + duration);
                         if let Some(expected) = expected_duration {
                             ensure!(
-                                (expected - duration).abs() < 0.00001,
+                                webp || (expected - duration).abs() < 0.00001,
                                 "Export currently requires constant-rate output"
                             );
                         } else {
@@ -3197,12 +3236,17 @@ pub(crate) fn pipeline_export_with_inputs(
             Ok(()) => written,
         }
     })?;
-    cancel.check().map_err(anyhow::Error::msg)?;
+    wait()?;
+    if webp {
+        std::fs::hard_link(&temp.0, dest)?;
+        temp.published();
+        return Ok(());
+    }
     if let Some(mkv) = mkv_out {
         let (file, slots) = mkv.finish()?;
         mkv_append(file, &temp.0, chapters, &meta, &slots, false)?;
         let seated = finish_mkv(&temp.0, dest, &meta, None)?;
-        cancel.check().map_err(anyhow::Error::msg)?;
+        wait()?;
         std::fs::hard_link(seated.as_ref().map_or(&temp.0, |s| &s.0), dest)?;
         temp.published();
         return Ok(());
@@ -3213,6 +3257,7 @@ pub(crate) fn pipeline_export_with_inputs(
     text_handlers(&temp.0)?;
     let tags: &[(String, String)] = if mp4_brand(dest) { &meta.mp4 } else { &[] };
     finish_mp4(&temp.0, chapters, true, tags)?;
+    wait()?;
     std::fs::hard_link(&temp.0, dest)?;
     temp.published();
     Ok(())
@@ -3376,13 +3421,110 @@ impl Feed {
 /// The writer thread: display pixels, encode, mux and report each chain output
 /// in order, then flush the encoder. Returns the muxer for audio and finishing.
 #[allow(clippy::too_many_arguments)]
+/// A WebP-to-WebP export with no processor or resampling can retain the original RGBA bytes.
+fn reencode_webp(
+    animation: &crate::animated_webp::Animation,
+    info: &crate::probe::VideoInfo,
+    dest: &Path,
+    keeps: &[(f64, f64)],
+    crop: Option<(u32, u32, u32, u32)>,
+    crops: &[crate::spatial::ClipCrop],
+    cancel: &abner_processor_api::Cancellation,
+    checkpoint: Option<&(dyn Fn() + Sync)>,
+    want_picture: Option<&(dyn Fn() -> bool + Sync)>,
+    mut emit: impl FnMut(crate::export_page::Rendered) -> Result<(), String>,
+) -> Result<()> {
+    let (x, y, w, h) = crop.unwrap_or((0, 0, info.width, info.height));
+    ensure!(w > 0 && h > 0 && x.checked_add(w).is_some_and(|right| right <= info.width)
+        && y.checked_add(h).is_some_and(|bottom| bottom <= info.height), "Crop lies outside the source");
+    let temp = ExportOutput::new(dest)?;
+    let file = std::fs::File::create(&temp.0)?;
+    let dims = [w, h];
+    let mut writer = crate::animated_webp::Writer::new(std::io::BufWriter::new(file), dims)?;
+    let wait = || {
+        if let Some(checkpoint) = checkpoint { checkpoint(); }
+        cancel.check().map_err(anyhow::Error::msg)
+    };
+    let mut count = 0;
+    let mut output_time = 0.;
+    let mut encoded_ms = 0;
+    for &(start, end) in keeps {
+        for (pts, duration) in animation.timings() {
+            if pts >= end { break; }
+            let overlap_start = pts.max(start);
+            let duration = (pts + duration).min(end) - overlap_start;
+            if duration <= 1e-9 { continue; }
+            wait()?;
+            let frame = animation.at(pts)?;
+            let filmcraft_frame::PixelData::Rgba8(rgba) = &frame.data else { unreachable!() };
+            let pixels = if let Some(edit) = crops.iter().rev().find(|edit| pts >= edit.start && pts < edit.end) {
+                crate::spatial::fit_alpha_crop(rgba, dims, edit.crop)
+            } else if dims == [info.width, info.height] {
+                rgba.clone()
+            } else {
+                let stride = info.width as usize * 4;
+                let x = x as usize * 4;
+                Arc::new(rgba.chunks_exact(stride).skip(y as usize).take(h as usize)
+                    .flat_map(|row| row[x..x + w as usize * 4].iter().copied()).collect())
+            };
+            output_time += duration;
+            let end_ms = ((output_time * 1000.).round() as u64).max(encoded_ms + 1);
+            writer.frame(&pixels, dims, end_ms - encoded_ms)?;
+            encoded_ms = end_ms;
+            count += 1;
+            emit(crate::export_page::Rendered {
+                pixels: if want_picture.is_none_or(|wanted| wanted()) { pixels } else { Arc::default() },
+                dims, source_pts: pts, output_time, count, frame_duration: duration,
+            }).map_err(anyhow::Error::msg)?;
+        }
+    }
+    ensure!(count > 0, "Pipeline returned no output frames");
+    writer.finish()?;
+    wait()?;
+    std::fs::hard_link(&temp.0, dest)?;
+    temp.published();
+    Ok(())
+}
+
+fn write_webp(
+    frames: std::sync::mpsc::Receiver<Output>,
+    file: std::fs::File,
+    check: &impl Fn() -> Result<()>,
+    want_picture: Option<&(dyn Fn() -> bool + Sync)>,
+    mut emit: impl FnMut(crate::export_page::Rendered) -> Result<(), String>,
+) -> Result<()> {
+    let mut writer = None;
+    let mut file = Some(file);
+    let mut output_time = 0.;
+    let mut encoded_ms = 0;
+    for (index, Output { frame, source_pts, duration }) in (0u64..).zip(frames) {
+        check()?;
+        let dims = [frame.width as u32, frame.height as u32];
+        let rgba = abner_processing::color::rgba8_validated(&frame).map_err(anyhow::Error::msg)?;
+        if let Some(file) = file.take() {
+            writer = Some(crate::animated_webp::Writer::new(std::io::BufWriter::new(file), dims)?);
+        }
+        output_time += duration;
+        // Round cumulative boundaries so fractional milliseconds do not drift.
+        let end_ms = ((output_time * 1000.).round() as u64).max(encoded_ms + 1);
+        writer.as_mut().unwrap().frame(&rgba, dims, end_ms - encoded_ms)?;
+        encoded_ms = end_ms;
+        emit(crate::export_page::Rendered {
+            pixels: if want_picture.is_none_or(|wanted| wanted()) { rgba } else { Arc::default() },
+            dims, source_pts, output_time, count: index + 1, frame_duration: duration,
+        }).map_err(anyhow::Error::msg)?;
+    }
+    check()?;
+    writer.context("Pipeline returned no output frames")?.finish()
+}
+
 fn write_frames<S: PacketSink>(
     frames: std::sync::mpsc::Receiver<Output>,
     mut mux: S,
     mut audio: AudioFeed,
     prores: bool,
     bitrate_kbps: Option<u32>,
-    cancel: &abner_processor_api::Cancellation,
+    check: &impl Fn() -> Result<()>,
     want_picture: Option<&(dyn Fn() -> bool + Sync)>,
     mut emit: impl FnMut(crate::export_page::Rendered) -> Result<(), String>,
 ) -> Result<S> {
@@ -3390,7 +3532,7 @@ fn write_frames<S: PacketSink>(
     let mut track = None;
     let mut output_time = 0.;
     for (index, Output { frame: f, source_pts, duration }) in (0u64..).zip(frames) {
-        cancel.check().map_err(anyhow::Error::msg)?;
+        check()?;
         let dims = [f.width as u32, f.height as u32];
         // Validated where it left the chain (or the reader, for an empty one).
         // The encoders take the chain's own format; RGBA8 is for the page
@@ -3446,7 +3588,7 @@ fn write_frames<S: PacketSink>(
         })
         .map_err(anyhow::Error::msg)?;
     }
-    cancel.check().map_err(anyhow::Error::msg)?;
+    check()?;
     let e = encoder
         .as_mut()
         .context("Pipeline returned no output frames")?;
@@ -3484,10 +3626,6 @@ enum PipelineEncoder {
 }
 impl PipelineEncoder {
     fn new(w: u32, h: u32, duration: f64, prores: bool, bitrate_kbps: u32, ten_bit: bool) -> Result<Self> {
-        ensure!(
-            w.is_multiple_of(2) && h.is_multiple_of(2),
-            "Export requires even output dimensions"
-        );
         if prores {
             return Ok(Self::ProRes {
                 encoder: filmcraft_prores::Encoder::new(filmcraft_prores::Profile::Standard, w, h),
@@ -3495,6 +3633,10 @@ impl PipelineEncoder {
                 duration: (duration * SCALE as f64).round() as u32,
             });
         }
+        ensure!(
+            w.is_multiple_of(2) && h.is_multiple_of(2),
+            "HEVC export requires even output dimensions"
+        );
         #[cfg(target_os = "macos")]
         {
             let settings = filmcraft_export::ExportSettings {
@@ -3702,6 +3844,98 @@ mod tests {
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
+    #[test]
+    fn animated_webp_import_seek_and_export_preserve_frames_and_delays() {
+        use std::time::{Duration, Instant};
+        let dir = Dir::new("animated-webp");
+        let source = dir.0.join("source.webp");
+        let dest = dir.0.join("out.webp");
+        let colors = [[255, 0, 0, 255], [0, 255, 0, 128], [0, 0, 255, 255]];
+        let delays = [40, 120, 25];
+        let mut writer = crate::animated_webp::Writer::new(std::fs::File::create(&source).unwrap(), [3, 2]).unwrap();
+        for (color, delay) in colors.into_iter().zip(delays) {
+            writer.frame(&color.repeat(6), [3, 2], delay).unwrap();
+        }
+        writer.finish().unwrap();
+
+        let info = crate::probe::probe(&source).unwrap();
+        assert_eq!(info.duration, 0.185);
+        let player = crate::player::Player::spawn(&source, 3, 2, false, None, 1024).unwrap();
+        let next = || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                if let Some(frame) = player.take_next() { break frame; }
+                assert!(!player.failed() && Instant::now() < deadline, "missing WebP frame");
+                std::thread::yield_now();
+            }
+        };
+        for (pts, color) in [0., 0.040, 0.160].into_iter().zip(colors) {
+            let (actual, pixels) = next();
+            assert!((actual - pts).abs() < 1e-9);
+            assert_eq!(&pixels[..4], &color);
+        }
+        player.seek(0.085, true);
+        let (pts, pixels) = next();
+        assert!((pts - 0.040).abs() < 1e-9);
+        assert_eq!(&pixels[..4], &colors[1]);
+
+        pipeline_export_with_inputs(
+            &Default::default(), &info, &dest, &[(0., info.duration)], &[],
+            &abner_processor_api::Registry::default(), &[], false, None, Some((1, 0, 2, 2)),
+            &Default::default(), &Mutex::default(), None, None, None, |_| Ok(()),
+        ).unwrap();
+        let mut decoder = image_webp::WebPDecoder::new(std::io::BufReader::new(std::fs::File::open(dest).unwrap())).unwrap();
+        assert_eq!(decoder.dimensions(), (2, 2));
+        assert_eq!(decoder.num_frames(), 3);
+        assert_eq!(decoder.loop_count(), image_webp::LoopCount::Forever);
+        let mut pixels = vec![0; decoder.output_buffer_size().unwrap()];
+        for (color, delay) in colors.into_iter().zip(delays) {
+            assert_eq!(u64::from(decoder.read_frame(&mut pixels).unwrap()), delay);
+            assert_eq!(pixels, color.repeat(4));
+        }
+
+        let dest = dir.0.join("timeline-crop.webp");
+        let inputs = crate::spatial::JobInputs {
+            crops: vec![crate::spatial::ClipCrop {
+                start: 0.04, end: 0.16,
+                crop: crate::mask::Crop { x: 1., y: 0., w: 1., h: 2. },
+            }],
+            ..Default::default()
+        };
+        pipeline_export_with_inputs(
+            &inputs, &info, &dest, &[(0., info.duration)], &[],
+            &abner_processor_api::Registry::default(), &[], false, None, None,
+            &Default::default(), &Mutex::default(), None, None, None, |_| Ok(()),
+        ).unwrap();
+        let animation = crate::animated_webp::Animation::open(&dest).unwrap().unwrap();
+        assert_eq!(animation.at(0.).unwrap().to_rgba8(), colors[0].repeat(6));
+        assert_eq!(&animation.at(0.04).unwrap().to_rgba8()[..12],
+            &[0, 0, 0, 0, 0, 255, 0, 128, 0, 0, 0, 0]);
+        assert_eq!(animation.at(0.16).unwrap().to_rgba8(), colors[2].repeat(6));
+
+    }
+
+    #[test]
+    fn video_pipeline_encodes_animated_webp_without_video_encoders() {
+        let dir = Dir::new("video-to-webp");
+        let source = dir.0.join("source.mp4");
+        let dest = dir.0.join("out.webp");
+        fixture(&source);
+        let info = crate::probe::probe(&source).unwrap();
+        let mut preview_count = 0;
+        pipeline_export_with_inputs(
+            &Default::default(), &info, &dest, &[(0., 0.5)], &[],
+            &abner_processor_api::Registry::default(), &[], false, None, None,
+            &Default::default(), &Mutex::default(), None, None, None,
+            |_| { preview_count += 1; Ok(()) },
+        ).unwrap();
+        let animation = crate::animated_webp::Animation::open(&dest).unwrap().unwrap();
+        assert!(preview_count > 1);
+        assert_eq!(animation.starts_ms.len(), preview_count);
+        assert_eq!(animation.duration_ms, 500);
+        assert!(animation.at(0.4).is_ok());
+    }
+
     #[test]
     fn cancelled_packet_export_keeps_its_partial_file() {
         let dir = Dir::new("partial-copy");
@@ -4478,7 +4712,7 @@ mod tests {
         let run = |name: &str| {
             let dest = dir.0.join(name);
             pipeline_export_with_inputs(&Default::default(), &info, &dest, &keeps, &chapters, &registry, &[],
-                true, None, None, &Default::default(), &Mutex::default(), None, None, |_| Ok(())).unwrap();
+                true, None, None, &Default::default(), &Mutex::default(), None, None, None, |_| Ok(())).unwrap();
             dest
         };
         let (mkv, mov) = (run("out.mkv"), run("out.mov"));
@@ -4541,7 +4775,7 @@ mod tests {
         let (mut frames, mut pictures) = (0, 0);
         pipeline_export_with_inputs(&Default::default(), &info, &dest, &[(0., 1.)], &[], &registry, &[],
             false, Some(20_000), None, &Default::default(), &Mutex::default(), None,
-            Some(&|| false), |f| {
+            Some(&|| false), None, |f| {
                 frames += 1;
                 pictures += usize::from(f.has_picture());
                 Ok(())
@@ -4621,7 +4855,7 @@ mod tests {
             let info = crate::probe::probe(&src).unwrap();
             let dest = dir.0.join(format!("out-{name}"));
             pipeline_export_with_inputs(&Default::default(), &info, &dest, &[(0., 1.)], &[], &registry, &[],
-                false, Some(40_000), None, &Default::default(), &Mutex::default(), None, None, |_| Ok(())).unwrap();
+                false, Some(40_000), None, &Default::default(), &Mutex::default(), None, None, None, |_| Ok(())).unwrap();
             (src, dest)
         };
         let profile = |path: &Path| {

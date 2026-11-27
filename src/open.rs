@@ -8,7 +8,7 @@
 //! in-app "Add sources" picker load into the current process. The notify hook covers the running-app case: an open
 //! landing while the loop sleeps on the idle tick still redraws promptly.
 //!
-//! The native File / View / Frame menus live here too (`open_shim.m` builds
+//! The native File / View / Frame / Mask menus live here too (`open_shim.m` builds
 //! them): a menu pick queues a `MenuAction` the same way, the runner applies
 //! it in `about_to_wait`, and `sync_menus` re-derives every item's state
 //! from `App` each turn — never from the click.
@@ -26,6 +26,16 @@ pub enum MenuAction {
     Close,
     /// Frame > Copy Frame as PNG (⌘C): the focused clip's frame on screen.
     CopyFrame,
+    /// File > Copy Pathname: the focused clip’s absolute pathname.
+    CopyPathname,
+    /// Mask > Import…: a PNG becomes the mask being painted.
+    MaskImport,
+    /// Mask > Export…: the mask as a PNG, wherever the save panel says.
+    MaskExport,
+    /// Mask > Clear: nothing masked.
+    MaskClear,
+    /// Mask > Autodetect: open or close the autodetect setup.
+    MaskAutodetect,
 }
 
 impl MenuAction {
@@ -36,6 +46,11 @@ impl MenuAction {
             3 => Self::Export,
             4 => Self::Close,
             5 => Self::CopyFrame,
+            6 => Self::CopyPathname,
+            7 => Self::MaskImport,
+            8 => Self::MaskExport,
+            9 => Self::MaskClear,
+            10 => Self::MaskAutodetect,
             _ => return None,
         })
     }
@@ -59,7 +74,8 @@ mod imp {
 
     unsafe extern "C" {
         fn ab_choose_files();
-        fn ab_sync_menus(mode: i32, has_clips: bool, can_export: bool, view_cb: extern "C" fn(i32), menu_cb: extern "C" fn(i32));
+        fn ab_sync_menus(mode: i32, has_clips: bool, can_export: bool, mask: i32, view_cb: extern "C" fn(i32), menu_cb: extern "C" fn(i32));
+        fn ab_copy_text(text: *const c_char);
         fn ab_copy_png(bytes: *const u8, len: usize);
         fn ab_reveal_in_finder(path: *const c_char);
         fn ab_install_open_handler(cb: extern "C" fn(*const c_char, std::ffi::c_int)) -> std::ffi::c_int;
@@ -89,13 +105,22 @@ mod imp {
 
     /// Main-thread only. Derive checkmarks and enabled items from App,
     /// never from menu clicks.
-    pub fn sync_menus(mode: usize, has_clips: bool, can_export: bool) {
-        unsafe { ab_sync_menus(mode as i32, has_clips, can_export, on_view, on_menu); }
+    /// `mask` is `App::mask_menu`: `None` hides the Mask menu.
+    pub fn sync_menus(mode: usize, has_clips: bool, can_export: bool, mask: Option<super::MaskMenu>) {
+        let mask = mask.map_or(-1, |m| i32::from(m.autodetect) | i32::from(m.enabled) << 1);
+        unsafe { ab_sync_menus(mode as i32, has_clips, can_export, mask, on_view, on_menu); }
     }
 
     /// Encoded PNG bytes onto the general pasteboard. Main thread.
     pub fn copy_png(bytes: &[u8]) {
         unsafe { ab_copy_png(bytes.as_ptr(), bytes.len()); }
+    }
+
+    /// Copy the absolute pathname as plain text. Main thread.
+    pub fn copy_pathname(path: &std::path::Path) {
+        let Ok(path) = std::path::absolute(path) else { return };
+        let Ok(text) = std::ffi::CString::new(path.to_string_lossy().as_bytes()) else { return };
+        unsafe { ab_copy_text(text.as_ptr()); }
     }
 
     /// Select the file in a Finder window.
@@ -155,8 +180,9 @@ mod imp {
     pub fn choose_files() {}
     pub fn take_view_request() -> Option<usize> { None }
     pub fn take_menu_requests() -> Vec<super::MenuAction> { Vec::new() }
-    pub fn sync_menus(_mode: usize, _has_clips: bool, _can_export: bool) {}
+    pub fn sync_menus(_mode: usize, _has_clips: bool, _can_export: bool, _mask: Option<super::MaskMenu>) {}
     pub fn copy_png(_bytes: &[u8]) {}
+    pub fn copy_pathname(_path: &std::path::Path) {}
     pub fn reveal(path: &std::path::Path) {
         // No Finder: open the containing folder with the desktop's opener.
         let Some(dir) = path.parent() else { return };
@@ -187,20 +213,49 @@ pub struct Opened {
     pub add: Vec<std::path::PathBuf>,
 }
 
-pub use imp::{paste_text, choose_files, copy_png, drain, install, reveal, sync_menus, take_menu_requests, take_view_request};
+pub use imp::{paste_text, choose_files, copy_pathname, copy_png, drain, install, reveal, sync_menus, take_menu_requests, take_view_request};
 
-pub(crate) fn export_destination(name: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn export_destination(name: &str, directory: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    let directory = directory.filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
     #[cfg(target_os="macos")]
     unsafe {
-        unsafe extern "C" { fn ab_export_destination(name:*const std::ffi::c_char)->*mut std::ffi::c_char; fn ab_free_text(text:*mut std::ffi::c_char); }
+        unsafe extern "C" { fn ab_export_destination(name:*const std::ffi::c_char, directory:*const std::ffi::c_char)->*mut std::ffi::c_char; fn ab_free_text(text:*mut std::ffi::c_char); }
         let name=std::ffi::CString::new(name).ok()?;
-        let path=ab_export_destination(name.as_ptr());
+        let directory = std::ffi::CString::new(directory.as_os_str().as_encoded_bytes()).ok()?;
+        let path=ab_export_destination(name.as_ptr(), directory.as_ptr());
         if path.is_null(){return None;}
         let value=std::path::PathBuf::from(std::ffi::CStr::from_ptr(path).to_string_lossy().into_owned());
         ab_free_text(path);Some(value)
     }
     #[cfg(not(target_os="macos"))]
-    { Some(std::path::PathBuf::from(name)) }
+    { Some(directory.join(name)) }
+}
+
+/// What the Mask menu shows this turn (`App::mask_menu`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaskMenu {
+    /// The autodetect setup is open: its item is ticked.
+    pub autodetect: bool,
+    /// False while the editor waits on an answer; the items are dead.
+    pub enabled: bool,
+}
+
+/// Mask > Import's picker: one PNG, `None` when cancelled.
+pub(crate) fn choose_mask_png(directory: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    #[cfg(target_os="macos")]
+    unsafe {
+        use std::os::unix::ffi::OsStrExt;
+        unsafe extern "C" { fn ab_choose_png(directory:*const std::ffi::c_char)->*mut std::ffi::c_char; fn ab_free_text(text:*mut std::ffi::c_char); }
+        let directory = std::ffi::CString::new(directory.map(|p| p.as_os_str().as_bytes().to_vec()).unwrap_or_default()).ok()?;
+        let path = ab_choose_png(directory.as_ptr());
+        if path.is_null() { return None; }
+        let value = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(std::ffi::CStr::from_ptr(path).to_bytes()));
+        ab_free_text(path);
+        Some(value)
+    }
+    #[cfg(not(target_os="macos"))]
+    { let _ = directory; None }
 }
 
 /// Choose a directory without changing the Export page's editable filename.

@@ -217,6 +217,13 @@ pub(crate) fn deadlined<T: Send + 'static>(
 /// Open `path` with every container and codec FilmCraft knows, reading in place; a container
 /// without an in-place reader is read whole.
 pub(crate) fn open(path: &Path) -> Result<SharedSource, String> {
+    if let Some(animation) = crate::animated_webp::Animation::open(path).map_err(|e| e.to_string())? {
+        return Ok(Arc::new(animation));
+    }
+    open_standard(path)
+}
+
+pub(crate) fn open_standard(path: &Path) -> Result<SharedSource, String> {
     register_hardware();
     let name = path
         .file_name()

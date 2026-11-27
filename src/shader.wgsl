@@ -132,6 +132,11 @@ fn ui_color(c: vec4<f32>) -> vec4<f32> {
 // 15 diagonal hatch in a p0-radius rounded box: color / uv slot alternate every p1/2 px along 135°
 // 16 shadow: p0 quad spread, p1 softness, pad 1 inner / 0 outer / -(1 + radius) tooltip
 
+// Video textures are premultiplied for filtering. The render target uses straight alpha.
+fn straight_video(c: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(c.rgb / max(c.a, 1e-5), c.a);
+}
+
 @fragment
 fn fs_main(in: Out) -> @location(0) vec4<f32> {
     // Sample unconditionally (uniform control flow), select after.
@@ -208,7 +213,7 @@ fn fs_main(in: Out) -> @location(0) vec4<f32> {
         case 1u: {
             // p0 is an optional corner radius for source-card thumbnails.
             let d = sd_round_box(in.local - in.size * 0.5, in.size * 0.5, in.p0);
-            return vec4<f32>(a.rgb, select(1.0, cov(d), in.p0 > 0.0));
+            return vec4<f32>(straight_video(a).rgb, a.a * select(1.0, cov(d), in.p0 > 0.0));
         }
         case 2u: {
             return vec4<f32>(abs(a.rgb - b.rgb) * in.p1, 1.0);
@@ -219,19 +224,19 @@ fn fs_main(in: Out) -> @location(0) vec4<f32> {
                 return vec4<f32>(1.0, 1.0, 1.0, 0.9);
             }
             if in.local.x < edge {
-                return vec4<f32>(a.rgb, 1.0);
+                return straight_video(a);
             }
-            return vec4<f32>(b.rgb, 1.0);
+            return straight_video(b);
         }
         case 4u: {
             let cell = vec2<i32>(floor(in.local / max(in.p0, 1.0)));
             if ((cell.x + cell.y) & 1) == 0 {
-                return vec4<f32>(a.rgb, 1.0);
+                return straight_video(a);
             }
-            return vec4<f32>(b.rgb, 1.0);
+            return straight_video(b);
         }
         case 5u: {
-            return vec4<f32>(mix(a.rgb, b.rgb, in.p0), 1.0);
+            return straight_video(mix(a, b, in.p0));
         }
         case 6u: {
             let c = ui_color(in.color);

@@ -170,6 +170,13 @@ impl NativeSource {
         };
         self.pending = self.next(cancel)?;
         let p = (pts * 1e6).round() as i64;
+        if let Some(duration) = self.player.animation_duration_us(p) {
+            // Filmcraft uses the same SDR display curve for sRGB and BT.709.
+            // The processor API accepts only opaque frames.
+            let mut frame = (*f).clone();
+            frame.color.transfer = filmcraft_color::Transfer::Bt709;
+            return abner_processing::color::from_decoded(&frame, p, duration, [1, 1_000_000]).map(Some);
+        }
         let nominal = (1e6 / self.fps).round().max(1.0) as i64;
         let duration = self
             .pending

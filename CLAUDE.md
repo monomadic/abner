@@ -530,7 +530,7 @@ shadow, a gradient, round-capped lines, a text effect.
   and in-app "Add sources" picker load locally; neither reads ⌘. A window
   drop onto the sources rail (`App::over_sources`, pointer read from AppKit by
   `Runner::drop_point` — winit gives no cursor during an inbound drag) adds;
-  anywhere else it also retains existing sources. No modifier is read. **The native menus** (File · View · Frame) are the same
+  anywhere else it also retains existing sources. No modifier is read. **The native menus** (File · View · Frame, and Mask while a mask is being painted: `App::mask_menu` is `None` = hidden, its Import/Export panels run in the runner via `Cmd::ImportMask`/`ExportMask`) are the same
   shim: `ab_sync_menus` builds them once and re-derives every item's enabled/checked
   state from `App` on each `about_to_wait` (never from clicks); a pick queues an
   `open::MenuAction` (File) or a view request, applied on the loop. Frame > Copy Frame

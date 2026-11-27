@@ -98,9 +98,17 @@ pub enum Cmd {
     OpenRecent(usize),
     OpenFiles,
     OpenCopiedSource(std::path::PathBuf),
+    OpenExportAsSource(std::path::PathBuf),
     OpenDirectory(std::path::PathBuf),
     /// File > Reveal in Finder: select this clip in a Finder window.
     Reveal(std::path::PathBuf),
+    CopyPathname(std::path::PathBuf),
+    /// Mask > Import…: ask for a PNG (starting in this directory), then
+    /// `App::import_mask`.
+    ImportMask(Option<std::path::PathBuf>),
+    /// Mask > Export…: ask where (this path is the suggestion), then
+    /// `App::export_mask_to`.
+    ExportMask(std::path::PathBuf),
 }
 
 /// What a press on the crop marquee took hold of.
@@ -1506,10 +1514,12 @@ impl App {
     /// video pixels underneath, cut to the very same rectangle so the two
     /// files line up pixel for pixel.
     fn save_mask(&mut self) {
+        self.save_mask_to(mask::output_path(&self.videos[self.active].info.path));
+    }
+    fn save_mask_to(&mut self, path: std::path::PathBuf) {
         if self.mask_save.is_some() { return; }
         let mask = self.masks[self.active].as_ref().unwrap();
         let video = &self.videos[self.active];
-        let path = mask::output_path(&video.info.path);
         let (width, height, pixels, frame) = match self.crop {
             None => (mask.width, mask.height, mask.pixels.clone(), None),
             Some(c) => {
@@ -1849,8 +1859,8 @@ impl App {
     fn wrap_of(videos: &[Video]) -> f64 {
         videos
             .iter()
+            .filter(|v| v.info.duration > 0.1 || (v.info.duration > 0. && v.info.codec == "webp"))
             .map(|v| v.info.duration)
-            .filter(|d| *d > 0.1)
             .fold(f64::INFINITY, f64::min)
     }
 
@@ -2006,9 +2016,62 @@ impl App {
             M::Reveal => if self.ready() {
                 self.cmds.push(Cmd::Reveal(self.videos[self.active].info.path.clone()));
             },
+            M::CopyPathname => {
+                if let Some(video) = self.videos.get(self.active) {
+                    self.cmds.push(Cmd::CopyPathname(video.info.path.clone()));
+                }
+            }
             M::Export => self.export(),
             M::CopyFrame => self.copy_frame(),
+            M::MaskImport | M::MaskExport | M::MaskClear | M::MaskAutodetect => {
+                // The menu is dead in these states too; a pick can still be
+                // queued from the turn before.
+                if !self.mask_menu().is_some_and(|m| m.enabled) { return; }
+                let source = self.videos[self.active].info.path.clone();
+                match action {
+                    M::MaskImport => self.cmds.push(Cmd::ImportMask(source.parent().map(Into::into))),
+                    M::MaskExport => self.cmds.push(Cmd::ExportMask(mask::output_path(&source))),
+                    M::MaskClear => self.activate(Action::ClearMask),
+                    _ => self.toggle_detection_panel(),
+                }
+            }
         }
+    }
+
+    /// The native Mask menu: `None` (hidden) unless a mask is being painted.
+    pub fn mask_menu(&self) -> Option<crate::open::MaskMenu> {
+        (self.ready() && self.mask_mode && self.crop.is_none()
+            && self.masks.get(self.active).is_some_and(|m| m.is_some()))
+            .then(|| crate::open::MaskMenu { autodetect: self.detection_panel, enabled: self.leave_prompt.is_none() })
+    }
+
+    /// Mask > Import: the PNG replaces the mask being painted, as one undo
+    /// step. It must be the picture's size.
+    pub fn import_mask(&mut self, path: &std::path::Path) {
+        if !self.mask_menu().is_some_and(|m| m.enabled) { return; }
+        let (width, height) = { let m = self.masks[self.active].as_ref().unwrap(); (m.width, m.height) };
+        match mask::load(path, width, height) {
+            Ok(pixels) => {
+                let pixels = std::sync::Arc::new(pixels);
+                self.set_mask_pixels(&format!("Imported {}", name_of(path)), move |_| pixels);
+                // An import that changes nothing still deserves an answer.
+                if !self.mask_status.starts_with("Imported") { self.mask_status = format!("{} matches the mask", name_of(path)); }
+            }
+            Err(error) => {
+                log::error!("mask import failed: {error:#}");
+                self.mask_status = format!("Import failed: {error}");
+            }
+        }
+    }
+
+    /// Mask > Export: the whole mask as a PNG at `path`.
+    pub fn export_mask_to(&mut self, mut path: std::path::PathBuf) {
+        if !self.mask_menu().is_some_and(|m| m.enabled) { return; }
+        if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("png")) {
+            path.as_mut_os_string().push(".png");
+        }
+        self.commit_stroke();
+        self.save_mask_to(path);
     }
 
     /// Any loaded source can be written through the Export workspace.
@@ -2024,7 +2087,9 @@ impl App {
 
     fn update_export_copy_availability(&mut self) {
         let (_, chain) = self.processors.export_setup();
-        let reason = if !chain.is_empty() {
+        let reason = if self.videos.get(self.active).is_some_and(|v| v.info.codec == "webp") {
+            Some("WebP requires encoding")
+        } else if !chain.is_empty() {
             Some("Enabled processors require rendering")
         } else if self.export_page.crop.is_some() || !self.crop_schedule().is_empty() {
             Some("Crop edits require rendering")
@@ -2089,7 +2154,12 @@ impl App {
 
     fn export_action(&mut self, action: crate::export_page::Action) {
         if action == crate::export_page::Action::Export { self.start_pipeline_export(); }
-        else if let Some(path) = self.export_page.apply(action) { self.cmds.push(Cmd::Reveal(path)); }
+        else if let Some(path) = self.export_page.apply(action) {
+            self.cmds.push(match action {
+                crate::export_page::Action::OpenAsSource => Cmd::OpenExportAsSource(path),
+                _ => Cmd::Reveal(path),
+            });
+        }
     }
 
     /// Frame > Copy Frame as PNG: the focused clip's frame on screen, at
@@ -2246,6 +2316,9 @@ impl App {
     /// Snap a pointer time to the frame grid, so a pixel's worth of jitter
     /// that names the same frame doesn't become a fresh seek.
     fn quantize(&self, t: f64) -> f64 {
+        if let Some(time) = self.videos.get(self.active).and_then(|v| v.player.animation_frame_time(t, 0)) {
+            return time;
+        }
         let d = 1.0 / self.fps.max(1.0);
         (t / d).round() * d
     }
@@ -2256,7 +2329,8 @@ impl App {
     fn step(&mut self, dir: i32) {
         let d = 1.0 / self.fps;
         self.playing = false;
-        let target = if dir > 0 { self.t + 0.5 * d } else { (self.t - 1.5 * d).max(0.0) };
+        let target = self.videos.get(self.active).and_then(|v| v.player.animation_frame_time(self.t, dir))
+            .unwrap_or_else(|| if dir > 0 { self.t + 0.5 * d } else { (self.t - 1.5 * d).max(0.0) });
         self.seek_all(target, true);
     }
 
@@ -2886,6 +2960,11 @@ impl App {
                 self.paint_at_cursor();
             }
         } else {
+            // Side by side, the press itself focuses the clip under it
+            // (`select` ends any gesture, so the pan starts after it).
+            if let Some(idx) = self.side_by_side_cell(x).filter(|idx| *idx != self.active) {
+                self.select(idx);
+            }
             self.drag = Some((x, y));
         }
     }
@@ -2959,7 +3038,8 @@ impl App {
         }
         let s = self.seek_rect(self.vp);
         let f = ((x - s.x) / s.w.max(1.0)).clamp(0.0, 1.0) as f64;
-        let end = (self.wrap - 0.05).max(0.0);
+        let animated = self.videos.get(self.active).is_some_and(|v| crate::animated_webp::is_webp(&v.info.path));
+        let end = if animated { self.wrap } else { (self.wrap - 0.05).max(0.0) };
         let target = self.quantize(f * end).min(end);
         if (target - self.t).abs() < 1e-9 { return; }
         // Exact, always: this is a frame-precise tool. The player's frame
@@ -3109,13 +3189,15 @@ impl App {
         cell
     }
 
+    /// The side-by-side cell under `x`; `None` when one picture is shown.
+    fn side_by_side_cell(&self, x: f32) -> Option<usize> {
+        if self.export_page.open || self.shown_mode() != Mode::SideBySide || self.single() { return None; }
+        let c = self.workspace().canvas;
+        Some((((x - c.x).max(0.0) / (c.w / self.videos.len() as f32).max(1.0)) as usize).min(self.videos.len() - 1))
+    }
+
     fn gesture_base(&self, x: f32, _y: f32) -> RectPx {
-        if self.export_page.open { return self.base_rect(self.active); }
-        let idx = if self.shown_mode() == Mode::SideBySide && !self.single() {
-            let c = self.workspace().canvas;
-            (((x - c.x).max(0.0) / (c.w / self.videos.len() as f32).max(1.0)) as usize).min(self.videos.len() - 1)
-        } else { self.active };
-        self.base_rect(idx)
+        self.base_rect(self.side_by_side_cell(x).unwrap_or(self.active))
     }
 
     fn base_rect(&self, idx: usize) -> RectPx {
@@ -3448,6 +3530,16 @@ impl App {
                         p0: 0.0,
                         p1: 0.0,
                     });
+                }
+                // The focused clip wears the rail's ring, on the part of
+                // its picture the cell shows. Shell hidden = picture only.
+                if self.show_ui && n > 1 && self.active < n {
+                    let seen = intersect(self.content_rect(self.active), self.video_cell(self.active));
+                    items.push(Item::Clip(Some(seen)));
+                    items.push(Item::Rect(RectItem {
+                        border_w: FOCUS_RING_W, border_color: hex_color(SOURCE_RING),
+                        ..RectItem::new(seen, [0.0; 4])
+                    }));
                 }
             }
             Mode::Delta | Mode::Split | Mode::Checker | Mode::Blend => {
@@ -4263,13 +4355,18 @@ impl App {
     }
     /// One undo step that rewrites every mask pixel (invert, clear).
     fn edit_mask(&mut self, status: &str, f: impl Fn(u8) -> u8) {
+        self.set_mask_pixels(status, |previous| std::sync::Arc::new(previous.iter().map(|&p| f(p)).collect()));
+    }
+    /// Replace the active mask's pixels as one undo step; nothing happens
+    /// (and no status) when the result equals what is there.
+    fn set_mask_pixels(&mut self, status: &str, f: impl FnOnce(&[u8]) -> std::sync::Arc<Vec<u8>>) {
         self.commit_stroke();
         self.watermark_task = None;
         let Some(mask) = self.masks.get_mut(self.active).and_then(|m| m.as_mut()) else { return; };
         let previous = mask.pixels.clone();
-        let next: Vec<u8> = previous.iter().map(|&p| f(p)).collect();
-        if *previous == next { return; }
-        mask.pixels = std::sync::Arc::new(next);
+        let next = f(&previous);
+        if previous.len() != next.len() || *previous == *next { return; }
+        mask.pixels = next;
         mask.revision += 1;
         self.record_mask(previous);
         self.refresh_detection_review();
@@ -8456,6 +8553,8 @@ const RAIL_GRIP_DOT_FILL: u32 = 0x2a2a2a;
 /// card renders, #444444), and the keycap plate (white @ 0.5 in Figma;
 /// linear blending wants less).
 pub(crate) const SOURCE_RING: u32 = 0xff9d00;
+/// Side by side's ring on the focused picture, drawn inside its edge.
+const FOCUS_RING_W: f32 = 2.0;
 /// Cut mode's snap control: the switch alone.
 const CUT_SNAP_W: f32 = 32.0;
 /// The same with its "Snap to Keyframes" label, when the toolbar has room.
@@ -10166,6 +10265,36 @@ mod tests {
     }
 
     #[test]
+    fn side_by_side_press_focuses_the_clip_under_it_before_release() {
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 3);
+        app.mode = Mode::SideBySide;
+        assert_eq!(app.active, 0);
+        let r = app.content_rect(2);
+        app.mouse_down(r.x + r.w / 2., r.y + r.h / 2.);
+        assert_eq!(app.active, 2, "focus moves on the press, not the release");
+        // The ring follows: one orange border, on the focused picture.
+        let rings = |app: &mut App| app.tick(0., (1280., 800.), 1.).items.iter().filter_map(|i| match i {
+            Item::Rect(r) if r.border_w == FOCUS_RING_W && r.border_color == hex_color(SOURCE_RING) && r.color[3] == 0. => Some(r.r),
+            _ => None,
+        }).collect::<Vec<_>>();
+        let ring = rings(&mut app);
+        assert_eq!(ring.len(), 1);
+        let cell = app.video_cell(2);
+        assert!(ring[0].x >= cell.x - 0.5 && ring[0].x + ring[0].w <= cell.x + cell.w + 0.5);
+        assert!(app.drag.is_some(), "the same press can still pan");
+        app.mouse_up();
+        assert_eq!(app.active, 2);
+        // One picture on screen: a press on the canvas changes nothing.
+        app.mode = Mode::Overlay;
+        let r = app.content_rect(2);
+        app.mouse_down(r.x + 4., r.y + 4.);
+        app.mouse_up();
+        assert_eq!(app.active, 2);
+        assert!(rings(&mut app).is_empty(), "one picture needs no ring");
+    }
+
+    #[test]
     fn side_by_side_zoom_anchors_inside_the_correct_workspace_cell() {
         let Some(clip) = test_clip() else { return };
         let mut app = mk_app(&clip, 3);
@@ -10263,6 +10392,58 @@ mod tests {
         app.key(Key::Char('V'));
         app.key(Key::Char('V'));
         assert_eq!(app.mode, Mode::Blend, "Shift-V wraps backwards");
+    }
+
+    #[test]
+    fn mask_menu_imports_exports_clears_and_toggles_autodetect() {
+        use crate::open::MenuAction as M;
+        let Some(clip) = test_clip() else { return; };
+        let mut app = mk_app(&clip, 1);
+        assert!(app.mask_menu().is_none(), "no Mask menu outside mask mode");
+        app.menu(M::MaskClear);
+        app.menu(M::MaskImport);
+        assert!(app.take_cmds().is_empty() && !app.mask_mode);
+        app.key(Key::Char('m'));
+        assert_eq!(app.mask_menu(), Some(crate::open::MaskMenu { autodetect: false, enabled: true }));
+        app.brush_diameter = 8.0;
+        pointer_down(&mut app, 160.0, 90.0);
+        app.mouse_up();
+        let painted = app.masks[0].as_ref().unwrap().pixels.clone();
+        assert!(painted.contains(&255));
+        // Export asks the runner for a destination, then writes there.
+        app.menu(M::MaskExport);
+        assert!(matches!(app.take_cmds().as_slice(), [Cmd::ExportMask(p)] if p.extension().is_some_and(|e| e == "png")));
+        let out = std::env::temp_dir().join(format!("abner-menu-mask-{}", std::process::id()));
+        app.export_mask_to(out.clone());
+        assert!(tick_until(&mut app, Duration::from_secs(2), |a| a.mask_save.is_none()));
+        let out = out.with_extension("png");
+        assert!(out.exists(), "{}", app.mask_status);
+        // Clear empties the mask as one undo step.
+        app.menu(M::MaskClear);
+        assert!(app.masks[0].as_ref().unwrap().pixels.iter().all(|p| *p == 0));
+        // Import brings the exported pixels back; undo returns to clear.
+        app.menu(M::MaskImport);
+        assert!(matches!(app.take_cmds().as_slice(), [Cmd::ImportMask(_)]));
+        app.import_mask(&out);
+        assert!(app.mask_status.starts_with("Imported"), "{}", app.mask_status);
+        assert_eq!(app.masks[0].as_ref().unwrap().pixels, painted);
+        app.activate(Action::UndoMask);
+        assert!(app.masks[0].as_ref().unwrap().pixels.iter().all(|p| *p == 0));
+        app.activate(Action::UndoMask);
+        assert_eq!(app.masks[0].as_ref().unwrap().pixels, painted);
+        std::fs::remove_file(&out).unwrap();
+        // A file that is not a mask for this picture changes nothing.
+        app.import_mask(std::path::Path::new("/nonexistent/mask.png"));
+        assert!(app.mask_status.starts_with("Import failed"), "{}", app.mask_status);
+        assert_eq!(app.masks[0].as_ref().unwrap().pixels, painted);
+        // Autodetect is a tick that follows the panel, whoever toggled it.
+        app.menu(M::MaskAutodetect);
+        assert!(app.mask_menu().unwrap().autodetect);
+        app.key(Key::Char('d'));
+        assert!(!app.mask_menu().unwrap().autodetect);
+        // The crop marquee is not mask painting.
+        app.key(Key::Char('c'));
+        assert!(app.mask_menu().is_none());
     }
 
     #[test]
@@ -10424,6 +10605,27 @@ mod tests {
         app.videos[0].input_crop = None;
         app.update_export_copy_availability();
         assert!(app.export_page.copy_unavailable.is_none());
+    }
+
+    #[test]
+    fn copy_pathname_targets_the_focused_source() {
+        use crate::open::MenuAction;
+
+        let mut empty = App::new(Vec::new(), &crate::config::Config::default());
+        empty.menu(MenuAction::CopyPathname);
+        assert!(empty.take_cmds().is_empty());
+
+        let Some(clip) = test_clip() else { return };
+        let mut app = mk_app(&clip, 2);
+        let focused = clip.with_file_name("second clip.mp4");
+        app.videos[1].info.path = focused.clone();
+        app.select(1);
+        app.take_cmds();
+        app.menu(MenuAction::CopyPathname);
+        assert!(matches!(
+            app.take_cmds().as_slice(),
+            [Cmd::CopyPathname(path)] if path == &focused
+        ));
     }
 
     #[test]

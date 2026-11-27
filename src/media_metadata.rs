@@ -41,7 +41,7 @@ impl Metadata {
         if !self.declared.icc
             && (hdr || !self.declared.hdr)
             && matches!(primaries, 1 | 2 | 9 | 12)
-            && matches!(transfer, 1 | 2 | 16 | 18)
+            && (matches!(transfer, 1 | 2 | 16 | 18) || (transfer == 13 && self.info.codec == "webp"))
             && matches!(matrix, 1 | 2 | 9)
         {
             return Ok(());
@@ -240,7 +240,9 @@ pub(crate) fn canonical_codec(label: &str) -> String {
     s
 }
 pub(crate) fn pix_label(label: &str) -> String {
-    let chroma = if label.contains("4:2:0") {
+    let chroma = if label == "RGBA 8-bit" {
+        return "rgba".into();
+    } else if label.contains("4:2:0") {
         1
     } else if label.contains("4:2:2") {
         2
@@ -1060,6 +1062,14 @@ pub(crate) fn timeline(path: &Path) -> Result<Option<Timeline>, String> {
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
+    if ext == "webp" {
+        let Some(animation) = crate::animated_webp::Animation::open(path).map_err(|e| e.to_string())? else {
+            return Ok(None);
+        };
+        let metadata = read(path)?;
+        let packets = animation.timings().map(|(pts, duration)| Packet { pts, duration, size: 0, key: true }).collect();
+        return Ok(Some(Timeline { packets, chapters: Vec::new(), facts: serde_json::json!({"streams":[video_facts(&metadata)], "format": {}}) }));
+    }
     if !matches!(ext.as_str(), "mp4" | "m4v" | "mov" | "3gp" | "mkv" | "webm") {
         return crate::media_packets::timeline(path);
     }
